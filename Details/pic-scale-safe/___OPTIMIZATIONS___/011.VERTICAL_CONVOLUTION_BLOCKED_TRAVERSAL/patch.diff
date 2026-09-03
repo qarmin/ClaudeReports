@@ -1,0 +1,26 @@
+diff --git a/src/fixed_point_vertical.rs b/src/fixed_point_vertical.rs
+index a946626..e9b2bc3 100644
+--- a/src/fixed_point_vertical.rs
++++ b/src/fixed_point_vertical.rs
+@@ -392,6 +392,21 @@ pub(crate) fn column_handler_fixed_point<
+ 
+     let total_width = dst.len();
+ 
++    // Candidate 011 (___OPTIMIZATIONS___): a wide column block, processed tap-by-tap with the
++    // same accumulate-then-narrow shape as the smaller tiers below, but far fewer times per row.
++    // Each destination row jumps between `bounds.size` source rows spaced `src_stride` bytes
++    // apart (often >>L2 line count for a downscale's full source width); with only a 16-64
++    // element block, that spaced-row-hop repeats total_width/BUFFER_SIZE times per destination
++    // row, discarding cache locality between visits to the same row. A wider block amortizes
++    // each row-hop over more contiguous, prefetch-friendly bytes per visit.
++    while cx + 512 <= total_width {
++        convolve_column_handler_fixed_point_direct_buffer::<T, J, 512>(
++            src, src_stride, dst, weight, bounds, bit_depth, cx,
++        );
++
++        cx += 512;
++    }
++
+     #[cfg(target_arch = "aarch64")]
+     while cx + 64 <= total_width {
+         convolve_column_handler_fixed_point_direct_buffer_four::<T, J, 16>(

@@ -1,0 +1,421 @@
+diff --git a/encoding/src/adapters.rs b/encoding/src/adapters.rs
+index 3a114218..f88f2199 100644
+--- a/encoding/src/adapters.rs
++++ b/encoding/src/adapters.rs
+@@ -63,6 +63,22 @@ pub enum DecodeError {
+     /// from the DICOM object representing the image.
+     #[snafu(display("Missing required attribute `{}`", name))]
+     MissingAttribute { name: &'static str },
++
++    /// A piece of data could not be allocated.
++    ///
++    /// This may be either a sign of memory saturation
++    /// while trying to decode very large images,
++    /// or a sign of the input data being invalid or otherwise problematic.
++    #[snafu(display("Could not allocate {name}"))]
++    Allocate {
++        /// A name for the memory object being allocated,
++        /// such as a frame of pixel data.
++        ///
++        /// Names at this level are not standardized.
++        name: &'static str,
++        /// The size of the attempted allocation in bytes
++        size: Option<usize>,
++    },
+ }
+ 
+ /// The possible error conditions when encoding (writing) pixel data.
+diff --git a/transfer-syntax-registry/src/adapters/jpeg.rs b/transfer-syntax-registry/src/adapters/jpeg.rs
+index 4a85965f..b5eb4a3a 100644
+--- a/transfer-syntax-registry/src/adapters/jpeg.rs
++++ b/transfer-syntax-registry/src/adapters/jpeg.rs
+@@ -46,10 +46,14 @@ impl PixelDataReader for JpegAdapter {
+         // `stride` it the total number of bytes for each sample plane
+         let stride: usize = bytes_per_sample as usize * cols as usize * rows as usize;
+         let base_offset = dst.len();
+-        dst.resize(
+-            base_offset + (samples_per_pixel as usize * stride) * nr_frames,
+-            0,
+-        );
++        // !!! using an approximation of encapsulated size
++        // so we do not need to go through every frame
++        let encapsulated_size = src.fragment(0).unwrap_or_default().len() * nr_frames;
++        guarded_resize(
++            dst,
++            samples_per_pixel as usize * stride * nr_frames,
++            encapsulated_size * nr_frames,
++        )?;
+ 
+         let raw = src
+             .raw_pixel_data()
+@@ -164,8 +168,6 @@ impl PixelDataReader for JpegAdapter {
+ 
+         // `stride` it the total number of bytes for each sample plane
+         let stride: usize = bytes_per_sample as usize * cols as usize * rows as usize;
+-        let base_offset = dst.len();
+-        dst.resize(base_offset + (samples_per_pixel as usize * stride), 0);
+ 
+         let raw = src
+             .raw_pixel_data()
+@@ -215,6 +217,9 @@ impl PixelDataReader for JpegAdapter {
+             Cow::Owned(fragments)
+         };
+ 
++        let base_offset = dst.len();
++        guarded_resize(dst, samples_per_pixel as usize * stride, frame_data.len())?;
++
+         let mut cursor = Cursor::new(&*frame_data);
+         let dst_offset = base_offset;
+ 
+@@ -359,7 +364,23 @@ fn next_even(l: u64) -> u64 {
+     (l + 1) & !1
+ }
+ 
+-/// reduce data precision to 8 bits if necessary
++const COMPRESSION_RATIO_THRESHOLD: u32 = 64;
++
++/// Perform a resize of a vector (with zeros), safeguarded from extreme cases.
++fn guarded_resize(
++    out: &mut Vec<u8>,
++    additional_capacity: usize,
++    encapsulated_size: usize,
++) -> DecodeResult<()> {
++    crate::alloc::guarded_resize(out, additional_capacity, encapsulated_size, COMPRESSION_RATIO_THRESHOLD)
++        .ok()
++        .context(decode_error::AllocateSnafu {
++            name: "frame",
++            size: additional_capacity,
++        })
++}
++
++/// reduce data precision to 8 bits if necessary.
+ /// data loss is possible
+ fn narrow_8bit(frame_data: &[u8], bits_stored: u16) -> EncodeResult<Cow<'_, [u8]>> {
+     debug_assert!(bits_stored >= 8);
+diff --git a/transfer-syntax-registry/src/adapters/jpeg2k.rs b/transfer-syntax-registry/src/adapters/jpeg2k.rs
+index 27f0e851..45fc48ed 100644
+--- a/transfer-syntax-registry/src/adapters/jpeg2k.rs
++++ b/transfer-syntax-registry/src/adapters/jpeg2k.rs
+@@ -56,13 +56,15 @@ impl PixelDataReader for Jpeg2000Adapter {
+ 
+         // `stride` it the total number of bytes for each sample plane
+         let stride: usize = bytes_per_sample as usize * cols as usize * rows as usize;
+-        dst.reserve_exact(samples_per_pixel as usize * stride);
+         let base_offset = dst.len();
+-        dst.resize(base_offset + (samples_per_pixel as usize * stride), 0);
+ 
+         let frame_data = src
+             .frame_pixel_data(frame)
+             .context(decode_error::FrameRangeOutOfBoundsSnafu)?;
++
++        // extend output vector
++        guarded_resize(dst, samples_per_pixel as usize * stride, frame_data.len())?;
++
+         let image = Image::from_bytes(&frame_data).whatever_context("jpeg2k decoder failure")?;
+ 
+         // Note: we cannot use `get_pixels`
+@@ -93,3 +95,24 @@ impl PixelDataReader for Jpeg2000Adapter {
+         Ok(())
+     }
+ }
++
++const COMPRESSION_RATIO_THRESHOLD: u32 = 64;
++
++/// Perform a resize of a vector (with zeros), safeguarded from extreme cases.
++fn guarded_resize(
++    out: &mut Vec<u8>,
++    additional_capacity: usize,
++    fragment_size: usize,
++) -> DecodeResult<()> {
++    crate::alloc::guarded_resize(
++        out,
++        additional_capacity,
++        fragment_size,
++        COMPRESSION_RATIO_THRESHOLD,
++    )
++    .ok()
++    .context(decode_error::AllocateSnafu {
++        name: "frame",
++        size: additional_capacity,
++    })
++}
+diff --git a/transfer-syntax-registry/src/adapters/jpegxl.rs b/transfer-syntax-registry/src/adapters/jpegxl.rs
+index aecce3f0..7a6766ee 100644
+--- a/transfer-syntax-registry/src/adapters/jpegxl.rs
++++ b/transfer-syntax-registry/src/adapters/jpegxl.rs
+@@ -65,7 +65,6 @@ impl PixelDataReader for JpegXlAdapter {
+ 
+         // `stride` it the total number of bytes for each sample plane
+         let stride: usize = bytes_per_sample as usize * cols as usize * rows as usize;
+-        dst.reserve_exact(samples_per_pixel as usize * stride);
+ 
+         let raw = src
+             .raw_pixel_data()
+@@ -83,6 +82,9 @@ impl PixelDataReader for JpegXlAdapter {
+                     format!("Missing fragment #{frame} for the frame requested")
+                 })?;
+ 
++        // extend output vector
++        guarded_reserve(dst, samples_per_pixel as usize * stride, frame_data.len())?;
++
+         let image = JxlImage::builder()
+             .read(&**frame_data)
+             .whatever_context("failed to read JPEG XL data")?;
+@@ -103,11 +105,8 @@ impl PixelDataReader for JpegXlAdapter {
+                 let samples_per_frame =
+                     stream.channels() as usize * stream.width() as usize * stream.height() as usize;
+ 
+-                dst.try_reserve(samples_per_frame)
+-                    .whatever_context("Failed to reserve heap space for JPEG XL frame")?;
+-
+                 let offset = dst.len();
+-                dst.resize(offset + samples_per_frame, 0);
++                guarded_resize(dst, samples_per_frame, frame_data.len())?;
+ 
+                 let count = stream.write_to_buffer(&mut dst[offset..]);
+                 dst.truncate(offset + count);
+@@ -309,3 +308,41 @@ impl PixelDataWriter for JpegXlLosslessEncoder {
+         JpegXlAdapter.encode(src, options, dst, offset_table)
+     }
+ }
++
++const COMPRESSION_RATIO_THRESHOLD: u32 = 64;
++
++fn guarded_reserve(
++    out: &mut Vec<u8>,
++    additional_capacity: usize,
++    encapsulated_size: usize,
++) -> DecodeResult<()> {
++    crate::alloc::guarded_reserve(
++        out,
++        additional_capacity,
++        encapsulated_size,
++        COMPRESSION_RATIO_THRESHOLD,
++    )
++    .ok()
++    .context(decode_error::AllocateSnafu {
++        name: "JPEG XL frame",
++        size: additional_capacity,
++    })
++}
++
++fn guarded_resize(
++    out: &mut Vec<u8>,
++    additional_capacity: usize,
++    encapsulated_size: usize,
++) -> DecodeResult<()> {
++    crate::alloc::guarded_resize(
++        out,
++        additional_capacity,
++        encapsulated_size,
++        COMPRESSION_RATIO_THRESHOLD,
++    )
++    .ok()
++    .context(decode_error::AllocateSnafu {
++        name: "JPEG XL frame",
++        size: additional_capacity,
++    })
++}
+diff --git a/transfer-syntax-registry/src/adapters/rle_lossless.rs b/transfer-syntax-registry/src/adapters/rle_lossless.rs
+index 7c16c5f7..cdfb99a6 100644
+--- a/transfer-syntax-registry/src/adapters/rle_lossless.rs
++++ b/transfer-syntax-registry/src/adapters/rle_lossless.rs
+@@ -52,9 +52,12 @@ impl PixelDataReader for RleLosslessAdapter {
+         // `stride` is the total number of bytes for each sample plane
+         let stride = bytes_per_sample * cols as usize * rows as usize;
+         let frame_size = stride * samples_per_pixel;
++
+         // extend `dst` to make room for decoded pixel data
+         let base_offset = dst.len();
+-        dst.resize(base_offset + frame_size * nr_frames, 0);
++        // estimate the sizes of the encapsulated fragments
++        let encapsulated_size = src.fragment(0).unwrap_or_default().len() * nr_frames;
++        guarded_resize(dst, frame_size * nr_frames, encapsulated_size)?;
+ 
+         // RLE encoded data is ordered like this (for 16-bit, 3 sample):
+         //  Segment: 0     | 1     | 2     | 3     | 4     | 5
+@@ -80,11 +83,16 @@ impl PixelDataReader for RleLosslessAdapter {
+                     // ii is 1, 0, 3, 2, 5, 4 for the example above
+                     // This is where the segment order correction occurs
+                     let ii = sample_number * bytes_per_sample + byte_offset;
+-                    let segment = &fragment[offsets[ii] as usize..offsets[ii + 1] as usize];
++                    ensure_whatever!(ii + 1 < offsets.len(), "Invalid RLE segment offsets");
++                    let segment_range = offsets[ii] as usize..offsets[ii + 1] as usize;
++                    let segment = fragment
++                        .get(segment_range)
++                        .whatever_context("Invalid RLE segment range")?;
+                     let buff = io::Cursor::new(segment);
+                     let (_, decoder) = PackBitsReader::new(buff, segment.len())
+                         .whatever_context("Failed to read RLE segments")?;
+-                    let mut decoded_segment = Vec::with_capacity(rows as usize * cols as usize);
++                    let mut decoded_segment =
++                        guarded_alloc(rows as usize * cols as usize, fragment.len())?;
+                     decoder
+                         .take(rows as u64 * cols as u64)
+                         .read_to_end(&mut decoded_segment)
+@@ -163,9 +171,7 @@ impl PixelDataReader for RleLosslessAdapter {
+         // `stride` is the total number of bytes for each sample plane
+         let stride = bytes_per_sample * cols as usize * rows as usize;
+         let frame_size = stride * samples_per_pixel;
+-        // extend `dst` to make room for decoded pixel data
+         let base_offset = dst.len();
+-        dst.resize(base_offset + frame_size, 0);
+ 
+         // RLE encoded data is ordered like this (for 16-bit, 3 sample):
+         //  Segment: 0     | 1     | 2     | 3     | 4     | 5
+@@ -185,17 +191,25 @@ impl PixelDataReader for RleLosslessAdapter {
+         let mut offsets = read_rle_header(fragment);
+         offsets.push(fragment.len() as u32);
+ 
++        // extend `dst` to make room for decoded pixel data
++        guarded_resize(dst, frame_size, fragment.len())?;
++
+         for sample_number in 0..samples_per_pixel {
+             for byte_offset in (0..bytes_per_sample).rev() {
+                 // ii is 1, 0, 3, 2, 5, 4 for the example above
+                 // This is where the segment order correction occurs
+                 let ii = sample_number * bytes_per_sample + byte_offset;
+-                let segment = &fragment[offsets[ii] as usize..offsets[ii + 1] as usize];
++                ensure_whatever!(ii + 1 < offsets.len(), "Invalid RLE segment offsets");
++                let segment_range = offsets[ii] as usize..offsets[ii + 1] as usize;
++                let segment = fragment
++                    .get(segment_range)
++                    .whatever_context("Invalid RLE segment range")?;
+                 let buff = io::Cursor::new(segment);
+                 let (_, decoder) = PackBitsReader::new(buff, segment.len())
+                     .map_err(|e| Box::new(e) as Box<_>)
+                     .whatever_context("Failed to read RLE segments")?;
+-                let mut decoded_segment = Vec::with_capacity(rows as usize * cols as usize);
++                let mut decoded_segment =
++                    guarded_alloc(rows as usize * cols as usize, fragment.len())?;
+                 decoder
+                     .take(rows as u64 * cols as u64)
+                     .read_to_end(&mut decoded_segment)
+@@ -286,6 +300,37 @@ impl Read for PackBitsReader {
+     }
+ }
+ 
++const COMPRESSION_RATIO_THRESHOLD: u32 = 32;
++
++/// Perform an allocation, safeguarded from extreme cases.
++fn guarded_alloc(capacity: usize, fragment_size: usize) -> DecodeResult<Vec<u8>> {
++    crate::alloc::guarded_alloc(capacity, fragment_size, COMPRESSION_RATIO_THRESHOLD)
++        .ok()
++        .context(decode_error::AllocateSnafu {
++            name: "RLE segment",
++            size: capacity,
++        })
++}
++
++/// Perform a resize of a vector (with zeros), safeguarded from extreme cases.
++fn guarded_resize(
++    out: &mut Vec<u8>,
++    additional_capacity: usize,
++    fragment_size: usize,
++) -> DecodeResult<()> {
++    crate::alloc::guarded_resize(
++        out,
++        additional_capacity,
++        fragment_size,
++        COMPRESSION_RATIO_THRESHOLD,
++    )
++    .ok()
++    .context(decode_error::AllocateSnafu {
++        name: "frame",
++        size: additional_capacity,
++    })
++}
++
+ #[cfg(test)]
+ mod test {
+     use super::*;
+diff --git a/transfer-syntax-registry/src/lib.rs b/transfer-syntax-registry/src/lib.rs
+index 1218aeaa..f5d44670 100644
+--- a/transfer-syntax-registry/src/lib.rs
++++ b/transfer-syntax-registry/src/lib.rs
+@@ -116,6 +116,8 @@ use std::fmt;
+ pub use dicom_encoding::{TransferSyntax, TransferSyntaxIndex};
+ pub mod entries;
+ 
++pub(crate) mod alloc;
++
+ mod adapters;
+ #[cfg(feature = "deflate")]
+ mod deflate;
+diff --git a/transfer-syntax-registry/src/alloc.rs b/transfer-syntax-registry/src/alloc.rs
+new file mode 100644
+index 00000000..b22e006b
+--- /dev/null
++++ b/transfer-syntax-registry/src/alloc.rs
+@@ -0,0 +1,71 @@
++//! Private module to assist in making safe memory allocations
++#![cfg(any(
++    feature = "rle",
++    feature = "jpeg",
++    feature = "jpegxl",
++    feature = "openjp2",
++    feature = "openjpeg-sys"
++))]
++
++const DANGEROUS_CAPACITY: usize = 16_777_216;
++
++/// Simplified allocation error
++#[derive(Debug)]
++pub enum Error {
++    /// Could not allocate via `try_reserve`
++    TryReserve,
++    /// Allocation would have been dangerous
++    Dangerous,
++}
++
++pub type Result<T, E = Error> = std::result::Result<T, E>;
++
++/// Perform an allocation, safeguarded from extreme cases.
++#[allow(dead_code)]
++pub fn guarded_alloc(
++    capacity: usize,
++    encapsulated_size: usize,
++    ratio_threshold: u32,
++) -> Result<Vec<u8>> {
++    // do not expect an allocation N times larger than the given encapsulated data size
++    if capacity >= DANGEROUS_CAPACITY && encapsulated_size < capacity / ratio_threshold as usize {
++        return Err(Error::Dangerous);
++    }
++
++    let mut out = Vec::new();
++    out.try_reserve_exact(capacity)
++        .map_err(|_| Error::TryReserve)?;
++    Ok(out)
++}
++
++/// Reserve extra capacity for a vector (with zeros), safeguarded from extreme cases.
++pub fn guarded_reserve(
++    out: &mut Vec<u8>,
++    additional_capacity: usize,
++    encapsulated_size: usize,
++    ratio_threshold: u32,
++) -> Result<()> {
++    // do not expect an allocation N times larger than the given encapsulated data size
++    if additional_capacity >= DANGEROUS_CAPACITY
++        && encapsulated_size < additional_capacity / ratio_threshold as usize
++    {
++        return Err(Error::Dangerous);
++    }
++
++    out.try_reserve_exact(additional_capacity)
++        .map_err(|_| Error::TryReserve)?;
++    Ok(())
++}
++
++/// Perform a resize of a vector (with zeros), safeguarded from extreme cases.
++#[allow(dead_code)]
++pub fn guarded_resize(
++    out: &mut Vec<u8>,
++    additional_capacity: usize,
++    encapsulated_size: usize,
++    ratio_threshold: u32,
++) -> Result<()> {
++    guarded_reserve(out, additional_capacity, encapsulated_size, ratio_threshold)?;
++    out.resize(out.len() + additional_capacity, 0);
++    Ok(())
++}

@@ -1,0 +1,34 @@
+diff --git a/parser/src/stateful/encode.rs b/parser/src/stateful/encode.rs
+index addfea46..2664d7c6 100644
+--- a/parser/src/stateful/encode.rs
++++ b/parser/src/stateful/encode.rs
+@@ -293,8 +293,15 @@ where
+         self.bytes_written += encoded_value.len() as u64;
+ 
+         // if element is Specific Character Set,
+-        // update the text codec
+-        if de.tag == Tag(0x0008, 0x0005) {
++        // update the text codec;
++        // only trust it when tagged with VR::CS, matching the decoder's own
++        // gating in `StatefulDecoder::read_value_cs` (only VR::CS elements
++        // route through that function and can change `self.text` on decode) -
++        // otherwise a non-conformant file that stores this tag under a
++        // different VR would switch the encoder's codec on a value the
++        // decoder never treated as a character set declaration in the first
++        // place, breaking the round trip of every later text element.
++        if de.tag == Tag(0x0008, 0x0005) && de.vr == VR::CS {
+             self.try_new_codec(text);
+         }
+ 
+@@ -334,8 +341,9 @@ where
+         self.bytes_written += self.buffer.len() as u64;
+ 
+         // if element is Specific Character Set,
+-        // update the text codec
+-        if de.tag == Tag(0x0008, 0x0005) {
++        // update the text codec; see the matching comment in
++        // `encode_text_element` for why this is gated on VR::CS.
++        if de.tag == Tag(0x0008, 0x0005) && de.vr == VR::CS {
+             if let Some(charset_name) = texts.first() {
+                 self.try_new_codec(charset_name.as_ref());
+             }

@@ -1,0 +1,781 @@
+diff --git a/hayro-jpeg2000/src/j2c/idwt.rs b/hayro-jpeg2000/src/j2c/idwt.rs
+index 952fd521..189f22ec 100644
+--- a/hayro-jpeg2000/src/j2c/idwt.rs
++++ b/hayro-jpeg2000/src/j2c/idwt.rs
+@@ -345,61 +345,119 @@ fn interleave_row<S: Simd>(simd: S, first: &[f32], second: &[f32], output: &mut
+ }
+ 
+ /// The `HOR_SR` procedure from F.3.4.
++///
++/// Unlike `filter_vertical` (which vectorizes trivially, since columns
++/// within one row are contiguous), the horizontal filter reads/writes at
++/// stride 2 within a row. To vectorize it anyway, each row is deinterleaved
++/// once into an "evens" (`scanline[0], scanline[2], ...`) and "odds"
++/// (`scanline[1], scanline[3], ...`) buffer; every lifting step then reads
++/// one of the two buffers (unchanged this step) as a plain contiguous,
++/// SIMD-friendly slice while writing the other, exactly mirroring how
++/// `interleave_samples_inner` above already deinterleaves sub-bands. The
++/// row is re-interleaved once at the end.
+ fn filter_horizontal(coefficients: &mut [f32], rect: IntRect, transform: WaveletTransform) {
+     let width = rect.width() as usize;
++    let height = rect.height() as usize;
++    let x0 = rect.x0 as usize;
+ 
+-    for scanline in coefficients
+-        .chunks_exact_mut(width)
+-        .take(rect.height() as usize)
+-    {
+-        filter_row(scanline, width, rect.x0 as usize, transform);
+-    }
+-}
+-
+-/// The `1D_SR` procedure from F.3.6.
+-fn filter_row(scanline: &mut [f32], width: usize, x0: usize, transform: WaveletTransform) {
+     if width == 1 {
+         if !x0.is_multiple_of(2) {
+-            scanline[0] *= 0.5;
++            for scanline in coefficients.chunks_exact_mut(width).take(height) {
++                scanline[0] *= 0.5;
++            }
+         }
+ 
+         return;
+     }
+ 
+-    match transform {
+-        WaveletTransform::Reversible53 => reversible_filter_53r(scanline, width, x0),
+-        WaveletTransform::Irreversible97 => irreversible_filter_97i(scanline, width, x0),
++    let mut evens = vec![0.0_f32; width.div_ceil(2)];
++    let mut odds = vec![0.0_f32; width / 2];
++
++    let level = Level::new();
++    dispatch!(level, simd => {
++        for scanline in coefficients.chunks_exact_mut(width).take(height) {
++            deinterleave_scanline(scanline, &mut evens, &mut odds);
++
++            match transform {
++                WaveletTransform::Reversible53 => {
++                    reversible_filter_53r_horizontal_simd(simd, &mut evens, &mut odds, width, x0);
++                }
++                WaveletTransform::Irreversible97 => {
++                    irreversible_filter_97i_horizontal_simd(simd, &mut evens, &mut odds, width, x0);
++                }
++            }
++
++            interleave_scanline(&evens, &odds, scanline);
++        }
++    });
++}
++
++#[inline(always)]
++fn deinterleave_scanline(scanline: &[f32], evens: &mut [f32], odds: &mut [f32]) {
++    for (i, e) in evens.iter_mut().enumerate() {
++        *e = scanline[2 * i];
++    }
++    for (i, o) in odds.iter_mut().enumerate() {
++        *o = scanline[2 * i + 1];
+     }
+ }
+ 
+-/// The 1D FILTER 5-3R procedure from F.3.8.1.
+-fn reversible_filter_53r(scanline: &mut [f32], width: usize, x0: usize) {
++#[inline(always)]
++fn interleave_scanline(evens: &[f32], odds: &[f32], scanline: &mut [f32]) {
++    for (i, &e) in evens.iter().enumerate() {
++        scanline[2 * i] = e;
++    }
++    for (i, &o) in odds.iter().enumerate() {
++        scanline[2 * i + 1] = o;
++    }
++}
++
++/// The 1D FILTER 5-3R procedure from F.3.8.1, operating on deinterleaved rows.
++fn reversible_filter_53r_horizontal_simd<S: Simd>(
++    simd: S,
++    evens: &mut [f32],
++    odds: &mut [f32],
++    width: usize,
++    x0: usize,
++) {
+     let first_even = x0 % 2;
+     let first_odd = 1 - first_even;
+ 
+     // Equation (F-5).
+-    // Originally: for i in (start / 2)..(end / 2 + 1).
+-    filter_step_horizontal(
+-        scanline,
++    filter_step_horizontal_dispatch(
++        simd,
+         width,
+         first_even,
++        evens,
++        odds,
++#[inline(always)]
++        |s, left, right| s - (left + right).mul_add(f32x8::splat(simd, 0.25), f32x8::splat(simd, 0.5)).floor(),
+         #[inline(always)]
+         |s, left, right| s - math::floor_f32(math::mul_add(left + right, 0.25, 0.5)),
+     );
+ 
+     // Equation (F-6).
+-    // Originally: for i in (start / 2)..(end / 2).
+-    filter_step_horizontal(
+-        scanline,
++    filter_step_horizontal_dispatch(
++        simd,
+         width,
+         first_odd,
++        evens,
++        odds,
++#[inline(always)]
++        |s, left, right| s + ((left + right) * f32x8::splat(simd, 0.5)).floor(),
+         #[inline(always)]
+         |s, left, right| s + math::floor_f32((left + right) * 0.5),
+     );
+ }
+ 
+-/// The 1D Filter 9-7I procedure from F.3.8.2.
+-fn irreversible_filter_97i(scanline: &mut [f32], width: usize, x0: usize) {
++/// The 1D Filter 9-7I procedure from F.3.8.2, operating on deinterleaved rows.
++fn irreversible_filter_97i_horizontal_simd<S: Simd>(
++    simd: S,
++    evens: &mut [f32],
++    odds: &mut [f32],
++    width: usize,
++    x0: usize,
++) {
+     // Table F.4.
+     const NEG_ALPHA: f32 = 1.586_134_3;
+     const NEG_BETA: f32 = 0.052_980_117;
+@@ -411,87 +469,189 @@ fn irreversible_filter_97i(scanline: &mut [f32], width: usize, x0: usize) {
+     let first_even = x0 % 2;
+     let first_odd = 1 - first_even;
+ 
+-    let (k0, k1) = if first_even == 0 {
++    let (k_evens, k_odds) = if first_even == 0 {
+         (KAPPA, INV_KAPPA)
+     } else {
+         (INV_KAPPA, KAPPA)
+     };
+ 
+-    // Step 1 and 2.
+-    // Originally: for i in (start / 2 - 1)..(end / 2 + 2).
+-    // Originally: for i in (start / 2 - 2)..(end / 2 + 2).
+-    for i in (0..width.saturating_sub(1)).step_by(2) {
+-        scanline[i] *= k0;
+-        scanline[i + 1] *= k1;
+-    }
+-    if width % 2 == 1 {
+-        scanline[width - 1] *= k0;
+-    }
++    // Steps 1 and 2: plain per-element scale, trivially vectorizable.
++    scale_slice_simd(simd, evens, k_evens);
++    scale_slice_simd(simd, odds, k_odds);
++
++    let neg_alpha = f32x8::splat(simd, NEG_ALPHA);
++    let neg_beta = f32x8::splat(simd, NEG_BETA);
++    let neg_gamma = f32x8::splat(simd, NEG_GAMMA);
++    let neg_delta = f32x8::splat(simd, NEG_DELTA);
+ 
+     // Step 3.
+-    // Originally: for i in (start / 2 - 1)..(end / 2 + 2).
+-    filter_step_horizontal(
+-        scanline,
++    filter_step_horizontal_dispatch(
++        simd,
+         width,
+         first_even,
++        evens,
++        odds,
++#[inline(always)]
++        |s, left, right| (left + right).mul_add(neg_delta, s),
+         #[inline(always)]
+         |s, left, right| math::mul_add(left + right, NEG_DELTA, s),
+     );
+ 
+     // Step 4.
+-    // Originally: for i in (start / 2 - 1)..((x0 + width) / 2 + 1).
+-    filter_step_horizontal(
+-        scanline,
++    filter_step_horizontal_dispatch(
++        simd,
+         width,
+         first_odd,
++        evens,
++        odds,
++#[inline(always)]
++        |s, left, right| (left + right).mul_add(neg_gamma, s),
+         #[inline(always)]
+         |s, left, right| math::mul_add(left + right, NEG_GAMMA, s),
+     );
+ 
+     // Step 5.
+-    // Originally: for i in (start / 2)..(end / 2 + 1).
+-    filter_step_horizontal(
+-        scanline,
++    filter_step_horizontal_dispatch(
++        simd,
+         width,
+         first_even,
++        evens,
++        odds,
++#[inline(always)]
++        |s, left, right| (left + right).mul_add(neg_beta, s),
+         #[inline(always)]
+         |s, left, right| math::mul_add(left + right, NEG_BETA, s),
+     );
+ 
+     // Step 6.
+-    // Originally: for i in (start / 2)..(end / 2).
+-    filter_step_horizontal(
+-        scanline,
++    filter_step_horizontal_dispatch(
++        simd,
+         width,
+         first_odd,
++        evens,
++        odds,
++#[inline(always)]
++        |s, left, right| (left + right).mul_add(neg_alpha, s),
+         #[inline(always)]
+         |s, left, right| math::mul_add(left + right, NEG_ALPHA, s),
+     );
+ }
+ 
+ #[inline(always)]
+-fn filter_step_horizontal(
+-    scanline: &mut [f32],
++fn scale_slice_simd<S: Simd>(simd: S, data: &mut [f32], factor: f32) {
++    let simd_len = data.len() / SIMD_WIDTH * SIMD_WIDTH;
++    let factor_v = f32x8::splat(simd, factor);
++    let (simd_part, tail) = data.split_at_mut(simd_len);
++    for chunk in simd_part.chunks_exact_mut(SIMD_WIDTH) {
++        (f32x8::from_slice(simd, chunk) * factor_v).store(chunk);
++    }
++    for x in tail {
++        *x *= factor;
++    }
++}
++
++/// Picks which of `evens`/`odds` is the target (updated) vs. neighbor
++/// (read-only) buffer for a lifting step, based on `first` - which, despite
++/// the `first_even`/`first_odd` naming at call sites, is `x0 % 2` and so can
++/// be either 0 or 1: it does *not* always mean "the evens array".
++#[inline(always)]
++fn filter_step_horizontal_dispatch<S: Simd>(
++    simd: S,
+     width: usize,
+     first: usize,
+-    f: impl Fn(f32, f32, f32) -> f32,
++    evens: &mut [f32],
++    odds: &mut [f32],
++    f_simd: impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
++    f_scalar: impl Fn(f32, f32, f32) -> f32,
+ ) {
++    if first == 0 {
++        filter_step_horizontal_simd(simd, width, first, evens, odds, f_simd, f_scalar);
++    } else {
++        filter_step_horizontal_simd(simd, width, first, odds, evens, f_simd, f_scalar);
++    }
++}
++
++/// Applies one lifting step (see `filter_step_horizontal` in the original
++/// scalar form, preserved in `#[cfg(test)]` below for comparison) on
++/// already-deinterleaved `target`/`neighbor` buffers.
++///
++/// `target` is the array being updated (`evens` when `first == 0`, `odds`
++/// when `first == 1`); `neighbor` is the other, read-only this step. Since
++/// `target[k]` corresponds to scanline position `2k + first`, and its
++/// scalar-form neighbors are at scanline positions `2k + first - 1` and
++/// `2k + first + 1` (both in the *other* parity class), those map to
++/// `neighbor[k - 1]`/`neighbor[k]` when `first == 0`, or `neighbor[k]`/
++/// `neighbor[k + 1]` when `first == 1` - a plain, contiguous, shifted-slice
++/// read, with no gather/shuffle needed.
++#[inline(always)]
++fn filter_step_horizontal_simd<S: Simd>(
++    simd: S,
++    width: usize,
++    first: usize,
++    target: &mut [f32],
++    neighbor: &[f32],
++    f_simd: impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
++    f_scalar: impl Fn(f32, f32, f32) -> f32,
++) {
++    // Boundary: scanline position 0 (only ever part of the `first == 0` / evens pass).
+     if first == 0 {
+         let left = periodic_symmetric_extension_left(0, 1);
+         let right = periodic_symmetric_extension_right(0, 1, width);
+-        scanline[0] = f(scanline[0], scanline[left], scanline[right]);
++        target[0] = f_scalar(target[0], neighbor[(left - 1) / 2], neighbor[(right - 1) / 2]);
+     }
+ 
++    // Bulk: same index range as the original `(middle_start..width - 1).step_by(2)`
++    // scalar loop, reparametrized from scanline index `i` to buffer index
++    // `k = (i - first) / 2` - a bijective, step-1 remapping of the same terms.
++    // `num_terms` is the closed-form count of that range (verified against the
++    // literal `.step_by(2).count()` in the exhaustive test), computed as O(1)
++    // arithmetic instead of an iterator - this runs on every lifting step of
++    // every row, so an O(width) `.count()` here would (and, before this fix,
++    // did) dominate the whole filter's runtime.
+     let middle_start = if first == 0 { 2 } else { 1 };
+-    for i in (middle_start..width - 1).step_by(2) {
+-        scanline[i] = f(scanline[i], scanline[i - 1], scanline[i + 1]);
++    let num_terms = if width - 1 > middle_start {
++        (width - 1 - middle_start).div_ceil(2)
++    } else {
++        0
++    };
++    let k_start = (middle_start - first) / 2;
++    let (neighbor_lo_start, neighbor_hi_start) = if first == 0 {
++        (k_start - 1, k_start)
++    } else {
++        (k_start, k_start + 1)
++    };
++
++    let simd_terms = num_terms / SIMD_WIDTH * SIMD_WIDTH;
++    for chunk in 0..simd_terms / SIMD_WIDTH {
++        let k = k_start + chunk * SIMD_WIDTH;
++        let nl = neighbor_lo_start + chunk * SIMD_WIDTH;
++        let nh = neighbor_hi_start + chunk * SIMD_WIDTH;
++
++        let t = f32x8::from_slice(simd, &target[k..][..SIMD_WIDTH]);
++        let l = f32x8::from_slice(simd, &neighbor[nl..][..SIMD_WIDTH]);
++        let r = f32x8::from_slice(simd, &neighbor[nh..][..SIMD_WIDTH]);
++        f_simd(t, l, r).store(&mut target[k..][..SIMD_WIDTH]);
++    }
++
++    for term in simd_terms..num_terms {
++        let k = k_start + term;
++        let nl = neighbor_lo_start + term;
++        let nh = neighbor_hi_start + term;
++        target[k] = f_scalar(target[k], neighbor[nl], neighbor[nh]);
+     }
+ 
++    // Boundary: last scanline position, if it belongs to this pass's parity.
+     if width > 1 && (width - 1) % 2 == first {
+         let i = width - 1;
+         let left = periodic_symmetric_extension_left(i, 1);
+         let right = periodic_symmetric_extension_right(i, 1, width);
+-        scanline[i] = f(scanline[i], scanline[left], scanline[right]);
++        let k = (i - first) / 2;
++        let (left_n, right_n) = if first == 0 {
++            ((left - 1) / 2, (right - 1) / 2)
++        } else {
++            (left / 2, right / 2)
++        };
++        target[k] = f_scalar(target[k], neighbor[left_n], neighbor[right_n]);
+     }
+ }
+ 
+@@ -776,3 +936,412 @@ fn irreversible_filter_97i_simd<S: Simd>(
+         |s1, s2, s3| math::mul_add(s2 + s3, NEG_ALPHA, s1),
+     );
+ }
++
++#[cfg(test)]
++mod horizontal_filter_equivalence_tests {
++    use super::*;
++
++    // Verbatim copy of the original scalar implementation (pre-SIMD-rewrite),
++    // kept only here as a reference oracle to check the new deinterleave-based
++    // SIMD implementation against, across many widths/x0/transforms.
++    mod reference {
++        use super::{
++            periodic_symmetric_extension_left, periodic_symmetric_extension_right,
++        };
++        use crate::math;
++
++        pub(super) fn filter_row(scanline: &mut [f32], width: usize, x0: usize, transform: super::WaveletTransform) {
++            if width == 1 {
++                if !x0.is_multiple_of(2) {
++                    scanline[0] *= 0.5;
++                }
++                return;
++            }
++            match transform {
++                super::WaveletTransform::Reversible53 => reversible_filter_53r(scanline, width, x0),
++                super::WaveletTransform::Irreversible97 => irreversible_filter_97i(scanline, width, x0),
++            }
++        }
++
++        fn reversible_filter_53r(scanline: &mut [f32], width: usize, x0: usize) {
++            let first_even = x0 % 2;
++            let first_odd = 1 - first_even;
++            filter_step_horizontal(scanline, width, first_even, |s, l, r| {
++                s - math::floor_f32((l + r).mul_add(0.25, 0.5))
++            });
++            filter_step_horizontal(scanline, width, first_odd, |s, l, r| {
++                s + math::floor_f32((l + r) * 0.5)
++            });
++        }
++
++        fn irreversible_filter_97i(scanline: &mut [f32], width: usize, x0: usize) {
++            const NEG_ALPHA: f32 = 1.586_134_3;
++            const NEG_BETA: f32 = 0.052_980_117;
++            const NEG_GAMMA: f32 = -0.882_911_1;
++            const NEG_DELTA: f32 = -0.443_506_87;
++            const KAPPA: f32 = 1.230_174_1;
++            const INV_KAPPA: f32 = 1.0 / KAPPA;
++
++            let first_even = x0 % 2;
++            let first_odd = 1 - first_even;
++            let (k0, k1) = if first_even == 0 { (KAPPA, INV_KAPPA) } else { (INV_KAPPA, KAPPA) };
++
++            for i in (0..width.saturating_sub(1)).step_by(2) {
++                scanline[i] *= k0;
++                scanline[i + 1] *= k1;
++            }
++            if width % 2 == 1 {
++                scanline[width - 1] *= k0;
++            }
++
++            filter_step_horizontal(scanline, width, first_even, |s, l, r| {
++                (l + r).mul_add(NEG_DELTA, s)
++            });
++            filter_step_horizontal(scanline, width, first_odd, |s, l, r| {
++                (l + r).mul_add(NEG_GAMMA, s)
++            });
++            filter_step_horizontal(scanline, width, first_even, |s, l, r| {
++                (l + r).mul_add(NEG_BETA, s)
++            });
++            filter_step_horizontal(scanline, width, first_odd, |s, l, r| {
++                (l + r).mul_add(NEG_ALPHA, s)
++            });
++        }
++
++        fn filter_step_horizontal(scanline: &mut [f32], width: usize, first: usize, f: impl Fn(f32, f32, f32) -> f32) {
++            if first == 0 {
++                let left = periodic_symmetric_extension_left(0, 1);
++                let right = periodic_symmetric_extension_right(0, 1, width);
++                scanline[0] = f(scanline[0], scanline[left], scanline[right]);
++            }
++            let middle_start = if first == 0 { 2 } else { 1 };
++            for i in (middle_start..width - 1).step_by(2) {
++                scanline[i] = f(scanline[i], scanline[i - 1], scanline[i + 1]);
++            }
++            if width > 1 && (width - 1) % 2 == first {
++                let i = width - 1;
++                let left = periodic_symmetric_extension_left(i, 1);
++                let right = periodic_symmetric_extension_right(i, 1, width);
++                scanline[i] = f(scanline[i], scanline[left], scanline[right]);
++            }
++        }
++    }
++
++    fn synthetic_row(width: usize, seed: u32) -> Vec<f32> {
++        let mut state = seed.wrapping_mul(2654435761).wrapping_add(1);
++        (0..width)
++            .map(|_| {
++                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
++                // Values roughly in wavelet-coefficient range, including negatives.
++                (state as i32 as f32) / (i32::MAX as f32) * 2048.0
++            })
++            .collect()
++    }
++
++    // `reference` uses true FMA (`f32::mul_add`) throughout, matching what the
++    // SIMD bulk path always uses (fearless_simd dispatches to real hardware FMA
++    // at runtime, independent of this crate's compile-time `target-feature`
++    // flags). The new code's *scalar* remainder/boundary positions still use
++    // `crate::math::mul_add`, which on this build falls back to unfused `a*b+c`
++    // (see `math.rs`'s doc comment: "very imprecise, but hopefully good enough")
++    // whenever `target-feature=fma` wasn't set at compile time - exactly the
++    // same tradeoff the existing, shipped `filter_step_vertical` already makes
++    // between its SIMD bulk and scalar remainder. So this test allows a small
++    // tolerance rather than requiring bit-exact equality, and its real purpose
++    // is to catch *index/logic* bugs (which show up as wildly wrong values,
++    // wrong lengths, or panics), not to police FMA rounding policy.
++    fn approx_eq(a: f32, b: f32) -> bool {
++        let diff = (a - b).abs();
++        let scale = a.abs().max(b.abs()).max(1.0);
++        diff <= (scale * 1e-4).max(5e-4)
++    }
++
++    #[test]
++    fn new_simd_path_matches_reference_within_fp_tolerance_exhaustively() {
++        let mut mismatches = Vec::new();
++        let mut max_relative_diff = 0.0f32;
++
++        for &transform in &[WaveletTransform::Reversible53, WaveletTransform::Irreversible97] {
++            for width in 1..=80usize {
++                for x0 in 0..2usize {
++                    for seed in 0..4u32 {
++                        let original = synthetic_row(width, seed + width as u32 * 7);
++
++                        let mut expected = original.clone();
++                        reference::filter_row(&mut expected, width, x0, transform);
++
++                        let mut actual = original.clone();
++                        let rect = IntRect::from_ltrb(x0 as u32, 0, (x0 + width) as u32, 1);
++                        filter_horizontal(&mut actual, rect, transform);
++
++                        for (&e, &a) in expected.iter().zip(&actual) {
++                            let scale = e.abs().max(a.abs()).max(1.0);
++                            max_relative_diff = max_relative_diff.max((e - a).abs() / scale);
++                        }
++
++                        if !expected.iter().zip(&actual).all(|(&e, &a)| approx_eq(e, a)) {
++                            mismatches.push((transform, width, x0, seed, expected, actual));
++                        }
++                    }
++                }
++            }
++        }
++
++        eprintln!("max relative diff observed: {max_relative_diff:e}");
++        assert!(
++            mismatches.is_empty(),
++            "{} mismatches (beyond FP tolerance) between reference and new SIMD horizontal filter; first: {:?}",
++            mismatches.len(),
++            mismatches.first()
++        );
++    }
++}
++
++// TEMPORARY - perf-optimize investigation (candidate 013, follow-up to 002/008).
++// Isolates candidate 002's remaining suspects #2 (unaligned SIMD loads) and #3
++// (problem-shape/amortization: many ~600-element per-row calls vs one big call)
++// by calling the real `filter_step_horizontal_simd` directly with synthetic
++// buffer shapes, independent of real JPX decode. Reverted before this candidate
++// folder's patch.diff was captured - not part of any shipped fix.
++#[cfg(test)]
++mod suspect_investigation {
++    use super::*;
++    use std::time::Instant;
++
++    const NEG_DELTA: f32 = -0.443_506_87;
++
++    fn run_step<S: Simd>(simd: S, width: usize, first: usize, target: &mut [f32], neighbor: &[f32]) {
++        let neg_delta = f32x8::splat(simd, NEG_DELTA);
++        filter_step_horizontal_simd(
++            simd,
++            width,
++            first,
++            target,
++            neighbor,
++            #[inline(always)]
++            |s, left, right| (left + right).mul_add(neg_delta, s),
++            #[inline(always)]
++            |s, left, right| math::mul_add(left + right, NEG_DELTA, s),
++        );
++    }
++
++    // Suspect #3: many small (~row-sized) calls vs one big call doing the same
++    // total amount of arithmetic. If per-call/loop-setup overhead is the
++    // dominant cost, the many-small-calls variant should be markedly slower
++    // per element than the one-big-call variant.
++    #[test]
++    #[ignore]
++    fn print_detected_level() {
++        println!("Level::new() = {:?}", Level::new());
++    }
++
++    #[test]
++    #[ignore]
++    fn suspect_3_amortization() {
++        const ROW_WIDTH: usize = 620; // ~ real per-row evens/odds buffer width for a 1241px-wide image
++        const N_ROWS: usize = 1752 * 4; // ~ rows x lifting-steps in one real decode of that image
++        const ROUNDS: usize = 5;
++        let total = ROW_WIDTH * N_ROWS;
++
++        dispatch!(Level::new(), simd => {
++            let mut small_times = Vec::with_capacity(ROUNDS);
++            let mut big_times = Vec::with_capacity(ROUNDS);
++
++            // Alternate small/big across rounds (paired comparison, avoids attributing
++            // a thermal/frequency drift over the run to one variant only).
++            for round in 0..ROUNDS {
++                let run_small = || {
++                    let mut target_small = vec![1.0f32; ROW_WIDTH];
++                    let neighbor_small = vec![2.0f32; ROW_WIDTH];
++                    let start = Instant::now();
++                    for _ in 0..N_ROWS {
++                        for x in target_small.iter_mut() {
++                            *x = 1.0;
++                        }
++                        run_step(simd, ROW_WIDTH, 0, &mut target_small, &neighbor_small);
++                        std::hint::black_box(&target_small);
++                    }
++                    start.elapsed()
++                };
++                let run_big = || {
++                    let mut target_big = vec![1.0f32; total];
++                    let neighbor_big = vec![2.0f32; total];
++                    let start = Instant::now();
++                    run_step(simd, total, 0, &mut target_big, &neighbor_big);
++                    std::hint::black_box(&target_big);
++                    start.elapsed()
++                };
++
++                if round % 2 == 0 {
++                    small_times.push(run_small());
++                    big_times.push(run_big());
++                } else {
++                    big_times.push(run_big());
++                    small_times.push(run_small());
++                }
++            }
++
++            println!(
++                "suspect#3 amortization ({N_ROWS} calls x {ROW_WIDTH} width vs 1 call x {total} width), {ROUNDS} paired rounds:"
++            );
++            println!("  many-small-calls: {small_times:?}");
++            println!("  one-big-call:     {big_times:?}");
++            let small_median = {
++                let mut v: Vec<_> = small_times.iter().map(|d| d.as_secs_f64()).collect();
++                v.sort_by(f64::total_cmp);
++                v[v.len() / 2]
++            };
++            let big_median = {
++                let mut v: Vec<_> = big_times.iter().map(|d| d.as_secs_f64()).collect();
++                v.sort_by(f64::total_cmp);
++                v[v.len() / 2]
++            };
++            println!(
++                "  median: small={small_median:.6}s big={big_median:.6}s ratio(small/big)={:.2}x",
++                small_median / big_median
++            );
++        });
++    }
++
++    // Suspect #2: does a plain +4-byte (one f32) base-address shift of the
++    // exact same computation cost anything extra on this SIMD dispatch level?
++    // This isolates pure load-alignment cost from the algorithm's own
++    // inherent even/odd overlap (which is present in both arms below - both
++    // pass `first = 0`, only the underlying slice's start address differs).
++    #[test]
++    #[ignore]
++    fn suspect_2_alignment() {
++        const WIDTH: usize = 4_000_000;
++        const ROUNDS: usize = 5;
++
++        dispatch!(Level::new(), simd => {
++            let mut offset0_times = Vec::with_capacity(ROUNDS);
++            let mut offset1_times = Vec::with_capacity(ROUNDS);
++
++            for round in 0..ROUNDS {
++                let run_offset0 = || {
++                    let mut target = vec![1.0f32; WIDTH + 8];
++                    let neighbor = vec![2.0f32; WIDTH + 8];
++                    let start = Instant::now();
++                    run_step(simd, WIDTH, 0, &mut target[0..WIDTH], &neighbor[0..WIDTH]);
++                    std::hint::black_box(&target);
++                    start.elapsed()
++                };
++                let run_offset1 = || {
++                    let mut target = vec![1.0f32; WIDTH + 8];
++                    let neighbor = vec![2.0f32; WIDTH + 8];
++                    let start = Instant::now();
++                    run_step(simd, WIDTH, 0, &mut target[1..WIDTH + 1], &neighbor[1..WIDTH + 1]);
++                    std::hint::black_box(&target);
++                    start.elapsed()
++                };
++
++                if round % 2 == 0 {
++                    offset0_times.push(run_offset0());
++                    offset1_times.push(run_offset1());
++                } else {
++                    offset1_times.push(run_offset1());
++                    offset0_times.push(run_offset0());
++                }
++            }
++
++            println!("suspect#2 alignment ({WIDTH} elements, single call), {ROUNDS} paired rounds:");
++            println!("  offset+0: {offset0_times:?}");
++            println!("  offset+1elem: {offset1_times:?}");
++            let median = |times: &[std::time::Duration]| {
++                let mut v: Vec<_> = times.iter().map(|d| d.as_secs_f64()).collect();
++                v.sort_by(f64::total_cmp);
++                v[v.len() / 2]
++            };
++            let m0 = median(&offset0_times);
++            let m1 = median(&offset1_times);
++            println!("  median: offset+0={m0:.6}s offset+1elem={m1:.6}s ratio={:.3}x", m1 / m0);
++        });
++    }
++
++    // Neither #2 nor #3 explained the regression's magnitude - this checks
++    // whether the SIMD kernel itself (one big call, so amortization-neutral)
++    // simply costs more per element than the equivalent plain scalar loop,
++    // independent of any shape/alignment concern.
++    #[test]
++    #[ignore]
++    fn suspect_4_simd_kernel_vs_naive_scalar() {
++        const WIDTH: usize = 4_000_000;
++        const ROUNDS: usize = 5;
++
++        fn scalar_step(width: usize, first: usize, target: &mut [f32], neighbor: &[f32]) {
++            const NEG_DELTA: f32 = -0.443_506_87;
++            if first == 0 {
++                let left = periodic_symmetric_extension_left(0, 1);
++                let right = periodic_symmetric_extension_right(0, 1, width);
++                target[0] = math::mul_add(
++                    neighbor[(left - 1) / 2] + neighbor[(right - 1) / 2],
++                    NEG_DELTA,
++                    target[0],
++                );
++            }
++            let middle_start = if first == 0 { 2 } else { 1 };
++            let num_terms = if width - 1 > middle_start {
++                (width - 1 - middle_start).div_ceil(2)
++            } else {
++                0
++            };
++            let k_start = (middle_start - first) / 2;
++            let (nl_start, nh_start) = if first == 0 {
++                (k_start - 1, k_start)
++            } else {
++                (k_start, k_start + 1)
++            };
++            for term in 0..num_terms {
++                let k = k_start + term;
++                let nl = nl_start + term;
++                let nh = nh_start + term;
++                target[k] = math::mul_add(neighbor[nl] + neighbor[nh], NEG_DELTA, target[k]);
++            }
++        }
++
++        dispatch!(Level::new(), simd => {
++            let mut simd_times = Vec::with_capacity(ROUNDS);
++            let mut scalar_times = Vec::with_capacity(ROUNDS);
++
++            for round in 0..ROUNDS {
++                let run_simd = || {
++                    let mut target = vec![1.0f32; WIDTH];
++                    let neighbor = vec![2.0f32; WIDTH];
++                    let start = Instant::now();
++                    run_step(simd, WIDTH, 0, &mut target, &neighbor);
++                    std::hint::black_box(&target);
++                    start.elapsed()
++                };
++                let run_scalar = || {
++                    let mut target = vec![1.0f32; WIDTH];
++                    let neighbor = vec![2.0f32; WIDTH];
++                    let start = Instant::now();
++                    scalar_step(WIDTH, 0, &mut target, &neighbor);
++                    std::hint::black_box(&target);
++                    start.elapsed()
++                };
++
++                if round % 2 == 0 {
++                    simd_times.push(run_simd());
++                    scalar_times.push(run_scalar());
++                } else {
++                    scalar_times.push(run_scalar());
++                    simd_times.push(run_simd());
++                }
++            }
++
++            println!("suspect#4 SIMD kernel vs naive scalar loop ({WIDTH} elements, single call), {ROUNDS} paired rounds:");
++            println!("  simd:   {simd_times:?}");
++            println!("  scalar: {scalar_times:?}");
++            let median = |times: &[std::time::Duration]| {
++                let mut v: Vec<_> = times.iter().map(|d| d.as_secs_f64()).collect();
++                v.sort_by(f64::total_cmp);
++                v[v.len() / 2]
++            };
++            let ms = median(&simd_times);
++            let mc = median(&scalar_times);
++            println!("  median: simd={ms:.6}s scalar={mc:.6}s ratio(simd/scalar)={:.3}x", ms / mc);
++        });
++    }
++}

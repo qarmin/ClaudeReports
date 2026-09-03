@@ -1,0 +1,36 @@
+# This candidate has no patch.diff, and never should: the fix it found - `clip: true` on a
+# non-virtualized row (candidate 001's `ClippedRecordRow`) - is an app-level `.slint` authoring
+# pattern, not a change to the Slint library or a dependency it vendors. A patch.diff only makes
+# sense against the tested project itself; the test harness
+# (`../harness/perf_test/ui/shared.slint`) simply has this row style built in directly, the same
+# as any other. `just test` builds the harness once and reproduces the finding by comparing the
+# two row styles it already offers.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+test: clone build bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+build:
+    cd clone/perf_test && cargo build --profile rdebug --bin perf_test
+
+# RESULT.md's headline: first frame 620ms -> 25ms at 20000 rows (24x) going from `layout` to
+# `clipped`.
+bench:
+    @echo "=== layout (no clip: true - every row's Text is shaped at startup) ==="
+    ./clone/target/rdebug/perf_test --bench --mode scroll --count 20000 --row-style layout --frames 3
+    @echo "=== clipped (layout + clip: true - only visible rows are shaped) ==="
+    ./clone/target/rdebug/perf_test --bench --mode scroll --count 20000 --row-style clipped --frames 3
+
+clean:
+    rm -rf clone

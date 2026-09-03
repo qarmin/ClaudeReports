@@ -1,0 +1,98 @@
+diff --git a/src/imageops/affine.rs b/src/imageops/affine.rs
+index 10bf8f44..c2a82b57 100644
+--- a/src/imageops/affine.rs
++++ b/src/imageops/affine.rs
+@@ -50,6 +50,47 @@ where
+         )));
+     }
+ 
++    // Fast path: this is a transpose (plus a reversal along one axis), so a naive row/column scan
++    // would read source rows contiguously but write destination columns with a large stride
++    // (`dst_row_len` apart), thrashing the cache on the write side for any image taller than a
++    // cache line's worth of rows. Process the image in small square tiles instead: within one
++    // tile the write side only touches `BLOCK` destination rows spanning `BLOCK` pixels each,
++    // which stays cache-resident, while still avoiding per-pixel get_pixel/put_pixel dispatch.
++    let pix_stride = usize::from(<I::Pixel as Pixel>::CHANNEL_COUNT);
++    if let Some(view) = image.to_pixel_view() {
++        let (sw, sh) = view.strides_wh();
++        if sw == pix_stride {
++            const BLOCK: usize = 64;
++            let (w0u, h0u) = (w0 as usize, h0 as usize);
++            let src_row_len = w0u * pix_stride;
++            let dst_row_len = w1 as usize * pix_stride;
++            let samples: &[_] = view.samples();
++            let dest = destination.subpixels_mut();
++
++            let mut by = 0usize;
++            while by < h0u {
++                let y_end = (by + BLOCK).min(h0u);
++                let mut bx = 0usize;
++                while bx < w0u {
++                    let x_end = (bx + BLOCK).min(w0u);
++                    for y in by..y_end {
++                        let src_row = &samples[y * sh..][..src_row_len];
++                        let src_pixels = <I::Pixel as Pixel>::pixels_from_channels(src_row);
++                        let dst_col = h0u - 1 - y;
++                        for x in bx..x_end {
++                            let dst_offset = x * dst_row_len + dst_col * pix_stride;
++                            let dst_slice = &mut dest[dst_offset..][..pix_stride];
++                            <I::Pixel as Pixel>::pixels_from_channels_mut(dst_slice)[0] = src_pixels[x];
++                        }
++                    }
++                    bx = x_end;
++                }
++                by = y_end;
++            }
++            return Ok(());
++        }
++    }
++
+     for y in 0..h0 {
+         for x in 0..w0 {
+             let p = image.get_pixel(x, y);
+@@ -100,6 +141,45 @@ where
+         )));
+     }
+ 
++    // Fast path: same blocked-transpose approach as `rotate90_in` above (see its comment), mirrored
++    // for this rotation's index mapping (reversal is along the row axis here instead of the column
++    // axis).
++    let pix_stride = usize::from(<I::Pixel as Pixel>::CHANNEL_COUNT);
++    if let Some(view) = image.to_pixel_view() {
++        let (sw, sh) = view.strides_wh();
++        if sw == pix_stride {
++            const BLOCK: usize = 64;
++            let (w0u, h0u) = (w0 as usize, h0 as usize);
++            let src_row_len = w0u * pix_stride;
++            let dst_row_len = w1 as usize * pix_stride;
++            let samples: &[_] = view.samples();
++            let dest = destination.subpixels_mut();
++
++            let mut by = 0usize;
++            while by < h0u {
++                let y_end = (by + BLOCK).min(h0u);
++                let mut bx = 0usize;
++                while bx < w0u {
++                    let x_end = (bx + BLOCK).min(w0u);
++                    for y in by..y_end {
++                        let src_row = &samples[y * sh..][..src_row_len];
++                        let src_pixels = <I::Pixel as Pixel>::pixels_from_channels(src_row);
++                        let dst_col = y;
++                        for x in bx..x_end {
++                            let dst_row = w0u - 1 - x;
++                            let dst_offset = dst_row * dst_row_len + dst_col * pix_stride;
++                            let dst_slice = &mut dest[dst_offset..][..pix_stride];
++                            <I::Pixel as Pixel>::pixels_from_channels_mut(dst_slice)[0] = src_pixels[x];
++                        }
++                    }
++                    bx = x_end;
++                }
++                by = y_end;
++            }
++            return Ok(());
++        }
++    }
++
+     for y in 0..h0 {
+         for x in 0..w0 {
+             let p = image.get_pixel(x, y);

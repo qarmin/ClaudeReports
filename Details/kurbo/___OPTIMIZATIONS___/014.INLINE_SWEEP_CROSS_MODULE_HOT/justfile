@@ -1,0 +1,114 @@
+# Self-contained reproduction for candidate 014.
+#
+# NOTE (shape 3, see templates/candidate_justfile): kurbo's own benchmarks don't reach these code
+# paths, so this uses the `kurbo_bench` harness built for this workspace. That harness is UNTRACKED
+# in the kurbo repo - a fresh `git clone` of repo_url will never contain it - so `clone:` copies it
+# in from `../harness/kurbo_bench` and rewrites its kurbo dependency path. That makes this folder
+# self-contained *given the whole ___OPTIMIZATIONS___ folder kept together*, not as a single
+# isolated subfolder.
+#
+# `just test` clones at the pinned commit, builds a baseline binary, applies patch.diff, builds a
+# patched binary, and prints a real before/after for the three scenes that move plus four control
+# scenes that should not, with the paired comparison that carries the conclusion.
+#
+# `just ir` additionally prints deterministic callgrind instruction counts, which is the
+# measurement to trust if the host is loaded (kurbo is pure computation, so `Ir` is stable).
+
+repo_url := "https://github.com/linebender/kurbo.git"
+base_commit := "ca273499e3e48bd2de6f02aa8e99a148984e45f3"
+harness_dir := "../harness/kurbo_bench"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout --quiet {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/kurbo_bench
+    rm -rf clone/kurbo_bench/target
+    # The harness lives at ___OPTIMIZATIONS___/harness/kurbo_bench in the workspace, but at
+    # clone/kurbo_bench here, so its relative path to the kurbo crate changes.
+    sed -i 's|path = "../../../kurbo"|path = "../kurbo"|' clone/kurbo_bench/Cargo.toml
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/kurbo_bench && cargo build --release
+    cp clone/kurbo_bench/target/release/kurbo_bench ./bin_baseline
+
+build-patched:
+    find clone/kurbo/src -name '*.rs' -exec touch {} +
+    cd clone/kurbo_bench && cargo build --release
+    cp clone/kurbo_bench/target/release/kurbo_bench ./bin_patched
+
+bench:
+    @echo "=== the two binaries must differ, or the patch didn't apply ==="
+    md5sum ./bin_baseline ./bin_patched
+    @echo ""
+    @echo "=== all nine annotated functions should be gone from the patched binary ==="
+    @for f in 'common::solve_quadratic' 'PathSeg>::tangents' 'CubicBez>::inflections' \
+              get_maybe_relative get_number_pair 'BezPath>::push' 'BezPath>::close_path' \
+              'BezPath>::truncate' to_cubic_beziers; do \
+        printf '%-30s baseline=%s patched=%s\n' "$f" \
+            "$(nm -C ./bin_baseline 2>/dev/null | grep -c "$f")" \
+            "$(nm -C ./bin_patched  2>/dev/null | grep -c "$f")"; \
+    done
+    @echo ""
+    @echo "=== binary size (this patch makes it BIGGER, +0.66% in the recorded run) ==="
+    stat -c '%s %n' ./bin_baseline ./bin_patched
+    @echo ""
+    @echo "=== the three scenes that move: baseline then patched ==="
+    ulimit -c 0 && ./bin_baseline simplify 500
+    ulimit -c 0 && ./bin_patched  simplify 500
+    ulimit -c 0 && ./bin_baseline bbox 2000
+    ulimit -c 0 && ./bin_patched  bbox 2000
+    ulimit -c 0 && ./bin_baseline svg-parse 500
+    ulimit -c 0 && ./bin_patched  svg-parse 500
+    @echo ""
+    @echo "=== paired comparison, single-core (alternating runs; the win count carries it) ==="
+    ulimit -c 0 && TASKSET=2 RUNS=15 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- simplify 500
+    ulimit -c 0 && TASKSET=2 RUNS=15 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- bbox 2000
+    ulimit -c 0 && TASKSET=2 RUNS=15 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- svg-parse 500
+    @echo ""
+    @echo "=== paired comparison, multi-core (unpinned) ==="
+    ulimit -c 0 && RUNS=15 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- simplify 500
+    ulimit -c 0 && RUNS=15 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- bbox 2000
+    ulimit -c 0 && RUNS=15 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- svg-parse 500
+    @echo ""
+    @echo "=== controls that must NOT move (dash in particular - see RESULT.md) ==="
+    ulimit -c 0 && TASKSET=2 RUNS=15 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- dash 20
+    ulimit -c 0 && TASKSET=2 RUNS=15 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- stroke 20
+    ulimit -c 0 && TASKSET=2 RUNS=15 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- offset 20
+    ulimit -c 0 && TASKSET=2 RUNS=15 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- flatten 200
+    @echo ""
+    @echo "=== bit-exactness: CHECK must be identical on every scene ==="
+    @same=0; diff=0; \
+    for s in $(./bin_baseline --list | grep -E '^  [a-z]' | awk '{print $1}'); do \
+        a=$(./bin_baseline $s 3 2>/dev/null | grep '^CHECK'); \
+        b=$(./bin_patched  $s 3 2>/dev/null | grep '^CHECK'); \
+        if [ "$a" = "$b" ]; then same=$((same+1)); else diff=$((diff+1)); echo "DIFF $s"; fi; \
+    done; \
+    echo "CHECK identical=$same differing=$diff  (expected: identical=25 differing=0)"
+
+# `ulimit -n` is lowered below because valgrind fails outright at this host's default fd limit.
+#
+# Deterministic instruction counts - immune to host load, which is how the `dash` question was settled.
+ir:
+    @echo "=== callgrind Ir (deterministic) ==="
+    @ulimit -n 4096; for spec in 'simplify 20' 'bbox 100' 'svg-parse 20' 'dash 2' 'stroke 2' 'offset 2' 'fit 1'; do \
+        set -- $spec; \
+        a=$(valgrind --tool=callgrind --callgrind-out-file=/dev/null ./bin_baseline $1 $2 2>&1 >/dev/null | grep -oE 'I   refs: *[0-9,]+' | tr -d ', ' | sed 's/Irefs://'); \
+        b=$(valgrind --tool=callgrind --callgrind-out-file=/dev/null ./bin_patched  $1 $2 2>&1 >/dev/null | grep -oE 'I   refs: *[0-9,]+' | tr -d ', ' | sed 's/Irefs://'); \
+        python3 -c "a=$a; b=$b; print(f'$1 {a:>14,} -> {b:>14,}  {100*(b/a-1):+.3f}%')"; \
+    done
+
+# Note: polycool's `planted_root_deg5` is an arbtest randomized test with a time-derived seed and
+# fails intermittently on the UNPATCHED tree too - re-run before believing a failure there.
+#
+# Project test suite (mandatory per SKILL.md); run once before `apply` and once after.
+tests:
+    cd clone && cargo test --workspace --all-features --no-fail-fast 2>&1 | grep -E '^test result|^error'
+
+clean:
+    rm -rf clone bin_baseline bin_patched

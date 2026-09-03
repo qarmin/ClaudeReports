@@ -1,0 +1,52 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# repo_url/base_commit were read via `git remote get-url origin` / `git rev-parse HEAD` in the
+# main project at the moment patch.diff was captured.
+#
+# patch.diff bundles TWO independent hunks:
+#   1) sparse_strips/vello_bench/src/fine/fill.rs - a harness extension (new
+#      `opaque_long_masked` / `transparent_long_masked` criterion benches). This is needed
+#      because no existing bench exercised `fill_solid`/`alpha_composite_solid`'s
+#      `alphas.is_some()` (per-pixel AA-coverage mask) branch at all - only the no-mask path
+#      was covered by the existing `fine_solid` bench group.
+#   2) sparse_strips/vello_cpu/src/fine/lowp/mod.rs - the actual fix (a fast path for a fully
+#      opaque solid color composited under a per-pixel mask).
+#
+# Since (1) is required just to REACH the benchmarked code path, `just test` applies it first
+# (unpatched code + new bench = baseline), benches, then applies (2) on top (patched code + new
+# bench = patched), and benches again - so both stages measure through the same benchmark.
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+bench_filter := "fill/opaque_long_masked|fill/transparent_long_masked"
+
+test: clone apply-harness bench-baseline apply-fix bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-harness:
+    cd clone && git apply --include='sparse_strips/vello_bench/*' "{{justfile_directory()}}/patch.diff"
+
+apply-fix:
+    cd clone && git apply --include='sparse_strips/vello_cpu/*' "{{justfile_directory()}}/patch.diff"
+
+bench-baseline:
+    @echo "=== baseline (original alpha_composite_solid, new masked-fill benches only) ==="
+    cd clone && cargo bench -p vello_bench --bench main -- "{{bench_filter}}" --warm-up-time 1 --measurement-time 2
+
+bench-patched:
+    @echo "=== patched (opaque+masked fast path applied) ==="
+    cd clone && cargo bench -p vello_bench --bench main -- "{{bench_filter}}" --warm-up-time 1 --measurement-time 2
+
+# For a fair A/B, pin to one core: `taskset -c N just bench-baseline` / `taskset -c N just
+# bench-patched` after `just clone && just apply-harness` / `just apply-fix` respectively.
+
+clean:
+    rm -rf clone

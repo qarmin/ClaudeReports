@@ -1,0 +1,55 @@
+=== reproduce-before (pristine clone, base_commit 7516831426fb70f36d62c521c5477f6a7265b36a) ===
+$ cd repro && cargo run --release
+dx = -30:    [PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }, PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }, PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }, PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }, PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }]
+dx = -70000: [PremulRgba8 { r: 102, g: 51, b: 153, a: 255 }, PremulRgba8 { r: 102, g: 51, b: 153, a: 255 }, PremulRgba8 { r: 102, g: 51, b: 153, a: 255 }, PremulRgba8 { r: 102, g: 51, b: 153, a: 255 }, PremulRgba8 { r: 102, g: 51, b: 153, a: 255 }]
+REPRODUCED: source rectangle at its original location is still opaque after being offset by dx = -70000 (should be fully transparent, exactly like the dx = -30 case).
+$ echo $?
+1
+
+=== apply patch.diff, then reproduce-after (same clone, patched) ===
+$ cd clone && git apply .../patch.diff
+$ cd repro && cargo run --release
+dx = -30:    [PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }, PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }, PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }, PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }, PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }]
+dx = -70000: [PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }, PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }, PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }, PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }, PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }]
+did not reproduce - stale pixels were correctly cleared
+$ echo $?
+0
+
+=== Repeat-run confirmation (deterministic, run 4/4 times against the main worktree's own
+    build during investigation, in addition to the fresh-clone run above) ===
+$ cargo run --release   (x3, all identical output)
+--- dx = -70000 ---
+pixel (40,10) = PremulRgba8 { r: 102, g: 51, b: 153, a: 255 }
+pixel (45,10) = PremulRgba8 { r: 102, g: 51, b: 153, a: 255 }
+pixel (50,10) = PremulRgba8 { r: 102, g: 51, b: 153, a: 255 }
+pixel (55,10) = PremulRgba8 { r: 102, g: 51, b: 153, a: 255 }
+pixel (59,10) = PremulRgba8 { r: 102, g: 51, b: 153, a: 255 }
+
+=== Approach 1: debug-assertions unit test in shift.rs (initial confirmation, before building
+    the real end-to-end repro above) ===
+$ cargo test -p vello_cpu --lib filter::shift -- --nocapture
+thread 'filter::shift::tests::test_offset_pixels_negative_large_wraparound' panicked at
+sparse_strips/vello_cpu/src/filter/shift.rs:221:17:
+assertion `left == right` failed: pixel (1,1) should be cleared, got a=255
+  left: 255
+ right: 0
+test filter::shift::tests::test_offset_pixels_negative ... ok
+test filter::shift::tests::test_offset_pixels_fractional ... ok
+test filter::shift::tests::test_offset_pixels_out_of_bounds ... ok
+test filter::shift::tests::test_offset_pixels_positive ... ok
+test filter::shift::tests::test_offset_pixels_negative_large_wraparound ... FAILED
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 77 filtered out
+(repeated 3x more, identical FAILED result each time - 4/4 total)
+(this temporary unit test was reverted before writing the final repro/ above)
+
+=== Project test suite: vello_cpu --lib, before vs. after the patch ===
+Before (pristine):  test result: ok. 81 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+After (patched):    test result: ok. 81 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+=== Project test suite: vello_sparse_tests --test tests filter::, before vs. after the patch ===
+Before (pristine):  test result: FAILED. 7 passed; 442 failed; 222 ignored; 0 measured
+After (patched):    test result: FAILED. 7 passed; 442 failed; 222 ignored; 0 measured
+(identical failure count before and after - these 442 failures are pre-existing, environmental:
+ this checkout's git-lfs binary is missing from PATH, so the LFS-tracked reference PNGs used by
+ these snapshot-comparison tests are unresolved pointer files, not actual images. Confirmed by
+ running the exact same command against the unmodified tree with `git stash` - identical result.)

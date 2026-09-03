@@ -1,0 +1,37 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - default depth (100_000 nested
+# opacity layers) reliably overflows the stack in a release build (see output.txt: also
+# confirmed at depth as low as ~11_000-15_000). Expected: aborts with "stack overflow", exit
+# code 134.
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer overflow the stack even at
+# far greater depth. Expected: prints "did not reproduce - rendered successfully with
+# depth=100000", exit code 0.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

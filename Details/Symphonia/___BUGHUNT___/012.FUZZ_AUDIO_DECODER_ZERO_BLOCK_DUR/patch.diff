@@ -1,0 +1,21 @@
+diff --git a/symphonia/fuzz/src/lib.rs b/symphonia/fuzz/src/lib.rs
+index d3c2c89..3736592 100644
+--- a/symphonia/fuzz/src/lib.rs
++++ b/symphonia/fuzz/src/lib.rs
+@@ -10,7 +10,15 @@ pub fn fuzz_audio_decoder<D: RegisterableAudioDecoder>(
+     packet_data: Vec<u8>,
+ ) {
+     if let Ok(mut decoder) = D::try_registry_new(params, &Default::default()) {
+-        let packet = Packet::new(0, Timestamp::ZERO, Duration::ZERO, packet_data);
++        // Some decoders (e.g. ADPCM) derive the number of blocks to decode from
++        // `Packet::block_dur()` rather than from `packet_data`'s length alone. A `Duration::ZERO`
++        // packet makes `block_dur()` zero for every packet regardless of `packet_data`, which
++        // silently skips those decoders' block-decoding logic entirely - see bug-hunt candidate
++        // 012. Use the codec's own declared `max_frames_per_packet` as a plausible non-zero
++        // duration so that code path actually runs, falling back to `Duration::ZERO` (today's
++        // behaviour) when a codec doesn't declare one.
++        let dur = params.max_frames_per_packet.map(Duration::new).unwrap_or(Duration::ZERO);
++        let packet = Packet::new(0, Timestamp::ZERO, dur, packet_data);
+         let _ = decoder.decode(&packet);
+     }
+ }

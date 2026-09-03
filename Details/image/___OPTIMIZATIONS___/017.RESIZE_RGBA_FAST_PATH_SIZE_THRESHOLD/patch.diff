@@ -1,0 +1,318 @@
+diff --git a/benches/imageops.rs b/benches/imageops.rs
+index d1b33ebe..01df4725 100644
+--- a/benches/imageops.rs
++++ b/benches/imageops.rs
+@@ -4,7 +4,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
+ use image::{
+     imageops::{self, FilterType},
+     math::Rect,
+-    DynamicImage, GrayImage, ImageBuffer, Rgb,
++    DynamicImage, GrayImage, ImageBuffer, Rgb, Rgba,
+ };
+ 
+ pub fn bench_imageops(c: &mut Criterion) {
+@@ -97,6 +97,21 @@ pub fn bench_resize(c: &mut Criterion) {
+         // "random" pixel values
+         Rgb([x as u8, (y / 8) as u8, ((x * 13 + y) % 256) as u8])
+     });
++    // Same pattern as `src`, plus a non-constant alpha channel so the resize path actually
++    // exercises premultiply/unpremultiply handling rather than short-circuiting on constant alpha.
++    let src_rgba = ImageBuffer::from_fn(1920, 1080, |x, y| {
++        Rgba([
++            x as u8,
++            (y / 8) as u8,
++            ((x * 13 + y) % 256) as u8,
++            ((x + y * 7) % 256) as u8,
++        ])
++    });
++    // Same colors as `src_rgba` but a constant (fully opaque) alpha channel - the common case of
++    // a decoded image with no real transparency, which should skip premultiply/unpremultiply.
++    let src_rgba_opaque = ImageBuffer::from_fn(1920, 1080, |x, y| {
++        Rgba([x as u8, (y / 8) as u8, ((x * 13 + y) % 256) as u8, 255u8])
++    });
+ 
+     let filters = [
+         FilterType::Nearest,
+@@ -112,6 +127,18 @@ pub fn bench_resize(c: &mut Criterion) {
+         });
+     }
+ 
++    for filter in filters {
++        c.bench_function(&format!("resize rgba 400x300 {:?}", filter), |b| {
++            b.iter(|| imageops::resize(&src_rgba, 400, 300, filter));
++        });
++    }
++
++    for filter in filters {
++        c.bench_function(&format!("resize rgba opaque 400x300 {:?}", filter), |b| {
++            b.iter(|| imageops::resize(&src_rgba_opaque, 400, 300, filter));
++        });
++    }
++
+     // resizing with large dimensions is slower, so take fewer samples
+     let mut group = c.benchmark_group("large");
+     let c = group.warm_up_time(Duration::from_secs(1)).sample_size(10);
+@@ -121,6 +148,12 @@ pub fn bench_resize(c: &mut Criterion) {
+             b.iter(|| imageops::resize(&src, 2000, 2000, filter));
+         });
+     }
++
++    for filter in filters {
++        c.bench_function(format!("resize rgba 2000x2000 {:?}", filter), |b| {
++            b.iter(|| imageops::resize(&src_rgba, 2000, 2000, filter));
++        });
++    }
+ }
+ 
+ criterion_group!(benches, bench_imageops, bench_resize);
+diff --git a/src/imageops/sample.rs b/src/imageops/sample.rs
+index 25864cac..df4a7d20 100644
+--- a/src/imageops/sample.rs
++++ b/src/imageops/sample.rs
+@@ -7,6 +7,7 @@
+ // for some of the theory behind image scaling and convolution
+ 
+ use num_traits::{NumCast, ToPrimitive, Zero};
++use std::any::TypeId;
+ use std::f32;
+ use std::ops::Mul;
+ 
+@@ -23,8 +24,8 @@ use crate::primitive_sealed::NearestFrom;
+ use crate::traits::{Enlargeable, Pixel, Primitive};
+ use crate::utils::{clamp, is_integer, vec_try_with_capacity};
+ use crate::{
+-    DynamicImage, GenericImage, GenericImageView, GrayAlphaImage, GrayImage, ImageBuffer,
+-    Rgb32FImage, RgbImage, Rgba32FImage, RgbaImage,
++    DynamicImage, GenericImage, GenericImageView, GrayAlphaImage, GrayImage, ImageBuffer, Rgb,
++    Rgb32FImage, RgbImage, Rgba, Rgba32FImage, RgbaImage,
+ };
+ 
+ const MAX_CHANNEL: usize = 4;
+@@ -544,7 +545,7 @@ where
+         }
+ 
+         for x in 0..width {
+-            let mut pix = crate::Rgba([1.0; 4]);
++            let mut pix = Rgba([1.0; 4]);
+ 
+             for (i, w) in ws.iter().enumerate() {
+                 let p = image.get_pixel(x, left + i as u32);
+@@ -970,6 +971,189 @@ where
+     out
+ }
+ 
++/// Prototype fast path for `resize` (see perf-optimize candidate
++/// `RESIZE_SAMPLE_PIC_SCALE_SAFE_DELEGATION`): delegate to `pic_scale_safe::resize_rgb8` when the
++/// source is provably a fully packed, contiguous `Rgb<u8>` buffer, falling back to `None`
++/// (the original `Filter{kernel,support}` algorithm below) for every other pixel type or layout.
++///
++/// This intentionally covers only one representative concrete case rather than the whole
++/// `I: GenericImageView` generality `resize` otherwise supports - it exists to measure whether
++/// delegating is worthwhile at all, not as a complete replacement.
++fn try_pic_scale_safe_rgb8_resize<I: GenericImageView>(
++    image: &I,
++    nwidth: u32,
++    nheight: u32,
++    filter: FilterType,
++) -> Option<ImageBuffer<I::Pixel, Vec<<I::Pixel as Pixel>::Subpixel>>>
++where
++    I::Pixel: 'static,
++{
++    if TypeId::of::<I::Pixel>() != TypeId::of::<Rgb<u8>>() {
++        return None;
++    }
++
++    let view = image.to_pixel_view()?;
++    let (width, height) = image.dimensions();
++    let channels = <I::Pixel as Pixel>::CHANNEL_COUNT as usize;
++    let (px_stride, row_stride) = view.strides_wh();
++    // Require full contiguity (not just packed-per-pixel): pic-scale-safe's entry points take a
++    // flat row-major buffer with no row-to-row gap, unlike this file's other fast paths (e.g.
++    // candidate 005's `vertical_sample`) which only need per-pixel packing and can stride between
++    // rows, so e.g. a `SubImage` view (packed pixels, but padded rows) does not qualify here.
++    if px_stride != channels || row_stride != width as usize * channels {
++        return None;
++    }
++
++    let samples: &[<I::Pixel as Pixel>::Subpixel] = view.samples();
++    // SAFETY: the `TypeId` check above proves `I::Pixel == Rgb<u8>`, hence
++    // `<I::Pixel as Pixel>::Subpixel == u8` and this slice is really `&[u8]` with identical
++    // layout - the compiler just can't see that equality through the generic parameter `S`.
++    let samples_u8: &[u8] =
++        unsafe { std::slice::from_raw_parts(samples.as_ptr().cast::<u8>(), samples.len()) };
++
++    let src_size = pic_scale_safe::ImageSize::new(width as usize, height as usize);
++    let dst_size = pic_scale_safe::ImageSize::new(nwidth as usize, nheight as usize);
++    let alg = match filter {
++        FilterType::Nearest => pic_scale_safe::ResamplingFunction::Nearest,
++        FilterType::Triangle => pic_scale_safe::ResamplingFunction::Bilinear,
++        FilterType::CatmullRom => pic_scale_safe::ResamplingFunction::CatmullRom,
++        FilterType::Gaussian => pic_scale_safe::ResamplingFunction::Gaussian,
++        FilterType::Lanczos3 => pic_scale_safe::ResamplingFunction::Lanczos3,
++    };
++
++    let resized = pic_scale_safe::resize_rgb8(samples_u8, src_size, dst_size, alg).ok()?;
++
++    // SAFETY: reverses the cast above; `<I::Pixel as Pixel>::Subpixel == u8` was already
++    // established via the `TypeId` check, so re-interpreting this `Vec<u8>` as
++    // `Vec<<I::Pixel as Pixel>::Subpixel>` is sound (same size/alignment, same allocator).
++    let resized_typed: Vec<<I::Pixel as Pixel>::Subpixel> = unsafe {
++        let mut resized = std::mem::ManuallyDrop::new(resized);
++        Vec::from_raw_parts(
++            resized
++                .as_mut_ptr()
++                .cast::<<I::Pixel as Pixel>::Subpixel>(),
++            resized.len(),
++            resized.capacity(),
++        )
++    };
++
++    ImageBuffer::from_raw(nwidth, nheight, resized_typed)
++}
++
++/// Minimum output pixel count (`nwidth * nheight`) required for `try_pic_scale_safe_rgba8_resize`
++/// to still take the pic-scale-safe fast path when the source has non-constant alpha (i.e. when
++/// premultiply/unpremultiply is actually needed). See perf-optimize candidate
++/// `RESIZE_RGBA_FAST_PATH_SIZE_THRESHOLD`: picked as a round number strictly between the two
++/// measured data points (120,000 = 400x300, regressed without a threshold; 4,000,000 = 2000x2000,
++/// a clear win) on a 1920x1080 source - the precise crossover was not narrowed further than that.
++const RGBA_PREMULTIPLY_FAST_PATH_MIN_OUTPUT_PIXELS: u64 = 1_000_000;
++
++/// Same fast path as [`try_pic_scale_safe_rgb8_resize`], but for `Rgba<u8>` (see perf-optimize
++/// candidate `RESIZE_RGBA_PIC_SCALE_SAFE_DELEGATION`, which extends candidate
++/// `RESIZE_SAMPLE_PIC_SCALE_SAFE_DELEGATION`'s `Rgb<u8>`-only prototype to the alpha case).
++///
++/// Mirrors `src/imageops/resize.rs`'s `DynamicImage::resize` handling: premultiplies by alpha
++/// before resizing (unless the filter is `Nearest`, which does no blending, or the image's alpha
++/// is already constant) and reverses it afterwards, to avoid color bleed from fully-transparent
++/// pixels.
++fn try_pic_scale_safe_rgba8_resize<I: GenericImageView>(
++    image: &I,
++    nwidth: u32,
++    nheight: u32,
++    filter: FilterType,
++) -> Option<ImageBuffer<I::Pixel, Vec<<I::Pixel as Pixel>::Subpixel>>>
++where
++    I::Pixel: 'static,
++{
++    if TypeId::of::<I::Pixel>() != TypeId::of::<Rgba<u8>>() {
++        return None;
++    }
++
++    let view = image.to_pixel_view()?;
++    let (width, height) = image.dimensions();
++    let channels = <I::Pixel as Pixel>::CHANNEL_COUNT as usize;
++    let (px_stride, row_stride) = view.strides_wh();
++    // Same full-contiguity requirement as the Rgb8 fast path above - see its comment.
++    if px_stride != channels || row_stride != width as usize * channels {
++        return None;
++    }
++
++    let samples: &[<I::Pixel as Pixel>::Subpixel] = view.samples();
++    // SAFETY: the `TypeId` check above proves `I::Pixel == Rgba<u8>`, hence
++    // `<I::Pixel as Pixel>::Subpixel == u8` and this slice is really `&[u8]` with identical
++    // layout - the compiler just can't see that equality through the generic parameter `S`.
++    let samples_u8: &[u8] =
++        unsafe { std::slice::from_raw_parts(samples.as_ptr().cast::<u8>(), samples.len()) };
++
++    let src_size = pic_scale_safe::ImageSize::new(width as usize, height as usize);
++    let dst_size = pic_scale_safe::ImageSize::new(nwidth as usize, nheight as usize);
++    let alg = match filter {
++        FilterType::Nearest => pic_scale_safe::ResamplingFunction::Nearest,
++        FilterType::Triangle => pic_scale_safe::ResamplingFunction::Bilinear,
++        FilterType::CatmullRom => pic_scale_safe::ResamplingFunction::CatmullRom,
++        FilterType::Gaussian => pic_scale_safe::ResamplingFunction::Gaussian,
++        FilterType::Lanczos3 => pic_scale_safe::ResamplingFunction::Lanczos3,
++    };
++
++    let needs_premultiply = filter != FilterType::Nearest && !has_constant_alpha_rgba8(samples_u8);
++
++    // Premultiplying the whole source is a fixed cost that scales with *source* pixel count,
++    // while the algorithmic win pic-scale-safe offers over the original per-pixel path scales
++    // with *output* pixel count (see perf-optimize candidates 014/015 for the measured
++    // 400x300-vs-2000x2000 crossover on a 1920x1080 source: the fixed premultiply tax dominates
++    // and erases the win at small output sizes, but is a small fraction of the total cost at
++    // large output sizes). Only the non-constant-alpha path pays this tax at all - constant-alpha
++    // and `Nearest` resizes skip premultiply entirely and are a clean win at every size measured,
++    // so the threshold below intentionally only gates this one branch.
++    if needs_premultiply
++        && (nwidth as u64) * (nheight as u64) < RGBA_PREMULTIPLY_FAST_PATH_MIN_OUTPUT_PIXELS
++    {
++        return None;
++    }
++
++    let mut resized = if needs_premultiply {
++        // Fused alloc+premultiply in one pass, instead of `to_vec()` (a full copy) followed by a
++        // separate in-place `premultiply_rgba8` pass over the same buffer.
++        let premultiplied = pic_scale_safe::premultiplied_rgba8(samples_u8);
++        pic_scale_safe::resize_rgba8(&premultiplied, src_size, dst_size, alg).ok()?
++    } else {
++        pic_scale_safe::resize_rgba8(samples_u8, src_size, dst_size, alg).ok()?
++    };
++    if needs_premultiply {
++        pic_scale_safe::unpremultiply_rgba8(&mut resized);
++    }
++
++    // SAFETY: reverses the cast above; `<I::Pixel as Pixel>::Subpixel == u8` was already
++    // established via the `TypeId` check, so re-interpreting this `Vec<u8>` as
++    // `Vec<<I::Pixel as Pixel>::Subpixel>` is sound (same size/alignment, same allocator).
++    let resized_typed: Vec<<I::Pixel as Pixel>::Subpixel> = unsafe {
++        let mut resized = std::mem::ManuallyDrop::new(resized);
++        Vec::from_raw_parts(
++            resized
++                .as_mut_ptr()
++                .cast::<<I::Pixel as Pixel>::Subpixel>(),
++            resized.len(),
++            resized.capacity(),
++        )
++    };
++
++    ImageBuffer::from_raw(nwidth, nheight, resized_typed)
++}
++
++/// Returns whether every pixel in a flat, packed RGBA8 buffer has the same alpha value (channel
++/// index 3 of every 4-byte group) - same early-exit-on-first-mismatch shape as
++/// `src/imageops/resize.rs`'s `has_constant_alpha_integer`, specialized to a raw `&[u8]` since
++/// this fast path already has one rather than a typed `ImageBuffer`.
++#[must_use]
++fn has_constant_alpha_rgba8(samples: &[u8]) -> bool {
++    let mut chunks = samples.chunks_exact(4);
++    let Some(first) = chunks.next() else {
++        return true;
++    };
++    let first_alpha = first[3];
++    chunks.all(|chunk| chunk[3] == first_alpha)
++}
++
+ /// Resize the supplied image to the specified dimensions.
+ ///
+ /// # Arguments:
+@@ -987,7 +1171,10 @@ pub fn resize<I: GenericImageView>(
+     nwidth: u32,
+     nheight: u32,
+     filter: FilterType,
+-) -> ImageBuffer<I::Pixel, Vec<<I::Pixel as Pixel>::Subpixel>> {
++) -> ImageBuffer<I::Pixel, Vec<<I::Pixel as Pixel>::Subpixel>>
++where
++    I::Pixel: 'static,
++{
+     // Check if there is nothing to sample from.
+     let is_empty = {
+         let (width, height) = image.dimensions();
+@@ -1005,6 +1192,16 @@ pub fn resize<I: GenericImageView>(
+         return tmp;
+     }
+ 
++    // Prototype delegation fast path (perf-optimize candidate: RESIZE_SAMPLE_PIC_SCALE_SAFE_DELEGATION):
++    // hand off to pic-scale-safe's SIMD/optionally-rayon implementation for the common
++    // fully-packed 8-bit RGB case, instead of this file's own Filter{kernel,support} algorithm.
++    if let Some(fast) = try_pic_scale_safe_rgb8_resize(image, nwidth, nheight, filter) {
++        return fast;
++    }
++    if let Some(fast) = try_pic_scale_safe_rgba8_resize(image, nwidth, nheight, filter) {
++        return fast;
++    }
++
+     let mut method = match filter {
+         FilterType::Nearest => Filter {
+             kernel: Box::new(box_kernel),

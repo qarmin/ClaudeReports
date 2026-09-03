@@ -1,0 +1,88 @@
+=== 1. Real end-to-end repro (repro/src/main.rs), release build, 3/3 identical runs ===
+$ cd repro && cargo run --release
+
+   Compiling repro v0.1.0 (.../017.ISOMP4_TRUN_TS_SAMPLE_DEFAULT_DUR_DIV_ZERO/repro)
+    Finished `release` profile [optimized] target(s) in 0.21s
+     Running `target/release/repro`
+=== assets/frag.mp4 ===
+opened assets/frag.mp4 successfully, track_id=1
+  seek(t=0.000s) => Ok(SeekedTo { track_id: 1, actual_ts: 0, required_ts: 0 })
+  seek(t=0.050s) => Ok(SeekedTo { track_id: 1, actual_ts: 0, required_ts: 400 })
+  seek(t=0.100s) => Ok(SeekedTo { track_id: 1, actual_ts: 0, required_ts: 800 })
+  seek(t=0.150s) => Ok(SeekedTo { track_id: 1, actual_ts: 1024, required_ts: 1200 })
+  seek(t=0.200s) => Ok(SeekedTo { track_id: 1, actual_ts: 1024, required_ts: 1600 })
+  seek(t=0.300s) => Ok(SeekedTo { track_id: 1, actual_ts: 2048, required_ts: 2400 })
+  seek(t=0.400s) => Ok(SeekedTo { track_id: 1, actual_ts: 3072, required_ts: 3200 })
+  seek(t=0.500s) => Ok(SeekedTo { track_id: 1, actual_ts: 3072, required_ts: 4000 })
+  seek(t=0.600s) => Ok(SeekedTo { track_id: 1, actual_ts: 4096, required_ts: 4800 })
+  seek(t=0.700s) => Ok(SeekedTo { track_id: 1, actual_ts: 5120, required_ts: 5600 })
+  seek(t=0.800s) => Ok(SeekedTo { track_id: 1, actual_ts: 6144, required_ts: 6400 })
+  seek(t=0.900s) => Ok(SeekedTo { track_id: 1, actual_ts: 7168, required_ts: 7200 })
+  seek(t=1.000s) => Ok(SeekedTo { track_id: 1, actual_ts: 7168, required_ts: 8000 })
+
+=== assets/evil.mp4 ===
+opened assets/evil.mp4 successfully, track_id=1
+  seek(t=0.000s) => Err(SeekError(OutOfRange))
+  seek(t=0.050s) => Err(SeekError(OutOfRange))
+  seek(t=0.100s) => Err(SeekError(OutOfRange))
+  seek(t=0.150s) => Err(SeekError(OutOfRange))
+  seek(t=0.200s) => Err(SeekError(OutOfRange))
+  seek(t=0.300s) => Err(SeekError(OutOfRange))
+  seek(t=0.400s) => Err(SeekError(OutOfRange))
+  seek(t=0.500s) => Err(SeekError(OutOfRange))
+  seek(t=0.600s) => Err(SeekError(OutOfRange))
+  seek(t=0.700s) => Err(SeekError(OutOfRange))
+  seek(t=0.800s) => Err(SeekError(OutOfRange))
+  seek(t=0.900s) => Err(SeekError(OutOfRange))
+  seek(t=1.000s) => Err(SeekError(OutOfRange))
+
+Repeated 2 more times (3/3 total), byte-identical output each time - deterministic, no flakiness.
+
+Interpretation: on the pristine fragmented MP4 (`frag.mp4`), every seek across the file's duration
+resolves correctly via the real `IsoMp4Reader::seek` -> `MoofSegment::ts_sample` ->
+`TrunAtom::ts_sample` path. On the same file with every `tfhd.default_sample_duration` zeroed
+(`evil.mp4` - the exact crafted-fMP4 scenario the candidate describes), every seek fails with a
+real, explicit `SeekError(OutOfRange)` - not a silent, wrong-but-successful sample resolution.
+This directly contradicts the candidate's claimed end-to-end consequence ("...instead of
+surfacing an error"): an error *is* surfaced, consistently, for every timestamp tried, including
+t=0.0s (the very first sample).
+
+=== 2. White-box confirmation of the underlying mechanism (temporary, reverted; see RESULT.md) ===
+
+2a. `TrunAtom::ts_sample` in isolation *does* exhibit the claimed div-by-zero-neutralization
+    (checked_div(0).unwrap_or(0)) when called directly with default_dur=0:
+
+running 1 test
+test stream::bughunt_017_tests::trun_ts_sample_zero_default_dur_direct ... ok
+(assert_eq!(trun.ts_sample(0, 0), 0); assert_eq!(trun.ts_sample(12345, 0), 0);
+ assert_eq!(trun.ts_sample(u64::MAX, 0), 0);  -- all pass, confirming every ts_delta collapses to
+ relative sample 0 when called directly)
+
+2b. But the real caller, `MoofSegment::ts_sample` (the same trait method `seek_track_by_ts` in
+    demuxer.rs actually calls), never reaches that call for a trun whose `total_duration()` is 0
+    (the case for any trun relying purely on a zeroed default_sample_duration, no per-sample
+    durations) - its guard `if ts_accum + trun_dur > ts` requires trun_dur > 0 to select the run:
+
+running 1 test
+test stream::bughunt_017_tests::moof_segment_ts_sample_zero_default_dur_reachability ... ok
+results: [(0, Ok(None)), (1, Ok(None)), (2, Ok(None)), (3, Ok(None)), (4, Ok(None)), (5, Ok(None)),
+(6, Ok(None)), (7, Ok(None)), (8, Ok(None)), (9, Ok(None)), (10, Ok(None)), (11, Ok(None)),
+(12, Ok(None)), (13, Ok(None)), (14, Ok(None)), (15, Ok(None)), (16, Ok(None)), (17, Ok(None)),
+(18, Ok(None)), (19, Ok(None))]
+any_wrongly_resolved = false
+
+2c. The one way to make such a trun's `total_duration()` nonzero despite default_dur=0 - the
+    "first sample has its own explicit duration" override path
+    (`is_first_sample_duration_present()`) - is gated on `first_sample_flags` bit 0x4
+    (`TrunAtom::FIRST_SAMPLE_FLAGS_PRESENT`, apparently reused by mistake instead of
+    `SAMPLE_DURATION_PRESENT`), and unconditionally panics on an out-of-bounds `sample_duration[0]`
+    index (the vector is only ever populated when the trun's own `SAMPLE_DURATION_PRESENT` flag is
+    set, which is a different, mutually exclusive branch) - independent of default_dur, so it can't
+    be used to reach the checked_div(0) path either:
+
+running 1 test
+test atoms::trun::bughunt_017_first_sample_dur_tests::total_duration_with_bogus_first_sample_duration_flag ... FAILED
+thread '...' panicked at symphonia-format-isomp4/src/atoms/trun.rs:92:47:
+index out of bounds: the len is 0 but the index is 0
+
+Reproduced 3/3 times (1 initial + 2 repeats), deterministic.

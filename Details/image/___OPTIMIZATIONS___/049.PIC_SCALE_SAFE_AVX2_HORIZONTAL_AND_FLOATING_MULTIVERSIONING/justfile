@@ -1,0 +1,56 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+# patch.diff bundles the harness hunk (Cargo.toml's `benches/imageops.rs` addition of
+# `bench_resize_dynamic`, reused verbatim from candidate 040/048) together with the actual fix
+# (Cargo.toml's `[patch.crates-io]` hunk, plus the entire vendored+patched `vendor/pic-scale-safe/`
+# tree). Candidate 048 added runtime AVX2 multiversioning
+# (`is_x86_feature_detected!("avx2")` selecting an explicit `#[target_feature(enable = "avx2")]`
+# variant) only to `fixed_point_vertical.rs`'s tap loop. This candidate extends the same pattern to
+# the three files 048 explicitly left untouched: `fixed_point_horizontal.rs`'s row convolution
+# (both the 1-row and 4-row-at-once handlers), `floating_point_horizontal.rs`'s row convolution
+# (same two handlers), and `floating_point_vertical.rs`'s 4-wide column tap tier. Each function's
+# body was extracted into a shared `#[inline(always)]` impl fn, then wrapped by a scalar path and
+# a `#[target_feature(enable = "avx2")]` path chosen at runtime by
+# `std::is_x86_feature_detected!("avx2")` inside the (still public-API-compatible) original
+# function name, so no call site elsewhere in the crate needed to change. apply-harness applies
+# just the bench addition so it exists for both the baseline (S) and the patched build (E);
+# apply-fix applies the Cargo.toml + vendor/ hunks on top, for the patched build only. Both S and E
+# are built with default RUSTFLAGS (no `-C target-feature=+avx2`) - the whole point is the speedup
+# shows up on a normal `cargo build --release` via runtime detection, not a special build flag.
+test: clone apply-harness bench-baseline apply-fix bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-harness:
+    cd clone && git apply --exclude='Cargo.toml' --exclude='vendor/*' "{{justfile_directory()}}/patch.diff"
+
+apply-fix:
+    cd clone && git apply --include='Cargo.toml' --include='vendor/*' "{{justfile_directory()}}/patch.diff"
+
+# S: registry pic-scale-safe 0.1.11, completely unmodified - default RUSTFLAGS, no multiversioning.
+bench-baseline:
+    @echo "=== S: registry pic-scale-safe 0.1.11 (main today), default RUSTFLAGS - Lanczos3 4032x3024->400x300 ==="
+    cd clone && cargo bench --bench imageops -- "dynamic_resize/DynamicImage::resize_exact 4032x3024->400x300 Lanczos3"
+
+# E: this candidate's fix - vendored pic-scale-safe with runtime AVX2 multiversioning extended to
+# the horizontal (row) convolution pass and the floating-point vertical/horizontal paths, on top
+# of candidate 048's vertical-only multiversioning. Default RUSTFLAGS (relies on
+# is_x86_feature_detected! at runtime, not a build-time target-feature flag).
+bench-patched:
+    @echo "=== E: this candidate's fix (vendored pic-scale-safe, AVX2 multiversioning extended to horizontal + floating-point paths), default RUSTFLAGS - Lanczos3 4032x3024->400x300 ==="
+    cd clone && cargo bench --bench imageops -- "dynamic_resize/DynamicImage::resize_exact 4032x3024->400x300 Lanczos3"
+
+clean:
+    rm -rf clone

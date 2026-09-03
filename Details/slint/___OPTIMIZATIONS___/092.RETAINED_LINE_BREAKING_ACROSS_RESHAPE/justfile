@@ -1,0 +1,49 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# perf_test (the project's own headless bench harness) reaches the patched code path directly -
+# no standalone bench crate was needed. This candidate needs `perf_test/` copied into `clone/`
+# manually first (it is untracked in the main checkout, see ___OPTIMIZATIONS___/README.md).
+#
+# `--type-text` dispatches one KeyPressed character per frame into the focused TextInput.
+# `--word-wrap` is the scenario where this candidate actually pays off: without it, the default
+# TextEdit also runs an unwrapped natural-width query every edited frame (for the ScrollView's
+# horizontal scroll extent) that alternates `max_width` with the wrapped draw call on every
+# single call, defeating the retained-breaking reuse this patch adds (see RESULT.md's "Why the
+# result looks the way it does") - run both variants below to see the contrast.
+bench:
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug
+    for c in 1000 10000 50000; do \
+        echo "=== word-wrap (fix applies) count=$c ==="; \
+        taskset -c 3 ./clone/target/rdebug/perf_test --bench --mode text --count $c --type-text --scroll-step 0 --word-wrap --frames 8; \
+        echo "=== no-wrap / default (fix defeated by width ping-pong) count=$c ==="; \
+        taskset -c 3 ./clone/target/rdebug/perf_test --bench --mode text --count $c --type-text --scroll-step 0 --frames 8; \
+    done
+
+clean:
+    rm -rf clone

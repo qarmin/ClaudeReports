@@ -1,0 +1,38 @@
+# Self-contained reproduction for candidate 014 (int_rs_width_cast_logic).
+#
+# Status: Not reproducible - there is no patch.diff (no bug, no fix). `just test` clones a
+# pristine checkout and re-runs the same investigation this candidate's RESULT.md describes:
+# compile-and-run a wide boundary-value program exercising src/int.rs's width-cast logic
+# (gcc_int_cast, Builder::intcast/trunc/zext/sext, gcc_lshr/gcc_shl, gcc_icmp, gcc_bswap,
+# additive_operation's array-path sign detection) three ways (plain rustc/LLVM reference, this
+# backend's native-128-bit-int path, and this backend with the array-based non-native path forced
+# via a transient diagnostic patch applied and reverted inside the clone only, built both release
+# and debug so debug_assert! is exercised), and diffs the outputs.
+#
+# Requires this project's own toolchain to already be buildable in the environment running this
+# (see the upstream project's Readme.md "Quick start" - `./y.sh prepare` needs network access to
+# download a prebuilt libgccjit.so and to fetch rustc-dev components). Not fast: a fresh clone's
+# first `./y.sh prepare && ./y.sh build --sysroot --release` takes a few minutes.
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && cp config.example.toml config.toml
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Runs the full four-way comparison (rustc/LLVM reference, native-128-bit-int backend path,
+# forced array-based non-native backend path in both release and debug builds) inside the fresh
+# clone and prints a MATCH/MISMATCH verdict per configuration - see repro/run.sh for what each
+# step does.
+reproduce-before:
+    bash repro/run.sh clone
+
+clean:
+    rm -rf clone

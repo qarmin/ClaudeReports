@@ -1,0 +1,30 @@
+# Self-contained reproduction for candidate 013: OggReader::seek() infinite loop reached via the
+# *seekable* (File-backed) bisection fast path when the landed page's own buffered packets run out
+# before target_ts, forcing a physical-page crossover into another logical stream's page.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Should hang and be killed by the repro's own 10s watchdog thread, printing
+# "TIMEOUT: seek() did not return within 10s -- infinite loop confirmed" and exiting non-zero.
+# The leading `-` lets `just test` continue on to apply/reproduce-after despite this expected
+# non-zero exit code (the demonstrated bug).
+reproduce-before:
+    -cd repro && cargo run --release -- assets/out_long.ogg
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Should now print "seek returned: ok=true" and exit 0, no hang.
+reproduce-after:
+    cd repro && cargo run --release -- assets/out_long.ogg
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

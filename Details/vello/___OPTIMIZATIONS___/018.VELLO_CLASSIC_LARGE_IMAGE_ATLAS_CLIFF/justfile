@@ -1,0 +1,46 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate is a MEASUREMENT-ONLY investigation of linebender/vello#1545 - no source
+# patch is included because the change that actually fixes the reported sustained cliff
+# (persistent image-atlas residency across frames) is already present at `base_commit` below
+# (commit c55a2b5e, "vello: Keep image atlas residency across renders (#1558)", merged before
+# base_commit). There is nothing to `apply`; `just test` just builds the bench crate against
+# the pinned commit and reproduces the numbers in RESULT.md directly.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - this whole folder can be copied anywhere and `just test` still works.
+#
+# Needs a wgpu-compatible adapter (a real GPU, or a software Vulkan/GL fallback such as
+# lavapipe/llvmpipe). No adapter at all makes `bench` fail outright - that's an environment
+# limitation, not a bug in this justfile.
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone build bench
+
+clone:
+    rm -rf clone
+    # -c filter.lfs.*: this repo's .gitattributes wires up Git LFS for reference PNG snapshots
+    # (used only by vello_sparse_tests, an unrelated rendering engine not touched by this
+    # candidate); on a machine without git-lfs installed, a plain clone hard-fails at checkout
+    # instead of just leaving pointer files in place. Disabling the filter here matches what
+    # every other candidate in this workspace does.
+    git -c filter.lfs.required=false -c filter.lfs.smudge= -c filter.lfs.process= clone --no-checkout {{repo_url}} clone
+    cd clone && git config filter.lfs.required false && git config filter.lfs.smudge "" && git config filter.lfs.process "" && git config filter.lfs.clean "" && git checkout {{base_commit}}
+
+build:
+    cd bench && cargo build --release
+
+bench:
+    @echo "=== mode=cliff height=4096 (fits a 4096x4096 atlas) ==="
+    ./bench/target/release/bench_large_image --mode cliff --height 4096 --iterations 20
+    @echo "=== mode=cliff height=4097 (needs an 8192x8192 atlas: one more doubling) ==="
+    ./bench/target/release/bench_large_image --mode cliff --height 4097 --iterations 20
+    @echo "=== mode=cliff height=8192 (largest size the atlas supports at all) ==="
+    ./bench/target/release/bench_large_image --mode cliff --height 8192 --iterations 20
+    @echo "=== mode=growth (8 small resident images, then one more that forces atlas growth) ==="
+    ./bench/target/release/bench_large_image --mode growth --iterations 15
+
+clean:
+    rm -rf clone bench/target

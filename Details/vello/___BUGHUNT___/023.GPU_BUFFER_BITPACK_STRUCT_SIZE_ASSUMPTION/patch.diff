@@ -1,0 +1,68 @@
+diff --git a/vello_encoding/src/encoding.rs b/vello_encoding/src/encoding.rs
+index 78d37cd5..800982d5 100644
+--- a/vello_encoding/src/encoding.rs
++++ b/vello_encoding/src/encoding.rs
+@@ -431,6 +431,35 @@ impl Encoding {
+ 
+     /// Encodes an image brush.
+     pub fn encode_image<'b>(&mut self, brush: impl Into<ImageBrushRef<'b>>, alpha: f32) {
++        // `sample_alpha` below packs `format`/`alpha_type`/`quality`/`x_extend`/`y_extend` into
++        // fixed-width bitfields with no runtime check that each enum's discriminant still fits
++        // in its allocated width - a new variant added to any of these `peniko` enums without
++        // also widening its field here would silently truncate/alias instead of failing to
++        // compile. See https://github.com/linebender/vello/issues/1259.
++        // Each assertion names the enum's own currently-highest-valued variant directly (rather
++        // than using `bytemuck::Contiguous::MAX_VALUE`, which needs a cargo feature this crate's
++        // dependency graph doesn't enable on `peniko`) - so this assumes new variants are always
++        // appended with the next sequential discriminant, consistent with the "NOTICE" comments
++        // already next to each enum's definition in `peniko`.
++        const _: () = {
++            assert!(
++                (peniko::ImageFormat::Bgra8 as u32) < (1 << 17),
++                "format no longer fits in the 17 bits allocated to it (bits 15..=31) in sample_alpha"
++            );
++            assert!(
++                (peniko::ImageAlphaType::AlphaPremultiplied as u32) < (1 << 1),
++                "alpha_type no longer fits in the 1 bit allocated to it (bit 14) in sample_alpha"
++            );
++            assert!(
++                (peniko::ImageQuality::High as u32) < (1 << 2),
++                "quality no longer fits in the 2 bits allocated to it (bits 12..=13) in sample_alpha"
++            );
++            assert!(
++                (Extend::Reflect as u32) < (1 << 2),
++                "extend no longer fits in the 2 bits allocated to x_extend/y_extend in sample_alpha"
++            );
++        };
++
+         let brush: ImageBrushRef<'b> = brush.into();
+         let ImageSampler {
+             x_extend,
+@@ -447,10 +476,26 @@ impl Encoding {
+             draw_data_offset: self.draw_data.len(),
+         });
+         self.draw_tags.push(DrawTag::IMAGE);
++        // `width_height` packs both fields into 16 bits each; `image.width`/`image.height` are
++        // plain `u32`s with no upstream validation, so a caller-supplied dimension >= 65536
++        // would otherwise silently corrupt this word instead of being rejected (see
++        // https://github.com/linebender/vello/issues/1259). Clamp defensively: every currently
++        // reachable image already fails to fit the image atlas (`vello_encoding::image_cache`'s
++        // `MAX_ATLAS_SIZE` is 8192) long before it would overflow this 16-bit field, so this only
++        // changes behavior for a caller of this crate that bypasses `Resolver::resolve`'s atlas
++        // sizing altogether.
++        debug_assert!(
++            brush.image.width <= 0xFFFF && brush.image.height <= 0xFFFF,
++            "image dimensions {}x{} exceed the 16-bit width_height field and will be clamped",
++            brush.image.width,
++            brush.image.height
++        );
++        let width = brush.image.width.min(0xFFFF);
++        let height = brush.image.height.min(0xFFFF);
+         self.draw_data
+             .extend_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(&DrawImage {
+                 xy: 0,
+-                width_height: (brush.image.width << 16) | (brush.image.height & 0xFFFF),
++                width_height: (width << 16) | height,
+                 sample_alpha: ((brush.image.format as u32) << 15
+                     | (brush.image.alpha_type as u32) << 14
+                     | (quality as u32) << 12

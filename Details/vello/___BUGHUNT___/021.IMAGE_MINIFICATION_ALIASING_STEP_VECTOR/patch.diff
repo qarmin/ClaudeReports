@@ -1,0 +1,155 @@
+diff --git a/sparse_strips/vello_common/src/encode.rs b/sparse_strips/vello_common/src/encode.rs
+index e3b5075f..bda68a6d 100644
+--- a/sparse_strips/vello_common/src/encode.rs
++++ b/sparse_strips/vello_common/src/encode.rs
+@@ -8,11 +8,13 @@ use crate::color::palette::css::BLACK;
+ use crate::color::{ColorSpaceTag, HueDirection, Srgb, gradient};
+ use crate::kurbo::{Affine, Point, Vec2};
+ use crate::math::{FloatExt, compute_erf7};
++use crate::pixmap::Pixmap;
+ use crate::paint::{Image, ImageSource, IndexedPaint, Paint, PremulColor, Tint};
+ use crate::peniko::{ColorStop, ColorStops, Extend, Gradient, GradientKind, ImageQuality};
+ use crate::util::f32_to_u8;
+ use alloc::borrow::Cow;
+ use alloc::fmt::Debug;
++use alloc::sync::Arc;
+ use alloc::vec;
+ use alloc::vec::Vec;
+ use bytemuck::Pod;
+@@ -474,6 +476,92 @@ pub(crate) fn x_y_advances(transform: &Affine) -> (Vec2, Vec2) {
+     )
+ }
+ 
++/// If the given step vectors represent an axis-aligned (unskewed, unrotated) minification
++/// (downscale) of at least 2x along either axis, returns the per-axis integer minification
++/// factors to box-downsample by. Returns `None` for magnification, identity, or any transform
++/// with skew/rotation (where a simple per-axis box filter would be incorrect).
++fn minification_factors(x_advance: &Vec2, y_advance: &Vec2) -> Option<(u32, u32)> {
++    // A skewed/rotated transform mixes the x and y source axes, so a simple axis-aligned box
++    // filter does not apply; leave those to the existing (aliasing) fixed-kernel path.
++    if !(x_advance.y as f32).is_nearly_zero() || !(y_advance.x as f32).is_nearly_zero() {
++        return None;
++    }
++
++    // A factor of `1` means "no downsampling on this axis"; only round down to whole texel
++    // blocks, since the downsampled image must still align 1:1 with the pre-existing advance
++    // computation logic once `x_y_advances` is re-derived from the rescaled transform.
++    let nx = (x_advance.x.abs().floor() as u32).max(1);
++    let ny = (y_advance.y.abs().floor() as u32).max(1);
++
++    if nx <= 1 && ny <= 1 {
++        None
++    } else {
++        Some((nx, ny))
++    }
++}
++
++/// Box-downsamples `pixmap` by averaging `nx` x `ny` texel blocks into a single output texel,
++/// producing a properly minified image instead of relying on a fixed-size interpolation kernel
++/// to (incorrectly) approximate the average of a much larger footprint.
++///
++/// Note this does not account for `Extend` semantics at the image edges (a block that would
++/// extend past the source bounds is simply averaged over the pixels actually present, not
++/// wrapped/reflected) - this is a reasonable approximation for the common case, since it is only
++/// ever a one-block-wide strip at the image's own edge that is affected.
++fn box_downsample(pixmap: &Pixmap, nx: u32, ny: u32) -> Pixmap {
++    let width = u32::from(pixmap.width());
++    let height = u32::from(pixmap.height());
++
++    let new_width = width.div_ceil(nx).max(1);
++    let new_height = height.div_ceil(ny).max(1);
++
++    let mut out = Pixmap::new(new_width as u16, new_height as u16);
++
++    for oy in 0..new_height {
++        let y0 = oy * ny;
++        let y1 = (y0 + ny).min(height);
++
++        for ox in 0..new_width {
++            let x0 = ox * nx;
++            let x1 = (x0 + nx).min(width);
++
++            let mut r = 0_u32;
++            let mut g = 0_u32;
++            let mut b = 0_u32;
++            let mut a = 0_u32;
++            let mut count = 0_u32;
++
++            for sy in y0..y1 {
++                for sx in x0..x1 {
++                    let px = pixmap.sample(sx as u16, sy as u16);
++                    r += u32::from(px.r);
++                    g += u32::from(px.g);
++                    b += u32::from(px.b);
++                    a += u32::from(px.a);
++                    count += 1;
++                }
++            }
++
++            // `count` is always > 0: `y0 < y1` and `x0 < x1` hold since `nx`/`ny` >= 1 and
++            // `x0`/`y0` are always < `width`/`height` by construction of `new_width`/`new_height`.
++            let avg = |sum: u32| ((sum + count / 2) / count) as u8;
++
++            out.set_pixel(
++                ox as u16,
++                oy as u16,
++                peniko::color::PremulRgba8 {
++                    r: avg(r),
++                    g: avg(g),
++                    b: avg(b),
++                    a: avg(a),
++                },
++            );
++        }
++    }
++
++    out
++}
++
+ impl private::Sealed for Image {}
+ 
+ impl EncodeExt for Image {
+@@ -510,6 +598,34 @@ impl EncodeExt for Image {
+ 
+         let (x_advance, y_advance) = x_y_advances(&transform);
+ 
++        // The sampling kernel used by the filtered image painters (a fixed 2x2 bilinear or
++        // 4x4 bicubic neighborhood) does not grow with `x_advance`/`y_advance`, so once either
++        // advance step exceeds one source texel (i.e. the image is being minified/downscaled),
++        // most of the source texels a correct filter should average get skipped entirely,
++        // causing aliasing. Pre-filter the source with a box downsample in that case, for the
++        // common axis-aligned, directly-embedded-pixmap case, so the fixed-size kernel that
++        // follows samples an already-averaged image instead of skipping data.
++        let (transform, x_advance, y_advance, source) =
++            if let ImageSource::Pixmap(pixmap) = &self.image {
++                if let Some((nx, ny)) = minification_factors(&x_advance, &y_advance) {
++                    let downsampled = box_downsample(pixmap, nx, ny);
++                    let transform =
++                        Affine::scale_non_uniform(1.0 / f64::from(nx), 1.0 / f64::from(ny))
++                            * transform;
++                    let (x_advance, y_advance) = x_y_advances(&transform);
++                    (
++                        transform,
++                        x_advance,
++                        y_advance,
++                        ImageSource::Pixmap(Arc::new(downsampled)),
++                    )
++                } else {
++                    (transform, x_advance, y_advance, self.image.clone())
++                }
++            } else {
++                (transform, x_advance, y_advance, self.image.clone())
++            };
++
+         // If the tint color has alpha < 1.0, the image will have opacities
+         // even if the source pixels are all opaque.
+         let has_opacity = tint.as_ref().is_some_and(|t| t.color.components[3] < 1.0)
+@@ -518,7 +634,7 @@ impl EncodeExt for Image {
+ 
+         let encoded = EncodedImage {
+             may_have_transparency: self.image.may_have_transparency() || has_opacity,
+-            source: self.image.clone(),
++            source,
+             sampler,
+             transform,
+             x_advance,

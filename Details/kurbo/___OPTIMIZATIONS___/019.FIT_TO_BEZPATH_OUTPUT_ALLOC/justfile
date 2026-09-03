@@ -1,0 +1,94 @@
+# Self-contained reproduction for candidate 019.
+#
+# NOTE (shape 3, see templates/candidate_justfile): kurbo's own benchmarks don't reach this code
+# path, so this uses the `kurbo_bench` harness built for this workspace. That harness is UNTRACKED
+# in the kurbo repo - a fresh `git clone` of repo_url will never contain it - so `clone:` copies it
+# in from `../harness/kurbo_bench` and rewrites its kurbo dependency path. That makes this folder
+# self-contained *given the whole ___OPTIMIZATIONS___ folder kept together*, not as a single
+# isolated subfolder.
+#
+# `just test` clones at the pinned commit, builds a baseline binary, applies patch.diff, builds a
+# patched binary, and prints the real before/after for both affected scenes. The headline of this
+# candidate is the MEM line (allocation count), not the RESULT line - see RESULT.md.
+#
+# `just bench-reuse` additionally builds a THIRD binary in which the harness's own `fit` scene is
+# switched over to the new `fit_to_bezpath_into` API with one reused output BezPath. That harness
+# edit is deliberately NOT part of patch.diff (patch.diff only ever touches kurbo's own source);
+# it is what quantifies what a downstream loop caller gains by adopting the new API.
+
+repo_url := "https://github.com/linebender/kurbo.git"
+base_commit := "ca273499e3e48bd2de6f02aa8e99a148984e45f3"
+harness_dir := "../harness/kurbo_bench"
+
+test: clone build-baseline apply build-patched bench bench-reuse
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout --quiet {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/kurbo_bench
+    rm -rf clone/kurbo_bench/target
+    # The harness lives at ___OPTIMIZATIONS___/harness/kurbo_bench in the workspace, but at
+    # clone/kurbo_bench here, so its relative path to the kurbo crate changes.
+    sed -i 's|path = "../../../kurbo"|path = "../kurbo"|' clone/kurbo_bench/Cargo.toml
+    cp clone/kurbo_bench/src/main.rs clone/main_orig.rs
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/kurbo_bench && cargo build --release
+    cp clone/kurbo_bench/target/release/kurbo_bench ./bin_baseline
+
+build-patched:
+    find clone/kurbo/src -name '*.rs' -exec touch {} +
+    cd clone/kurbo_bench && cargo build --release
+    cp clone/kurbo_bench/target/release/kurbo_bench ./bin_patched
+
+# The library patch alone does not change the `fit` scene (the harness still calls
+# `fit_to_bezpath`); the in-crate beneficiary is `simplify_bezpath`.
+bench:
+    @echo "=== the two binaries must differ, or the patch didn't apply ==="
+    sha256sum ./bin_baseline ./bin_patched
+    @echo ""
+    @echo "=== simplify (kurbo's own in-crate fit_to_bezpath caller): baseline then patched ==="
+    @echo "    expect allocs/iter 39 -> 25, CHECK identical"
+    ulimit -c 0 && taskset -c 2 ./bin_baseline simplify 200
+    ulimit -c 0 && taskset -c 2 ./bin_patched  simplify 200
+    @echo ""
+    @echo "=== fit, library patch only (control - expect NO change): baseline then patched ==="
+    ulimit -c 0 && taskset -c 2 ./bin_baseline fit 20
+    ulimit -c 0 && taskset -c 2 ./bin_patched  fit 20
+    @echo ""
+    @echo "=== paired comparison, simplify (the win count carries the conclusion) ==="
+    ulimit -c 0 && TASKSET=2 RUNS=9 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- simplify 200
+    ulimit -c 0 && RUNS=9 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- simplify 200
+
+# What a downstream loop caller gains: harness `fit` scene rewritten onto fit_to_bezpath_into.
+bench-reuse: build-reuse
+    @echo "=== fit: baseline (fit_to_bezpath) vs caller reusing one BezPath (fit_to_bezpath_into) ==="
+    @echo "    expect allocs/iter 1173 -> 0, bytes/iter 318536 -> 8, CHECK identical"
+    ulimit -c 0 && taskset -c 2 ./bin_baseline       fit 20
+    ulimit -c 0 && taskset -c 2 ./bin_patched_reuse  fit 20
+    @echo ""
+    @echo "=== paired comparison, fit (single-core then multi-core) ==="
+    ulimit -c 0 && TASKSET=2 RUNS=9 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched_reuse -- fit 20
+    ulimit -c 0 && RUNS=9 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched_reuse -- fit 20
+
+build-reuse:
+    python3 harness_reuse.py clone/kurbo_bench/src/main.rs
+    find clone/kurbo/src -name '*.rs' -exec touch {} +
+    cd clone/kurbo_bench && cargo build --release
+    cp clone/kurbo_bench/target/release/kurbo_bench ./bin_patched_reuse
+    cp clone/main_orig.rs clone/kurbo_bench/src/main.rs
+
+# Mandatory correctness check, before and after. Baseline for this commit is
+# 252 passed / 0 failed across 4 `test result` lines.
+tests:
+    @echo "=== patched tree: cargo test --workspace --all-features ==="
+    cd clone && cargo test --workspace --all-features 2>&1 | grep -E '^error|test result'
+    @echo "=== patched tree: no_std/libm build ==="
+    cd clone && cargo build -p kurbo --no-default-features --features libm 2>&1 | tail -1
+
+clean:
+    rm -rf clone bin_baseline bin_patched bin_patched_reuse

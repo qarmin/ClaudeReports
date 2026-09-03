@@ -1,0 +1,76 @@
+=== `just test` against a fresh clone of linebender/vello at base_commit 7516831426fb70f36d62c521c5477f6a7265b36a ===
+(git-lfs filters disabled for the clone only - not needed, the repro builds only Rust source)
+
+$ just test
+rm -rf clone
+git -c filter.lfs.smudge=cat -c filter.lfs.clean=cat -c filter.lfs.process= -c filter.lfs.required=false clone https://github.com/linebender/vello.git clone
+Cloning into 'clone'...
+cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.clean=cat -c filter.lfs.process= -c filter.lfs.required=false checkout 7516831426fb70f36d62c521c5477f6a7265b36a
+Note: switching to '7516831426fb70f36d62c521c5477f6a7265b36a'.
+HEAD is now at 75168314 Remove some Vello-Classic-specific info from the root README (#1698)
+cd repro && cargo run --release
+   Compiling vello_common v0.2.0 (.../clone/sparse_strips/vello_common)
+   Compiling glifo v0.3.0 (.../clone/glifo)
+   Compiling vello_cpu v0.2.0 (.../clone/sparse_strips/vello_cpu)
+   Compiling colr_convert_stops_repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 13.50s
+     Running `target/release/colr_convert_stops_repro`
+loaded patched font (21568 bytes), rendering glyph 8 (LinearGradient with a patched numStops=0 ColorLine)
+did NOT panic: rendered glyph 8 from the malformed (zero-stop ColorLine) font successfully - the empty-stops path in glifo's convert_stops is unreachable through the real skrifa 0.44.0 paint traversal, see RESULT.md
+
+Repeated 3/3 times (debug build, `cargo run` without --release, against the malformed font) with
+the identical result - no panic, every time:
+
+$ cargo run -- patched.ttf 8   (run 1)
+loaded font patched.ttf (21568 bytes)
+DEBUG paint() result = Ok(())
+rendered glyph 8 from patched font without panicking
+
+$ cargo run -- patched.ttf 8   (run 2)
+loaded font patched.ttf (21568 bytes)
+DEBUG paint() result = Ok(())
+rendered glyph 8 from patched font without panicking
+
+$ cargo run -- patched.ttf 8   (run 3)
+loaded font patched.ttf (21568 bytes)
+DEBUG paint() result = Ok(())
+rendered glyph 8 from patched font without panicking
+
+=== Root-cause instrumentation: temporary eprintln! added to ColrPainter::fill in the working
+=== tree (glifo/src/colr.rs), reverted afterwards, comparing the ORIGINAL font to the PATCHED
+=== (zero-stop ColorLine) font for the exact same glyph (glyph 8):
+
+$ cargo run -- original.ttf 8
+loaded font original.ttf (21568 bytes)
+DEBUG fill LinearGradient color_stops.len()=2
+DEBUG paint() result = Ok(())
+rendered glyph 8 from patched font without panicking
+
+$ cargo run -- patched.ttf 8
+loaded font patched.ttf (21568 bytes)
+DEBUG paint() result = Ok(())
+rendered glyph 8 from patched font without panicking
+
+Note the second run prints NO "DEBUG fill ..." line at all: for the malformed font,
+`ColorPainter::fill` (and therefore `glifo::colr::ColrPainter::convert_stops`) is never called for
+glyph 8 - skrifa's own paint traversal (skrifa-0.44.0/src/color/traversal.rs,
+`traverse_with_callbacks`, the `ResolvedPaint::LinearGradient` arm) resolves the ColorLine's 0
+stops into an empty `resolved_stops` vector, matches `(None, _) | (_, None) => {}` on
+`(resolved_stops.first(), resolved_stops.last())`, and returns `Ok(())` without ever invoking
+`painter.fill(..)`. The identical guard exists for `ResolvedPaint::RadialGradient`, and an explicit
+`if resolved_stops.is_empty() { return Ok(()); }` exists for `ResolvedPaint::SweepGradient`.
+`glifo::colr::ColrPainter::fill` is the only caller of `convert_stops` in the whole codebase, and
+`ColorPainter::fill` is only ever invoked by skrifa's own traversal - so `convert_stops` cannot
+receive an empty slice through any real rendering path with this skrifa version.
+
+=== How the malformed font was made (see tools/font_patch/) ===
+
+$ font_patch examples/assets/colr_test_glyphs/test_glyphs-glyf_colr_1.ttf patched.ttf
+glyph_id=8 colorline_abs_offset=21078
+original numStops=2
+wrote patched font with numStops=0 for glyph 8 to patched.ttf
+
+font_patch parses the real test_glyphs-glyf_colr_1.ttf COLRv1 table with read-fonts (via skrifa),
+walks the BaseGlyphList/LayerList paint graph to find the ColorLine used by glyph 8's
+PaintLinearGradient, and overwrites only that ColorLine's 2-byte `numStops` field with 0 in an
+otherwise byte-identical copy of the font (no other offsets/lengths change).

@@ -1,0 +1,43 @@
+# Self-contained reproduction for candidate 023.
+#
+# `into_outer_par`'s local `Cpy<T>` type is not reachable through any public API (the `recursive`
+# and `utils` modules it lives in are both private, and every current internal caller already
+# bounds its own generic element type with `Send` before calling `into_outer_par`) - so, unlike
+# most candidates in this workspace, there is no external crate that can exercise it through the
+# crate's public surface alone. Instead, `probe.patch` adds a `#[cfg(test)]` module directly
+# inside `src/infallible/recursive/utils.rs` (in the pristine clone) that calls `into_outer_par`
+# directly with a genuinely `!Send`/`!Sync` witness type, then runs it as a normal `cargo test`
+# inside that clone. Nothing in this justfile reaches outside this folder except cloning
+# `repo_url` at `base_commit` into `./clone` (gitignored).
+
+repo_url := "git@github.com:orxfun/orx-parallel.git"
+base_commit := "b9214fbeb714e4bb8f8858676a818cef2f21b097"
+
+# Not reproducible this session - no patch.diff, so there is no "before"/"after" to compare.
+# `test` just runs the probe against a pristine clone and shows it passing (no corruption/UB
+# observed), which is the actual recorded result for this candidate.
+test: clone probe reproduce
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+probe:
+    cd clone && git apply "{{justfile_directory()}}/repro/probe.patch"
+
+# Native (non-miri) run: the witness type (Rc<Cell<i64>>, non-atomic refcount) is driven through
+# `into_outer_par`'s real dispatch via the crate's real thread pool (genuine OS worker threads -
+# printed thread IDs make this visible), 50 iterations, checking for corrupted Rc state/strong
+# counts/misplaced values after each. See this folder's output.txt for a previously captured run.
+reproduce:
+    cd clone && cargo test --release --lib bughunt_023_investigation -- --nocapture
+
+# Optional second tool: same probe, under Miri (needs `rustup toolchain install nightly` +
+# `cargo +nightly miri setup` once). `-Zmiri-ignore-leaks` silences an unrelated warning about the
+# crate's persistent global thread pool not being joined before the test process exits.
+reproduce-miri:
+    cd clone && MIRIFLAGS="-Zmiri-ignore-leaks" cargo +nightly miri test --lib bughunt_023_investigation
+
+clean:
+    rm -rf clone

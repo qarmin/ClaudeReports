@@ -1,0 +1,43 @@
+diff --git a/object/src/meta.rs b/object/src/meta.rs
+index 2c0352e9..734c1820 100644
+--- a/object/src/meta.rs
++++ b/object/src/meta.rs
+@@ -616,18 +616,28 @@ impl FileMetaTable {
+             };
+             builder = match elem.tag() {
+                 Tag(0x0002, 0x0001) => {
+-                    // Implementation Version
+-                    if elem.length() != Length(2) {
+-                        return UnexpectedDataValueLengthSnafu {
+-                            tag: elem.tag(),
+-                            length: elem.length(),
++                    // File Meta Information Version - normally exactly 2 bytes, but some
++                    // real-world devices (e.g. NewTom CT scanners, see Enet4/dicom-rs#565)
++                    // write this element present but empty. Since a genuinely *missing*
++                    // element already falls back to a default ([0, 1], see #28/#29 below in
++                    // `build()`), tolerate any other declared length the same way - read
++                    // whatever was declared (keeping the stream in sync) and use it only if
++                    // it happens to be exactly 2 bytes, otherwise leave it unset so `build()`
++                    // applies the same default it already would for a missing element.
++                    let mut buf = vec![0u8; elem_len as usize];
++                    file.read_exact(&mut buf).context(ReadValueDataSnafu)?;
++                    match *buf {
++                        [a, b] => builder.information_version([a, b]),
++                        _ => {
++                            tracing::warn!(
++                                tag = %elem.tag(),
++                                length = elem_len,
++                                "File Meta Information Version has an unexpected length (expected 2); \
++                                 leaving it unset",
++                            );
++                            builder
+                         }
+-                        .fail();
+                     }
+-                    let mut hbuf = [0u8; 2];
+-                    file.read_exact(&mut hbuf[..]).context(ReadValueDataSnafu)?;
+-
+-                    builder.information_version(hbuf)
+                 }
+                 // Media Storage SOP Class UID
+                 Tag(0x0002, 0x0002) => {

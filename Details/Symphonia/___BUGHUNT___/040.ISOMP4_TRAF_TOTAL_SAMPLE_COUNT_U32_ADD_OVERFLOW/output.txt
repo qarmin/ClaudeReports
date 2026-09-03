@@ -1,0 +1,69 @@
+=== BEFORE FIX (pristine ee35874, `cargo run -- all` in repro/, dev profile: debug-assertions/overflow-checks = true) ===
+
+$ RUST_BACKTRACE=1 cargo run -- all
+   Compiling symphonia-format-isomp4 v0.6.1 (.../clone/symphonia-format-isomp4)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.28s
+     Running `target/debug/repro all`
+=== assets/control_ok.m4a ===
+  demuxed to end with no panic (unexpected for the overflow asset)
+=== assets/traf_overflow.m4a ===
+
+thread 'main' (29588) panicked at .../clone/symphonia-format-isomp4/src/atoms/traf.rs:40:21:
+attempt to add with overflow
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:80:14
+   2: core::panicking::panic_const::panic_const_add_overflow
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:175:17
+   3: <symphonia_format_isomp4::atoms::traf::TrafAtom as symphonia_format_isomp4::atoms::Atom>::read::<symphonia_core::io::media_source_stream::MediaSourceStream>
+             at .../clone/symphonia-format-isomp4/src/atoms/traf.rs:40:21
+   4: <symphonia_format_isomp4::atoms::AtomIterator<symphonia_core::io::media_source_stream::MediaSourceStream>>::read_atom::<symphonia_format_isomp4::atoms::traf::TrafAtom>
+             at .../clone/symphonia-format-isomp4/src/atoms/mod.rs:751:22
+   5: <symphonia_format_isomp4::atoms::moof::MoofAtom as symphonia_format_isomp4::atoms::Atom>::read::<symphonia_core::io::media_source_stream::MediaSourceStream>
+             at .../clone/symphonia-format-isomp4/src/atoms/moof.rs:36:35
+   6: <symphonia_format_isomp4::atoms::AtomIterator<symphonia_core::io::media_source_stream::MediaSourceStream>>::read_atom::<symphonia_format_isomp4::atoms::moof::MoofAtom>
+             at .../clone/symphonia-format-isomp4/src/atoms/mod.rs:751:22
+   7: <symphonia_format_isomp4::demuxer::IsoMp4Reader>::try_read_more_segments
+             at .../clone/symphonia-format-isomp4/src/demuxer.rs:467:42
+   8: <symphonia_format_isomp4::demuxer::IsoMp4Reader as symphonia_core::formats::FormatReader>::next_packet
+             at .../clone/symphonia-format-isomp4/src/demuxer.rs:640:26
+   9: repro::run
+             at ./src/main.rs:47:22
+  10: repro::main
+             at ./src/main.rs:68:9
+  11: <fn() as core::ops::function::FnOnce<()>>::call_once
+             at /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+(process exits 101; assets/traf_overflow2.m4a is never reached because `all` stops at the first
+panic - see the separate `overflow2`-only run below, run independently, which panics identically)
+
+$ cargo run -- overflow2
+     Running `target/debug/repro overflow2`
+=== assets/traf_overflow2.m4a ===
+
+thread 'main' (29859) panicked at .../clone/symphonia-format-isomp4/src/atoms/traf.rs:40:21:
+attempt to add with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+Repeated 3/3 times in the dev profile (debug-assertions/overflow-checks = true), deterministically
+(pure integer arithmetic on fixed input bytes, no seed/layout dependency) - see RESULT.md. Also
+reproduces identically with `cargo run --release` (release profile in repro/Cargo.toml sets
+overflow-checks = true explicitly for this reason).
+
+=== AFTER FIX (patch.diff applied to the clone) ===
+
+$ cargo run -- all
+   Compiling symphonia-format-isomp4 v0.6.1 (.../clone/symphonia-format-isomp4)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.26s
+     Running `target/debug/repro all`
+=== assets/control_ok.m4a ===
+  demuxed to end with no panic (unexpected for the overflow asset)
+=== assets/traf_overflow.m4a ===
+  next_packet() => Err(malformed stream: isomp4 (traf): total sample count overflow) (no panic: fix likely applied)
+=== assets/traf_overflow2.m4a ===
+  next_packet() => Err(malformed stream: isomp4 (traf): total sample count overflow) (no panic: fix likely applied)
+(process exits 0)

@@ -1,0 +1,71 @@
+Captured output from `just test` (fresh clone of pristine upstream df2b9e42, reproduce-before,
+apply patch.diff, reproduce-after), run twice independently for determinism confirmation.
+
+=== Run 1 ===
+
+--- reproduce-before (pristine df2b9e42) ---
+tag (0009,0001): write succeeded, 12 bytes: [09, 00, 01, 00, 55, 4e, 00, 00, 00, 00, 00, 00]
+tag (0009,0001): round-tripped correctly
+tag (FFFE,E000): write succeeded, 12 bytes: [fe, ff, 00, e0, 55, 4e, 00, 00, 00, 00, 00, 00]
+tag (FFFE,E000): BUG - wrote successfully but failed to read back: Could not read data set token
+tag (FFFE,E00D): write succeeded, 12 bytes: [fe, ff, 0d, e0, 55, 4e, 00, 00, 00, 00, 00, 00]
+tag (FFFE,E00D): BUG - wrote successfully but failed to read back: Could not read data set token
+tag (FFFE,E0DD): write succeeded, 12 bytes: [fe, ff, dd, e0, 55, 4e, 00, 00, 00, 00, 00, 00]
+tag (FFFE,E0DD): BUG - wrote successfully but failed to read back: Could not read data set token
+BUG REPRODUCED: writing a data element with a reserved-group (0xFFFE) tag produces output that the crate's own reader cannot parse back correctly.
+(exit code: 1, as expected: bug reproduced)
+
+--- reproduce-after (patched clone) ---
+tag (0009,0001): write succeeded, 12 bytes: [09, 00, 01, 00, 55, 4e, 00, 00, 00, 00, 00, 00]
+tag (0009,0001): round-tripped correctly
+tag (FFFE,E000): write rejected: Could not print data set
+tag (FFFE,E00D): write rejected: Could not print data set
+tag (FFFE,E0DD): write rejected: Could not print data set
+No corruption observed: reserved tags are now cleanly rejected at write time.
+(exit code: 0, as expected: bug fixed)
+
+=== Run 2 (independent, fresh clone) ===
+
+--- reproduce-before (pristine df2b9e42) ---
+tag (0009,0001): write succeeded, 12 bytes: [09, 00, 01, 00, 55, 4e, 00, 00, 00, 00, 00, 00]
+tag (0009,0001): round-tripped correctly
+tag (FFFE,E000): write succeeded, 12 bytes: [fe, ff, 00, e0, 55, 4e, 00, 00, 00, 00, 00, 00]
+tag (FFFE,E000): BUG - wrote successfully but failed to read back: Could not read data set token
+tag (FFFE,E00D): write succeeded, 12 bytes: [fe, ff, 0d, e0, 55, 4e, 00, 00, 00, 00, 00, 00]
+tag (FFFE,E00D): BUG - wrote successfully but failed to read back: Could not read data set token
+tag (FFFE,E0DD): write succeeded, 12 bytes: [fe, ff, dd, e0, 55, 4e, 00, 00, 00, 00, 00, 00]
+tag (FFFE,E0DD): BUG - wrote successfully but failed to read back: Could not read data set token
+BUG REPRODUCED: writing a data element with a reserved-group (0xFFFE) tag produces output that the crate's own reader cannot parse back correctly.
+(exit code: 1, as expected: bug reproduced)
+
+--- reproduce-after (patched clone) ---
+tag (0009,0001): write succeeded, 12 bytes: [09, 00, 01, 00, 55, 4e, 00, 00, 00, 00, 00, 00]
+tag (0009,0001): round-tripped correctly
+tag (FFFE,E000): write rejected: Could not print data set
+tag (FFFE,E00D): write rejected: Could not print data set
+tag (FFFE,E0DD): write rejected: Could not print data set
+No corruption observed: reserved tags are now cleanly rejected at write time.
+(exit code: 0, as expected: bug fixed)
+
+=== Byte-level analysis (from the "before" bytes above) ===
+
+Written for tag (FFFE,E000), VR::UN, PrimitiveValue::Empty, explicit VR little endian:
+  fe ff 00 e0 55 4e 00 00 00 00 00 00
+  \____tag____/ \VR/ \_reserved__/ \_len (as bare tag+len, per delimiter format)_/
+
+This is exactly what the explicit-VR encoder for an *ordinary* tag produces: 4 bytes tag,
+2 bytes VR ("UN" = 0x55 0x4E), 2 reserved bytes, 4 bytes length. But the *decoder*, upon seeing
+a tag in group 0xFFFE, does not read a VR field at all - real Item/ItemDelimiter/
+SequenceDelimiter markers are always encoded as bare tag + 4-byte length (8 bytes total, no VR),
+in every transfer syntax. So the decoder reads bytes 5-8 ("55 4e 00 00") directly as a
+little-endian length: 0x00004e55 = 20053 - garbage derived from misreading the ASCII VR text
+"UN" as the low two bytes of a length field. The decoder then expects 20053 more bytes of data
+that were never written, and fails with "Could not read data set token" / UnexpectedEof once the
+buffer is exhausted.
+
+This confirms the root cause is a write/read asymmetry, not a general parser weakness: the
+reader's group-0xFFFE special-casing is correct for legitimate delimiters (which the encoder
+also produces correctly via its own dedicated item/delimiter-writing methods); the bug is that
+`encode_element_header` - the single shared entry point used for ordinary data elements - had no
+guard preventing it from being called with a tag in that reserved group, silently producing a
+header shape that no DICOM reader (including this crate's own) can distinguish from a delimiter.

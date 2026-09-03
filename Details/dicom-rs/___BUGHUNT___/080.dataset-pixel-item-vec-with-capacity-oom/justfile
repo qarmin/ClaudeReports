@@ -1,0 +1,36 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# Both reproduction steps run under `ulimit -v 500000` (a 500 MB virtual-memory cap,
+# representative of a small container/service) so the allocator-failure abort is fast and
+# deterministic instead of depending on this machine's actual free RAM.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - both scenarios should abort
+# with SIGABRT ("memory allocation of N bytes failed").
+reproduce-before:
+    cd repro && cargo build --release
+    bash -c 'ulimit -v 500000; ./repro/target/release/repro'
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - both scenarios should exit 0 with a
+# graceful error/result instead of aborting.
+reproduce-after:
+    cd repro && cargo build --release
+    bash -c 'ulimit -v 500000; ./repro/target/release/repro'
+
+clean:
+    rm -rf clone repro/target

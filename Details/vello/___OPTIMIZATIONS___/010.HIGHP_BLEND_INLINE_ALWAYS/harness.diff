@@ -1,0 +1,83 @@
+diff --git a/sparse_strips/vello_bench/src/fine/blend.rs b/sparse_strips/vello_bench/src/fine/blend.rs
+index 41041783..47d2e193 100644
+--- a/sparse_strips/vello_bench/src/fine/blend.rs
++++ b/sparse_strips/vello_bench/src/fine/blend.rs
+@@ -7,10 +7,77 @@ use vello_common::color::palette::css::ROYAL_BLUE;
+ use vello_common::fearless_simd::Simd;
+ use vello_common::paint::{Paint, PremulColor};
+ use vello_common::peniko::{BlendMode, Compose, Mix};
+-use vello_cpu::fine::{Fine, FineKernel};
++use vello_cpu::Level;
++use vello_cpu::fine::{F32Kernel, Fine, FineKernel};
+ use vello_dev_macros::vello_bench;
+ 
++// The `#[vello_bench]` macro only instantiates the `u8` (`U8Kernel`) pipeline by default (the
++// `f32`/`F32Kernel` variants are deliberately commented out there to keep the default bench run
++// short - see `vello_dev_macros::bench`). Candidate 010 (`___OPTIMIZATIONS___/010.*`) targets the
++// `F32Kernel`/highp blend path specifically (`highp::blend::mix` / `highp::compose::ComposeExt`),
++// so it's benched here directly against every available SIMD level, without touching the shared
++// macro (and therefore without re-enabling `f32` variants for every other bench function).
++fn blend_f32_inner<S: Simd>(b: &mut Bencher<'_>, simd: S, blend_mode: BlendMode) {
++    let mut fine = Fine::<S, F32Kernel>::new(simd, BENCH_WIDTH);
++    let paint = Paint::Solid(PremulColor::from_alpha_color(ROYAL_BLUE));
++
++    fill_single(&paint, &[], BENCH_WIDTH, b, blend_mode, &mut fine);
++}
++
++pub fn multiply_f32(c: &mut Criterion) {
++    let blend_mode = BlendMode::new(Mix::Multiply, Compose::SrcOver);
++
++    #[cfg(target_arch = "aarch64")]
++    if let Some(neon) = Level::new().as_neon() {
++        c.bench_function("blend/multiply_f32_neon", |b| {
++            blend_f32_inner(b, neon, blend_mode);
++        });
++    }
++
++    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
++    if let Some(sse4_2) = Level::new().as_sse4_2() {
++        c.bench_function("blend/multiply_f32_sse4_2", |b| {
++            blend_f32_inner(b, sse4_2, blend_mode);
++        });
++    }
++
++    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
++    if let Some(avx2) = Level::new().as_avx2() {
++        c.bench_function("blend/multiply_f32_avx2", |b| {
++            blend_f32_inner(b, avx2, blend_mode);
++        });
++    }
++}
++
++pub fn src_atop_f32(c: &mut Criterion) {
++    let blend_mode = BlendMode::new(Mix::Normal, Compose::SrcAtop);
++
++    #[cfg(target_arch = "aarch64")]
++    if let Some(neon) = Level::new().as_neon() {
++        c.bench_function("blend/src_atop_f32_neon", |b| {
++            blend_f32_inner(b, neon, blend_mode);
++        });
++    }
++
++    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
++    if let Some(sse4_2) = Level::new().as_sse4_2() {
++        c.bench_function("blend/src_atop_f32_sse4_2", |b| {
++            blend_f32_inner(b, sse4_2, blend_mode);
++        });
++    }
++
++    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
++    if let Some(avx2) = Level::new().as_avx2() {
++        c.bench_function("blend/src_atop_f32_avx2", |b| {
++            blend_f32_inner(b, avx2, blend_mode);
++        });
++    }
++}
++
+ pub fn blend(c: &mut Criterion) {
++    multiply_f32(c);
++    src_atop_f32(c);
++
+     if !crate::EXTENDED {
+         return;
+     }

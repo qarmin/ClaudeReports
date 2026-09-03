@@ -1,0 +1,32 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug (RLE
+# Lossless decode aborts the whole process with SIGABRT/"memory allocation ... failed" from a tiny,
+# well-formed 16-byte fragment, driven purely by Rows=Columns=SamplesPerPixel=65535,
+# BitsAllocated=16 header attributes that are wildly disproportionate to the actual payload).
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer abort, and should instead
+# return a normal Result::Err(Allocate { .. }).
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

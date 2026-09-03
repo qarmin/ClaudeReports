@@ -1,0 +1,43 @@
+# Self-contained harness for this candidate.
+#
+# This candidate did NOT find a reproducible GPU-vs-CPU rendering bug (see RESULT.md) - so there
+# is no patch.diff and no repro/ in the usual "prove the bug, apply the fix, prove it's gone"
+# sense. What this justfile reproduces instead is the *differential harness itself*: a real,
+# broad (33 example scenes x up to 3 renderer configurations) GPU-vs-CPU comparison, run against
+# a real `wgpu` device, that found no divergence. `harness/065_fix_needed_for_harness.patch` is
+# candidate 065's already-recorded fix (repeated here only so this folder is self-contained) -
+# without it, `vello_tests::compare_gpu_cpu`'s FLIP score is a hardcoded 0.0 self-comparison and
+# this harness would prove nothing.
+#
+# This machine has no real GPU: SwiftShader (software Vulkan, `VK_ICD_FILENAMES`) or Mesa's
+# llvmpipe (software GL, `WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1`) is used instead. On a machine
+# with a real GPU, drop those env vars - the exact same real `vello`/wgpu renderer code runs.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, wire in candidate 065's harness fix + this candidate's sweep test,
+# then run the real differential sweep and print its output.
+test: clone apply-harness-fix add-sweep-test run-sweep
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-harness-fix:
+    cd clone && git apply "{{justfile_directory()}}/harness/065_fix_needed_for_harness.patch"
+
+add-sweep-test:
+    cp "{{justfile_directory()}}/harness/compare_gpu_cpu_sweep.rs" clone/vello_tests/tests/compare_gpu_cpu_sweep.rs
+
+# Real Vulkan device (SwiftShader software ICD) by default. Swap the env vars below for
+# `WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1` to use Mesa's llvmpipe instead (see RESULT.md/
+# output.txt for the fact that both backends were checked this session, plus AaConfig::Msaa16 in
+# addition to the default AaConfig::Area).
+run-sweep:
+    cd clone && VK_ICD_FILENAMES={{env_var_or_default("VK_ICD_FILENAMES", "/tmp/swiftshader_icd/vk_swiftshader_icd.json")}} WGPU_BACKEND=vulkan \
+        cargo test --release -p vello_tests --test compare_gpu_cpu_sweep -- --ignored --nocapture
+
+clean:
+    rm -rf clone

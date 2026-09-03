@@ -1,0 +1,68 @@
+diff --git a/core/src/header.rs b/core/src/header.rs
+index 655bda57..c48315b2 100644
+--- a/core/src/header.rs
++++ b/core/src/header.rs
+@@ -654,7 +654,7 @@ impl<I, P> DataElement<I, P> {
+ 
+ /// A data structure for a data element header, containing
+ /// a tag, value representation and specified length.
+-#[derive(Debug, PartialEq, Clone, Copy)]
++#[derive(Debug, Clone, Copy)]
+ pub struct DataElementHeader {
+     /// DICOM tag
+     pub tag: Tag,
+@@ -664,6 +664,20 @@ pub struct DataElementHeader {
+     pub len: Length,
+ }
+ 
++impl PartialEq for DataElementHeader {
++    /// Two headers are equal if their tag, VR, and length all match.
++    ///
++    /// Length comparison uses [`Length::inner_eq`] rather than `==`, since
++    /// `Length`'s own `PartialEq` considers two undefined lengths to never
++    /// be equal (mirroring the fact that an undefined length carries no
++    /// comparable value) - which would otherwise make a header with an
++    /// undefined length (ubiquitous for `SQ` elements and encapsulated
++    /// pixel data) never equal to itself.
++    fn eq(&self, other: &Self) -> bool {
++        self.tag == other.tag && self.vr == other.vr && self.len.inner_eq(other.len)
++    }
++}
++
+ impl HasLength for DataElementHeader {
+     #[inline]
+     fn length(&self) -> Length {
+@@ -717,7 +731,7 @@ impl From<SequenceItemHeader> for DataElementHeader {
+ /// Data type for describing a sequence item data element.
+ /// If the element represents an item, it will also contain
+ /// the specified length.
+-#[derive(Debug, PartialEq, Clone, Copy)]
++#[derive(Debug, Clone, Copy)]
+ pub enum SequenceItemHeader {
+     /// The cursor contains an item.
+     Item {
+@@ -732,6 +746,24 @@ pub enum SequenceItemHeader {
+     SequenceDelimiter,
+ }
+ 
++impl PartialEq for SequenceItemHeader {
++    /// Two `Item` variants are equal if their length matches, using
++    /// [`Length::inner_eq`] rather than `==` for the same reason as
++    /// [`DataElementHeader`]'s `PartialEq` - an item with undefined length
++    /// (the ordinary encoding for an item inside a sequence with undefined
++    /// length) would otherwise never equal itself.
++    fn eq(&self, other: &Self) -> bool {
++        match (self, other) {
++            (SequenceItemHeader::Item { len: l1 }, SequenceItemHeader::Item { len: l2 }) => {
++                l1.inner_eq(*l2)
++            }
++            (SequenceItemHeader::ItemDelimiter, SequenceItemHeader::ItemDelimiter) => true,
++            (SequenceItemHeader::SequenceDelimiter, SequenceItemHeader::SequenceDelimiter) => true,
++            _ => false,
++        }
++    }
++}
++
+ impl SequenceItemHeader {
+     /// Create a sequence item header using the element's raw properties.
+     /// An error can be raised if the given properties do not relate to a

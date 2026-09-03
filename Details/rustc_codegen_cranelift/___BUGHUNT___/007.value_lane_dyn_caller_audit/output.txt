@@ -1,0 +1,142 @@
+==============================================================================
+1. AUDIT: every value_lane_dyn caller reachable on x86-64, vs LLVM, opt-level 0
+   $ bash ___BUGHUNT___/tools/diffcheck.sh <file>            (main tree dist/, HEAD 2bc05d45)
+==============================================================================
+
+--- checks/pshufb.rs  (llvm.x86.ssse3.pshuf.b.128 + llvm.x86.avx2.pshuf.b;
+    all 256 broadcast selector bytes plus 2000 random selector vectors per width) ---
+    pshufb128 hash 0d13467fc5902d38 len 36096
+    pshufb256 hash f7d8dec099a02a91 len 72192
+    pshufb128 hash 0d13467fc5902d38 len 36096
+    pshufb256 hash f7d8dec099a02a91 len 72192
+    RESULT: identical (exit 0)
+
+--- checks/extract_dyn.rs  (sym::simd_extract_dyn + sym::simd_insert_dyn over 16
+    #[repr(simd)] types: u8x2/3/16/32/64, i16x5/8, u32x1/4/8, i64x2/7, f32x4, f64x8,
+    u128x2, i128x3 - every in-bounds index, output elided, full text is long) ---
+    RESULT: identical (exit 0)
+
+==============================================================================
+2. NEGATIVE CONTROL: the already-confirmed permd bug (candidate 001) through the
+   SAME harness - proves the harness detects a missing index mask in this code
+   $ bash ___BUGHUNT___/tools/diffcheck.sh ___BUGHUNT___/007.value_lane_dyn_caller_audit/checks/permd_control.rs
+==============================================================================
+
+    === LLVM: exit 0 ===
+    [10, 11, 14, 17, 17, 13, 12, 11]
+    
+    === CLIF: exit 139 ===
+    
+    RESULT: DIFFERENT (llvm exit 0, clif exit 139)
+    --- diff (llvm vs clif, run output only) ---
+    1,2c1
+    < === exit 0 ===
+    < [10, 11, 14, 17, 17, 13, 12, 11]
+    ---
+    > === exit 139 ===
+
+==============================================================================
+3. FLAG VARIANTS (same two audit programs, -Ctarget-cpu=native and -O)
+==============================================================================
+
+    pshufb.rs [default]      -> RESULT: identical (exit 0)
+    pshufb.rs [target-cpu=native] -> RESULT: identical (exit 0)
+    pshufb.rs [-O]           -> RESULT: identical (exit 0)
+    extract_dyn.rs [default]      -> RESULT: identical (exit 0)
+    extract_dyn.rs [target-cpu=native] -> RESULT: identical (exit 0)
+    extract_dyn.rs [-O]           -> RESULT: identical (exit 0)
+
+==============================================================================
+4. GENERATED SWEEP (45 programs, seed 1) - ___BUGHUNT___/tools/lane_dyn_sweep.py
+   $ python3 ___BUGHUNT___/tools/lane_dyn_sweep.py --count 45 --seed 1
+   Cycles simd_extract_dyn/simd_insert_dyn over random (lane type x lane count)
+   incl. non-power-of-two counts 1/3/5/7/12/31, pshufb with random selectors, and
+   permd with in-range selectors only.
+==============================================================================
+
+    [039] generic  ok
+    [040] pshufb   ok
+    [041] permd    ok
+    [042] generic  ok
+    [043] pshufb   ok
+    [044] permd    ok
+    
+    45/45 agreed with LLVM
+
+==============================================================================
+5. WHY THE TWO aarch64 CALL SITES COULD NOT BE EXECUTED HERE
+   (llvm.aarch64.neon.tbl1.v8i8 / .v16i8, src/intrinsics/llvm_aarch64.rs:427,441)
+==============================================================================
+
+   $ rustc --target aarch64-unknown-linux-gnu -o /tmp/h hello.rs
+   error[E0463]: can't find crate for `std`
+     = note: the `aarch64-unknown-linux-gnu` target may not be installed
+   -> no LLVM-side oracle for aarch64 (only rust-std-x86_64-unknown-linux-gnu installed)
+
+   $ which aarch64-linux-gnu-as aarch64-linux-gnu-gcc aarch64-linux-gnu-ld
+   (no output - no aarch64 binutils; /usr/aarch64-linux-gnu and
+    /usr/lib/aarch64-linux-gnu do not exist, no ld-linux-aarch64.so anywhere)
+   -> nothing can link an aarch64 executable, and cg_clif's global_asm/inline-asm path
+      (src/global_asm.rs: get_toolchain_binary(sess, "as")) has no aarch64 assembler,
+      which compiler_builtins' aarch64 asm routines need.
+
+   $ CARGO_TARGET_DIR=... dist/cargo-clif build -Zbuild-std=core \
+       --target aarch64-unknown-linux-gnu --manifest-path a64/Cargo.toml
+   error: 128bit atomics not yet supported
+   error: could not compile `core` (lib) due to 1 previous error
+   error: attempt to declare `__gttf2` with signature Signature { params: [AbiParam { value_type: types::F128, purpose: Normal, extension: None }, AbiParam { value_type: types::F128, purpose: Normal, extension: None }], returns: [AbiParam { value_type: types::I64, purpose: Normal, extension: None }], call_conv: SystemV }, but it was already declared with signature Signature { params: [AbiParam { value_type: types::F128, purpose: Normal, extension: None }, AbiParam { value_type: types::F128, purpose: Normal, extension: None }], returns: [AbiParam { value_type: types::I32, purpose: Normal, extension: None }], call_conv: SystemV }
+   error: could not compile `compiler_builtins` (lib) due to 1 previous error
+   -> even producing an aarch64 *object* fails: cg_clif cannot cross-build core /
+      compiler_builtins for aarch64 at all (two independent blockers, see
+      RESULT.md "What's not done"). qemu-aarch64 IS present, so a run would have
+      been possible had a binary been produceable.
+
+==============================================================================
+6. PROJECT TEST SUITE in the worktree at unmodified HEAD 2bc05d45 (no patch applied)
+   $ cd tmp/wt/007.value_lane_dyn_caller_audit && ./y.sh test
+==============================================================================
+
+    running 0 tests
+    
+    test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+    
+    y.sh test rc=0
+
+==============================================================================
+7. THE CANDIDATE FOLDER'S OWN justfile, run for real from a fresh clone
+   $ cd ___BUGHUNT___/007.value_lane_dyn_caller_audit
+   $ just repo_url=https://github.com/rust-lang/rustc_codegen_cranelift.git test
+   (the https override is only because this machine has no github.com SSH host key;
+    clone -> ./y.sh build -> check-callers -> positive-control, exit 0 overall)
+==============================================================================
+
+       Compiling addr2line v0.27.1
+       Compiling rustc-std-workspace-std v1.99.0 (/home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/007.value_lane_dyn_caller_audit/clone/build/stdlib/library/rustc-std-workspace-std)
+       Compiling proc_macro v0.0.0 (/home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/007.value_lane_dyn_caller_audit/clone/build/stdlib/library/proc_macro)
+       Compiling getopts v0.2.24
+       Compiling sysroot v0.0.0 (/home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/007.value_lane_dyn_caller_audit/clone/build/stdlib/library/sysroot)
+        Finished `release` profile [optimized + debuginfo] target(s) in 27.20s
+    ulimit -c 0 && bash /home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/007.value_lane_dyn_caller_audit/checks/diff_run.sh /home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/007.value_lane_dyn_caller_audit/clone /home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/007.value_lane_dyn_caller_audit/checks/pshufb.rs /home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/007.value_lane_dyn_caller_audit/checks/extract_dyn.rs
+    ########## pshufb ##########
+    RESULT pshufb: identical (exit 0)
+    pshufb128 hash 0d13467fc5902d38 len 36096
+    pshufb256 hash f7d8dec099a02a91 len 72192
+    
+    
+    ########## extract_dyn ##########
+    RESULT extract_dyn: identical (exit 0)
+    u8x2 1 14 8,14, 1,8, 
+    u8x3 1 14 27 8,14,27, 1,8,27, 1,14,8, 
+    u8x16 1 14 27 40 53 66 79 92 105 118 131 144 157 170 183 196 8,14,27,40,53,66,79,92,105,118,131,144,157,170,183,196, 1,8,27,40,53,66,79,92,105,118,131,144,157,170,183,196, 1,14,8,40,53,66,79,92,105,118,131,144,157,170,183,196, 1,14,27,8,53
+    
+    ########## permd_control ##########
+    /home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/007.value_lane_dyn_caller_audit/checks/diff_run.sh: line 30: 1599272 Segmentation fault         "$OUT/${BASE}_$side" > "$OUT/$side.run" 2>&1
+    RESULT permd_control: DIFFERENT
+    --- llvm (exit 0) ---
+    [10, 11, 14, 17, 17, 13, 12, 11]
+    
+    --- clif (exit 139) ---
+    
+    
+    control OK: harness detects the known missing-index-mask bug
+    just test rc=0

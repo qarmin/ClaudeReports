@@ -1,0 +1,74 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# This is an investigation candidate (root-causing IDEAS.md's "residual 8px --type-text
+# non-determinism" entry, not a timing candidate). `patch.diff` against the real Slint source is
+# empty - no product-source bug was found; the finding is that `perf_test --bench`'s animation
+# clock is real-wall-clock-driven (`BenchPlatform` never overrides `Platform::duration_since_start`),
+# which only becomes visible as pixel non-determinism once a scene's own per-frame cost drops below
+# the `ScrollView` scrollbar thumb's 150ms `animate` transition duration - which candidates 091/092
+# (applied here on top of pristine master, via their own already-recorded `patch.diff`) do.
+# `virtualclock_diagnostic.diff` (this folder) is a temporary perf_test-only diagnostic (not a
+# proposed permanent fix - see RESULT.md's "What's not done") applied as a plain `patch`, not
+# `git apply`, since `perf_test/` is untracked in the main repo's git history and so is not part
+# of the `git clone` below - copy `perf_test/` in manually first (see this workspace's
+# README.md), same limitation candidate 097's justfile already documents.
+#
+# repo_url/base_commit read via `git remote get-url origin` / `git rev-parse HEAD` in the main
+# project, at the moment this candidate was written (same commit as candidates 095-098).
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone at the pinned commit, apply 091+092's own bundled patch (the tree this
+# candidate's finding reproduces on), copy perf_test/ in manually, run the repeat-sampled pixel
+# comparison with and without the virtual-clock diagnostic.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+# Applies candidate 092's own patch.diff, which bundles 091+092 - the simplest tree this
+# candidate's residual was confirmed on. This candidate's own patch.diff (against tracked source)
+# is empty, so nothing from this folder itself is applied here.
+apply:
+    cd clone && git apply "{{justfile_directory()}}/../092.RETAINED_LINE_BREAKING_ACROSS_RESHAPE/patch.diff"
+
+# Applies this candidate's temporary diagnostic clock override directly to perf_test/src/bench.rs
+# (a plain unified diff, since perf_test/ is untracked and `git apply` against the clone's tracked
+# history won't touch it). Requires perf_test/ to already be copied into clone/ manually first.
+apply-diagnostic:
+    cd clone/perf_test && patch -p1 < "{{justfile_directory()}}/virtualclock_diagnostic.diff"
+
+# Reproduces the residual with the real clock (091+092, unmodified perf_test), then confirms the
+# diagnostic virtual clock removes it, 20 repeats each, at the exact scenario/frame count this
+# candidate used.
+bench:
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug --features software
+    mkdir -p /tmp/099_repro/real_clock
+    for r in $(seq 1 20); do \
+        ./clone/target/rdebug/perf_test --bench --mode text --count 10000 --type-text \
+            --scroll-step 0 --frames 150 --snapshot /tmp/099_repro/real_clock/r$r.ppm >/dev/null; \
+    done
+    just apply-diagnostic
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug --features software
+    mkdir -p /tmp/099_repro/virtual_clock
+    for r in $(seq 1 20); do \
+        ./clone/target/rdebug/perf_test --bench --mode text --count 10000 --type-text \
+            --scroll-step 0 --frames 150 --snapshot /tmp/099_repro/virtual_clock/r$r.ppm >/dev/null; \
+    done
+    @echo "Compare /tmp/099_repro/real_clock/*.ppm pairwise (expect a handful of differing px,"
+    @echo "rows 796-797) against /tmp/099_repro/virtual_clock/*.ppm (expect 0) - see RESULT.md."
+
+clean:
+    rm -rf clone

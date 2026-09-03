@@ -1,0 +1,316 @@
+diff --git a/src/math/cubic.rs b/src/math/cubic.rs
+index effc436..84ed854 100644
+--- a/src/math/cubic.rs
++++ b/src/math/cubic.rs
+@@ -106,3 +106,49 @@ where
+         ),
+     )
+ }
++
++#[cfg(test)]
++mod tmp_verify_tests {
++    use super::*;
++
++    fn ref_cubic_spline(x: f64) -> f64 {
++        let x = x.abs();
++        if x < 1.0 {
++            (3.0 * x * x * x - 6.0 * x * x + 4.0) / 6.0
++        } else if x < 2.0 {
++            (-x * x * x + 6.0 * x * x - 12.0 * x + 8.0) / 6.0
++        } else {
++            0.0
++        }
++    }
++
++    fn ref_bicubic(x: f64) -> f64 {
++        const A: f64 = -0.5;
++        let x = x.abs();
++        if x < 1.0 {
++            (A + 2.0) * x * x * x - (A + 3.0) * x * x + 1.0
++        } else if x < 2.0 {
++            A * x * x * x - 5.0 * A * x * x + 8.0 * A * x - 4.0 * A
++        } else {
++            0.0
++        }
++    }
++
++    #[test]
++    fn tmp_cubic_spline_matches_reference() {
++        for i in -300..=300 {
++            let x = i as f64 / 100.0;
++            let (got, want) = (cubic_spline(x), ref_cubic_spline(x));
++            assert!((got - want).abs() < 1e-9, "x={x}: got {got}, want {want}");
++        }
++    }
++
++    #[test]
++    fn tmp_bicubic_spline_matches_reference() {
++        for i in -300..=300 {
++            let x = i as f64 / 100.0;
++            let (got, want) = (bicubic_spline(x), ref_bicubic(x));
++            assert!((got - want).abs() < 1e-9, "x={x}: got {got}, want {want}");
++        }
++    }
++}
+diff --git a/src/math/hann.rs b/src/math/hann.rs
+index 8ee3901..ce4d03c 100644
+--- a/src/math/hann.rs
++++ b/src/math/hann.rs
+@@ -105,3 +105,67 @@ where
+         mla(0.5f32.as_(), x.f_cospi(), 0.5f32.as_())
+     }
+ }
++
++#[cfg(test)]
++mod tmp_verify_tests {
++    use super::*;
++
++    // The kernel builds its coefficients from f32 literals, so the reference
++    // must use the same widened values (see gaussian.rs's SIGMA note).
++    const HAMMING_A: f64 = 0.46f32 as f64;
++    const HAMMING_B: f64 = 0.54f32 as f64;
++
++    fn ref_hamming(x: f64) -> f64 {
++        let x = x.abs();
++        if x >= 1.0 {
++            0.0
++        } else {
++            HAMMING_B + HAMMING_A * (std::f64::consts::PI * x).cos()
++        }
++    }
++
++    fn ref_hanning(x: f64) -> f64 {
++        let x = x.abs();
++        if x >= 1.0 {
++            0.0
++        } else {
++            0.5 + 0.5 * (std::f64::consts::PI * x).cos()
++        }
++    }
++
++    #[test]
++    fn tmp_hamming_matches_reference() {
++        // The source special-cases x == 0 to exactly 1.0 rather than letting
++        // f32-rounded coefficients produce 1.0000000298023224 - tolerance
++        // absorbs that deliberate exactness, not a discrepancy in the formula.
++        for i in 0..=200 {
++            let x = i as f64 / 100.0;
++            let (got, want) = (hamming(x), ref_hamming(x));
++            assert!((got - want).abs() < 1e-7, "x={x}: got {got}, want {want}");
++        }
++    }
++
++    #[test]
++    fn tmp_hanning_matches_reference() {
++        for i in 0..=200 {
++            let x = i as f64 / 100.0;
++            let (got, want) = (hanning(x), ref_hanning(x));
++            assert!((got - want).abs() < 1e-9, "x={x}: got {got}, want {want}");
++        }
++    }
++
++    #[test]
++    fn tmp_hann_normalized_shape() {
++        // hann() carries a constant 0.25 scale that cancels under weights.rs's
++        // sum-normalization; check the *shape* (ratio to centre) instead of
++        // an absolute value.
++        let centre = hann(0.0f64);
++        for i in 0..=200 {
++            let x = i as f64 / 100.0;
++            let got = hann(x) / centre;
++            let want = (std::f64::consts::PI / 4.0 * x).cos().powi(2);
++            assert!((got - want).abs() < 1e-9, "x={x}: got {got}, want {want}");
++        }
++        assert!(hann(2.5f64) == 0.0);
++    }
++}
+diff --git a/src/math/kaiser.rs b/src/math/kaiser.rs
+index aa55fe2..74301f7 100644
+--- a/src/math/kaiser.rs
++++ b/src/math/kaiser.rs
+@@ -74,3 +74,39 @@ where
+     let i0a = 1.0f64.as_() / 6.33f64.as_().bessel_i0();
+     (6.33f64.as_() * mla(-x, x, 1.0f64.as_()).sqrt()).bessel_i0() * i0a
+ }
++
++#[cfg(test)]
++mod tmp_verify_tests {
++    use super::*;
++
++    fn bessel_i0_series(x: f64) -> f64 {
++        let mut term = 1.0;
++        let mut sum = 1.0;
++        let half_x_sq = (x / 2.0) * (x / 2.0);
++        for k in 1..60 {
++            term *= half_x_sq / (k as f64 * k as f64);
++            sum += term;
++        }
++        sum
++    }
++
++    fn ref_kaiser(x: f64) -> f64 {
++        if x.abs() > 1.0 {
++            0.0
++        } else {
++            const BETA: f64 = 6.33;
++            bessel_i0_series(BETA * (1.0 - x * x).sqrt()) / bessel_i0_series(BETA)
++        }
++    }
++
++    #[test]
++    fn tmp_kaiser_matches_reference() {
++        for i in -100..=100 {
++            let x = i as f64 / 100.0;
++            let (got, want) = (kaiser(x), ref_kaiser(x));
++            assert!((got - want).abs() < 1e-7, "x={x}: got {got}, want {want}");
++        }
++        assert_eq!(kaiser(1.5f64), 0.0);
++        assert!((kaiser(0.0f64) - 1.0).abs() < 1e-9);
++    }
++}
+diff --git a/src/math/lagrange.rs b/src/math/lagrange.rs
+index 1c19294..1613b91 100644
+--- a/src/math/lagrange.rs
++++ b/src/math/lagrange.rs
+@@ -102,3 +102,66 @@ where
+ {
+     lagrange(x, 3)
+ }
++
++#[cfg(test)]
++mod tmp_verify_tests {
++    use super::*;
++
++    /// A degree-`(2*support - 1)` polynomial resampling kernel must
++    /// reconstruct any polynomial of that degree exactly from its integer
++    /// samples, at any phase - this is what makes it a Lagrange kernel at
++    /// all, independent of the exact closed form used to compute the taps.
++    fn check_exact_reconstruction(
++        kernel: fn(f64) -> f64,
++        support: i32,
++        poly: impl Fn(f64) -> f64,
++    ) {
++        // weights.rs always calls the kernel with an *absolute* offset, and
++        // the tap window it selects around a phase in [0, 1) is asymmetric:
++        // (support - 1) samples on the left, `support` on the right.
++        let lo = -(support - 1);
++        let hi = support + 1;
++        for i in 0..=20 {
++            let phase = i as f64 / 20.0;
++            let mut recon = 0.0;
++            for k in lo..hi {
++                let sample = poly(k as f64);
++                recon += sample * kernel((phase - k as f64).abs());
++            }
++            let want = poly(phase);
++            assert!(
++                (recon - want).abs() < 1e-6,
++                "phase={phase}: reconstructed {recon}, expected {want}"
++            );
++        }
++    }
++
++    #[test]
++    fn tmp_lagrange2_reconstructs_cubics_exactly() {
++        // support=2 -> order=4 -> exact up to degree 3.
++        check_exact_reconstruction(lagrange2, 2, |x| 1.0 - 2.0 * x + 0.5 * x * x - 0.1 * x * x * x);
++    }
++
++    #[test]
++    fn tmp_lagrange3_reconstructs_quintics_exactly() {
++        // support=3 -> order=6 -> exact up to degree 5.
++        check_exact_reconstruction(lagrange3, 3, |x| {
++            2.0 - x + 0.3 * x * x - 0.05 * x * x * x + 0.02 * x.powi(4) - 0.001 * x.powi(5)
++        });
++    }
++
++    #[test]
++    fn tmp_lagrange_centre_tap_is_unity_and_vanishes_at_other_integers() {
++        for support in [2usize, 3] {
++            let k: fn(f64) -> f64 = if support == 2 { lagrange2 } else { lagrange3 };
++            assert!((k(0.0) - 1.0).abs() < 1e-9, "support={support}: k(0) != 1");
++            for i in 1..support as i32 {
++                assert!(
++                    k(i as f64).abs() < 1e-9,
++                    "support={support}: k({i}) = {}, expected 0",
++                    k(i as f64)
++                );
++            }
++        }
++    }
++}
+diff --git a/src/math/quadric.rs b/src/math/quadric.rs
+index bc42fc0..db46b2b 100644
+--- a/src/math/quadric.rs
++++ b/src/math/quadric.rs
+@@ -56,3 +56,28 @@ where
+     }
+     0f32.as_()
+ }
++
++#[cfg(test)]
++mod tmp_verify_tests {
++    use super::*;
++
++    fn ref_quadric(x: f64) -> f64 {
++        let x = x.abs();
++        if x < 0.5 {
++            0.75 - x * x
++        } else if x < 1.5 {
++            0.5 * (x - 1.5) * (x - 1.5)
++        } else {
++            0.0
++        }
++    }
++
++    #[test]
++    fn tmp_quadric_matches_reference() {
++        for i in -300..=300 {
++            let x = i as f64 / 100.0;
++            let (got, want) = (quadric(x), ref_quadric(x));
++            assert!((got - want).abs() < 1e-9, "x={x}: got {got}, want {want}");
++        }
++    }
++}
+diff --git a/src/math/welch.rs b/src/math/welch.rs
+index 288b033..17c84bd 100644
+--- a/src/math/welch.rs
++++ b/src/math/welch.rs
+@@ -54,3 +54,37 @@ where
+         mla(-x, x, 1f32.as_())
+     }
+ }
++
++#[cfg(test)]
++mod tmp_verify_tests {
++    use super::*;
++
++    fn ref_welch(x: f64) -> f64 {
++        let x = x.abs();
++        if x >= 1.0 { 0.0 } else { 1.0 - x * x }
++    }
++
++    #[test]
++    fn tmp_welch_matches_reference_nonnegative_domain() {
++        // weights.rs always calls this with `dx.abs()`, so only x >= 0 is
++        // ever reached in practice - verify that domain explicitly.
++        for i in 0..=200 {
++            let x = i as f64 / 100.0;
++            let (got, want) = (welch(x), ref_welch(x));
++            assert!((got - want).abs() < 1e-9, "x={x}: got {got}, want {want}");
++        }
++    }
++
++    /// The function itself has no `x <= -1` branch (relies on callers passing
++    /// `dx.abs()`), so a negative x outside [-1, 0] does NOT vanish here -
++    /// documenting this latent, currently-unreachable gap rather than
++    /// asserting it is safe.
++    #[test]
++    fn tmp_welch_negative_x_is_not_clamped_by_the_function_itself() {
++        let w = welch(-2.0f64);
++        assert!(
++            w != 0.0,
++            "expected the still-unguarded negative branch to be nonzero (documents the gap)"
++        );
++    }
++}

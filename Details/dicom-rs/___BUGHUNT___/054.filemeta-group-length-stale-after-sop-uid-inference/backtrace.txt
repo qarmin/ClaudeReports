@@ -1,0 +1,52 @@
+Captured output from `just test` (fresh clone of pristine upstream df2b9e42, reproduce-before,
+apply patch.diff, reproduce-after), run twice independently for determinism confirmation.
+
+=== Run 1 ===
+
+--- reproduce-before (pristine df2b9e42) ---
+information_group_length after first parse: 134
+information_group_length after round trip: 142
+BUG - information_group_length changed across a round trip (134 -> 142), meaning the first parse's value was already stale
+BUG REPRODUCED: the SOP Class UID inference fallback leaves information_group_length stale, truncating the meta group on write.
+(exit code: 1, as expected: bug reproduced)
+
+--- reproduce-after (patched clone) ---
+information_group_length after first parse: 142
+information_group_length after round trip: 142
+No corruption observed: information_group_length stays correct and stable.
+(exit code: 0, as expected: bug fixed)
+
+=== Run 2 (independent, fresh clone) ===
+
+--- reproduce-before (pristine df2b9e42) ---
+information_group_length after first parse: 134
+information_group_length after round trip: 142
+BUG - information_group_length changed across a round trip (134 -> 142), meaning the first parse's value was already stale
+BUG REPRODUCED: the SOP Class UID inference fallback leaves information_group_length stale, truncating the meta group on write.
+(exit code: 1, as expected: bug reproduced)
+
+--- reproduce-after (patched clone) ---
+information_group_length after first parse: 142
+information_group_length after round trip: 142
+No corruption observed: information_group_length stays correct and stable.
+(exit code: 0, as expected: bug fixed)
+
+=== Provenance ===
+
+Found by temporarily stacking candidates 001, 002, 008, 048, 049, 050, 051, 052, 053's already-
+confirmed patches onto the tree and re-running the existing `object/fuzz/fuzz_targets/open_file.rs`
+for 150s (`ASAN_OPTIONS=symbolize=0 cargo +nightly fuzz run open_file -- -max_total_time=150`),
+which turned up a crashing input (`cargo +nightly fuzz tmin` minimized it to 340 bytes). A
+parse/write/re-parse/compare diagnostic, combined with a byte-offset walk of the actually-written
+meta group (bypassing the WRITTEN file's own declared, and as it turned out wrong,
+`information_group_length` to see where each element really started/ended), traced the
+discrepancy precisely: `object/src/meta.rs`'s `FileMetaTable::build()` computes
+`information_group_length` once, from whatever fields were populated purely from the wire; the
+enrichment step in `object/src/mem.rs` (candidate 053) then mutates
+`media_storage_sop_class_uid`/`media_storage_sop_instance_uid` *afterward*, without ever calling
+`update_information_group_length()` again - unlike every other place in this codebase that mutates
+a meta field directly (`set_transfer_syntax`, `apply()`), both of which already call it
+immediately after their own mutation. The minimal, hand-built reproduction here isolates the
+defect directly and was confirmed to reproduce fully independently of every other stacked
+candidate, including 053 itself (tested against a pristine tree with *only* this candidate's
+patch applied, with no dependency on 053's SOP-UID-padding fix).

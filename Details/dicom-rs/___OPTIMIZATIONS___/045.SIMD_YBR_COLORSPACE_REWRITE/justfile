@@ -1,0 +1,69 @@
+# Self-contained reproduction for candidate 045.SIMD_YBR_COLORSPACE_REWRITE.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo, built by this
+# ___OPTIMIZATIONS___ workspace - see SKILL.md's "shape 3" pattern). Self-contained given the
+# WHOLE ___OPTIMIZATIONS___ folder kept together, not as a fully isolated single subfolder.
+#
+# `just test` clones dicom-rs at base_commit, builds baseline + patched binaries in BOTH a
+# no-rayon build (--no-default-features, for a valid single-core number - see RESULT.md) and a
+# default rayon-enabled build (for a realistic multi-core number), and runs a paired comparison
+# via tools/paired.sh for each, plus a bit-exactness check against the checked-in
+# testdata/ybr_big.dcm (real tiled photographic content) and testdata/ybr_random.dcm (synthetic,
+# shows the same 1-LSB rounding-boundary difference candidate 002 characterized).
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline_rayon
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --no-default-features
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline_norayon
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched_rayon
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --no-default-features
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched_norayon
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cp "{{justfile_directory()}}/testdata/ybr_big.dcm" clone/ybr_big.dcm
+    cp "{{justfile_directory()}}/testdata/ybr_random.dcm" clone/ybr_random.dcm
+
+    echo "=== bit-exactness check (ybr_big.dcm, real tiled photographic content) ==="
+    ./bin_baseline_rayon dump-image clone/ybr_big.dcm > /tmp/cand045_baseline_big.raw
+    ./bin_patched_rayon dump-image clone/ybr_big.dcm > /tmp/cand045_patched_big.raw
+    cmp /tmp/cand045_baseline_big.raw /tmp/cand045_patched_big.raw && echo "bit-exact" || echo "UNEXPECTED: differs"
+
+    echo "=== bit-exactness check (ybr_random.dcm, synthetic random content) ==="
+    ./bin_baseline_rayon dump-image clone/ybr_random.dcm > /tmp/cand045_baseline_rand.raw
+    ./bin_patched_rayon dump-image clone/ybr_random.dcm > /tmp/cand045_patched_rand.raw
+    cmp /tmp/cand045_baseline_rand.raw /tmp/cand045_patched_rand.raw \
+        && echo "bit-exact (unexpected - random fixture should show the characterized 1-LSB diff)" \
+        || echo "differs (expected - see RESULT.md, ~0.027% of bytes off by 1 LSB, same as candidate 002's fixed-point-only version)"
+
+    echo "=== single-core paired comparison (RUNS=${RUNS:-9}), taskset -c 0, no-rayon build ==="
+    taskset -c 0 env RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline_norayon ./bin_patched_norayon \
+        -- colorspace clone/ybr_big.dcm 200
+
+    echo "=== multi-core paired comparison (RUNS=${RUNS:-9}), unpinned, default rayon build ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline_rayon ./bin_patched_rayon \
+        -- colorspace clone/ybr_big.dcm 200
+
+clean:
+    rm -rf clone bin_baseline_rayon bin_baseline_norayon bin_patched_rayon bin_patched_norayon

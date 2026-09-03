@@ -1,0 +1,137 @@
+diff --git a/symphonia-format-mkv/src/demuxer.rs b/symphonia-format-mkv/src/demuxer.rs
+index 14b7780..0c8a44b 100644
+--- a/symphonia-format-mkv/src/demuxer.rs
++++ b/symphonia-format-mkv/src/demuxer.rs
+@@ -25,7 +25,8 @@ use crate::ebml::{EbmlElementInfo, EbmlError, EbmlIterator, EbmlSchema, ReadEbml
+ use crate::lacing::{Frame, extract_frames};
+ use crate::schema::{MkvElement, MkvSchema};
+ use crate::segment::{
+-    AttachmentsElement, BlockGroupElement, ChaptersElement, CuesElement, EbmlHeaderElement,
++    AttachmentsElement, BlockGroupElement, ChaptersElement, CuePointElement, CuesElement,
++    EbmlHeaderElement,
+     InfoElement, MatroskaTicks, NonZeroMatroskaTicks, SeekHeadElement, SegmentTicks,
+     SignedTrackTicks, TagsElement, TargetTagsMap, TracksElement,
+ };
+@@ -395,7 +396,7 @@ impl<'s> MkvReader<'s> {
+ 
+         // If cues exist, seek to the nearest cue point.
+         if let Some(cues) = &self.cues {
+-            let mut target_cue_point = None;
++            let mut target_cue_point: Option<&CuePointElement> = None;
+ 
+             // Cue points store timestamps in Matroska ticks while the timestamp being seeked to is
+             // in signed Track ticks. Convert to unsigned Matroska ticks for iterating the cue
+@@ -405,28 +406,48 @@ impl<'s> MkvReader<'s> {
+                 .try_into_matroska_ticks(tb)
+                 .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
+ 
++            // Do not assume the cue points are sorted by time: find the cue point with the
++            // largest time that is still <= ts by scanning the whole table.
+             for cue_point in &cues.points {
+-                if cue_point.time > ts {
+-                    break;
++                if cue_point.time <= ts {
++                    let is_later = match target_cue_point {
++                        Some(prev) => cue_point.time >= prev.time,
++                        None => true,
++                    };
++                    if is_later {
++                        target_cue_point = Some(cue_point);
++                    }
+                 }
+-                target_cue_point = Some(cue_point);
+             }
+ 
+             let target_cue_point =
+                 target_cue_point.ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
+ 
++            // A `CuePoint` may carry one `CueTrackPositions` per indexed track. Use the one that
++            // actually corresponds to the track being sought; other tracks' positions can point
++            // into unrelated clusters. If the requested track has no dedicated entry for this cue
++            // point, fall back to the position with the smallest cluster offset: since seeking
++            // forward from there can only ever advance past, never skip over, the true target
++            // block, this can never return an *earlier* frame than the correct answer.
++            let positions = target_cue_point
++                .positions
++                .iter()
++                .find(|p| p.track.get() == u64::from(id))
++                .or_else(|| target_cue_point.positions.iter().min_by_key(|p| p.cluster_pos))
++                .expect("CuePointElement::read guarantees at least one CueTrackPositions");
++
+             log::debug!(
+                 "found cue point: track_id={}, ts={}, seg_pos={}",
+-                target_cue_point.positions.track.get(),
++                positions.track.get(),
+                 target_cue_point.time,
+-                target_cue_point.positions.cluster_pos
++                positions.cluster_pos
+             );
+ 
+             // Ascend back to the segment element.
+             self.iter.pop_elements_upto(MkvElement::Segment)?;
+ 
+             // Seek to the specific cluster element.
+-            self.iter.seek_to_child(target_cue_point.positions.cluster_pos)?;
++            self.iter.seek_to_child(positions.cluster_pos)?;
+ 
+             // Resume iteration.
+             let cluster = match self.iter.next_header()? {
+@@ -452,7 +473,7 @@ impl<'s> MkvReader<'s> {
+ 
+             // If a cluster relative position is available, seek to the exact simple block or
+             // block group element.
+-            if let Some(cluster_rel_pos) = target_cue_point.positions.cluster_rel_pos {
++            if let Some(cluster_rel_pos) = positions.cluster_rel_pos {
+                 self.iter.seek_to_child(cluster_rel_pos)?;
+             }
+         }
+diff --git a/symphonia-format-mkv/src/segment.rs b/symphonia-format-mkv/src/segment.rs
+index 86aead1..021be1e 100644
+--- a/symphonia-format-mkv/src/segment.rs
++++ b/symphonia-format-mkv/src/segment.rs
+@@ -1072,7 +1072,9 @@ impl EbmlElement<MkvSchema> for CuesElement {
+ pub(crate) struct CuePointElement {
+     /// Time in segment ticks.
+     pub(crate) time: MatroskaTicks,
+-    pub(crate) positions: CueTrackPositionsElement,
++    /// One `CueTrackPositions` per track referencing this timestamp. A `CuePoint` may (and, for a
++    /// multi-track file, typically does) contain more than one of these, one per indexed track.
++    pub(crate) positions: Box<[CueTrackPositionsElement]>,
+ }
+ 
+ impl EbmlElement<MkvSchema> for CuePointElement {
+@@ -1080,7 +1082,7 @@ impl EbmlElement<MkvSchema> for CuePointElement {
+ 
+     fn read<R: ReadEbml>(it: &mut MkvEbmlIterator<R>, hdr: &MkvEbmlElementHeader) -> Result<Self> {
+         let mut time = None;
+-        let mut positions = None;
++        let mut positions = vec![];
+ 
+         while let Some(child) = it.next_header()? {
+             match child.element_type() {
+@@ -1089,8 +1091,8 @@ impl EbmlElement<MkvSchema> for CuePointElement {
+                     time = Some(MatroskaTicks(it.read_u64_no_default()?));
+                 }
+                 MkvElement::CueTrackPositions => {
+-                    // Mandatory element.
+-                    positions = Some(it.read_master_element()?);
++                    // Mandatory element. May appear more than once, once per indexed track.
++                    positions.push(it.read_master_element()?);
+                 }
+                 other => {
+                     // Unexpected child element.
+@@ -1099,9 +1101,13 @@ impl EbmlElement<MkvSchema> for CuePointElement {
+             }
+         }
+ 
++        if positions.is_empty() {
++            return Err(EbmlError::ElementError("mkv: missing positions in cue"));
++        }
++
+         Ok(Self {
+             time: time.ok_or(EbmlError::ElementError("mkv: missing time in cue"))?,
+-            positions: positions.ok_or(EbmlError::ElementError("mkv: missing positions in cue"))?,
++            positions: positions.into_boxed_slice(),
+         })
+     }
+ }

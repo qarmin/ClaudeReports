@@ -1,0 +1,63 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder or fetched by `just clone` into ./clone
+# (gitignored) - nothing reaches outside the folder it lives in, so the whole folder can be copied
+# anywhere (e.g. attached to a GitHub issue) and `just test` still works.
+#
+# The subject is a *compiler backend*, so "run the repro" means: build cg_clif from ./clone, then
+# compile + run repro/ twice - once with plain cargo (LLVM = the oracle) and once with
+# clone/dist/cargo-clif - and compare. repro/ has two binaries:
+#
+#   control  an `extern "C"` fn taking/returning `__m128`/`__m128i` by value plus a Rust-ABI
+#            `__m256` fn. Must build and print the same three lines under both compilers.
+#   wide     an `extern "C"` fn taking/returning `__m256` by value, made legal by a per-function
+#            `#[target_feature(enable = "avx")]`. LLVM compiles it and prints the sum; unpatched
+#            cg_clif ICEs (`Unexpected SSA-value type: f32x8` reported through `bug!()`).
+#            patch.diff turns the ICE into a plain `error:` diagnostic.
+#
+# Requirements: the nightly toolchain pinned by clone/rust-toolchain.toml (rustup fetches it), the
+# rust-src component, and an x86-64 host. Building cg_clif takes a few minutes the first time.
+# Swap repo_url for https://github.com/rust-lang/rustc_codegen_cranelift.git if you have no SSH key
+# on GitHub.
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+# Full cycle: clone pristine, prove the ICE exists, apply the fix, prove it is gone.
+# Written as sequential `just` calls rather than a dependency list because build-backend has to run
+# twice and just would deduplicate it as a dependency.
+test:
+    just repo_url={{repo_url}} base_commit={{base_commit}} clone
+    just build-backend
+    just reproduce-before
+    just apply
+    just build-backend
+    just reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Builds clone/dist/{cargo-clif,rustc-clif} plus the cg_clif sysroot. Must be re-run after `apply`.
+build-backend:
+    cd clone && ./y.sh build
+
+# Build + run repro/ against the current state of ./clone. Unpatched, the `wide` binary makes
+# cg_clif ICE, so run.sh exits 1 and the `-` prefix keeps `just test` going to the apply/after half.
+reproduce-before:
+    -ulimit -c 0 && rm -rf repro/target-clif && bash repro/run.sh "{{justfile_directory()}}/clone"
+    rm -f rustc-ice-*.txt
+
+# Same repro against the patched clone: `control` must still match LLVM byte-for-byte and `wide`
+# must now be rejected with a diagnostic instead of an ICE.
+reproduce-after:
+    ulimit -c 0 && rm -rf repro/target-clif && bash repro/run.sh "{{justfile_directory()}}/clone"
+    rm -f rustc-ice-*.txt
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+clean:
+    rm -rf clone repro/target-llvm repro/target-clif repro/*.out repro/*.build repro/Cargo.lock
+    rm -f rustc-ice-*.txt repro/rustc-ice-*.txt

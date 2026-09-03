@@ -1,0 +1,83 @@
+=== `just test` output (fresh clone at base_commit 75168314, no patch applied - this is the
+=== official repro/ check for this candidate) ===
+
+rm -rf clone
+git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false clone https://github.com/linebender/vello.git clone
+Cloning into 'clone'...
+cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false checkout 7516831426fb70f36d62c521c5477f6a7265b36a
+Note: switching to '7516831426fb70f36d62c521c5477f6a7265b36a'.
+HEAD is now at 75168314 Remove some Vello-Classic-specific info from the root README (#1698)
+cd repro && cargo run --release
+    Updating crates.io index
+     Locking 41 packages to latest compatible versions
+   Compiling proc-macro2 v1.0.107
+   [... normal dependency build output omitted ...]
+   Compiling vello_common v0.2.0 (/tmp/candidate_018_test/clone/sparse_strips/vello_common)
+   Compiling skrifa v0.44.0
+   Compiling glifo v0.3.0 (/tmp/candidate_018_test/clone/glifo)
+   Compiling vello_cpu v0.2.0 (/tmp/candidate_018_test/clone/sparse_strips/vello_cpu)
+   Compiling repro v0.1.0 (/tmp/candidate_018_test/repro)
+    Finished `release` profile [optimized] target(s) in 19.61s
+     Running `target/release/repro`
+inside 3x3 rect (251,31): PremulRgba8 { r: 255, g: 99, b: 71, a: 255 }
+far left        (2,31):   PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }
+far right     (509,31):   PremulRgba8 { r: 0, g: 0, b: 0, a: 0 }
+did not reproduce - flood stayed within the filtered content's region
+
+Repeated 2 more times directly (same built binary, `./target/release/repro`), identical output and
+exit code 0 each time - 3/3 total runs, fully deterministic (no seed/layout dependence: this is
+plain integer/float geometry with no allocator-order or timing dependence).
+
+=== Supplementary evidence: the bug WAS real on an older commit, and is fixed by a specific later
+=== commit - captured via a separate scratch investigation (git worktrees checked out directly in
+=== the main project's own clone, not via this folder's own justfile/repro; these worktrees are
+=== NOT part of the shipped repro/ and are not required to reproduce this candidate's own result,
+=== which is "not reproducible on current HEAD" - included here only to substantiate the historical
+=== root-cause/"fixed by" claim in RESULT.md) ===
+
+--- scan against commit 3df80378 (immediate parent of the fixing commit, "Triple script timeout on
+--- WASM (#1710)") - same 512x64 canvas, same 3x3 rect at (250,30)-(253,33), same flood filter,
+--- scanning for the flooded pixel extent along row y=31 and column x=251:
+
+   Compiling vello_common v0.0.9 (/tmp/vello_worktrees/018_old_pre_rewrite/sparse_strips/vello_common)
+   Compiling vello_cpu v0.0.9 (/tmp/vello_worktrees/018_old_pre_rewrite/sparse_strips/vello_cpu)
+   Compiling scan_old v0.1.0 (/tmp/scan_018_old)
+    Finished `release` profile [optimized] target(s) in 19.35s
+     Running `target/release/scan_old`
+flooded x range on row 31: Some(0)..=Some(255)
+flooded y range on col 251: Some(28)..=Some(35)
+
+Repeated 2 more times, identical output each time (3/3 total) - the flood covers the ENTIRE
+256-pixel-wide row (x=0..=255), not just the tile-snapped area around the 3x3 rect, exactly
+matching issue #1423's description ("we will still fill 256 pixels of the whole width of a wide
+tile").
+
+--- scan against commit 9c292860 ("vello_cpu: A full rewrite of the frontend (#1701)"), the very
+--- next commit after 3df80378 that touches sparse_strips/ - same test:
+
+   Compiling vello_common v0.0.9 (/tmp/vello_worktrees/018_fix_commit/sparse_strips/vello_common)
+   Compiling vello_cpu v0.0.9 (/tmp/vello_worktrees/018_fix_commit/sparse_strips/vello_cpu)
+   Compiling scan_fix v0.1.0 (/tmp/scan_018_fix)
+    Finished `release` profile [optimized] target(s) in 19.63s
+     Running `target/release/scan_fix`
+flooded x range on row 31: Some(248)..=Some(255)
+flooded y range on col 251: Some(28)..=Some(35)
+
+Already tile-granularity (248..=255, an 8px-wide area matching the 3x3 rect expanded/snapped to
+Tile::WIDTH=4 boundaries) at this commit - confirming 9c292860 is the exact commit that changed
+this behavior (`git log --oneline 3df80378..9c292860 -- sparse_strips/` returns only this one
+commit).
+
+--- for completeness, `git log --oneline --all -S "pixmap_bbox" -- sparse_strips/` (searching for
+--- when the current `pixmap_bbox`/`snap_to_tile_coordinates` mechanism was introduced):
+
+9c292860 vello_cpu: A full rewrite of the frontend (#1701)
+93162ef3 sparse_strips: Move some code from `vello_cpu` to `vello_common` (#1744)
+dc23e938 vello_common: Generalize the command recorder abstraction and add more metadata (#1746)
+c3343862 vello_hybrid: A complete rewrite of the core logic (#1759)
+
+--- and the pre-rewrite mechanism this replaced, confirming `WideTile::WIDTH = 256` (the "wide
+--- tile" the issue's title/body refers to) was the old granularity:
+
+$ git show 3df80378:sparse_strips/vello_common/src/coarse.rs | grep -n "pub const WIDTH"
+1379:    pub const WIDTH: u16 = 256;

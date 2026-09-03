@@ -1,0 +1,52 @@
+# Self-contained reproduction for this candidate.
+#
+# Needs a real Qt 6 installed and on PATH (qmake reachable) - the i-slint-backend-qt crate
+# links against it at build time, AND needs the `offscreen` QPA plugin (ships with a normal Qt
+# install). If you don't have a system Qt, aqtinstall works without root, e.g.:
+#   python3 -m venv tmp/aqt && tmp/aqt/bin/pip install aqtinstall
+#   tmp/aqt/bin/aqt install-qt linux desktop 6.5.3 gcc_64 -O tmp/Qt
+#   export PATH="$PWD/tmp/Qt/6.5.3/gcc_64/bin:$PATH"
+#   export LD_LIBRARY_PATH="$PWD/tmp/Qt/6.5.3/gcc_64/lib:$LD_LIBRARY_PATH"
+#
+# The bench binary itself needs no display: it sets QT_QPA_PLATFORM=offscreen internally via
+# the `bench` recipe below.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+
+# Full cycle: clone at the pinned commit, apply the fix + the bench-probe scaffolding, build, run.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Two patches: patch.diff is the actual proposed fix (identical to candidate 113's - this
+# candidate verifies it through a different, more end-to-end harness, it doesn't change it);
+# bench/bench_probe.patch is measurement-only scaffolding (per-bucket call/miss counters on top
+# of the fix) - never meant to ship, kept separate so patch.diff alone is postable as the actual
+# fix (e.g. attached to GitHub issue #7511).
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && git apply "{{justfile_directory()}}/bench/bench_probe.patch"
+
+bench:
+    ln -sfn ../clone bench/clone
+    cd bench && cargo build --release --target-dir target
+    QT_QPA_PLATFORM=offscreen ./bench/target/release/qt_icon_e2e_probe 1000
+
+# Measure the pristine (pre-113) tree with the same harness, for the baseline row in RESULT.md.
+# Uses bench_probe_baseline.patch instead of patch.diff + bench_probe.patch (no cache to check,
+# so every call is also a miss) - same bench/ crate and scene either way.
+baseline:
+    rm -rf clone-baseline
+    git clone {{repo_url}} clone-baseline
+    cd clone-baseline && git checkout {{base_commit}}
+    cd clone-baseline && git apply "{{justfile_directory()}}/bench/bench_probe_baseline.patch"
+    ln -sfn ../clone-baseline bench/clone
+    cd bench && cargo build --release --target-dir target-baseline
+    QT_QPA_PLATFORM=offscreen ./bench/target-baseline/release/qt_icon_e2e_probe 1000
+
+clean:
+    rm -rf clone clone-baseline bench/clone bench/target bench/target-baseline

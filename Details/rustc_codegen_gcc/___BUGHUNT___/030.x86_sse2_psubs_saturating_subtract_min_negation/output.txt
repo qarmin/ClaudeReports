@@ -1,0 +1,77 @@
+=== Standalone C reproduction against system GCC 15.2.0 (informative negative - not the bundled libgccjit) ===
+$ gcc -O2 -msse2 test2.c -o test2_O2 && ./test2_O2
+i8 subs: [127,0,-128,-1] - [-128,-128,-128,1] = [127,127,0,-2]  (expect [127,127,0,-2])
+i16 subs: [32767,0,-32768,-1] - [-32768,-32768,-32768,1] = [32767,32767,0,-2] (expect [32767,32767,0,-2])
+(identical result at -O0, -O1, -O2, -O3)
+
+=== Standalone JIT harness against the real bundled libgccjit.so (dead end, abandoned) ===
+$ LIBGCCJIT_PATH=.../libgccjit.so LD_LIBRARY_PATH=... ./target/release/psubs_jit_repro
+Cannot find target builtin __builtin_ia32_psubsb128
+
+thread 'main' (405942) panicked at src/main.rs:55:27:
+gccjit: call returned NULL (libgccjit recorded no error; see stderr)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+=== Real end-to-end repro (./y.sh rustc), BEFORE fix, 3 runs ===
+$ CHANNEL=release ./y.sh rustc repro/x86_subs_min.rs -o /tmp/x86_subs_min_before
+$ /tmp/x86_subs_min_before
+thread 'main' (424731) panicked at repro/x86_subs_min.rs:30:9:
+assertion `left == right` failed: _mm_subs_epi8 mismatch (operand includes i8::MIN)
+  left: [-1, -128, -128, -2]
+ right: [127, 127, 0, -2]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+(exit code 101)
+
+$ /tmp/x86_subs_min_before
+thread 'main' (424732) panicked at repro/x86_subs_min.rs:30:9:
+assertion `left == right` failed: _mm_subs_epi8 mismatch (operand includes i8::MIN)
+  left: [-1, -128, -128, -2]
+ right: [127, 127, 0, -2]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+(exit code 101)
+
+$ /tmp/x86_subs_min_before
+thread 'main' (424733) panicked at repro/x86_subs_min.rs:30:9:
+assertion `left == right` failed: _mm_subs_epi8 mismatch (operand includes i8::MIN)
+  left: [-1, -128, -128, -2]
+ right: [127, 127, 0, -2]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+(exit code 101)
+
+=== Differential check: identical source compiled with host rustc (LLVM backend) ===
+$ rustc -O repro/x86_subs_min.rs -o /tmp/x86_subs_min_llvm && /tmp/x86_subs_min_llvm
+all assertions passed
+(exit code 0)
+
+=== After applying candidate 025's patch.diff (src/intrinsic/simd.rs) and rebuilding the backend, 3 runs ===
+$ CHANNEL=release ./y.sh build --release
+   Compiling rustc_codegen_gcc v0.1.0 (/tmp/bughunt_worktrees/030)
+    Finished `release` profile [optimized] target(s) in 1.88s
+
+$ CHANNEL=release ./y.sh rustc repro/x86_subs_min.rs -o /tmp/x86_subs_min_after
+$ /tmp/x86_subs_min_after
+all assertions passed
+(exit code 0)
+
+$ /tmp/x86_subs_min_after
+all assertions passed
+(exit code 0)
+
+$ /tmp/x86_subs_min_after
+all assertions passed
+(exit code 0)
+
+=== Project test suite, BEFORE fix (CHANNEL=release ./y.sh test --release --mini-tests --cargo-tests) ===
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out          (cargo unit tests)
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out          (mini-tests smoke test)
+test result: ok. 41 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out         (debug lang_tests)
+test result: ok. 41 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out         (release lang_tests)
+
+=== Project test suite, AFTER fix (identical command) ===
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out          (cargo unit tests)
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out          (mini-tests smoke test)
+test result: ok. 41 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out         (debug lang_tests)
+test result: ok. 41 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out         (release lang_tests)
+
+No regressions; identical pass/fail counts before and after (this repro is intentionally not
+part of tests/run/, so it isn't counted in the above - see RESULT.md).

@@ -1,0 +1,35 @@
+# Self-contained verification for this candidate.
+#
+# Status: Not reproducible - no reachable path was found through the crate's real public API
+# (BasicPool + ParThreadPool + Pool::basic + Runner::fixed_with_pool) that lets Inner::drop run
+# while its queue is non-empty. `just test` clones the project fresh at base_commit, drops in the
+# stress test that was actually run this session (stress_test.rs, next to this justfile - copied
+# into the clone's tests/ dir, not referencing the main project), and re-runs it under both a
+# debug-assertions build and a release build so the claim can be independently re-checked without
+# this folder's prose.
+
+repo_url := "https://github.com/orxfun/orx-parallel.git"
+base_commit := "b9214fbeb714e4bb8f8858676a818cef2f21b097"
+
+test: clone stress-test debug-run release-run
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Copies the exact stress test used this session into the freshly cloned tree.
+stress-test:
+    cp "{{justfile_directory()}}/stress_test.rs" clone/tests/bughunt_024_basic_pool_stress.rs
+
+# Re-run under a plain debug-assertions build (~13s: 500 iterations x 256 tasks, 1 worker thread,
+# 4 concurrent droppers per iteration).
+debug-run:
+    cd clone && cargo test --test bughunt_024_basic_pool_stress
+
+# Re-run under a release build (same test, optimized).
+release-run:
+    cd clone && cargo test --release --test bughunt_024_basic_pool_stress
+
+clean:
+    rm -rf clone

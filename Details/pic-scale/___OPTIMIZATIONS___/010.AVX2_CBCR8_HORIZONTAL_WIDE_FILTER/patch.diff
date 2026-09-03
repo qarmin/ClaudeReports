@@ -1,0 +1,540 @@
+diff --git a/src/avx2/cbcr8.rs b/src/avx2/cbcr8.rs
+new file mode 100644
+index 0000000..8b2aa8f
+--- /dev/null
++++ b/src/avx2/cbcr8.rs
+@@ -0,0 +1,493 @@
++/*
++ * Copyright (c) Radzivon Bartoshyk. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without modification,
++ * are permitted provided that the following conditions are met:
++ *
++ * 1.  Redistributions of source code must retain the above copyright notice, this
++ * list of conditions and the following disclaimer.
++ *
++ * 2.  Redistributions in binary form must reproduce the above copyright notice,
++ * this list of conditions and the following disclaimer in the documentation
++ * and/or other materials provided with the distribution.
++ *
++ * 3.  Neither the name of the copyright holder nor the names of its
++ * contributors may be used to endorse or promote products derived from
++ * this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
++ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
++ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#[cfg(target_arch = "x86")]
++use std::arch::x86::*;
++#[cfg(target_arch = "x86_64")]
++use std::arch::x86_64::*;
++
++use crate::filter_weights::FilterWeights;
++use crate::sse::shuffle;
++use crate::support::{PRECISION, ROUNDING_CONST};
++
++// Same "reorder taps into per-channel groups via shuffle_epi8, then madd_epi16" trick as
++// src/sse/cbcr8.rs, widened to 256-bit: `_mm256_shuffle_epi8` shuffles each 128-bit lane
++// independently using the same control indices, so replicating the SSE 16-byte control mask into
++// both lanes of a 256-bit one applies the identical per-lane grouping to two independent 8-tap
++// chunks (taps 0-7 in the low lane, taps 8-15 in the high lane) in a single instruction.
++
++#[inline]
++#[target_feature(enable = "avx2")]
++fn conv_cb_cr_1(start_x: usize, src: &[u8], weight0: __m128i, store_0: __m128i) -> __m128i {
++    unsafe {
++        const CN: usize = 2;
++        let src_ptr = src.get_unchecked((start_x * CN)..).as_ptr();
++        let vl = _mm_loadu_si16(src_ptr.cast());
++        let lo = _mm_unpacklo_epi8(vl, _mm_setzero_si128());
++        let wlo = _mm_unpacklo_epi16(lo, _mm_setzero_si128());
++        _mm_add_epi32(store_0, _mm_madd_epi16(wlo, weight0))
++    }
++}
++
++#[inline]
++#[target_feature(enable = "avx2")]
++fn conv_cb_cr_2(
++    start_x: usize,
++    src: &[u8],
++    weight0: __m128i,
++    store_0: __m128i,
++    sh: __m128i,
++) -> __m128i {
++    unsafe {
++        const CN: usize = 2;
++        let src_ptr = src.get_unchecked((start_x * CN)..).as_ptr();
++        let vl = _mm_loadu_si32(src_ptr.cast());
++        let lo = _mm_shuffle_epi8(vl, sh);
++        _mm_add_epi32(store_0, _mm_madd_epi16(lo, weight0))
++    }
++}
++
++#[inline]
++#[target_feature(enable = "avx2")]
++fn conv_cb_cr_4(
++    start_x: usize,
++    src: &[u8],
++    weight0: __m128i,
++    store_0: __m128i,
++    sh: __m128i,
++) -> __m128i {
++    unsafe {
++        const CN: usize = 2;
++        let src_ptr = src.get_unchecked((start_x * CN)..).as_ptr();
++        let vl = _mm_loadu_si64(src_ptr.cast());
++        let lo = _mm_shuffle_epi8(vl, sh);
++        _mm_add_epi32(store_0, _mm_madd_epi16(lo, weight0))
++    }
++}
++
++#[inline]
++#[target_feature(enable = "avx2")]
++fn conv_cb_cr_8(
++    store_0: __m128i,
++    start_x: usize,
++    src: &[u8],
++    w0: __m128i,
++    w1: __m128i,
++    sh_lo: __m128i,
++    sh_hi: __m128i,
++) -> __m128i {
++    unsafe {
++        const CN: usize = 2;
++        let src_ptr = src.get_unchecked((start_x * CN)..).as_ptr();
++        let values = _mm_loadu_si128(src_ptr.cast());
++        let lo = _mm_shuffle_epi8(values, sh_lo);
++        let hi = _mm_shuffle_epi8(values, sh_hi);
++        let p = _mm_add_epi32(store_0, _mm_madd_epi16(lo, w0));
++        _mm_add_epi32(p, _mm_madd_epi16(hi, w1))
++    }
++}
++
++#[inline]
++#[target_feature(enable = "avx2")]
++fn conv_cb_cr_16(
++    store_0: __m256i,
++    start_x: usize,
++    src: &[u8],
++    w0: __m256i,
++    w1: __m256i,
++    sh_lo: __m256i,
++    sh_hi: __m256i,
++) -> __m256i {
++    unsafe {
++        const CN: usize = 2;
++        let src_ptr = src.get_unchecked((start_x * CN)..).as_ptr();
++        let values = _mm256_loadu_si256(src_ptr.cast());
++        let lo = _mm256_shuffle_epi8(values, sh_lo);
++        let hi = _mm256_shuffle_epi8(values, sh_hi);
++        let p = _mm256_add_epi32(store_0, _mm256_madd_epi16(lo, w0));
++        _mm256_add_epi32(p, _mm256_madd_epi16(hi, w1))
++    }
++}
++
++#[inline(always)]
++fn fold_store_256(store256: __m256i) -> __m128i {
++    unsafe { _mm_add_epi32(_mm256_castsi256_si128(store256), _mm256_extracti128_si256::<1>(store256)) }
++}
++
++#[inline(always)]
++fn reduce_store_cbcr<const PRECISION: i32>(store: __m128i) -> __m128i {
++    unsafe {
++        let shuf = _mm_shuffle_epi32::<{ shuffle(1, 0, 3, 2) }>(store);
++        let summed = _mm_add_epi32(store, shuf);
++        let shifted = _mm_srai_epi32::<PRECISION>(summed);
++        let narrow16 = _mm_packs_epi32(shifted, shifted);
++        _mm_packus_epi16(narrow16, narrow16)
++    }
++}
++
++pub(crate) fn convolve_horizontal_cbcr_avx_rows_4(
++    src: &[u8],
++    src_stride: usize,
++    dst: &mut [u8],
++    dst_stride: usize,
++    filter_weights: &FilterWeights<i16>,
++    _: u32,
++) {
++    unsafe {
++        convolve_horizontal_cbcr_avx_rows_4_impl(src, src_stride, dst, dst_stride, filter_weights);
++    }
++}
++
++#[target_feature(enable = "avx2")]
++fn convolve_horizontal_cbcr_avx_rows_4_impl(
++    src: &[u8],
++    src_stride: usize,
++    dst: &mut [u8],
++    dst_stride: usize,
++    filter_weights: &FilterWeights<i16>,
++) {
++    unsafe {
++        const CN: usize = 2;
++        const ROUNDING: i32 = ROUNDING_CONST;
++
++        let idx_shuffle_lo = _mm_setr_epi8(0, -1, 2, -1, 1, -1, 3, -1, 4, -1, 6, -1, 5, -1, 7, -1);
++        let idx_shuffle_hi =
++            _mm_setr_epi8(8, -1, 10, -1, 9, -1, 11, -1, 12, -1, 14, -1, 13, -1, 15, -1);
++
++        let idx_shuffle_lo_256 = _mm256_broadcastsi128_si256(idx_shuffle_lo);
++        let idx_shuffle_hi_256 = _mm256_broadcastsi128_si256(idx_shuffle_hi);
++
++        let weights_lo = _mm_setr_epi8(0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 6, 7, 4, 5, 6, 7);
++        let weights_hi = _mm_setr_epi8(8, 9, 10, 11, 8, 9, 10, 11, 12, 13, 14, 15, 12, 13, 14, 15);
++
++        let weights_lo_256 = _mm256_broadcastsi128_si256(weights_lo);
++        let weights_hi_256 = _mm256_broadcastsi128_si256(weights_hi);
++
++        let vld_256 = _mm256_setr_epi32(ROUNDING, ROUNDING, 0, 0, 0, 0, 0, 0);
++
++        let (row0_ref, rest) = dst.split_at_mut(dst_stride);
++        let (row1_ref, rest) = rest.split_at_mut(dst_stride);
++        let (row2_ref, row3_ref) = rest.split_at_mut(dst_stride);
++
++        let iter_row0 = row0_ref.as_chunks_mut::<CN>().0;
++        let iter_row1 = row1_ref.as_chunks_mut::<CN>().0;
++        let iter_row2 = row2_ref.as_chunks_mut::<CN>().0;
++        let iter_row3 = row3_ref.as_chunks_mut::<CN>().0;
++
++        for (((((chunk0, chunk1), chunk2), chunk3), &bounds), weights) in iter_row0
++            .iter_mut()
++            .zip(iter_row1.iter_mut())
++            .zip(iter_row2.iter_mut())
++            .zip(iter_row3.iter_mut())
++            .zip(filter_weights.bounds.iter())
++            .zip(
++                filter_weights
++                    .weights
++                    .chunks_exact(filter_weights.aligned_size),
++            )
++        {
++            let mut jx = 0usize;
++
++            let src0 = src;
++            let src1 = src0.get_unchecked(src_stride..);
++            let src2 = src1.get_unchecked(src_stride..);
++            let src3 = src2.get_unchecked(src_stride..);
++
++            let mut store0_256 = vld_256;
++            let mut store1_256 = vld_256;
++            let mut store2_256 = vld_256;
++            let mut store3_256 = vld_256;
++
++            while jx + 16 <= bounds.size {
++                let w_ptr = weights.get_unchecked(jx..).as_ptr();
++                let raw_w = _mm256_loadu_si256(w_ptr.cast());
++                let w0 = _mm256_shuffle_epi8(raw_w, weights_lo_256);
++                let w1 = _mm256_shuffle_epi8(raw_w, weights_hi_256);
++                let bounds_start = bounds.start + jx;
++
++                store0_256 = conv_cb_cr_16(
++                    store0_256,
++                    bounds_start,
++                    src0,
++                    w0,
++                    w1,
++                    idx_shuffle_lo_256,
++                    idx_shuffle_hi_256,
++                );
++                store1_256 = conv_cb_cr_16(
++                    store1_256,
++                    bounds_start,
++                    src1,
++                    w0,
++                    w1,
++                    idx_shuffle_lo_256,
++                    idx_shuffle_hi_256,
++                );
++                store2_256 = conv_cb_cr_16(
++                    store2_256,
++                    bounds_start,
++                    src2,
++                    w0,
++                    w1,
++                    idx_shuffle_lo_256,
++                    idx_shuffle_hi_256,
++                );
++                store3_256 = conv_cb_cr_16(
++                    store3_256,
++                    bounds_start,
++                    src3,
++                    w0,
++                    w1,
++                    idx_shuffle_lo_256,
++                    idx_shuffle_hi_256,
++                );
++                jx += 16;
++            }
++
++            let mut store0 = fold_store_256(store0_256);
++            let mut store1 = fold_store_256(store1_256);
++            let mut store2 = fold_store_256(store2_256);
++            let mut store3 = fold_store_256(store3_256);
++
++            while jx + 8 <= bounds.size {
++                let w_ptr = weights.get_unchecked(jx..).as_ptr();
++                let raw_w = _mm_loadu_si128(w_ptr.cast());
++                let w0 = _mm_shuffle_epi8(raw_w, weights_lo);
++                let w1 = _mm_shuffle_epi8(raw_w, weights_hi);
++                let bounds_start = bounds.start + jx;
++
++                store0 = conv_cb_cr_8(
++                    store0,
++                    bounds_start,
++                    src0,
++                    w0,
++                    w1,
++                    idx_shuffle_lo,
++                    idx_shuffle_hi,
++                );
++                store1 = conv_cb_cr_8(
++                    store1,
++                    bounds_start,
++                    src1,
++                    w0,
++                    w1,
++                    idx_shuffle_lo,
++                    idx_shuffle_hi,
++                );
++                store2 = conv_cb_cr_8(
++                    store2,
++                    bounds_start,
++                    src2,
++                    w0,
++                    w1,
++                    idx_shuffle_lo,
++                    idx_shuffle_hi,
++                );
++                store3 = conv_cb_cr_8(
++                    store3,
++                    bounds_start,
++                    src3,
++                    w0,
++                    w1,
++                    idx_shuffle_lo,
++                    idx_shuffle_hi,
++                );
++                jx += 8;
++            }
++
++            while jx + 4 <= bounds.size {
++                let w_ptr = weights.get_unchecked(jx..).as_ptr();
++                let w0 = _mm_shuffle_epi8(_mm_loadu_si64(w_ptr.cast()), weights_lo);
++                let bounds_start = bounds.start + jx;
++
++                store0 = conv_cb_cr_4(bounds_start, src0, w0, store0, idx_shuffle_lo);
++                store1 = conv_cb_cr_4(bounds_start, src1, w0, store1, idx_shuffle_lo);
++                store2 = conv_cb_cr_4(bounds_start, src2, w0, store2, idx_shuffle_lo);
++                store3 = conv_cb_cr_4(bounds_start, src3, w0, store3, idx_shuffle_lo);
++                jx += 4;
++            }
++
++            while jx + 2 <= bounds.size {
++                let w_ptr = weights.get_unchecked(jx..).as_ptr();
++                let w0 = _mm_shuffle_epi8(_mm_loadu_si32(w_ptr.cast()), weights_lo);
++                let bounds_start = bounds.start + jx;
++
++                store0 = conv_cb_cr_2(bounds_start, src0, w0, store0, idx_shuffle_lo);
++                store1 = conv_cb_cr_2(bounds_start, src1, w0, store1, idx_shuffle_lo);
++                store2 = conv_cb_cr_2(bounds_start, src2, w0, store2, idx_shuffle_lo);
++                store3 = conv_cb_cr_2(bounds_start, src3, w0, store3, idx_shuffle_lo);
++                jx += 2;
++            }
++
++            while jx < bounds.size {
++                let w_ptr = *weights.get_unchecked(jx);
++                let w0 = _mm_set1_epi16(w_ptr);
++                let bounds_start = bounds.start + jx;
++
++                store0 = conv_cb_cr_1(bounds_start, src0, w0, store0);
++                store1 = conv_cb_cr_1(bounds_start, src1, w0, store1);
++                store2 = conv_cb_cr_1(bounds_start, src2, w0, store2);
++                store3 = conv_cb_cr_1(bounds_start, src3, w0, store3);
++                jx += 1;
++            }
++
++            _mm_storeu_si16(
++                chunk0.as_mut_ptr().cast(),
++                reduce_store_cbcr::<PRECISION>(store0),
++            );
++            _mm_storeu_si16(
++                chunk1.as_mut_ptr().cast(),
++                reduce_store_cbcr::<PRECISION>(store1),
++            );
++            _mm_storeu_si16(
++                chunk2.as_mut_ptr().cast(),
++                reduce_store_cbcr::<PRECISION>(store2),
++            );
++            _mm_storeu_si16(
++                chunk3.as_mut_ptr().cast(),
++                reduce_store_cbcr::<PRECISION>(store3),
++            );
++        }
++    }
++}
++
++pub(crate) fn convolve_horizontal_cbcr_avx_row_one(
++    src: &[u8],
++    dst: &mut [u8],
++    filter_weights: &FilterWeights<i16>,
++    _: u32,
++) {
++    unsafe {
++        convolve_horizontal_cbcr_avx_row_one_impl(src, dst, filter_weights);
++    }
++}
++
++#[target_feature(enable = "avx2")]
++fn convolve_horizontal_cbcr_avx_row_one_impl(
++    src: &[u8],
++    dst: &mut [u8],
++    filter_weights: &FilterWeights<i16>,
++) {
++    unsafe {
++        const CN: usize = 2;
++        const ROUNDING: i32 = ROUNDING_CONST;
++
++        let idx_shuffle_lo = _mm_setr_epi8(0, -1, 2, -1, 1, -1, 3, -1, 4, -1, 6, -1, 5, -1, 7, -1);
++        let idx_shuffle_hi =
++            _mm_setr_epi8(8, -1, 10, -1, 9, -1, 11, -1, 12, -1, 14, -1, 13, -1, 15, -1);
++
++        let idx_shuffle_lo_256 = _mm256_broadcastsi128_si256(idx_shuffle_lo);
++        let idx_shuffle_hi_256 = _mm256_broadcastsi128_si256(idx_shuffle_hi);
++
++        let weights_lo = _mm_setr_epi8(0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 6, 7, 4, 5, 6, 7);
++        let weights_hi = _mm_setr_epi8(8, 9, 10, 11, 8, 9, 10, 11, 12, 13, 14, 15, 12, 13, 14, 15);
++
++        let weights_lo_256 = _mm256_broadcastsi128_si256(weights_lo);
++        let weights_hi_256 = _mm256_broadcastsi128_si256(weights_hi);
++
++        let vld_256 = _mm256_setr_epi32(ROUNDING, ROUNDING, 0, 0, 0, 0, 0, 0);
++
++        for ((dst, &bounds), weights) in dst
++            .as_chunks_mut::<CN>()
++            .0
++            .iter_mut()
++            .zip(filter_weights.bounds.iter())
++            .zip(
++                filter_weights
++                    .weights
++                    .chunks_exact(filter_weights.aligned_size),
++            )
++        {
++            let mut jx = 0usize;
++            let mut store256 = vld_256;
++
++            while jx + 16 <= bounds.size {
++                let w_ptr = weights.get_unchecked(jx..).as_ptr();
++                let raw_w = _mm256_loadu_si256(w_ptr.cast());
++                let w0 = _mm256_shuffle_epi8(raw_w, weights_lo_256);
++                let w1 = _mm256_shuffle_epi8(raw_w, weights_hi_256);
++                store256 = conv_cb_cr_16(
++                    store256,
++                    bounds.start + jx,
++                    src,
++                    w0,
++                    w1,
++                    idx_shuffle_lo_256,
++                    idx_shuffle_hi_256,
++                );
++                jx += 16;
++            }
++
++            let mut store = fold_store_256(store256);
++
++            while jx + 8 <= bounds.size {
++                let w_ptr = weights.get_unchecked(jx..).as_ptr();
++                let raw_w = _mm_loadu_si128(w_ptr.cast());
++                let w0 = _mm_shuffle_epi8(raw_w, weights_lo);
++                let w1 = _mm_shuffle_epi8(raw_w, weights_hi);
++                store = conv_cb_cr_8(
++                    store,
++                    bounds.start + jx,
++                    src,
++                    w0,
++                    w1,
++                    idx_shuffle_lo,
++                    idx_shuffle_hi,
++                );
++                jx += 8;
++            }
++
++            while jx + 4 <= bounds.size {
++                let w_ptr = weights.get_unchecked(jx..).as_ptr();
++                let w0 = _mm_shuffle_epi8(_mm_loadu_si64(w_ptr.cast()), weights_lo);
++                store = conv_cb_cr_4(bounds.start + jx, src, w0, store, idx_shuffle_lo);
++                jx += 4;
++            }
++
++            while jx + 2 <= bounds.size {
++                let w_ptr = weights.get_unchecked(jx..).as_ptr();
++                let w0 = _mm_shuffle_epi8(_mm_loadu_si32(w_ptr.cast()), weights_lo);
++                store = conv_cb_cr_2(bounds.start + jx, src, w0, store, idx_shuffle_lo);
++                jx += 2;
++            }
++
++            while jx < bounds.size {
++                let w_ptr = *weights.get_unchecked(jx);
++                let w0 = _mm_set1_epi16(w_ptr);
++                store = conv_cb_cr_1(bounds.start + jx, src, w0, store);
++                jx += 1;
++            }
++
++            _mm_storeu_si16(
++                dst.as_mut_ptr().cast(),
++                reduce_store_cbcr::<PRECISION>(store),
++            );
++        }
++    }
++}
+diff --git a/src/avx2/mod.rs b/src/avx2/mod.rs
+index dc08cef..306a054 100644
+--- a/src/avx2/mod.rs
++++ b/src/avx2/mod.rs
+@@ -33,6 +33,7 @@ mod alpha_f32;
+ mod alpha_u16;
+ mod alpha_u8;
+ mod ar30_utils;
++mod cbcr8;
+ mod check_alpha;
+ mod horizontal_ar30;
+ mod plane_f32;
+@@ -70,6 +71,7 @@ pub(crate) use alpha_f32::avx_premultiply_alpha_rgba_f32;
+ pub(crate) use alpha_f32::avx_unpremultiply_alpha_rgba_f32;
+ pub(crate) use alpha_u8::avx_premultiply_alpha_rgba;
+ pub(crate) use alpha_u8::avx_unpremultiply_alpha_rgba;
++pub(crate) use cbcr8::{convolve_horizontal_cbcr_avx_row_one, convolve_horizontal_cbcr_avx_rows_4};
+ pub(crate) use alpha_u16::{avx_premultiply_alpha_rgba_u16, avx_unpremultiply_alpha_rgba_u16};
+ pub(crate) use check_alpha::{
+     avx_has_non_constant_cap_alpha_rgba8, avx_has_non_constant_cap_alpha_rgba16,
+diff --git a/src/factory/cbcr8.rs b/src/factory/cbcr8.rs
+index 6acf505..a2523db 100644
+--- a/src/factory/cbcr8.rs
++++ b/src/factory/cbcr8.rs
+@@ -99,6 +99,16 @@ impl HorizontalFilterPass<u8, f32, 2> for ImageStore<'_, u8, 2> {
+                 _dispatcher_1_row = convolve_horizontal_cbcr_sse_row_one;
+             }
+         }
++        #[cfg(all(target_arch = "x86_64", feature = "avx"))]
++        {
++            if std::arch::is_x86_feature_detected!("avx2") {
++                use crate::avx2::{
++                    convolve_horizontal_cbcr_avx_row_one, convolve_horizontal_cbcr_avx_rows_4,
++                };
++                _dispatcher_4_rows = Some(convolve_horizontal_cbcr_avx_rows_4);
++                _dispatcher_1_row = convolve_horizontal_cbcr_avx_row_one;
++            }
++        }
+         use crate::support::PRECISION;
+         let i_weights = filter_weights.numerical_approximation::<i16, PRECISION>(0);
+         Arc::new(HorizontalFiltering {

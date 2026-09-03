@@ -1,0 +1,42 @@
+=== Before fix (pristine tree, commit 5c6565e36d35b9ea7de049daa67acc0be0fd3b01) ===
+$ cargo run --release   (repro/, lofty pointed directly at the unpatched checkout)
+
+    Finished `release` profile [optimized] target(s) in 0.01s
+     Running `target/release/repro016`
+base AIFF file: 86 bytes
+after writing small tag:  1140 bytes
+
+thread 'main' (124717) panicked at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/id3/v2/write/chunk_file.rs:105:6:
+attempt to subtract with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - panicked: Any { .. }
+
+(reproduced deterministically 4/4 runs, release profile with overflow-checks = true, no fixed seed
+- the input is fully deterministic, not randomized)
+
+=== For reference: release build WITHOUT overflow-checks, pristine tree (same scratch repro) ===
+Confirms the bug is not merely a debug-assertions artifact - a normal release build silently
+corrupts the file instead of panicking:
+
+base AIFF file: 86 bytes
+after writing small tag:  1140 bytes
+after writing large tag:  201144 bytes
+FORM header declares total size = 4294768432 bytes; actual physical file = 201144 bytes
+REPRODUCED (silent corruption) - FORM header size does not match the actual file size
+
+=== After fix (`updated_stream_len -= ...` changed to `updated_stream_len += ...`) ===
+$ cargo run --release   (overflow-checks = true)
+
+   Compiling lofty v0.25.1 (/home/rafal/Projekty/Obce/lofty-rs/lofty)
+   Compiling repro016 v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 3.02s
+     Running `target/release/repro016`
+base AIFF file: 86 bytes
+after writing small tag:  1140 bytes
+after writing large tag:  201144 bytes
+FORM header declares total size = 201144 bytes; actual physical file = 201144 bytes
+did not reproduce - FORM header size matches the real file size
+
+=== Project test suite (lofty crate), run both before and after the fix ===
+`cargo test -p lofty --lib`:            256 passed; 0 failed; 0 ignored  (identical before and after)
+`cargo test -p lofty --test taglib`:    191 passed; 0 failed; 73 ignored  (identical before and after)

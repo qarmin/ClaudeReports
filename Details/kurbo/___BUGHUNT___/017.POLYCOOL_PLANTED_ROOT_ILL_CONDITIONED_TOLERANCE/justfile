@@ -1,0 +1,39 @@
+# Self-contained reproduction for candidate 017 (polycool's `poly::tests::planted_root_deg5`
+# flakiness, kurbo issue #594 / PR #599).
+#
+# The bug lives in the test itself (polycool/src/poly.rs), not in a function reachable through
+# polycool's public API, so `repro/` doesn't depend on the polycool crate directly - it drives
+# the real, unmodified `cargo test -p polycool` in a real checkout, with `ARBTEST_SEED` pinned to
+# seeds known to make `arbtest` regenerate a problematic polynomial. That's the literal thing CI
+# runs, so a `patch.diff` applied to the checkout is picked up automatically by the same repro
+# binary, no need to duplicate the test's logic in `repro/` itself.
+
+repo_url := "https://github.com/linebender/kurbo.git"
+base_commit := "ca273499e3e48bd2de6f02aa8e99a148984e45f3"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone build-repro reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-repro:
+    cd repro && cargo build --release
+
+# Should exit 1 ("REPRODUCED") - runs the real, unpatched test against the pristine clone.
+# `|| true`: repro's own convention is non-zero = bug reproduced, which is the EXPECTED outcome
+# here, so it must not abort `just test`.
+reproduce-before:
+    cd repro && ./target/release/repro "{{justfile_directory()}}/clone" || true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Should exit 0 ("did not reproduce") - same repro binary, now against the patched clone.
+reproduce-after:
+    cd repro && ./target/release/repro "{{justfile_directory()}}/clone"
+
+clean:
+    rm -rf clone

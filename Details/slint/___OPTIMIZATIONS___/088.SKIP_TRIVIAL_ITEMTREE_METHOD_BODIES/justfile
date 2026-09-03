@@ -1,0 +1,45 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+
+# Full cycle: clone at the pinned commit, build baseline + patched slint-compiler, generate a
+# fixture with both, compare generated Rust size and slint-compiler run time.
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-baseline:
+    cd clone && cargo build --release -p slint-compiler
+    cp clone/target/release/slint-compiler slint-compiler-baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone && cargo build --release -p slint-compiler
+    cp clone/target/release/slint-compiler slint-compiler-patched
+
+# N=400 distinct trivial components (see testdata/gen_fixture.py for why "distinct" matters).
+# Compares generated Rust size (deterministic, the primary metric - see RESULT.md) and
+# slint-compiler wall time (noisier, secondary).
+bench:
+    python3 testdata/gen_fixture.py 400 fixture_400.slint
+    ./slint-compiler-baseline -f rust fixture_400.slint -o out_baseline.rs
+    ./slint-compiler-patched  -f rust fixture_400.slint -o out_patched.rs
+    @echo "--- generated Rust size ---"
+    wc -c out_baseline.rs out_patched.rs
+    @echo "--- slint-compiler wall time, 5 runs each ---"
+    @for i in 1 2 3 4 5; do \
+        /usr/bin/env python3 -c "import subprocess,time; t=time.time(); subprocess.run(['./slint-compiler-baseline','-f','rust','fixture_400.slint','-o','/dev/null']); print('baseline', time.time()-t)"; \
+        /usr/bin/env python3 -c "import subprocess,time; t=time.time(); subprocess.run(['./slint-compiler-patched','-f','rust','fixture_400.slint','-o','/dev/null']); print('patched ', time.time()-t)"; \
+    done
+
+clean:
+    rm -rf clone slint-compiler-baseline slint-compiler-patched fixture_400.slint out_baseline.rs out_patched.rs

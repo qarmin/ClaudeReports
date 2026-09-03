@@ -1,0 +1,55 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# This candidate's own repro uses `#![feature(portable_simd)]` (nightly-only) and needs the
+# project's own libgccjit-backed toolchain to actually exercise the bug (it's a codegen bug, not
+# something a plain host rustc/LLVM build can show - see RESULT.md's differential check, which is
+# exactly why `reproduce-before`/`reproduce-after` build through `clone/y.sh cargo build`, not
+# plain `cargo build`).
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+# Full cycle: clone pristine, build the backend+sysroot, prove the bug exists, apply the fix,
+# rebuild, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && cp config.example.toml config.toml
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Build+run the standalone repro against the pristine clone - each binary should segfault.
+# `ulimit -c 0` stops a crashing repro from dumping a core file.
+reproduce-before:
+    rm -rf repro/target
+    cd repro && CHANNEL=release "{{justfile_directory()}}/clone/y.sh" cargo build --manifest-path Cargo.toml --bins
+    ulimit -c 0; \
+    repro/target/debug/gather_scatter_repro; echo "gather exit=$?"; \
+    repro/target/debug/scatter; echo "scatter exit=$?"; \
+    repro/target/debug/gather8; echo "gather8 exit=$?"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && ./y.sh build --release
+
+# Same repro again, now against the patched clone - every binary should exit 0 and print its own
+# "... ok" lines instead of segfaulting.
+reproduce-after:
+    rm -rf repro/target
+    cd repro && CHANNEL=release "{{justfile_directory()}}/clone/y.sh" cargo build --manifest-path Cargo.toml --bins
+    ulimit -c 0; \
+    repro/target/debug/gather_scatter_repro; echo "gather exit=$?"; \
+    repro/target/debug/scatter; echo "scatter exit=$?"; \
+    repro/target/debug/gather8; echo "gather8 exit=$?"
+
+clean:
+    rm -rf clone repro/target

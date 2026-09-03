@@ -1,0 +1,37 @@
+diff --git a/sparse_strips/vello_cpu/src/coarse/depth.rs b/sparse_strips/vello_cpu/src/coarse/depth.rs
+index 627a48fa..85baaaf1 100644
+--- a/sparse_strips/vello_cpu/src/coarse/depth.rs
++++ b/sparse_strips/vello_cpu/src/coarse/depth.rs
+@@ -60,8 +60,7 @@ impl BucketRange {
+     }
+ 
+     pub(crate) fn span(self) -> Span {
+-        let x = self.start * DEPTH_BUCKET_WIDTH;
+-        Span::new(x, (self.end - self.start) * DEPTH_BUCKET_WIDTH)
++        bucket_span(usize::from(self.start), usize::from(self.end))
+     }
+ }
+ 
+@@ -283,9 +282,20 @@ impl DepthBuffer {
+     }
+ }
+ 
++/// Converts a `[start, end)` bucket-index range into a pixel [`Span`].
++///
++/// `start`/`end` are bucket counts, so `end * DEPTH_BUCKET_WIDTH` can exceed `u16::MAX`
++/// for large buffers (e.g. a buffer whose width is within `DEPTH_BUCKET_WIDTH` of
++/// `u16::MAX`, giving a bucket count high enough that a full-buffer range overflows).
++/// Since no real pixel coordinate can exceed `u16::MAX` anyway, saturate rather than
++/// wrap or panic; callers only ever use this to compute a coarse span that gets
++/// intersected with a real, in-bounds request span right after.
+ fn bucket_span(start: usize, end: usize) -> Span {
+-    let x = start as u16 * DEPTH_BUCKET_WIDTH;
+-    Span::new(x, (end - start) as u16 * DEPTH_BUCKET_WIDTH)
++    let bucket_width = usize::from(DEPTH_BUCKET_WIDTH);
++    let max = usize::from(u16::MAX);
++    let x = (start * bucket_width).min(max) as u16;
++    let end_px = (end * bucket_width).min(max) as u16;
++    Span::new(x, end_px - x)
+ }
+ 
+ #[cfg(test)]

@@ -1,0 +1,123 @@
+diff --git a/rawler/src/imgop/srgb.rs b/rawler/src/imgop/srgb.rs
+index 88a93ee1..1dc2a1aa 100644
+--- a/rawler/src/imgop/srgb.rs
++++ b/rawler/src/imgop/srgb.rs
+@@ -1,6 +1,8 @@
+ // SPDX-License-Identifier: LGPL-2.1
+ // Copyright 2021 Daniel Vogelbacher <daniel@chaospixel.com>
+ 
++use std::sync::OnceLock;
++
+ use rayon::prelude::*;
+ 
+ // Reference for sRGB:
+@@ -27,12 +29,90 @@ const SRGB_GAIN: f32 = 1.055;
+ /// sRGB offset for exponential part
+ const SRGB_OFFSET: f32 = SRGB_GAIN - 1.0; // 0.055
+ 
++/// Exponent applied to the linear value in the exponential part of the curve (1/2.4).
++const GAMMA_EXP: f32 = 1.0 / SRGB_GAMMA;
++
++/// Number of interpolation intervals covering the IEEE-754 mantissa range `[1.0, 2.0)`.
++const MANTISSA_LUT_SIZE: usize = 1024;
++
++/// Range of (unbiased, base-2) exponents covered by `EXP_LUT` before falling back to `powf`.
++/// `[-16, 16]` covers linear values from ~1.5e-5 up to 65536, far beyond anything
++/// `clip_euclidean_norm_avg` (imgop/raw.rs) lets through in practice.
++const EXP_LUT_MIN: i32 = -16;
++const EXP_LUT_MAX: i32 = 16;
++const EXP_LUT_SIZE: usize = (EXP_LUT_MAX - EXP_LUT_MIN + 1) as usize;
++
++/// `m.powf(GAMMA_EXP)` for `m` linearly spaced over `[1.0, 2.0]`, interpolated at lookup time.
++fn mantissa_lut() -> &'static [f32; MANTISSA_LUT_SIZE + 1] {
++  static LUT: OnceLock<[f32; MANTISSA_LUT_SIZE + 1]> = OnceLock::new();
++  LUT.get_or_init(|| {
++    let mut table = [0f32; MANTISSA_LUT_SIZE + 1];
++    for (i, v) in table.iter_mut().enumerate() {
++      let m = 1.0 + i as f32 / MANTISSA_LUT_SIZE as f32;
++      *v = m.powf(GAMMA_EXP);
++    }
++    table
++  })
++}
++
++/// `2f32.powf(e as f32 * GAMMA_EXP)` for every unbiased exponent `e` in `[EXP_LUT_MIN, EXP_LUT_MAX]`.
++fn exp_lut() -> &'static [f32; EXP_LUT_SIZE] {
++  static LUT: OnceLock<[f32; EXP_LUT_SIZE]> = OnceLock::new();
++  LUT.get_or_init(|| {
++    let mut table = [0f32; EXP_LUT_SIZE];
++    for (i, v) in table.iter_mut().enumerate() {
++      let e = EXP_LUT_MIN + i as i32;
++      *v = 2f32.powf(e as f32 * GAMMA_EXP);
++    }
++    table
++  })
++}
++
++/// Approximates `v.powf(1.0 / SRGB_GAMMA)` for `v > 0` using the IEEE-754 decomposition
++/// `v = m * 2^e` (`m` in `[1.0, 2.0)`), so that `v.powf(p) == m.powf(p) * 2f32.powf(e as f32 * p)`.
++/// `m.powf(p)` is looked up in a small interpolated table (low curvature over a factor-2 range,
++/// so linear interpolation error is negligible relative to the eventual u16 quantization step);
++/// `2f32.powf(e as f32 * p)` is an exact table lookup since `e` is an integer. Falls back to the
++/// real `powf` outside the exponent range the table covers.
++///
++/// Takes the LUT references in (rather than calling `mantissa_lut()`/`exp_lut()` internally) so
++/// hot per-pixel callers can resolve the `OnceLock`s once per call site instead of once per pixel.
++#[inline]
++fn fast_pow_gamma_with(v: f32, mlut: &[f32; MANTISSA_LUT_SIZE + 1], elut: &[f32; EXP_LUT_SIZE]) -> f32 {
++  let bits = v.to_bits();
++  let exponent = ((bits >> 23) & 0xff) as i32 - 127;
++  if exponent < EXP_LUT_MIN || exponent > EXP_LUT_MAX {
++    return v.powf(GAMMA_EXP);
++  }
++  let mantissa_bits = (bits & 0x007f_ffff) | (127u32 << 23);
++  let m = f32::from_bits(mantissa_bits);
++  let scaled = (m - 1.0) * MANTISSA_LUT_SIZE as f32;
++  // Safety: `m` is in `[1.0, 2.0)` by construction (mantissa bits forced to exponent 127), so
++  // `scaled` is always in `[0, MANTISSA_LUT_SIZE)` - the saturating/NaN-checking behavior of the
++  // safe `as usize` cast is dead weight here (see 002.SRGB_GAMMA_POWF_LUT/RESULT.md).
++  // i32, not usize: x86-64 has single-instruction float<->signed-int conversions (cvttss2si /
++  // cvtsi2ss) but no direct float<->u64 ones, so a usize target forces LLVM's multi-instruction
++  // unsigned-conversion fallback on both the truncate and the `idx as f32` below, even with the
++  // unchecked cast; doing both conversions on i32 (safe, `scaled` fits easily) avoids that,
++  // deferring the (cheap, single-instruction) widen to usize until after `frac` is computed.
++  let idx_i32 = unsafe { scaled.to_int_unchecked::<i32>() };
++  let frac = scaled - idx_i32 as f32;
++  let idx = idx_i32 as usize;
++  let m_pow = mlut[idx] + frac * (mlut[idx + 1] - mlut[idx]);
++  m_pow * elut[(exponent - EXP_LUT_MIN) as usize]
++}
++
++#[inline]
++fn fast_pow_gamma(v: f32) -> f32 {
++  fast_pow_gamma_with(v, mantissa_lut(), exp_lut())
++}
++
+ /// Apply sRGB gamma
+ pub fn srgb_apply_gamma(v: f32) -> f32 {
+   if v <= SRGB_CROSSOVER_POINT {
+     v * LINEAR_GAIN
+   } else {
+-    v.powf(1.0 / SRGB_GAMMA) * SRGB_GAIN - SRGB_OFFSET
++    fast_pow_gamma(v) * SRGB_GAIN - SRGB_OFFSET
+   }
+ }
+ 
+@@ -52,7 +132,16 @@ pub fn srgb_invert_gamma(v: f32) -> f32 {
+ 
+ /// Apply gamma correction to whole buffer
+ pub fn srgb_apply_gamma_inplace(pixels: &mut [f32]) {
+-  pixels.par_iter_mut().for_each(|p| *p = srgb_apply_gamma(*p));
++  // Resolve the LUTs' OnceLock once per call, not once per pixel (see fast_pow_gamma_with).
++  let mlut = mantissa_lut();
++  let elut = exp_lut();
++  pixels.par_iter_mut().for_each(|p| {
++    *p = if *p <= SRGB_CROSSOVER_POINT {
++      *p * LINEAR_GAIN
++    } else {
++      fast_pow_gamma_with(*p, mlut, elut) * SRGB_GAIN - SRGB_OFFSET
++    }
++  });
+ }
+ 
+ /// Invert gamma correction to whole buffer

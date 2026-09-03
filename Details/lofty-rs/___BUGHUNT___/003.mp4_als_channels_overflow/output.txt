@@ -1,0 +1,62 @@
+$ just test   (run from a fresh, standalone copy of this candidate folder, ./clone freshly
+cloned at base_commit 5c6565e36d35b9ea7de049daa67acc0be0fd3b01, no dependency on the
+original checkout this bug was found in)
+
+--- reproduce-before (pristine clone, dev build, panic expected) ---
+wrote 208 byte crafted MP4/M4A file to /tmp/mp4_als_channels_overflow_repro.m4a
+reading it back through lofty::read_from_path (real public entry point)...
+
+thread 'main' (51424) panicked at /tmp/candidate003_verify/clone/lofty/src/mp4/properties.rs:912:52:
+attempt to add with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- reproduce-after (patched clone, dev build, panic expected to be gone) ---
+wrote 208 byte crafted MP4/M4A file to /tmp/mp4_als_channels_overflow_repro.m4a
+reading it back through lofty::read_from_path (real public entry point)...
+RESULT: no panic. channels reported = Some(255)
+
+before: exit=101 (non-zero = reproduced), after: exit=0 (0 = fixed)
+
+---
+
+Repeat-run check (3/3), against the main checkout's working tree with the bug present, same
+crafted file, RUST_BACKTRACE=1 for a full stack trace on one of the runs:
+
+thread 'main' (42086) panicked at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/mp4/properties.rs:912:52:
+attempt to add with overflow
+stack backtrace:
+   0: rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::panicking::panic
+   3: lofty::mp4::properties::mp4a_properties::<&mut core::io::cursor::Cursor<&[u8]>>
+             at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/mp4/properties.rs:912:52
+   4: lofty::mp4::properties::read_stsd::read_inner::<&mut core::io::cursor::Cursor<&[u8]>>
+             at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/mp4/properties.rs:635:16
+   5: lofty::mp4::properties::read_stsd::<&mut core::io::cursor::Cursor<&[u8]>>
+             at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/mp4/properties.rs:670:2
+   6: lofty::mp4::properties::read_properties::<&mut std::io::buffered::bufreader::BufReader<std::fs::File>>
+             at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/mp4/properties.rs:712:2
+   7: lofty::mp4::read::read_from::<std::io::buffered::bufreader::BufReader<std::fs::File>>
+             at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/mp4/read/mod.rs:71:3
+   8: <lofty::mp4::Mp4File as lofty::file::audio_file::AudioFile>::read_from::<std::io::buffered::bufreader::BufReader<std::fs::File>>
+             at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/mp4/mod.rs:35:10
+   9: <lofty::probe::Probe<std::io::buffered::bufreader::BufReader<std::fs::File>>>::read_inner
+             at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/probe.rs:480:22
+  10: <lofty::probe::Probe<std::io::buffered::bufreader::BufReader<std::fs::File>>>::read
+             at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/probe.rs:459:8
+  11: lofty::probe::read_from_path::<&std::path::PathBuf>
+             at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/probe.rs:582:21
+  12: mp4_als_scratch::main
+             at ./src/main.rs:135:23
+  13: <fn() as core::ops::function::FnOnce<()>>::call_once
+             at /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+All 3/3 runs panicked identically at properties.rs:912:52 "attempt to add with overflow".
+
+---
+
+Project test suite (`cargo test -p lofty`), main checkout, before/after the patch:
+
+before (bug present):  176 passed; 0 failed; 23 ignored; 0 measured; 0 filtered out
+after  (patch applied): 176 passed; 0 failed; 23 ignored; 0 measured; 0 filtered out

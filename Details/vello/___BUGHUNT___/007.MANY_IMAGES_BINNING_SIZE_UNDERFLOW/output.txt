@@ -1,0 +1,66 @@
+Real captured output of `just test` (this candidate's own justfile: fresh clone of
+linebender/vello at base_commit 7516831426fb70f36d62c521c5477f6a7265b36a, `repro/` run against
+it, `patch.diff` applied, `repro/` run again). Compiler-warning noise (an unrelated pre-existing
+`single_use_lifetimes` false-positive lint expectation) trimmed; the panic/backtrace and repro
+program output are verbatim.
+
+=== clone + git checkout (elided: standard git clone/checkout chatter) ===
+HEAD is now at 75168314 Remove some Vello-Classic-specific info from the root README (#1698)
+
+=== reproduce-before: `cargo run -- 1000000` against the PRISTINE clone (debug build, default
+    `overflow-checks = true`) ===
+     Running `target/debug/repro 1000000`
+n_images = 1000000, layout.bin_data_start = 10000000
+
+thread 'main' (160080) panicked at /tmp/vello-007-justtest/clone/vello_encoding/src/config.rs:185:31:
+attempt to subtract with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - RenderConfig::new panicked: Any { .. }
+
+=== apply: `git apply patch.diff` against the clone (no output, exit 0) ===
+
+=== reproduce-after: `cargo run -- 1000000` against the PATCHED clone ===
+     Running `target/debug/repro 1000000`
+n_images = 1000000, layout.bin_data_start = 10000000
+did not reproduce - RenderConfig::new completed, binning_size = 262144
+
+=== Additional evidence captured directly against the working checkout during the session (not
+    part of `just test`, but demonstrates the release-mode "silent wrap" the reporter warned
+    about, and that the fix holds across a range of input sizes, not just the exact 1,000,000
+    from the issue) ===
+
+$ cargo run --release  (pristine tree, overflow-checks = false)
+n_images = 1000000, layout.bin_data_start = 10000000
+did not reproduce - RenderConfig::new completed, binning_size = 4285229440
+    # ^ this is the *wrapped* u32 value (262144 - 10000000 mod 2^32), not a legitimate size -
+    #   exactly the "does not panic, but the images do not appear"/potential-OOB behavior the
+    #   original reporter described for release builds.
+
+$ for n in 26214 26215 100000 2000000; do cargo run --quiet -- $n; done   (PATCHED tree, debug build)
+n_images = 26214, layout.bin_data_start = 262140
+did not reproduce - RenderConfig::new completed, binning_size = 262144
+n_images = 26215, layout.bin_data_start = 262150
+did not reproduce - RenderConfig::new completed, binning_size = 262144
+n_images = 100000, layout.bin_data_start = 1000000
+did not reproduce - RenderConfig::new completed, binning_size = 262144
+n_images = 2000000, layout.bin_data_start = 20000000
+did not reproduce - RenderConfig::new completed, binning_size = 262144
+
+$ cargo run --quiet -- 26215   (PRISTINE tree, debug build - confirms the panic already triggers
+                                just past the old hand-picked 1<<18 = 262144 threshold, not only
+                                at the issue's own 1,000,000)
+n_images = 26215, layout.bin_data_start = 262150
+
+thread 'main' (141773) panicked at /tmp/vello-bughunt-007/vello_encoding/src/config.rs:185:31:
+attempt to subtract with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - RenderConfig::new panicked: Any { .. }
+
+=== `cargo test -p vello_encoding` (before and after the patch, run directly against the main
+    project's own working tree) ===
+Before: test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+After:  test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+`cargo test -p vello --no-default-features` (no non-GPU tests exist in this crate):
+Before: test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+After:  test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out

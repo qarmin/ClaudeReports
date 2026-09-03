@@ -1,0 +1,41 @@
+# Self-contained reproduction for candidate 040 (round_f32/floor_f32 call-site audit ->
+# hayro-jpeg2000::math::floor_f32 sse4.1/neon gate).
+#
+# No suitable existing benchmark reaches `floor_f32`'s two direct call sites (both are inside
+# `hayro-jpeg2000::j2c::idwt`'s `WaveletTransform::Reversible53` path, which no PDF in this
+# repo's own test corpus exercises - see RESULT.md). `inject_bench.py` appends a temporary
+# `#[cfg(test)] #[ignore]` microbenchmark directly into `hayro-jpeg2000/src/j2c/idwt.rs` that
+# calls the real, private `filter_horizontal`/`filter_vertical` functions with
+# `WaveletTransform::Reversible53` on a synthetic 1024x64 buffer (1024 matches the largest
+# scanline width seen in this repo's own JPX corpus, for the *Irreversible97* transform - no
+# real-world Reversible53 image size is known, see RESULT.md).
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+test: clone bench-baseline apply bench-patched compare
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    python3 inject_bench.py clone/hayro-jpeg2000/src/j2c/idwt.rs
+
+bench-baseline:
+    cd clone && cargo test -p hayro-jpeg2000 --release --lib floor_f32_hor_ver_bench -- --ignored --nocapture --test-threads=1 2>&1 | tee ../baseline.log
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+bench-patched:
+    cd clone && cargo test -p hayro-jpeg2000 --release --lib floor_f32_hor_ver_bench -- --ignored --nocapture --test-threads=1 2>&1 | tee ../patched.log
+
+compare:
+    @echo "=== baseline (before patch) ==="
+    @grep floor_f32_hor_ver_bench baseline.log
+    @echo "=== patched (after patch) ==="
+    @grep floor_f32_hor_ver_bench patched.log
+    @echo "checksums above must match for bit-exactness; ms/iter should be noticeably lower for patched"
+
+clean:
+    rm -rf clone baseline.log patched.log

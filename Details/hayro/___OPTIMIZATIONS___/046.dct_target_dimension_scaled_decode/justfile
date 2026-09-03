@@ -1,0 +1,75 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder (testdata/dct_downscale.pdf - a
+# synthetic PDF wrapping a real 3000x2000 baseline JPEG drawn at 300x200 on the page, 10x
+# downscale on both axes, see testdata/make_dct_pdf.py for how it was built), or fetched by
+# `just clone` into ./clone (gitignored). patch.diff is PR #1353 verbatim
+# (https://github.com/LaurenzV/hayro/pull/1353), unmodified.
+#
+# IMPORTANT (see RESULT.md "Why the result looks the way it does"): applying patch.diff alone
+# and building the real `hayro`/`hayro-bench` binaries reproduces a real gap in the PR as
+# submitted - the new `hayro-syntax` "jpeg-decoder" feature (which gates the actual IDCT-scaled
+# decode) is never requested by `hayro-interpret`'s own Cargo.toml dependency edge on
+# hayro-syntax, and the workspace-level dependency pin sets `default-features = false` for
+# hayro-syntax - so the fast path this PR's own description centers on is dead code through the
+# normal build graph. `bench` below reproduces that real-world (as-submitted) behavior.
+# `bench-wired` additionally patches in the one-line Cargo.toml feature-edge fix (not part of
+# patch.diff - see RESULT.md) so the actual scaled-decode win can also be measured.
+
+repo_url := "https://github.com/LaurenzV/hayro"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Not part of patch.diff - see the header comment above and RESULT.md. Wires the
+# `jpeg-decoder` feature through hayro-interpret's own dependency edge on hayro-syntax so the
+# PR's scaled-decode path is actually reachable, to measure what the PR intended.
+wire-feature:
+    cd clone && sed -i 's/hayro-syntax = { workspace = true, features = \["std", "images", "unsafe"\] }/hayro-syntax = { workspace = true, features = ["std", "images", "unsafe", "jpeg-decoder"] }/' hayro-interpret/Cargo.toml
+
+build-baseline:
+    cd clone && cargo build --release -p hayro-bench --bin render_bench
+    cd clone && cargo build --release -p hayro --example render
+    cp clone/target/release/render_bench ./render_bench_baseline
+    cp clone/target/release/examples/render ./render_example_baseline
+
+build-patched:
+    cd clone && cargo build --release -p hayro-bench --bin render_bench
+    cd clone && cargo build --release -p hayro --example render
+    cp clone/target/release/render_bench ./render_bench_patched
+    cp clone/target/release/examples/render ./render_example_patched
+
+build-patched-wired: wire-feature
+    cd clone && cargo build --release -p hayro-bench --bin render_bench
+    cp clone/target/release/render_bench ./render_bench_patched_wired
+
+bench:
+    @echo "=== timing: baseline (before patch), render_bench, 300 iterations, single-core (taskset -c 2) ==="
+    taskset -c 2 ./render_bench_baseline testdata --backend hayro --iter 300
+    @echo "=== timing: patched (PR #1353 as submitted - jpeg-decoder feature NOT wired, see header), single-core ==="
+    taskset -c 2 ./render_bench_patched testdata --backend hayro --iter 300
+    @echo "=== correctness: rendering testdata/dct_downscale.pdf with both builds ==="
+    rm -rf out_baseline out_patched
+    ./render_example_baseline testdata/dct_downscale.pdf out_baseline
+    ./render_example_patched testdata/dct_downscale.pdf out_patched
+    @echo "=== sha256 of rendered PNG, baseline vs patched (expected to DIFFER - see RESULT.md) ==="
+    sha256sum out_baseline/rendered_0.png out_patched/rendered_0.png
+
+# Secondary check: the PR's intended behavior once the feature-wiring gap is fixed locally
+# (not part of patch.diff). Run `just clone build-baseline apply build-patched-wired bench-wired`.
+bench-wired:
+    @echo "=== timing: baseline, single-core ==="
+    taskset -c 2 ./render_bench_baseline testdata --backend hayro --iter 300
+    @echo "=== timing: patched + feature wired, single-core ==="
+    taskset -c 2 ./render_bench_patched_wired testdata --backend hayro --iter 300
+
+clean:
+    rm -rf clone render_bench_baseline render_bench_patched render_bench_patched_wired render_example_baseline render_example_patched out_baseline out_patched

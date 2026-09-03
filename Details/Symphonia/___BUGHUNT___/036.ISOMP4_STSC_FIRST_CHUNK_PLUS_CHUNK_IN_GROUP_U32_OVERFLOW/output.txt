@@ -1,0 +1,308 @@
+### Environment
+rustc 1.98.0 (88d9e12ae 2026-08-18)
+cargo 1.98.0 (797e8a9bc 2026-08-05)
+Linux 7.0.0-30-generic x86_64
+
+### BEFORE the fix - pristine clone at base_commit, debug profile (overflow-checks = true)
+$ cargo run
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running `target/debug/repro`
+build: debug_assertions=true (the overflow only panics when overflow checks are on; in a release build it silently wraps to a bogus in-range chunk index instead)
+
+=== assets/base.m4a @ ts=2048
+    control: pristine unmodified file, must behave normally
+    next_packet()      -> Ok(Some((Timestamp(0), Duration(1024))))
+    seek(ts=2048) -> Ok(SeekedTo { track_id: 1, required_ts: Timestamp(2048), actual_ts: Timestamp(2048) })
+    => no panic
+
+=== assets/evil_stsc.mp4 @ ts=1024
+    first_chunk=0xFFFFFFFF (0xFFFFFFFE internally), sample 1 -> 0xFFFFFFFE + 1, no overflow yet
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=1024) -> Err(DecodeError("isomp4: missing stco entry"))
+    => no panic
+
+=== assets/evil_stsc.mp4 @ ts=2048
+    first_chunk=0xFFFFFFFF (0xFFFFFFFE internally), sample 2 -> 0xFFFFFFFE + 2 OVERFLOWS
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+
+thread 'main' (117533) panicked at /home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/036.ISOMP4_STSC_FIRST_CHUNK_PLUS_CHUNK_IN_GROUP_U32_OVERFLOW/clone/symphonia-format-isomp4/src/stream.rs:416:31:
+attempt to add with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    => PANICKED
+
+=== assets/evil_stsc_v2.mp4 @ ts=2048
+    first_chunk=0xFFFFFFFE (0xFFFFFFFD internally), sample 2 -> 0xFFFFFFFD + 2 == u32::MAX, no overflow yet
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=2048) -> Err(DecodeError("isomp4: missing stco entry"))
+    => no panic
+
+=== assets/evil_stsc_v2.mp4 @ ts=3072
+    first_chunk=0xFFFFFFFE (0xFFFFFFFD internally), sample 3 -> 0xFFFFFFFD + 3 OVERFLOWS
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+
+thread 'main' (117533) panicked at /home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/036.ISOMP4_STSC_FIRST_CHUNK_PLUS_CHUNK_IN_GROUP_U32_OVERFLOW/clone/symphonia-format-isomp4/src/stream.rs:416:31:
+attempt to add with overflow
+    => PANICKED
+
+BUG REPRODUCED: 2 of 5 cases panicked:
+  - assets/evil_stsc.mp4 @ ts=2048
+  - assets/evil_stsc_v2.mp4 @ ts=3072
+(exit code: 1)
+
+### BEFORE the fix - same pristine clone, RELEASE profile (overflow checks off; note seek() now returns Ok with a garbage chunk offset instead of panicking)
+$ cargo run --release
+   Compiling symphonia-format-isomp4 v0.6.1 (/home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/036.ISOMP4_STSC_FIRST_CHUNK_PLUS_CHUNK_IN_GROUP_U32_OVERFLOW/clone/symphonia-format-isomp4)
+   Compiling repro v0.1.0 (/home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/036.ISOMP4_STSC_FIRST_CHUNK_PLUS_CHUNK_IN_GROUP_U32_OVERFLOW/repro)
+    Finished `release` profile [optimized] target(s) in 1.23s
+     Running `target/release/repro`
+build: debug_assertions=false (the overflow only panics when overflow checks are on; in a release build it silently wraps to a bogus in-range chunk index instead)
+
+=== assets/base.m4a @ ts=2048
+    control: pristine unmodified file, must behave normally
+    next_packet()      -> Ok(Some((Timestamp(0), Duration(1024))))
+    seek(ts=2048) -> Ok(SeekedTo { track_id: 1, required_ts: Timestamp(2048), actual_ts: Timestamp(2048) })
+    => no panic
+
+=== assets/evil_stsc.mp4 @ ts=1024
+    first_chunk=0xFFFFFFFF (0xFFFFFFFE internally), sample 1 -> 0xFFFFFFFE + 1, no overflow yet
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=1024) -> Err(DecodeError("isomp4: missing stco entry"))
+    => no panic
+
+=== assets/evil_stsc.mp4 @ ts=2048
+    first_chunk=0xFFFFFFFF (0xFFFFFFFE internally), sample 2 -> 0xFFFFFFFE + 2 OVERFLOWS
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=2048) -> Ok(SeekedTo { track_id: 1, required_ts: Timestamp(2048), actual_ts: Timestamp(2048) })
+    => no panic
+
+=== assets/evil_stsc_v2.mp4 @ ts=2048
+    first_chunk=0xFFFFFFFE (0xFFFFFFFD internally), sample 2 -> 0xFFFFFFFD + 2 == u32::MAX, no overflow yet
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=2048) -> Err(DecodeError("isomp4: missing stco entry"))
+    => no panic
+
+=== assets/evil_stsc_v2.mp4 @ ts=3072
+    first_chunk=0xFFFFFFFE (0xFFFFFFFD internally), sample 3 -> 0xFFFFFFFD + 3 OVERFLOWS
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=3072) -> Ok(SeekedTo { track_id: 1, required_ts: Timestamp(3072), actual_ts: Timestamp(3072) })
+    => no panic
+
+BUG NOT REPRODUCED: no case panicked
+(exit code: 0)
+
+### Applying patch.diff
+$ cd clone && git apply ../patch.diff
+(exit code: 0)
+
+### AFTER the fix - debug profile
+$ cargo run
+   Compiling symphonia-format-isomp4 v0.6.1 (/home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/036.ISOMP4_STSC_FIRST_CHUNK_PLUS_CHUNK_IN_GROUP_U32_OVERFLOW/clone/symphonia-format-isomp4)
+   Compiling repro v0.1.0 (/home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/036.ISOMP4_STSC_FIRST_CHUNK_PLUS_CHUNK_IN_GROUP_U32_OVERFLOW/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.32s
+     Running `target/debug/repro`
+build: debug_assertions=true (the overflow only panics when overflow checks are on; in a release build it silently wraps to a bogus in-range chunk index instead)
+
+=== assets/base.m4a @ ts=2048
+    control: pristine unmodified file, must behave normally
+    next_packet()      -> Ok(Some((Timestamp(0), Duration(1024))))
+    seek(ts=2048) -> Ok(SeekedTo { track_id: 1, required_ts: Timestamp(2048), actual_ts: Timestamp(2048) })
+    => no panic
+
+=== assets/evil_stsc.mp4 @ ts=1024
+    first_chunk=0xFFFFFFFF (0xFFFFFFFE internally), sample 1 -> 0xFFFFFFFE + 1, no overflow yet
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=1024) -> Err(DecodeError("isomp4: missing stco entry"))
+    => no panic
+
+=== assets/evil_stsc.mp4 @ ts=2048
+    first_chunk=0xFFFFFFFF (0xFFFFFFFE internally), sample 2 -> 0xFFFFFFFE + 2 OVERFLOWS
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=2048) -> Err(DecodeError("isomp4: chunk index overflow"))
+    => no panic
+
+=== assets/evil_stsc_v2.mp4 @ ts=2048
+    first_chunk=0xFFFFFFFE (0xFFFFFFFD internally), sample 2 -> 0xFFFFFFFD + 2 == u32::MAX, no overflow yet
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=2048) -> Err(DecodeError("isomp4: missing stco entry"))
+    => no panic
+
+=== assets/evil_stsc_v2.mp4 @ ts=3072
+    first_chunk=0xFFFFFFFE (0xFFFFFFFD internally), sample 3 -> 0xFFFFFFFD + 3 OVERFLOWS
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=3072) -> Err(DecodeError("isomp4: chunk index overflow"))
+    => no panic
+
+BUG NOT REPRODUCED: no case panicked
+(exit code: 0)
+
+### AFTER the fix - RELEASE profile
+$ cargo run --release
+   Compiling symphonia-format-isomp4 v0.6.1 (/home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/036.ISOMP4_STSC_FIRST_CHUNK_PLUS_CHUNK_IN_GROUP_U32_OVERFLOW/clone/symphonia-format-isomp4)
+   Compiling repro v0.1.0 (/home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/036.ISOMP4_STSC_FIRST_CHUNK_PLUS_CHUNK_IN_GROUP_U32_OVERFLOW/repro)
+    Finished `release` profile [optimized] target(s) in 0.89s
+     Running `target/release/repro`
+build: debug_assertions=false (the overflow only panics when overflow checks are on; in a release build it silently wraps to a bogus in-range chunk index instead)
+
+=== assets/base.m4a @ ts=2048
+    control: pristine unmodified file, must behave normally
+    next_packet()      -> Ok(Some((Timestamp(0), Duration(1024))))
+    seek(ts=2048) -> Ok(SeekedTo { track_id: 1, required_ts: Timestamp(2048), actual_ts: Timestamp(2048) })
+    => no panic
+
+=== assets/evil_stsc.mp4 @ ts=1024
+    first_chunk=0xFFFFFFFF (0xFFFFFFFE internally), sample 1 -> 0xFFFFFFFE + 1, no overflow yet
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=1024) -> Err(DecodeError("isomp4: missing stco entry"))
+    => no panic
+
+=== assets/evil_stsc.mp4 @ ts=2048
+    first_chunk=0xFFFFFFFF (0xFFFFFFFE internally), sample 2 -> 0xFFFFFFFE + 2 OVERFLOWS
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=2048) -> Err(DecodeError("isomp4: chunk index overflow"))
+    => no panic
+
+=== assets/evil_stsc_v2.mp4 @ ts=2048
+    first_chunk=0xFFFFFFFE (0xFFFFFFFD internally), sample 2 -> 0xFFFFFFFD + 2 == u32::MAX, no overflow yet
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=2048) -> Err(DecodeError("isomp4: missing stco entry"))
+    => no panic
+
+=== assets/evil_stsc_v2.mp4 @ ts=3072
+    first_chunk=0xFFFFFFFE (0xFFFFFFFD internally), sample 3 -> 0xFFFFFFFD + 3 OVERFLOWS
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=3072) -> Err(DecodeError("isomp4: chunk index overflow"))
+    => no panic
+
+BUG NOT REPRODUCED: no case panicked
+(exit code: 0)
+
+### Repeatability - 3 consecutive debug runs against the pristine clone
+
+-- run 1
+build: debug_assertions=true (the overflow only panics when overflow checks are on; in a release build it silently wraps to a bogus in-range chunk index instead)
+
+=== assets/base.m4a @ ts=2048
+    control: pristine unmodified file, must behave normally
+    next_packet()      -> Ok(Some((Timestamp(0), Duration(1024))))
+    seek(ts=2048) -> Ok(SeekedTo { track_id: 1, required_ts: Timestamp(2048), actual_ts: Timestamp(2048) })
+    => no panic
+
+=== assets/evil_stsc.mp4 @ ts=1024
+    first_chunk=0xFFFFFFFF (0xFFFFFFFE internally), sample 1 -> 0xFFFFFFFE + 1, no overflow yet
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=1024) -> Err(DecodeError("isomp4: missing stco entry"))
+    => no panic
+
+=== assets/evil_stsc.mp4 @ ts=2048
+    first_chunk=0xFFFFFFFF (0xFFFFFFFE internally), sample 2 -> 0xFFFFFFFE + 2 OVERFLOWS
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+
+thread 'main' (119467) panicked at /home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/036.ISOMP4_STSC_FIRST_CHUNK_PLUS_CHUNK_IN_GROUP_U32_OVERFLOW/clone/symphonia-format-isomp4/src/stream.rs:416:31:
+attempt to add with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    => PANICKED
+
+=== assets/evil_stsc_v2.mp4 @ ts=2048
+    first_chunk=0xFFFFFFFE (0xFFFFFFFD internally), sample 2 -> 0xFFFFFFFD + 2 == u32::MAX, no overflow yet
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=2048) -> Err(DecodeError("isomp4: missing stco entry"))
+    => no panic
+
+=== assets/evil_stsc_v2.mp4 @ ts=3072
+    first_chunk=0xFFFFFFFE (0xFFFFFFFD internally), sample 3 -> 0xFFFFFFFD + 3 OVERFLOWS
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+
+thread 'main' (119467) panicked at /home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/036.ISOMP4_STSC_FIRST_CHUNK_PLUS_CHUNK_IN_GROUP_U32_OVERFLOW/clone/symphonia-format-isomp4/src/stream.rs:416:31:
+attempt to add with overflow
+    => PANICKED
+
+BUG REPRODUCED: 2 of 5 cases panicked:
+  - assets/evil_stsc.mp4 @ ts=2048
+  - assets/evil_stsc_v2.mp4 @ ts=3072
+(exit code: 1)
+
+-- run 2
+build: debug_assertions=true (the overflow only panics when overflow checks are on; in a release build it silently wraps to a bogus in-range chunk index instead)
+
+=== assets/base.m4a @ ts=2048
+    control: pristine unmodified file, must behave normally
+    next_packet()      -> Ok(Some((Timestamp(0), Duration(1024))))
+    seek(ts=2048) -> Ok(SeekedTo { track_id: 1, required_ts: Timestamp(2048), actual_ts: Timestamp(2048) })
+    => no panic
+
+=== assets/evil_stsc.mp4 @ ts=1024
+    first_chunk=0xFFFFFFFF (0xFFFFFFFE internally), sample 1 -> 0xFFFFFFFE + 1, no overflow yet
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=1024) -> Err(DecodeError("isomp4: missing stco entry"))
+    => no panic
+
+=== assets/evil_stsc.mp4 @ ts=2048
+    first_chunk=0xFFFFFFFF (0xFFFFFFFE internally), sample 2 -> 0xFFFFFFFE + 2 OVERFLOWS
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+
+thread 'main' (119729) panicked at /home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/036.ISOMP4_STSC_FIRST_CHUNK_PLUS_CHUNK_IN_GROUP_U32_OVERFLOW/clone/symphonia-format-isomp4/src/stream.rs:416:31:
+attempt to add with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    => PANICKED
+
+=== assets/evil_stsc_v2.mp4 @ ts=2048
+    first_chunk=0xFFFFFFFE (0xFFFFFFFD internally), sample 2 -> 0xFFFFFFFD + 2 == u32::MAX, no overflow yet
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=2048) -> Err(DecodeError("isomp4: missing stco entry"))
+    => no panic
+
+=== assets/evil_stsc_v2.mp4 @ ts=3072
+    first_chunk=0xFFFFFFFE (0xFFFFFFFD internally), sample 3 -> 0xFFFFFFFD + 3 OVERFLOWS
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+
+thread 'main' (119729) panicked at /home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/036.ISOMP4_STSC_FIRST_CHUNK_PLUS_CHUNK_IN_GROUP_U32_OVERFLOW/clone/symphonia-format-isomp4/src/stream.rs:416:31:
+attempt to add with overflow
+    => PANICKED
+
+BUG REPRODUCED: 2 of 5 cases panicked:
+  - assets/evil_stsc.mp4 @ ts=2048
+  - assets/evil_stsc_v2.mp4 @ ts=3072
+(exit code: 1)
+
+-- run 3
+build: debug_assertions=true (the overflow only panics when overflow checks are on; in a release build it silently wraps to a bogus in-range chunk index instead)
+
+=== assets/base.m4a @ ts=2048
+    control: pristine unmodified file, must behave normally
+    next_packet()      -> Ok(Some((Timestamp(0), Duration(1024))))
+    seek(ts=2048) -> Ok(SeekedTo { track_id: 1, required_ts: Timestamp(2048), actual_ts: Timestamp(2048) })
+    => no panic
+
+=== assets/evil_stsc.mp4 @ ts=1024
+    first_chunk=0xFFFFFFFF (0xFFFFFFFE internally), sample 1 -> 0xFFFFFFFE + 1, no overflow yet
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=1024) -> Err(DecodeError("isomp4: missing stco entry"))
+    => no panic
+
+=== assets/evil_stsc.mp4 @ ts=2048
+    first_chunk=0xFFFFFFFF (0xFFFFFFFE internally), sample 2 -> 0xFFFFFFFE + 2 OVERFLOWS
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+
+thread 'main' (119740) panicked at /home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/036.ISOMP4_STSC_FIRST_CHUNK_PLUS_CHUNK_IN_GROUP_U32_OVERFLOW/clone/symphonia-format-isomp4/src/stream.rs:416:31:
+attempt to add with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    => PANICKED
+
+=== assets/evil_stsc_v2.mp4 @ ts=2048
+    first_chunk=0xFFFFFFFE (0xFFFFFFFD internally), sample 2 -> 0xFFFFFFFD + 2 == u32::MAX, no overflow yet
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+    seek(ts=2048) -> Err(DecodeError("isomp4: missing stco entry"))
+    => no panic
+
+=== assets/evil_stsc_v2.mp4 @ ts=3072
+    first_chunk=0xFFFFFFFE (0xFFFFFFFD internally), sample 3 -> 0xFFFFFFFD + 3 OVERFLOWS
+    next_packet()      -> Err(DecodeError("isomp4: missing stco entry"))
+
+thread 'main' (119740) panicked at /home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/036.ISOMP4_STSC_FIRST_CHUNK_PLUS_CHUNK_IN_GROUP_U32_OVERFLOW/clone/symphonia-format-isomp4/src/stream.rs:416:31:
+attempt to add with overflow
+    => PANICKED
+
+BUG REPRODUCED: 2 of 5 cases panicked:
+  - assets/evil_stsc.mp4 @ ts=2048
+  - assets/evil_stsc_v2.mp4 @ ts=3072
+(exit code: 1)

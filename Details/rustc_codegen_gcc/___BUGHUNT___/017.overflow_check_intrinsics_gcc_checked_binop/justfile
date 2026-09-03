@@ -1,0 +1,36 @@
+# Self-contained reproduction for candidate 017 (overflow_check_intrinsics_gcc_checked_binop).
+#
+# Status: Not reproducible - there is no patch.diff (no bug found, no fix). `just test` clones a
+# pristine checkout and re-runs the same investigation this candidate's RESULT.md describes: a
+# differential boundary-value test (CTFE-computed expected vs. JIT-codegen'd actual) for
+# checked/overflowing/wrapping/saturating add/sub/mul across every integer type, run once against
+# the backend as shipped (native GCC __int128 path) and once with `repro/force_non_native.patch`
+# applied and the sysroot rebuilt, to also exercise the otherwise-unreachable non-native fallback
+# functions inside `gcc_checked_binop` (`operation_with_overflow` / `__rust_*128_*o`).
+#
+# Requires this project's own toolchain to already be buildable in the environment running this
+# (see the upstream project's Readme.md "Quick start" - `./y.sh prepare` needs network access to
+# download a prebuilt libgccjit.so and to fetch rustc-dev components). Not fast: a fresh clone's
+# first `./y.sh prepare && ./y.sh build --sysroot --release` takes a few minutes, and step 2's
+# forced-non-native sysroot rebuild (inside repro/run.sh) takes about another minute.
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && cp config.example.toml config.toml
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Runs the full two-way comparison (native-128-bit-int backend path, forced array-based
+# non-native backend path) inside the fresh clone - see repro/run.sh for what each step does.
+reproduce-before:
+    bash repro/run.sh clone
+
+clean:
+    rm -rf clone

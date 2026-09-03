@@ -1,0 +1,78 @@
+Real captured output of `repro/` (cargo build warnings from the wider crate elided), 3 runs
+before the fix and 3 runs after, against the exact same embedded CMYK8 1000x1000 TIFF file and
+the exact same declared max_alloc = 5500000.
+
+===== BEFORE FIX (src/codecs/tiff.rs at base_commit 44ce9226) =====
+--- run 1 ---
+dimensions: (1000, 1000), final output color: Rgb8, RGB output bytes: 3000000
+CMYK internal scratch buffer needed: 4000000 bytes
+declared max_alloc: 5500000
+true combined live memory required: 7000000
+set_limits(max_alloc = Some(5500000)) -> Ok(())
+REPRODUCED: read_image() succeeded with declared max_alloc = 5500000, even though the caller's own RGB output buffer (3000000 bytes) plus the decoder's own internal CMYK scratch buffer (4000000 bytes) sum to 7000000 bytes, 1500000 bytes MORE than what was declared allowed - the decoder's own internal accounting (`TiffDecoder::redistribute_limits`) checks its scratch buffer against the *raw*, undiminished max_alloc value, unaware that the same budget was already independently spent on the caller's own output buffer.
+exit_code=1
+--- run 2 ---
+dimensions: (1000, 1000), final output color: Rgb8, RGB output bytes: 3000000
+CMYK internal scratch buffer needed: 4000000 bytes
+declared max_alloc: 5500000
+true combined live memory required: 7000000
+set_limits(max_alloc = Some(5500000)) -> Ok(())
+REPRODUCED: read_image() succeeded with declared max_alloc = 5500000, even though the caller's own RGB output buffer (3000000 bytes) plus the decoder's own internal CMYK scratch buffer (4000000 bytes) sum to 7000000 bytes, 1500000 bytes MORE than what was declared allowed - the decoder's own internal accounting (`TiffDecoder::redistribute_limits`) checks its scratch buffer against the *raw*, undiminished max_alloc value, unaware that the same budget was already independently spent on the caller's own output buffer.
+exit_code=1
+--- run 3 ---
+dimensions: (1000, 1000), final output color: Rgb8, RGB output bytes: 3000000
+CMYK internal scratch buffer needed: 4000000 bytes
+declared max_alloc: 5500000
+true combined live memory required: 7000000
+set_limits(max_alloc = Some(5500000)) -> Ok(())
+REPRODUCED: read_image() succeeded with declared max_alloc = 5500000, even though the caller's own RGB output buffer (3000000 bytes) plus the decoder's own internal CMYK scratch buffer (4000000 bytes) sum to 7000000 bytes, 1500000 bytes MORE than what was declared allowed - the decoder's own internal accounting (`TiffDecoder::redistribute_limits`) checks its scratch buffer against the *raw*, undiminished max_alloc value, unaware that the same budget was already independently spent on the caller's own output buffer.
+exit_code=1
+
+===== AFTER FIX (src/codecs/tiff.rs patched with this candidate's patch.diff) =====
+--- run 1 ---
+dimensions: (1000, 1000), final output color: Rgb8, RGB output bytes: 3000000
+CMYK internal scratch buffer needed: 4000000 bytes
+declared max_alloc: 5500000
+true combined live memory required: 7000000
+set_limits(max_alloc = Some(5500000)) -> Ok(())
+did not reproduce - read_image() correctly rejected the request: Memory limit exceeded
+exit_code=0
+--- run 2 ---
+dimensions: (1000, 1000), final output color: Rgb8, RGB output bytes: 3000000
+CMYK internal scratch buffer needed: 4000000 bytes
+declared max_alloc: 5500000
+true combined live memory required: 7000000
+set_limits(max_alloc = Some(5500000)) -> Ok(())
+did not reproduce - read_image() correctly rejected the request: Memory limit exceeded
+exit_code=0
+--- run 3 ---
+dimensions: (1000, 1000), final output color: Rgb8, RGB output bytes: 3000000
+CMYK internal scratch buffer needed: 4000000 bytes
+declared max_alloc: 5500000
+true combined live memory required: 7000000
+set_limits(max_alloc = Some(5500000)) -> Ok(())
+did not reproduce - read_image() correctly rejected the request: Memory limit exceeded
+exit_code=0
+
+===== Separate empirical threshold sweep (examples/tmp_tiff_cmyk_probe.rs, run in-tree, not part of repro/) =====
+Same 1000x1000 CMYK8 source. Shows the exact boundary shifting from "below the true combined
+requirement" (before the fix) to "at or above it" (after the fix).
+
+BEFORE (unfixed):
+  max_alloc=4300000  ->  Err("Memory limit exceeded")
+  max_alloc=5500000  ->  Ok(..)   <- reproduces: 5500000 < 7000000 (rgb 3000000 + cmyk 4000000)
+  max_alloc=7000000  ->  Ok(..)   <- reproduces: 7000000 is not < 7000000, but still only just
+                                       covers the sum with zero margin for TIFF's own additional
+                                       IFD/tag intermediate-buffer needs, i.e. still unsafe
+  max_alloc=10000000 ->  Ok(..)
+
+AFTER (patched):
+  max_alloc=4300000  ->  Err("Memory limit exceeded")
+  max_alloc=5500000  ->  Err("Memory limit exceeded")
+  max_alloc=7000000  ->  Err("Memory limit exceeded")
+  max_alloc=8000000  ->  Ok(..)   <- only succeeds once max_alloc comfortably covers rgb+cmyk
+  max_alloc=10000000 ->  Ok(..)
+
+===== Project test suite (cargo test --lib, default features) =====
+Before fix: 331 passed; 0 failed; 0 ignored
+After fix:  331 passed; 0 failed; 0 ignored

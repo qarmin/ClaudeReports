@@ -1,0 +1,47 @@
+# Self-contained reproduction for candidate 004 (atomic_fetch_max_min_sign_bug).
+#
+# Unlike a typical `cargo run` repro, the thing under test is a compiler backend, not a library -
+# so "run the repro" means "compile a small Rust source file through the real backend
+# (`y.sh rustc`, wrapping `rustc -Zcodegen-backend=...`) and run the resulting binary", following
+# the same pattern as candidates 002/003 in this workspace.
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+test: clone build reproduce-before apply rebuild reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r repro clone/repro
+
+# One-time setup: downloads a prebuilt libgccjit.so and builds the sysroot (core/alloc/std).
+# ~2-3 minutes on a modern multi-core machine, per this workspace's own README.md.
+build:
+    echo 'download-gccjit = true' > clone/config.toml
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Compile+run the boundary-value report against the pristine (unpatched) backend - several
+# Atomic{U8,U16,U32,U64}::fetch_max/fetch_min lines should print FAIL (unsigned comparison used
+# where it shouldn't be, or vice versa).
+reproduce-before:
+    ulimit -c 0
+    cd clone && CHANNEL=release ./y.sh rustc repro/atomic_extremum_report.rs -o /tmp/atomic_extremum_report_before
+    /tmp/atomic_extremum_report_before
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+rebuild:
+    cd clone && CHANNEL=release ./y.sh build --release
+
+# Same repro again, now against the patched backend - every line should print OK.
+reproduce-after:
+    ulimit -c 0
+    cd clone && CHANNEL=release ./y.sh rustc repro/atomic_extremum_report.rs -o /tmp/atomic_extremum_report_after
+    /tmp/atomic_extremum_report_after
+
+clean:
+    rm -rf clone

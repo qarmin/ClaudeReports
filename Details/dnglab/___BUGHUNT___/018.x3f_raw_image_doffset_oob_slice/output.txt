@@ -1,0 +1,64 @@
+=== Standalone repro/, `just test`, real captured output ===
+
+--- reproduce-before (pristine tree at base_commit ac975f5d, release build) ---
+
+$ cd repro && cargo run --release
+   Compiling rawler v0.7.2 (.../018.x3f_raw_image_doffset_oob_slice/clone/rawler)
+   Compiling repro v0.0.0 (.../018.x3f_raw_image_doffset_oob_slice/repro)
+    Finished `release` profile [optimized] target(s) in 23.10s
+     Running `target/release/repro`
+crafted 64-byte X3F file; caminfo.doffset = 60, caminfo.doffset+6 = 66 (> file len 64)
+wrote crafted file to "/tmp/bughunt_018_x3f_doffset_oob.x3f"
+
+thread 'main' (157546) panicked at .../018.x3f_raw_image_doffset_oob_slice/clone/rawler/src/decoders/x3f.rs:113:23:
+range start index 66 out of range for slice of length 64
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: Recipe `reproduce-before` failed on line 19 with exit code 101
+
+(`just` reports the recipe as "failed" here by design: the panic's exit code 101
+is exactly what demonstrates the bug is present in pristine code - `just test`
+as a whole is expected to stop at this step until `patch.diff` is applied.)
+
+--- apply ---
+
+$ just apply
+cd clone && git apply ".../018.x3f_raw_image_doffset_oob_slice/patch.diff"
+(applied cleanly, no output)
+
+--- reproduce-after (patched tree, release build) ---
+
+$ just reproduce-after
+cd repro && cargo run --release
+   Compiling rawler v0.7.2 (.../018.x3f_raw_image_doffset_oob_slice/clone/rawler)
+   Compiling repro v0.0.0 (.../018.x3f_raw_image_doffset_oob_slice/repro)
+    Finished `release` profile [optimized] target(s) in 11.06s
+     Running `target/release/repro`
+crafted 64-byte X3F file; caminfo.doffset = 60, caminfo.doffset+6 = 66 (> file len 64)
+wrote crafted file to "/tmp/bughunt_018_x3f_doffset_oob.x3f"
+process_raw_image returned Err, no panic (bug not present): Failed to decode image, possibly corrupt image: X3F: Camera info offset out of range
+
+=== Additional boundary-value sweep (against a separately maintained copy of the
+    patched source in a scratch worktree, debug build, direct calls to the same
+    public rawler::imgop::develop::process_raw_image entry point) ===
+
+variant_a_oob2 (== the repro/ input above, doffset+6 = len+2):
+  process_raw_image returned Err (bug not present as panic): Failed to decode image, possibly corrupt image: X3F: Camera info offset out of range
+
+variant_c_inbounds_no_exif (doffset+6 in range, but no "Exif" magic present -
+  confirms the fix does not reject a genuinely in-range offset, it falls through
+  to the pre-existing "Couldn't find EXIF info" check exactly as before the fix):
+  process_raw_image returned Err (bug not present as panic): Failed to decode image, possibly corrupt image: X3F: Couldn't find EXIF info
+
+variant_d_valid_exif_prefix (doffset+6 in range AND "Exif" magic present -
+  confirms the fix lets valid input proceed past the new check into the
+  pre-existing IFD/camera-lookup logic, failing only later for an unrelated,
+  expected reason since no real TIFF/IFD tags were crafted):
+  process_raw_image returned Err (bug not present as panic): Failed to decode image, possibly corrupt image: Couldn't find tag TiffCommonTag::Make
+
+=== `cargo test -p rawler --lib` ===
+
+Before fix (pristine ac975f5d):
+  test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+After fix (patch.diff applied):
+  test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s

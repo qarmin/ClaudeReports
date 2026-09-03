@@ -1,0 +1,67 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate is a pure profiling/measurement investigation - no patch was applied to
+# dicom-rs's own source (see RESULT.md), so there is no patch.diff and no "baseline vs patched"
+# comparison here, just "reproduce the measured numbers against a fresh clone".
+#
+# Fill-in values, read at the moment this candidate was created:
+#   repo_url    - `git remote get-url origin` in the main project
+#   base_commit - `git rev-parse HEAD` in the main project
+#
+# The benchmark harness (bench_pipeline) is this workspace's own creation and is untracked in
+# the main dicom-rs repo (see ___OPTIMIZATIONS___/README.md's "Instrumentation added" section) -
+# a fresh `git clone` of repo_url will never contain it. This is "shape 3" from
+# templates/candidate_justfile: self-contained given the whole ___OPTIMIZATIONS___ folder kept
+# together, not as a single isolated subfolder - `just test` below copies the canonical harness
+# copy from `../harness/bench_pipeline` (relative to this folder) into the fresh clone.
+
+repo_url := "git@github.com:qarmin/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    # bench_pipeline's own Cargo.toml path-deps (e.g. `../../../core`) assume it lives 3
+    # directories below the repo root, exactly as it does in the real workspace
+    # (___OPTIMIZATIONS___/harness/bench_pipeline) - preserve that depth here too.
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+    rm -rf clone/___OPTIMIZATIONS___/harness/bench_pipeline/target
+
+build:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+
+# Reproduces this candidate's own isolated decode microbenchmark for all 5 remaining
+# multi-byte codecs (ISO_IR 13 / ISO_IR 87 / ISO_IR 149 / GB18030 / GBK), plus the ISO_IR 100
+# reference number for scale (see RESULT.md's own table for what these should look like -
+# absolute numbers will vary by machine, the ~1.5-2.0 ns/input-byte SHAPE relative to the
+# ISO_IR 100 reference is the thing being reproduced, not an exact figure).
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline
+    BIN=./target/release/bench
+    echo "=== reference: ISO_IR 100 (single-byte, unfixed generic path) ==="
+    "$BIN" text-decode 2000
+    "$BIN" text-encode 2000
+    for code in "ISO_IR 13" "ISO_IR 87" "ISO_IR 149" "GB18030" "GBK"; do
+        echo "=== $code ==="
+        "$BIN" text-decode-cs "$code" 2000
+        "$BIN" text-encode-cs "$code" 2000
+    done
+
+# Optional: reproduce the perf profile referenced in RESULT.md's "decode-specific self-time
+# breakdown" table (needs `perf` with a usable perf_event_paranoid, see MEASUREMENT.md).
+profile code="GBK":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline
+    perf record -q -o perf.data -g -- ./target/release/bench text-decode-cs "{{code}}" 400000 >/dev/null
+    perf report -i perf.data --stdio --sort=overhead,symbol 2>/dev/null | head -60
+
+clean:
+    rm -rf clone

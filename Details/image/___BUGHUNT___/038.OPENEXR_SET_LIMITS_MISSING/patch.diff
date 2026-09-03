@@ -1,0 +1,52 @@
+diff --git a/src/codecs/openexr.rs b/src/codecs/openexr.rs
+index 442a9153..ba69ed2a 100644
+--- a/src/codecs/openexr.rs
++++ b/src/codecs/openexr.rs
+@@ -47,6 +47,8 @@ pub struct OpenExrDecoder<R> {
+     alpha_preference: Option<bool>,
+ 
+     alpha_present_in_file: bool,
++
++    limits: crate::Limits,
+ }
+ 
+ impl<R: BufRead + Seek> OpenExrDecoder<R> {
+@@ -99,11 +101,20 @@ impl<R: BufRead + Seek> OpenExrDecoder<R> {
+             exr_reader: Some(exr_reader),
+             header_index,
+             alpha_present_in_file: has_alpha,
++            limits: crate::Limits::no_limits(),
+         })
+     }
+ }
+ 
+ impl<R: BufRead + Seek> ImageDecoder for OpenExrDecoder<R> {
++    fn set_limits(&mut self, limits: crate::Limits) -> ImageResult<()> {
++        limits.check_support(&crate::LimitSupport::default())?;
++        let layout = self.prepare_image()?;
++        limits.check_layout_dimensions(&layout)?;
++        self.limits = limits;
++        Ok(())
++    }
++
+     fn prepare_image(&mut self) -> ImageResult<DecoderPreparedImage> {
+         let (width, height) = match &self.exr_reader {
+             Some(exr) => {
+@@ -177,6 +188,17 @@ impl<R: BufRead + Seek> ImageDecoder for OpenExrDecoder<R> {
+             );
+         }
+ 
++        // The `rgba_channels` callback below allocates its own `f32` scratch buffer, the same
++        // size as `unaligned_bytes`, before copying into it - account for that separately since
++        // it is not the caller-supplied buffer already implied by `layout.total_bytes()`.
++        self.limits.reserve_usize(
++            display_window
++                .size
++                .area()
++                .saturating_mul(channel_count)
++                .saturating_mul(size_of::<f32>()),
++        )?;
++
+         let result = read()
+             .no_deep_data()
+             .largest_resolution_level()

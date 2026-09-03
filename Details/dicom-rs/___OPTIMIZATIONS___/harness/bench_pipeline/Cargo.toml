@@ -1,0 +1,68 @@
+[workspace]
+
+[package]
+name = "bench_pipeline"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[dependencies]
+dicom-object = { path = "../../../object" }
+dicom-core = { path = "../../../core" }
+dicom-encoding = { path = "../../../encoding" }
+dicom-pixeldata = { path = "../../../pixeldata", default-features = false, features = ["image", "native"] }
+dicom-transfer-syntax-registry = { path = "../../../transfer-syntax-registry", default-features = false }
+dicom-dictionary-std = { path = "../../../dictionary-std" }
+dicom-json = { path = "../../../json" }
+dicom-ul = { path = "../../../ul", default-features = false }
+dicom-test-files = "0.4"
+mimalloc = { version = "0.1.52", optional = true }
+tikv-jemallocator = { version = "0.7", optional = true }
+tokio = { version = "1", features = ["rt", "macros"] }
+# needed only for json-decode-fromvalue (candidate 037) to build a serde_json::Value the same
+# way dicom-json's own from_value() entry point expects - matches dicom-json's own resolved
+# version so this stays the same Value type, not a second, incompatible serde_json in the tree.
+serde_json = "1.0.96"
+
+[features]
+# On by default so a plain `cargo build --release` behaves exactly as before (rayon linked).
+# Build with `--no-default-features` to get a no-rayon binary for single-core measurements
+# (see candidate 012/023's RESULT.md) - `dicom-pixeldata`'s own default-features is now off
+# above so this is the only thing gating its `rayon` feature.
+default = ["dicom-pixeldata/rayon"]
+# Swaps the global allocator to mimalloc instead of the system default (glibc malloc on this
+# box) - used to distinguish "this change is a real regression" from "this change is only a
+# regression under glibc's specific allocator behavior for this access pattern". See candidates
+# 005/016's RESULT.md for the two real cases this caught this session.
+diag-mimalloc = ["dep:mimalloc"]
+# Same diagnostic purpose as diag-mimalloc, but jemalloc instead - candidate 041.
+diag-jemalloc = ["dep:tikv-jemallocator"]
+# Counts total alloc+dealloc calls via a wrapped System allocator - for measuring an allocation-
+# *count*-reducing fix (peak RSS/byte volume can't see this dimension). Mutually exclusive with
+# diag-mimalloc (both define #[global_allocator]) - don't combine on the command line.
+diag-alloccount = []
+# Gates the harness's *-consuming modes (write-dataset-only-consuming, dump-dataset-consuming,
+# write-dataset-peak-mem-consuming), which call InMemDicomObject::write_dataset_with_ts2 - a
+# method that only exists once candidate 019's patch.diff (comparison-only block) is applied.
+# Off by default so a baseline (unpatched) build of this harness still compiles.
+comparison-ts2 = []
+# Gates the harness's pdatawriter-inprocess mode, which calls
+# dicom_ul::association::pdata::PDataWriter::new_for_bench. Deliberately NOT forwarded to
+# dicom-ul/bench-internals here (e.g. `= ["dicom-ul/bench-internals"]`) - that forward is
+# validated by Cargo at manifest-resolution time regardless of whether this feature is ever
+# activated, so it would break even a plain default build whenever ul's own bench-internals
+# feature isn't present (i.e. whenever candidate 020's bench-shim.diff isn't applied - the
+# normal, reverted state of the main tree). Pass both features explicitly on the command line
+# instead when actually running this mode: `--features pdatawriter-inprocess,dicom-ul/bench-internals`.
+# See MEASUREMENT.md's "stale optional-feature forward" pitfall and candidate 020's RESULT.md.
+pdatawriter-inprocess = []
+# Gates the harness's async-pdatawriter-inprocess mode, which calls
+# dicom_ul::association::AsyncPDataWriter::new_for_bench. Separate from pdatawriter-inprocess
+# (see that mode's own comment) - see candidate 029's RESULT.md.
+async-pdatawriter-inprocess = []
+
+[profile.release]
+debug = true

@@ -1,0 +1,87 @@
+diff --git a/kurbo/src/offset.rs b/kurbo/src/offset.rs
+index 48ecfad..3142597 100644
+--- a/kurbo/src/offset.rs
++++ b/kurbo/src/offset.rs
+@@ -368,12 +368,19 @@ impl CubicOffset {
+         let mut unorms = [Vec2::ZERO; N_LSE];
+         let mut err_vecs = [Vec2::ZERO; N_LSE];
+         for i in 0..N_LSE {
+-            let ta = (i + 1) as f64 * (1.0 / (N_LSE + 1) as f64);
++            let w = EVAL_WEIGHTS[i];
+             let mut t = ts[i];
+             let p = self.c.eval(t);
+-            // Newton step to refine t value
+-            let pa = c_approx.eval(ta);
+-            let tana = qa.eval(ta).to_vec2();
++            // Newton step to refine t value. This is `c_approx.eval(ta)` and
++            // `qa.eval(ta).to_vec2()` with the parts that depend only on the (constant) sample
++            // parameter lifted into EVAL_WEIGHTS - same operations, same order, same result.
++            let pa = (c_approx.p0.to_vec2() * w.c0
++                + (c_approx.p1.to_vec2() * w.c1
++                    + (c_approx.p2.to_vec2() * w.c2 + c_approx.p3.to_vec2() * w.t) * w.t)
++                    * w.t)
++                .to_point();
++            let tana = qa.p0.to_vec2() * w.q0
++                + (qa.p1.to_vec2() * w.q1 + qa.p2.to_vec2() * w.t) * w.t;
+             t += tana.dot(pa - p) / tana.dot(self.q.eval(t).to_vec2());
+             t = t.max(rec.t0).min(rec.t1);
+             ts[i] = t;
+@@ -600,6 +607,58 @@ impl OffsetRec {
+     }
+ }
+ 
++/// The sub-expressions `ParamCurve::eval` and `ParamCurveDeriv::eval` build from `t`, at the
++/// `N_LSE` fixed sample points [`CubicOffset::eval_err`] uses.
++///
++/// Only `t` varies between calls in those methods - and here it doesn't vary at all - so these
++/// are compile-time constants. They are kept in exactly the form the two `eval` implementations
++/// use them, and combined with the control points in exactly the same order, so the results are
++/// unchanged bit for bit.
++#[derive(Clone, Copy)]
++struct EvalWeights {
++    /// The sample parameter itself.
++    t: f64,
++    /// `mt^3`, the coefficient `CubicBez::eval` applies to `p0`.
++    c0: f64,
++    /// `3 mt^2`, the coefficient `CubicBez::eval` applies to `p1`.
++    c1: f64,
++    /// `3 mt`, the coefficient `CubicBez::eval` applies to `p2`.
++    c2: f64,
++    /// `mt^2`, the coefficient `QuadBez::eval` applies to `p0`.
++    q0: f64,
++    /// `2 mt`, the coefficient `QuadBez::eval` applies to `p1`.
++    q1: f64,
++}
++
++const fn mk_eval_weights() -> [EvalWeights; N_LSE] {
++    let mut result = [EvalWeights {
++        t: 0.0,
++        c0: 0.0,
++        c1: 0.0,
++        c2: 0.0,
++        q0: 0.0,
++        q1: 0.0,
++    }; N_LSE];
++    let mut i = 0;
++    while i < N_LSE {
++        // Same expression as the t value it replaces, so the sample points are unchanged.
++        let t = (i + 1) as f64 * (1.0 / (N_LSE + 1) as f64);
++        let mt = 1.0 - t;
++        result[i] = EvalWeights {
++            t,
++            c0: mt * mt * mt,
++            c1: mt * mt * 3.0,
++            c2: mt * 3.0,
++            q0: mt * mt,
++            q1: mt * 2.0,
++        };
++        i += 1;
++    }
++    result
++}
++
++const EVAL_WEIGHTS: [EvalWeights; N_LSE] = mk_eval_weights();
++
+ /// Compute Bézier weights for evenly subdivided t values.
+ const fn mk_a_weights(rev: bool) -> [f64; N_LSE] {
+     let mut result = [0.0; N_LSE];

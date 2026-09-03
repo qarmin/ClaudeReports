@@ -1,0 +1,54 @@
+diff --git a/pixeldata/src/transform.rs b/pixeldata/src/transform.rs
+index 88225e00..c8fc35a4 100644
+--- a/pixeldata/src/transform.rs
++++ b/pixeldata/src/transform.rs
+@@ -85,18 +85,32 @@ impl WindowLevelTransform {
+     ///
+     /// The width of the given `window_level` is automatically clamped
+     /// if it is incompatible with the given LUT function:
+-    /// it muse be `>= 0` if the function is [`LinearExact`](VoiLutFunction::LinearExact),
++    /// it must be `>= 0` if the function is [`LinearExact`](VoiLutFunction::LinearExact),
+     /// and `>= 1` in other functions.
++    ///
++    /// The `LINEAR` function is defined in terms of `width - 1`
++    /// (PS3.3 C.11.2.1.2.1), so it degenerates into a hard black/white
++    /// threshold once a width below 1 is clamped up to 1. A window
++    /// narrower than one unit (typically because the modality rescale maps
++    /// the samples onto a small floating point range) is therefore served
++    /// by the `LINEAR_EXACT` function instead, which is well defined for
++    /// any non-negative width and does not degenerate.
+     #[inline]
+     pub fn new(voi_lut_function: VoiLutFunction, window_level: WindowLevel) -> Self {
++        let (voi_lut_function, width) = match voi_lut_function {
++            VoiLutFunction::LinearExact => (voi_lut_function, window_level.width.max(0.)),
++            VoiLutFunction::Linear if window_level.width < 1. => {
++                (VoiLutFunction::LinearExact, window_level.width.max(0.))
++            }
++            VoiLutFunction::Linear => (voi_lut_function, window_level.width),
++            VoiLutFunction::Sigmoid => (voi_lut_function, window_level.width.max(1.)),
++        };
++
+         WindowLevelTransform {
+             voi_lut_function,
+             window_level: WindowLevel {
+                 center: window_level.center,
+-                width: match voi_lut_function {
+-                    VoiLutFunction::LinearExact => window_level.width.max(0.),
+-                    VoiLutFunction::Linear | VoiLutFunction::Sigmoid => window_level.width.max(1.),
+-                },
++                width,
+             },
+         }
+     }
+@@ -104,8 +118,9 @@ impl WindowLevelTransform {
+     /// Create a new window level transformation
+     /// with the `LINEAR` function.
+     ///
+-    /// The width of the given `window_level` is automatically clamped
+-    /// to 1 if it is lower than 1.
++    /// A width lower than 1 is served by the `LINEAR_EXACT` function
++    /// instead, as described in [`new`](Self::new), to avoid degenerating
++    /// into a hard threshold.
+     #[inline]
+     pub fn linear(window_level: WindowLevel) -> Self {
+         Self::new(VoiLutFunction::Linear, window_level)

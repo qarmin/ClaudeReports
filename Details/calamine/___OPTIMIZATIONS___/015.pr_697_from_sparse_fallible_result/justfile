@@ -1,0 +1,49 @@
+# Self-contained reproduction for this candidate.
+#
+# Rebases GitHub PR #697 (tafia/calamine, open, not merged as of this writing) onto this
+# candidate's own base_commit - the PR's own branch had already diverged (conflicting changes
+# in src/xls.rs and src/xlsx/mod.rs from unrelated later commits), so patch.diff here is a
+# hand-rebased equivalent of the PR's actual diff, not a literal `git apply` of it. Behavior is
+# the same: `Range::from_sparse` returns `Result<Range<T>, RangeError>` instead of aborting the
+# process on an oversized dense-grid allocation.
+#
+# Uses the `rss_probe` harness from ../harness/rss_probe (untracked in the main calamine repo -
+# see ../README.md). Self-contained given the whole ___OPTIMIZATIONS___ folder kept together.
+#
+# The primary fixture (big_300k_rows.xlsx, ~20MB, 2.4M cells) is re-downloaded from the public
+# URL documented in ../README.md.
+
+repo_url := "https://github.com/tafia/calamine.git"
+base_commit := "5c02e86e99ec5c1fb1dcc15e64c2bbaf19bff60d"
+harness_dir := "../harness/rss_probe"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/rss_probe
+    mkdir -p testdata
+    curl -sL -o testdata/big_300k_rows.xlsx https://test-files.sheetjs.com/8-by-300000-cells.xlsx
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_baseline
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_patched
+
+bench:
+    @echo "=== baseline: XLSX real file, worksheet_range() (watch peak_rss_kb / elapsed_ms) ==="
+    ./rss_probe_baseline range testdata/big_300k_rows.xlsx
+    @echo "=== patched: same file (expect no measurable change, identical sig/cells) ==="
+    ./rss_probe_patched range testdata/big_300k_rows.xlsx
+
+clean:
+    rm -rf clone rss_probe_baseline rss_probe_patched testdata

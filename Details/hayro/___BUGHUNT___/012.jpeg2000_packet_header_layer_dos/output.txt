@@ -1,0 +1,154 @@
+=== Boundary sweep (standalone harness calling hayro-jpeg2000's public Image::new/decode() directly, target_resolution=(20,20)) ===
+
+--- baseline sanity check: reproduce candidate 011's own numbers exactly (15000x15000, 1 decomp level, 4x4 code blocks, empty tile-part body, num_layers=1) ---
+header parsed: 7500x7500 declared
+decode() returned Err: Validation(InvalidExponents)
+decode() took 1.243692678s (total incl. header: 1.243705222s)
+peak RSS (VmHWM): 2750360 kB (~2685.90 MB)
+(matches candidate 011's own reported ~1.15s / ~2.75GB for the same shape - confirms the harness/generator faithfully reproduces their setup)
+
+--- isolating segment::parse's own cost at a smaller, cheap-to-build-structurally scale (3000x3000, 1 decomp level, 4x4 code blocks) ---
+empty tile-part body, num_layers=1 (build_decompositions only, no packets ever parsed):
+  decode() took 65.538284ms, peak RSS ~110.45 MB
+empty tile-part body, num_layers=32 (build_decompositions only; isolates the storage.layers Vec's own num_layers scaling):
+  decode() took 181.569506ms, peak RSS ~509.54 MB
+real minimal non-empty packet stream, num_layers=1 (adds segment::parse's packet loop):
+  decode() took 50.744565ms, peak RSS ~110.46 MB
+real minimal non-empty packet stream, num_layers=32 (adds segment::parse's packet loop, multiplied by 32 layers):
+  decode() took 260.639855ms, peak RSS ~509.62 MB
+  => segment::parse's own additional cost at this scale: ~260ms - ~181ms = ~79ms, using only 64
+     extra real payload bytes (2 bytes/layer) beyond the empty-body case, entirely attributable
+     to the packet-header-parsing loop (resolve_segments + the body-read loop in parse_inner)
+     walking every code-block of the huge (skipped) resolution level once per layer.
+
+--- full scale (15000x15000, matching candidate 011's own PoC dimensions), pristine tree (no fixes applied) ---
+empty tile-part body, num_layers=1:
+  decode() took 1.124963641s, peak RSS ~2685.93 MB  (matches candidate 011's own reported baseline)
+empty tile-part body, num_layers=32 (build_decompositions only):
+  decode() took 4.248973175s, peak RSS ~12663.73 MB
+real minimal non-empty packet stream, num_layers=32 (adds segment::parse's own cost):
+  decode() took 7.713787708s, peak RSS ~12663.76 MB
+  => segment::parse's own additional time at full scale: ~7.71s - ~4.25s = ~3.46s (memory
+     identical between the two, confirming the ~12.66GB is entirely attributable to
+     build_decompositions/storage.layers, not to segment::parse itself, which only adds time,
+     not additional peak memory, in this shape)
+
+--- isolating against candidate 011's own (unmerged) fix: with MAX_RAW_CODE_BLOCK_ESTIMATE
+    (candidate 011's patch.diff) applied to a fresh checkout, raw_code_block_estimate for
+    7900x7900 (1 decomp level, 4x4 code blocks) computes to ~3.9M, just under their 4,000,000
+    cap, so candidate 011's own fix does NOT reject this input ---
+real minimal non-empty packet stream, num_layers=1 (candidate 011's fix applied):
+  decode() took 345.996309ms, peak RSS ~747.89 MB
+real minimal non-empty packet stream, num_layers=32 (candidate 011's fix applied):
+  decode() took 1.889140383s, peak RSS ~3518.24 MB
+empty tile-part body, num_layers=32 (candidate 011's fix applied; isolates build_decompositions only):
+  decode() took 1.10875733s, peak RSS ~3518.33 MB
+  => even with candidate 011's own fix applied, num_layers alone (1 -> 32) still inflates
+     decode() time by ~5.5x and peak memory by ~4.7x (346ms/748MB -> 1.89s/3.52GB), and
+     segment::parse's own packet-parsing loop still contributes ~0.78s of that (1.89s - 1.11s)
+     on top of build_decompositions's own (also uncapped-by-011's-estimate) storage.layers cost -
+     both mechanisms are entirely decoupled from candidate 011's code-block-COUNT-only estimate.
+
+--- control: realistic large image, realistic code-block size, all 32 layers (should be fast and
+    NOT rejected by this candidate's fix) ---
+20000x15000, 1 decomp level, 64x64 code blocks, 32 layers, real minimal packet stream:
+  decode() took 3.373349ms, peak RSS ~7.47 MB (returns Err(InvalidExponents) downstream, same as
+  every other PoC in this file, from the deliberately-minimal QCD data - irrelevant, since the
+  cost being measured all happens before that point is reached)
+
+
+=== This candidate's own fix (build.rs: MAX_RAW_CODE_BLOCK_LAYER_ESTIMATE) applied ===
+
+--- malicious PoC (15000x15000, 1 decomp level, 4x4 code blocks, 32 layers, real packets) ---
+header parsed: 7500x7500 declared
+decode() returned Err: Validation(ImageTooLarge)
+decode() took 13.977µs (total incl. header: 28.634µs)
+peak RSS (VmHWM): 3020 kB (~2.95 MB)
+
+--- same shape but num_layers=1 (candidate 011's own original PoC shape) - also now rejected,
+    since this fix's estimate reduces to the same code-block-count-only estimate when
+    num_layers=1 ---
+header parsed: 7500x7500 declared
+decode() returned Err: Validation(ImageTooLarge)
+decode() took 7.975µs (total incl. header: 17.052µs)
+peak RSS (VmHWM): 2952 kB (~2.88 MB)
+
+--- control (20000x15000, 64x64 code blocks, 32 layers) - still accepted, still fast ---
+header parsed: 10000x7500 declared
+decode() returned Err: Validation(InvalidExponents)
+decode() took 3.373349ms (total incl. header: 3.399208ms)
+peak RSS (VmHWM): 7648 kB (~7.47 MB)
+(identical to the pristine-tree run above - confirms the fix does not affect this legitimate shape)
+
+
+=== Real, standalone, end-to-end repro/ (own Cargo.toml, real public hayro/hayro-syntax API,
+    real hayro::render() entry point, real classic-xref-table PDF with a real /JPXDecode image
+    XObject placed as a 20x20 thumbnail on a 200x200 page) ===
+
+--- pristine tree (base_commit 5a5f0e247c970df948505ee0bb36e2df2504bf86), 3 separate runs ---
+run 1:
+built PoC PDF: 829 bytes (embedded JPEG2000 codestream: 144 bytes, declares 15000x15000 raw, 1 decomposition level, 4x4 code blocks, 32 quality layers with a real, minimal non-empty packet stream; placed as a 20x20 thumbnail via `cm 20 0 0 20 90 90` on a 200x200 page)
+calling the real, public hayro::render() and timing it...
+render() returned after 7.666001669s (pixmap 200x200)
+peak RSS (VmHWM): 12969268 kB (~12665.30 MB)
+SLOW: took >= 500ms to render a 20x20 thumbnail placement - consistent with the suspected packet-header-parsing-loop cost (multiplied by the 32 quality layers), on top of candidate 011's own already-confirmed raw-dimension-driven structural-build cost
+
+run 2:
+built PoC PDF: 829 bytes (embedded JPEG2000 codestream: 144 bytes, declares 15000x15000 raw, 1 decomposition level, 4x4 code blocks, 32 quality layers with a real, minimal non-empty packet stream; placed as a 20x20 thumbnail via `cm 20 0 0 20 90 90` on a 200x200 page)
+calling the real, public hayro::render() and timing it...
+render() returned after 7.467165925s (pixmap 200x200)
+peak RSS (VmHWM): 12969704 kB (~12665.73 MB)
+SLOW: took >= 500ms to render a 20x20 thumbnail placement - consistent with the suspected packet-header-parsing-loop cost (multiplied by the 32 quality layers), on top of candidate 011's own already-confirmed raw-dimension-driven structural-build cost
+
+run 3:
+built PoC PDF: 829 bytes (embedded JPEG2000 codestream: 144 bytes, declares 15000x15000 raw, 1 decomposition level, 4x4 code blocks, 32 quality layers with a real, minimal non-empty packet stream; placed as a 20x20 thumbnail via `cm 20 0 0 20 90 90` on a 200x200 page)
+calling the real, public hayro::render() and timing it...
+render() returned after 7.864138188s (pixmap 200x200)
+peak RSS (VmHWM): 12969996 kB (~12666.01 MB)
+SLOW: took >= 500ms to render a 20x20 thumbnail placement - consistent with the suspected packet-header-parsing-loop cost (multiplied by the 32 quality layers), on top of candidate 011's own already-confirmed raw-dimension-driven structural-build cost
+
+--- patched tree (this candidate's own patch.diff applied to hayro-jpeg2000/src/j2c/build.rs), 3 separate runs ---
+run 1:
+built PoC PDF: 829 bytes (embedded JPEG2000 codestream: 144 bytes, declares 15000x15000 raw, 1 decomposition level, 4x4 code blocks, 32 quality layers with a real, minimal non-empty packet stream; placed as a 20x20 thumbnail via `cm 20 0 0 20 90 90` on a 200x200 page)
+calling the real, public hayro::render() and timing it...
+render() returned after 275.392µs (pixmap 200x200)
+peak RSS (VmHWM): 6600 kB (~6.45 MB)
+FAST: rendering completed quickly
+
+run 2:
+built PoC PDF: 829 bytes (embedded JPEG2000 codestream: 144 bytes, declares 15000x15000 raw, 1 decomposition level, 4x4 code blocks, 32 quality layers with a real, minimal non-empty packet stream; placed as a 20x20 thumbnail via `cm 20 0 0 20 90 90` on a 200x200 page)
+calling the real, public hayro::render() and timing it...
+render() returned after 230.797µs (pixmap 200x200)
+peak RSS (VmHWM): 6712 kB (~6.55 MB)
+FAST: rendering completed quickly
+
+run 3:
+built PoC PDF: 829 bytes (embedded JPEG2000 codestream: 144 bytes, declares 15000x15000 raw, 1 decomposition level, 4x4 code blocks, 32 quality layers with a real, minimal non-empty packet stream; placed as a 20x20 thumbnail via `cm 20 0 0 20 90 90` on a 200x200 page)
+calling the real, public hayro::render() and timing it...
+render() returned after 287.204µs (pixmap 200x200)
+peak RSS (VmHWM): 6676 kB (~6.52 MB)
+FAST: rendering completed quickly
+
+
+=== Project test suite (patch applied vs pristine, hayro-tests / hayro-jpeg2000) ===
+
+cargo test -p hayro-jpeg2000 --release:
+  unit tests: 1 passed / 0 failed (identical before/after)
+  asset_suite integration test: fails identically before/after with
+  "Failed to read asset directory: missing test input serenity/buggie-gray.jpf" - a pre-existing
+  environment limitation (downloaded test assets not present in this checkout), not a regression,
+  same as documented by candidates 004/006/008/009/011.
+
+cargo test -p hayro-tests --release --test tests -- load::
+  112 passed / 0 failed (patched tree) - includes load::issue391, the specific regression
+  candidate 011's own first (reverted) fix attempt broke; this candidate's fix does not touch
+  segment::parse's own structural reliance on precinct/code-block bookkeeping for skipped
+  resolution levels, so it does not reintroduce that regression.
+
+cargo test -p hayro-tests --release --test tests -- render::
+  pristine tree:  266 passed / 1259 failed
+  patched tree:   266 passed / 1259 failed
+  identical pass/fail counts and identical failing-test set (including stream_jpx_3/5/6) before
+  and after - the failures are the same pre-existing environment limitation (missing downloaded
+  reference PDFs/snapshots) candidates 004/006/008/009/011 already documented, not caused by
+  this change.

@@ -1,0 +1,51 @@
+# Self-contained reproduction for this candidate.
+#
+# The harness (harness/bench_decode) is untracked in the main jpeg-decoder repo (it's this
+# workspace's own scratch crate, see ___OPTIMIZATIONS___/README.md), so a fresh `git clone` of
+# repo_url will never contain it - this candidate is self-contained given the whole
+# ___OPTIMIZATIONS___ folder (shape 3 from the template comment), not standalone-postable on its
+# own.
+
+repo_url := "https://github.com/image-rs/jpeg-decoder.git"
+base_commit := "eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c"
+harness_dir := "../harness/bench_decode"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/bench_decode
+    sed -i 's#path = "\.\./\.\./\.\."#path = ".."#' clone/bench_decode/Cargo.toml
+
+build-baseline:
+    cd clone/bench_decode && cargo +stable build --release
+    cp clone/bench_decode/target/release/bench_decode ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    find clone/src -name '*.rs' -exec touch {} +
+    cd clone/bench_decode && cargo +stable build --release
+    cp clone/bench_decode/target/release/bench_decode ./bin_patched
+
+bench:
+    @echo "=== baseline (LUT_BITS=8) vs patched (LUT_BITS=10) ==="
+    @echo "--- benches/large_image.jpg (1.95% slow-path hit rate) ---"
+    ./bin_baseline clone/benches/large_image.jpg 30
+    ./bin_patched  clone/benches/large_image.jpg 30
+    @echo "--- benches/tower.jpg (4.41% slow-path hit rate) ---"
+    ./bin_baseline clone/benches/tower.jpg 100
+    ./bin_patched  clone/benches/tower.jpg 100
+    @echo "--- benches/tower_grayscale.jpg (7.15% slow-path hit rate) ---"
+    ./bin_baseline clone/benches/tower_grayscale.jpg 200
+    ./bin_patched  clone/benches/tower_grayscale.jpg 200
+    @echo "--- tests/reftest/images/lossless/1/jpeg_lossless_sel1-rgb.jpg (0% slow-path hit rate, expected no-op) ---"
+    ./bin_baseline clone/tests/reftest/images/lossless/1/jpeg_lossless_sel1-rgb.jpg 15
+    ./bin_patched  clone/tests/reftest/images/lossless/1/jpeg_lossless_sel1-rgb.jpg 15
+    @echo "Use ../tools/paired.sh ./bin_baseline ./bin_patched -- <image> [iters] (RUNS=9+) for a properly paired A/B comparison; see RESULT.md for numbers already gathered that way."
+
+clean:
+    rm -rf clone bin_baseline bin_patched

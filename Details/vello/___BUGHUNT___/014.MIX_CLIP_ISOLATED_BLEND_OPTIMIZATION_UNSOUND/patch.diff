@@ -1,0 +1,93 @@
+diff --git a/vello_shaders/shader/coarse.wgsl b/vello_shaders/shader/coarse.wgsl
+index 4e045c11..553f912d 100644
+--- a/vello_shaders/shader/coarse.wgsl
++++ b/vello_shaders/shader/coarse.wgsl
+@@ -131,9 +131,9 @@ fn write_image(info_offset: u32) {
+     cmd_offset += 2u;
+ }
+ 
+-fn write_begin_clip() {
++fn write_begin_clip(flags: u32) {
+     alloc_cmd(1u);
+-    ptcl[cmd_offset] = CMD_BEGIN_CLIP;
++    ptcl[cmd_offset] = CMD_BEGIN_CLIP | flags;
+     cmd_offset += 1u;
+ }
+ 
+@@ -417,7 +417,12 @@ fn main(
+                         if tile.segment_count_or_ix == 0u && backdrop_clear {
+                             clip_zero_depth = clip_depth + 1u;
+                         } else {
+-                            write_begin_clip();
++                            let blend = scene[dd];
++                            if blend == BLEND_CLIP {
++                                write_begin_clip(NON_ISOLATED_BLENDING_FLAG);
++                            } else {
++                                write_begin_clip(0u);
++                            }
+                             render_blend_depth += 1u;
+                             max_blend_depth = max(max_blend_depth, render_blend_depth);
+                         }
+diff --git a/vello_shaders/shader/fine.wgsl b/vello_shaders/shader/fine.wgsl
+index 55f615de..911d7c53 100644
+--- a/vello_shaders/shader/fine.wgsl
++++ b/vello_shaders/shader/fine.wgsl
+@@ -1089,10 +1089,11 @@ fn main(
+     // main interpretation loop
+     while true {
+         let tag = ptcl[cmd_ix];
+-        if tag == CMD_END {
++        let cmd = tag & 0xffu;
++        if cmd == CMD_END {
+             break;
+         }
+-        switch tag {
++        switch cmd {
+             case CMD_FILL: {
+                 let fill = read_fill(cmd_ix);
+ #ifdef msaa
+@@ -1118,10 +1119,16 @@ fn main(
+                 cmd_ix += 2u;
+             }
+             case CMD_BEGIN_CLIP: {
++                // A clip-only layer (`BLEND_CLIP`) is flagged as non-isolated: instead of
++                // resetting `rgba` to transparent, the real backdrop is left in place so
++                // that a real blend mode nested inside the clip sees the genuine backdrop
++                // rather than an isolated transparent one. See issue #1198.
++                let is_non_isolated = (tag & NON_ISOLATED_BLENDING_FLAG) != 0u;
++                let rgba_mul = select(vec4(0.0), vec4(1.0), is_non_isolated);
+                 if clip_depth < BLEND_STACK_SPLIT {
+                     for (var i = 0u; i < PIXELS_PER_THREAD; i += 1u) {
+                         blend_stack[clip_depth][i] = pack4x8unorm(rgba[i]);
+-                        rgba[i] = vec4(0.0);
++                        rgba[i] *= rgba_mul;
+                     }
+                 } else {
+                     let blend_in_scratch = clip_depth - BLEND_STACK_SPLIT;
+@@ -1129,7 +1136,7 @@ fn main(
+                     let local_blend_start = blend_offset + blend_in_scratch * TILE_WIDTH * TILE_HEIGHT + local_tile_ix;
+                     for (var i = 0u; i < PIXELS_PER_THREAD; i += 1u) {
+                         blend_spill[local_blend_start + i] = pack4x8unorm(rgba[i]);
+-                        rgba[i] = vec4(0.0);
++                        rgba[i] *= rgba_mul;
+                     }
+                 }
+                 clip_depth += 1u;
+diff --git a/vello_shaders/shader/shared/ptcl.wgsl b/vello_shaders/shader/shared/ptcl.wgsl
+index 487c3496..f32758fb 100644
+--- a/vello_shaders/shader/shared/ptcl.wgsl
++++ b/vello_shaders/shader/shared/ptcl.wgsl
+@@ -24,6 +24,13 @@ const CMD_END_CLIP = 11u;
+ const CMD_JUMP = 12u;
+ const CMD_BLUR_RECT = 13u;
+ 
++// Full blend state used for a clip-only layer (`DrawBeginClip::CLIP_BLEND_MODE`).
++const BLEND_CLIP = (128u << 8u) | 3u;
++
++// Flag set on CMD_BEGIN_CLIP's tag to let blending punch through the layer,
++// i.e. skip creating an isolated blend group for a clip-only layer.
++const NON_ISOLATED_BLENDING_FLAG = 0x100u;
++
+ // The individual PTCL structs are written here, but read/write is by
+ // hand in the relevant shaders
+ 

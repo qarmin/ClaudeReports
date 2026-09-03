@@ -1,0 +1,49 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Full cycle: clone at the pinned commit, apply the patch + the bench addition, build, run
+# the bench, check bit-exactness.
+test: clone apply bench correctness
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    # Adds the "Pic scale Plane8 wide filter: Lanczos 3" criterion case (u8, PreferQuality,
+    # 1/16 downscale -> kernel_size~96 taps, so the 16-tap AVX2 loop fires several times per
+    # output pixel instead of ~0-1 times like the existing "Pic scale Plane8(Quality): Lanczos
+    # 3" case at 1/4 downscale). This is the gap flagged in ___OPTIMIZATIONS___/IDEAS.md against
+    # app/benches/resize_plane/main.rs. Measurement-only, not committed to the main tree -
+    # reverted with the rest of the working tree at the end of every session (see ../README.md).
+    cd clone && git apply "{{justfile_directory()}}/bench_addition.diff"
+    # app/Cargo.toml's default pic-scale feature list has no "avx"/"sse", so the bench never
+    # reaches src/avx2/ at all otherwise.
+    cd clone && sed -i 's/"colorspaces", "rdm", "nightly_i8mm", "nightly_f16"/"colorspaces", "rdm", "nightly_i8mm", "nightly_f16", "avx", "sse"/' app/Cargo.toml
+
+# The compiled criterion binary needs `--bench` as its first argument to actually measure and
+# print `time:   [...]` (otherwise it just lists available cases) - run from `clone` as the
+# working directory, since the bench opens `../assets/...` relative to cwd (from app/, so cd
+# into clone first, cargo bench handles the app/ part).
+bench:
+    cd clone && cargo bench -p app --bench resize_plane -- --bench "Pic scale Plane8 wide filter: Lanczos 3"
+
+# Bit-exact correctness check: resamples several synthetic planar u8 sources (sweeping tap
+# counts, PreferSpeed/PreferQuality) and hashes the output. Compare the printed FINAL_HASH
+# between a build of ./clone at base_commit (pristine) and one with patch.diff applied - both
+# should print the identical hash (see RESULT.md).
+correctness:
+    cd bit_exact_check && cargo run --release
+
+clean:
+    rm -rf clone bit_exact_check/target

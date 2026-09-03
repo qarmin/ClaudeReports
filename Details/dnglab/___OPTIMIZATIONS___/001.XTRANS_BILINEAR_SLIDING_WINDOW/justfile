@@ -1,0 +1,30 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# repo_url/base_commit read at the moment patch.diff was captured (2026-08-24).
+
+repo_url := "https://github.com/dnglab/dnglab.git"
+base_commit := "ac975f5d1b3362feb3974811db6cc5a37a77b02b"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Reuses the project's own existing criterion bench (rawler/benches/demosaic.rs), which already
+# exercises exactly the patched function via RawDevelop::new_with(&[ProcessingStep::Demosaic])
+# on a decoded Fujifilm X-T5 sample. Requires network access on first run (downloads ~samples
+# via RAWDB_CACHE, see rawler/src/devtools/rawdb.rs) and the `rawdb` cargo feature.
+bench:
+    cd clone && RAWDB_CACHE=./target/rawdb_cache cargo bench -p rawler --features rawdb --bench demosaic -- full_image_fuji_xt5
+
+clean:
+    rm -rf clone

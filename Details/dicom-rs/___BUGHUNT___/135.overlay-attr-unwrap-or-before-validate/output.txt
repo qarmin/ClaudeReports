@@ -1,0 +1,68 @@
+=== BEFORE: repro/ run against a pristine clone of Enet4/dicom-rs at df2b9e42 ===
+$ cd repro && cargo run
+
+A) Overlay Bits Allocated = 16, VR SS instead of US
+  correct VR (baseline) -> Err(Unsupported Overlay Bits Allocated 16 in group 0x6000, expected 1)
+  wrong VR (malformed)  -> Ok(Some(plane with 32 pixels))
+  BUG: Overlay Bits Allocated: the malformed element was silently accepted as the spec default
+
+B) Overlay Bit Position = 3, VR SS instead of US
+  correct VR (baseline) -> Err(Unsupported Overlay Bit Position 3 in group 0x6000, expected 0)
+  wrong VR (malformed)  -> Ok(Some(plane with 32 pixels))
+  BUG: Overlay Bit Position: the malformed element was silently accepted as the spec default
+
+C) Samples per Pixel = 3, VR SS instead of US (embedded overlay)
+  correct VR (baseline) -> Err(Embedded overlay in group 0x6000: Samples per Pixel 3 is not supported)
+  wrong VR (malformed)  -> Ok(Some(plane with 8 pixels))
+  BUG: Samples per Pixel: the malformed element was silently accepted as the spec default
+
+D) control: the same attributes absent entirely (must keep working)
+  absent Overlay Bits Allocated + Overlay Bit Position -> Ok(Some(plane with 32 pixels))
+
+3 of 3 sites silently accepted a malformed element as the spec default
+exit code: 1
+
+=== AFTER: the same repro against the same clone with patch.diff applied ===
+$ cd clone && git apply ../patch.diff
+$ cd repro && cargo run
+
+A) Overlay Bits Allocated = 16, VR SS instead of US
+  correct VR (baseline) -> Err(Unsupported Overlay Bits Allocated 16 in group 0x6000, expected 1)
+  wrong VR (malformed)  -> Err(Could not get attribute `OverlayBitsAllocated`)
+  OK: Overlay Bits Allocated: the malformed element is reported instead of silently defaulted
+
+B) Overlay Bit Position = 3, VR SS instead of US
+  correct VR (baseline) -> Err(Unsupported Overlay Bit Position 3 in group 0x6000, expected 0)
+  wrong VR (malformed)  -> Err(Could not get attribute `OverlayBitPosition`)
+  OK: Overlay Bit Position: the malformed element is reported instead of silently defaulted
+
+C) Samples per Pixel = 3, VR SS instead of US (embedded overlay)
+  correct VR (baseline) -> Err(Embedded overlay in group 0x6000: Samples per Pixel 3 is not supported)
+  wrong VR (malformed)  -> Err(Could not get attribute `SamplesPerPixel`)
+  OK: Samples per Pixel: the malformed element is reported instead of silently defaulted
+
+D) control: the same attributes absent entirely (must keep working)
+  absent Overlay Bits Allocated + Overlay Bit Position -> Ok(Some(plane with 32 pixels))
+
+0 of 3 sites silently accepted a malformed element as the spec default
+all sites report the malformed element, and absent elements still default
+exit code: 0
+
+=== Repeatability (unpatched clone, dev profile) ===
+$ cargo run -q > run1.txt; cargo run -q > run2.txt; cargo run -q > run3.txt
+run1 exit=1
+run2 exit=1
+run3 exit=1
+6c4ae51359cbd2a185b8587038d407d1  run1.txt
+6c4ae51359cbd2a185b8587038d407d1  run2.txt
+6c4ae51359cbd2a185b8587038d407d1  run3.txt
+(bit-for-bit identical output on all three runs)
+
+=== In-crate unit test added by patch.diff ===
+$ cargo test -p dicom-pixeldata --features image --lib
+before the patch: test result: ok. 58 passed; 0 failed; 2 ignored
+after the patch:  test result: ok. 59 passed; 0 failed; 2 ignored
+
+$ cargo test --workspace
+before the patch: passed=537 failed=0 ignored=6
+after the patch:  passed=538 failed=0 ignored=6

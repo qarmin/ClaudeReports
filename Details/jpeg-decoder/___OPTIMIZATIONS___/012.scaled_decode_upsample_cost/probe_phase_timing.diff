@@ -1,0 +1,98 @@
+diff --git a/src/decoder.rs b/src/decoder.rs
+index b8eb531..1d29791 100644
+--- a/src/decoder.rs
++++ b/src/decoder.rs
+@@ -23,6 +23,12 @@ pub const MAX_COMPONENTS: usize = 4;
+ mod lossless;
+ use self::lossless::compute_image_lossless;
+ 
++// CANDIDATE012 scratch instrumentation: phase-time entropy decode vs dequant+IDCT dispatch vs
++// upsample/color-convert. Reverted before this candidate's tree is left clean.
++pub static CANDIDATE012_ENTROPY_NANOS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static CANDIDATE012_IDCT_DISPATCH_NANOS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub static CANDIDATE012_UPSAMPLE_COLORCONVERT_NANOS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++
+ #[rustfmt::skip]
+ static UNZIGZAG: [u8; 64] = [
+      0,  1,  8, 16,  9,  2,  3, 10,
+@@ -683,7 +689,8 @@ impl<R: Read> Decoder<R> {
+             }
+         }
+ 
+-        if frame.coding_process == CodingProcess::Lossless {
++        let candidate012_compute_t0 = std::time::Instant::now();
++        let result = if frame.coding_process == CodingProcess::Lossless {
+             compute_image_lossless(frame, planes_u16)
+         } else {
+             compute_image(
+@@ -692,7 +699,12 @@ impl<R: Read> Decoder<R> {
+                 frame.output_size,
+                 self.determine_color_transform(),
+             )
+-        }
++        };
++        CANDIDATE012_UPSAMPLE_COLORCONVERT_NANOS.fetch_add(
++            candidate012_compute_t0.elapsed().as_nanos() as u64,
++            core::sync::atomic::Ordering::Relaxed,
++        );
++        result
+     }
+ 
+     fn determine_color_transform(&self) -> ColorTransform {
+@@ -912,6 +924,7 @@ impl<R: Read> Decoder<R> {
+                 break;
+             }
+ 
++            let candidate012_entropy_t0 = std::time::Instant::now();
+             for mcu_x in 0..max_mcu_x {
+                 if mcu_x * 8 >= frame.image_size.width {
+                     break;
+@@ -1015,6 +1028,11 @@ impl<R: Read> Decoder<R> {
+                 }
+             }
+ 
++            CANDIDATE012_ENTROPY_NANOS.fetch_add(
++                candidate012_entropy_t0.elapsed().as_nanos() as u64,
++                core::sync::atomic::Ordering::Relaxed,
++            );
++            let candidate012_idct_t0 = std::time::Instant::now();
+             // Send the coefficients from this MCU row to the worker thread for dequantization and idct.
+             for (i, component) in components.iter().enumerate() {
+                 if finished[i] {
+@@ -1058,6 +1076,10 @@ impl<R: Read> Decoder<R> {
+                     worker.append_row((i, row_coefficients))?;
+                 }
+             }
++            CANDIDATE012_IDCT_DISPATCH_NANOS.fetch_add(
++                candidate012_idct_t0.elapsed().as_nanos() as u64,
++                core::sync::atomic::Ordering::Relaxed,
++            );
+         }
+ 
+         let mut marker = huffman.take_marker(&mut self.reader)?;
+diff --git a/src/lib.rs b/src/lib.rs
+index ff1ceb1..16d62c0 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -53,6 +53,21 @@ mod parser;
+ mod upsampler;
+ mod worker;
+ 
++// CANDIDATE012 scratch instrumentation accessors - reverted before this candidate's tree is
++// left clean. See decoder.rs's CANDIDATE012_* atomics.
++#[doc(hidden)]
++pub fn _candidate012_entropy_nanos() -> u64 {
++    decoder::CANDIDATE012_ENTROPY_NANOS.load(core::sync::atomic::Ordering::Relaxed)
++}
++#[doc(hidden)]
++pub fn _candidate012_idct_dispatch_nanos() -> u64 {
++    decoder::CANDIDATE012_IDCT_DISPATCH_NANOS.load(core::sync::atomic::Ordering::Relaxed)
++}
++#[doc(hidden)]
++pub fn _candidate012_upsample_colorconvert_nanos() -> u64 {
++    decoder::CANDIDATE012_UPSAMPLE_COLORCONVERT_NANOS.load(core::sync::atomic::Ordering::Relaxed)
++}
++
+ fn read_u8<R: io::Read>(reader: &mut R) -> io::Result<u8> {
+     let mut buf = [0];
+     reader.read_exact(&mut buf)?;

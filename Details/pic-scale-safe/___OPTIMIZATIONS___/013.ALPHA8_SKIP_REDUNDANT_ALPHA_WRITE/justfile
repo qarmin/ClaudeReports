@@ -1,0 +1,41 @@
+# Self-contained reproduction for this candidate. Clones pic-scale-safe at the pinned commit,
+# applies patch.diff (source fix + a new premultiply_alpha bench, since no such bench existed
+# before this candidate), benches AFTER first, then reverts just the source fix (leaving the new
+# bench file in place, since it's untracked at base_commit) to get a real BEFORE number too.
+#
+# This candidate's result FLIPS DIRECTION depending on RUSTFLAGS/target-cpu - see RESULT.md. Both
+# `bench` steps below run under two configs for that reason: this repo's own default
+# (.cargo/config.toml sets `-Ctarget-cpu=native`) and `RUSTFLAGS=""` (simulating a downstream
+# consumer without that config, which is what most real-world users of this crate get).
+
+repo_url := "https://github.com/awxkee/pic-scale-safe.git"
+base_commit := "b50e020d72a1c0063f39c2c0166343d4e44790ca"
+
+test: clone apply bench-after bench-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+bench-after:
+    @echo "=== AFTER patch, native-cpu (this repo's own default build) ==="
+    cd clone/app && cargo bench --bench premultiply_alpha
+    @echo ""
+    @echo "=== AFTER patch, RUSTFLAGS=\"\" (downstream-consumer-equivalent build) ==="
+    cd clone/app && RUSTFLAGS="" cargo bench --bench premultiply_alpha
+
+bench-before:
+    @echo "=== reverting just the source fix (keeping the new bench) to measure BEFORE ==="
+    cd clone && git checkout -- src/alpha.rs
+    @echo "=== BEFORE patch, native-cpu (this repo's own default build) ==="
+    cd clone/app && cargo bench --bench premultiply_alpha
+    @echo ""
+    @echo "=== BEFORE patch, RUSTFLAGS=\"\" (downstream-consumer-equivalent build) ==="
+    cd clone/app && RUSTFLAGS="" cargo bench --bench premultiply_alpha
+
+clean:
+    rm -rf clone

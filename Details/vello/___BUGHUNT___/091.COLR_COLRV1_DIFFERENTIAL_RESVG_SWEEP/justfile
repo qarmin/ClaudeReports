@@ -1,0 +1,44 @@
+# Self-contained harness for this candidate.
+#
+# This candidate did NOT find a new, previously-unknown COLR/COLRv1 rendering bug (see
+# RESULT.md) - so there is no patch.diff and no repro/ in the usual "prove the bug, apply the
+# fix, prove it's gone" sense. What this justfile reproduces instead is the *differential
+# testing harness itself*: rendering real COLRv1 test-font glyphs through vello_cpu's real public
+# API and comparing them against `resvg` (an independent COLR implementation) - the actual ask
+# behind this candidate ("set up a differential-testing pass against a reference COLR renderer").
+#
+# Requires `resvg` on PATH (`cargo install resvg`) and python3 with fontTools/Pillow/numpy
+# (`pip install fonttools pillow numpy`) - see repro/README.md.
+#
+# `git clone` of the real repo touches two git-lfs-tracked snapshot directories
+# (vello_tests/snapshots, sparse_strips/vello_sparse_tests/snapshots) - install git-lfs first,
+# or see ___BUGHUNT___/README.md's sparse-checkout workaround if it's unavailable.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, build the vello-side harness, run the differential comparison for
+# a representative sample of test-font glyphs across several COLRv1 paint feature categories.
+test: clone build-harness run-sample
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-harness:
+    cd repro/vello_harness && cargo build --release
+
+# A representative sample across the categories checked this session: transforms
+# (scale/rotate/skew/matrix/translate), gradient extend modes, clip boxes, foreground-color
+# substitution, nested paint-glyph composition, and the one real divergence found
+# (167, explained in RESULT.md as a resvg limitation, not a vello bug).
+run-sample:
+    mkdir -p /tmp/colr_diff_out
+    for g in 84 90 93 99 103 109 113 156 160 148 167 205 220; do \
+        python3 repro/compare.py $g /tmp/colr_diff_out/g$g ; \
+    done
+    @echo "Combined images written to /tmp/colr_diff_out/g*_combo.png - vello on the left, resvg on the right."
+
+clean:
+    rm -rf clone

@@ -1,0 +1,55 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+#
+# This patch is self-contained: it includes candidate 013's original Rgb<u8> fast path,
+# candidate 014's Rgba<u8> fast path, and candidate 015's fused-alloc premultiply swap, since all
+# three of those candidates' own patches were reverted from the main tree at the end of their
+# sessions (per the skill's "the one rule that matters most" - candidates never stay applied).
+#
+# This candidate's own change: candidate 017 added a uniform output-pixel-count threshold
+# (`RGBA_PREMULTIPLY_FAST_PATH_MIN_OUTPUT_PIXELS = 1_000_000`) gating
+# `try_pic_scale_safe_rgba8_resize`'s non-constant-alpha branch for *every* filter, to guard
+# against a `Triangle`-at-400x300 regression. This candidate was tasked with replacing that with
+# a per-filter gate (Triangle only). Re-measurement this session (see RESULT.md) found the
+# regression no longer reproduces for `Triangle` either (matching candidate 017's own finding),
+# so the actual patch here removes the threshold/gate mechanism entirely rather than
+# reintroducing it for one filter - i.e. this patch is equivalent to 013+014+015 with the fast
+# path always taken, for every filter, regardless of output size.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+# patch.diff bundles a harness-only hunk (the `RgbaImage` source cases in benches/imageops.rs,
+# already introduced by candidate 014 and reapplied here from the pristine base_commit) with the
+# actual fix (src/imageops/sample.rs). apply-harness applies just the former so the same
+# benchmarks exist in both the baseline (013+014+015, no gate) and patched (gate removed, same
+# net effect) build; apply-fix applies the latter on top, for the patched build only. See
+# RESULT.md for the paired A/B numbers against candidate 017's own threshold build specifically.
+test: clone apply-harness bench-baseline apply-fix bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-harness:
+    cd clone && git apply --exclude='src/imageops/sample.rs' "{{justfile_directory()}}/patch.diff"
+
+apply-fix:
+    cd clone && git apply --include='src/imageops/sample.rs' "{{justfile_directory()}}/patch.diff"
+
+bench-baseline:
+    @echo "=== baseline (before patch, i.e. 013+014+015 only) ==="
+    cd clone && cargo bench --bench imageops -- 'resize rgba'
+
+bench-patched:
+    @echo "=== patched (after patch) ==="
+    cd clone && cargo bench --bench imageops -- 'resize rgba'
+
+clean:
+    rm -rf clone

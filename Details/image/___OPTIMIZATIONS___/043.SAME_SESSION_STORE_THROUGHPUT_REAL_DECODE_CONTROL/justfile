@@ -1,0 +1,163 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# This candidate re-measures candidate 041's standalone synthetic store-throughput microbenchmark
+# (bench/, no dependency on the `image` crate - copied verbatim from candidate 041) AND the real
+# BMP decode's wall-clock cost (candidate 037's approach: a temporary example driver + hyperfine)
+# back-to-back in one session, to remove the cross-session confound candidate 041 flagged. The
+# "fix" applied to the real decode is a re-application of candidates 008/011's already-known
+# patch (patch.diff here is byte-identical to candidate 025/037's) - not a new source-level idea,
+# needed only to build a real decode binary to time. Needs `hyperfine` on PATH; falls back to
+# skipping the wallclock step with a loud message if missing rather than failing silently.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+test: synth clone add-drivers copy-testdata build-baseline build-patched correctness wallclock
+
+# Step 1: the standalone synthetic store-throughput microbenchmark (candidate 041's bench/,
+# unmodified) - no dependency on the `image` crate, builds and runs entirely from this folder.
+synth:
+    cd bench && cargo build --release
+    @echo "=== synthetic store-throughput microbenchmark (single-core, taskset -c 0) ==="
+    taskset -c 0 bench/target/release/store_throughput
+    @echo "=== synthetic store-throughput microbenchmark (multi-core, unpinned) ==="
+    bench/target/release/store_throughput
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Adds the two temporary example drivers + their [[example]] Cargo.toml entries to the clone.
+# Kept out of patch.diff on purpose (measurement tooling, not the fix) - same convention
+# candidate 037 used for its own (differently-named) equivalent drivers.
+add-drivers:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cat > clone/examples/_wallclock_bmp_loop.rs <<'RUST'
+    use std::env;
+    use std::hint::black_box;
+
+    fn main() {
+        let mut args = env::args().skip(1);
+        let path = args.next().expect("usage: _wallclock_bmp_loop <path.bmp> <iterations>");
+        let iterations: u32 = args
+            .next()
+            .expect("usage: _wallclock_bmp_loop <path.bmp> <iterations>")
+            .parse()
+            .expect("iterations must be a u32");
+        let bytes = std::fs::read(&path).expect("failed to read input file");
+        for _ in 0..iterations {
+            let img = image::load_from_memory_with_format(black_box(&bytes), image::ImageFormat::Bmp)
+                .expect("decode failed")
+                .to_rgba8();
+            black_box(img.as_raw().len());
+        }
+    }
+    RUST
+    cat > clone/examples/_correctness_check_bmp.rs <<'RUST'
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    fn main() {
+        let dir = std::env::args().nth(1).expect("usage: _correctness_check_bmp <dir>");
+        let mut paths: Vec<_> = walk(&dir);
+        paths.sort();
+        for path in paths {
+            match image::open(&path) {
+                Ok(img) => {
+                    let rgba = img.to_rgba8();
+                    let mut hasher = DefaultHasher::new();
+                    rgba.as_raw().hash(&mut hasher);
+                    println!("{}\t{}x{}\t{:016x}", path, rgba.width(), rgba.height(), hasher.finish());
+                }
+                Err(e) => println!("{path}\tERROR\t{e}"),
+            }
+        }
+    }
+
+    fn walk(dir: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walk(path.to_str().unwrap()));
+            } else if path.extension().and_then(|e| e.to_str()) == Some("bmp") {
+                out.push(path.to_str().unwrap().to_string());
+            }
+        }
+        out
+    }
+    RUST
+    python3 - <<'PY'
+    content = open("clone/Cargo.toml").read()
+    marker = '[[example]]\nname = "bmp_1bit_encoding"\nrequired-features = ["bmp"]\n'
+    addition = marker + '\n[[example]]\nname = "_wallclock_bmp_loop"\nrequired-features = ["bmp"]\n\n[[example]]\nname = "_correctness_check_bmp"\nrequired-features = ["bmp"]\n'
+    assert marker in content, "bmp_1bit_encoding [[example]] block not found - Cargo.toml layout changed since base_commit"
+    open("clone/Cargo.toml", "w").write(content.replace(marker, addition))
+    PY
+
+# candidate 020's synthetic 2-bit corpus file (copied from this folder's own testdata/, not
+# fetched from anywhere external) - needed so the 2-bit case has a large-enough sample, same as
+# candidates 020/025/037 used.
+copy-testdata:
+    cp "{{justfile_directory()}}/testdata/pal2_large.bmp" clone/tests/images/bmp/images/pal2_large.bmp
+    cp "{{justfile_directory()}}/testdata/pal2_large.bmp.png" clone/tests/reference/bmp/images/pal2_large.bmp.png
+
+build-baseline:
+    cd clone && cargo build --release --example _wallclock_bmp_loop --example _correctness_check_bmp
+    mkdir -p bin
+    cp clone/target/release/examples/_wallclock_bmp_loop bin/wc_baseline
+    cp clone/target/release/examples/_correctness_check_bmp bin/check_baseline
+
+build-patched: apply
+    cd clone && cargo build --release --example _wallclock_bmp_loop --example _correctness_check_bmp
+    mkdir -p bin
+    cp clone/target/release/examples/_wallclock_bmp_loop bin/wc_patched
+    cp clone/target/release/examples/_correctness_check_bmp bin/check_patched
+
+# Bit-exact hash comparison across every .bmp under tests/images/bmp/ (66 pre-existing + pal2_large.bmp).
+correctness:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone
+    ./../bin/check_baseline tests/images/bmp > ../hashes_baseline.txt
+    ./../bin/check_patched tests/images/bmp > ../hashes_patched.txt
+    cd ..
+    if diff -q hashes_baseline.txt hashes_patched.txt > /dev/null; then
+        echo "correctness: bit-exact (0 differences across 67 files)"
+    else
+        echo "correctness: MISMATCH - see hashes_baseline.txt / hashes_patched.txt"
+        diff hashes_baseline.txt hashes_patched.txt || true
+    fi
+
+# Wall-clock via hyperfine: single-core (taskset) and multi-core (unpinned), run in the same
+# session as `synth` above (both recipes are invoked by `test`, in the same `just` invocation).
+wallclock:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v hyperfine >/dev/null; then
+        echo "hyperfine not installed - skipping wall-clock step (see RESULT.md for this session's already-captured numbers in evidence/)"
+        exit 0
+    fi
+    for depth_file in Core_8_Bit.bmp:8bit Core_4_Bit.bmp:4bit pal2_large.bmp:2bit Core_1_Bit.bmp:1bit; do
+        f="${depth_file%%:*}"; tag="${depth_file##*:}"
+        echo "=== ${tag} single-core (taskset -c 0) ==="
+        hyperfine --warmup 3 -m 10 \
+            "taskset -c 0 bin/wc_baseline clone/tests/images/bmp/images/${f} 2000" \
+            "taskset -c 0 bin/wc_patched clone/tests/images/bmp/images/${f} 2000"
+        echo "=== ${tag} multi-core (unpinned) ==="
+        hyperfine --warmup 3 -m 10 \
+            "bin/wc_baseline clone/tests/images/bmp/images/${f} 2000" \
+            "bin/wc_patched clone/tests/images/bmp/images/${f} 2000"
+    done
+
+clean:
+    rm -rf clone bin hashes_baseline.txt hashes_patched.txt bench/target

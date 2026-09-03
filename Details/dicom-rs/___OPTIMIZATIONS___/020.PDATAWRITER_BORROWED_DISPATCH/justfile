@@ -1,0 +1,57 @@
+# Self-contained reproduction for candidate 020.PDATAWRITER_BORROWED_DISPATCH.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern). Self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+# The harness's own `pdatawriter-throughput` and `pdatawriter-inprocess` modes (added this
+# session) are part of the harness copy below, not something this justfile adds itself.
+#
+# `pdatawriter-inprocess` needs a small BENCHMARK-ONLY shim (PDataWriter::new_for_bench +
+# ul/Cargo.toml's `bench-internals` feature) that is NOT part of patch.diff - see RESULT.md's
+# "Instrumentation added for this candidate" section for why. `bench-shim.diff` in this folder
+# carries that shim; it's applied as its own step, separate from patch.diff, for both the
+# baseline and patched builds (both need it to run pdatawriter-inprocess at all).
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+
+# baseline = unpatched fix, but WITH the benchmark-only shim, so pdatawriter-inprocess can run
+# against it too (see RESULT.md - the shim is orthogonal to the real fix, needed on both sides)
+build-baseline:
+    cd clone && git apply "{{justfile_directory()}}/bench-shim.diff"
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --features pdatawriter-inprocess,dicom-ul/bench-internals
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+    cd clone && git checkout -- ul/src/association/pdata.rs ul/Cargo.toml
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && git apply "{{justfile_directory()}}/bench-shim.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --features pdatawriter-inprocess,dicom-ul/bench-internals
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "=== realistic: loopback TCP association, 100MB, checksummed round-trip ==="
+    ./bin_baseline pdatawriter-throughput 100 5
+    ./bin_patched pdatawriter-throughput 100 5
+    echo "(expect received_match=true on both; expect the timing difference to be inconsistent/noisy - see RESULT.md)"
+
+    echo ""
+    echo "=== isolated mechanism: in-memory sink, no socket noise - expect a small consistent win ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- pdatawriter-inprocess 100 5
+
+clean:
+    rm -rf clone bin_baseline bin_patched

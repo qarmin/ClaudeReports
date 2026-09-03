@@ -1,0 +1,53 @@
+diff --git a/polycool/src/poly.rs b/polycool/src/poly.rs
+index d00e76e..87cf823 100644
+--- a/polycool/src/poly.rs
++++ b/polycool/src/poly.rs
+@@ -467,12 +467,44 @@ mod tests {
+                 "found roots out of range [-2.0, 2.0]: {roots:?}"
+             );
+ 
++            // `poly_with_planted_root` builds `poly` by repeatedly multiplying out linear
++            // factors in f64, so `planted_root` is only an approximate root of the *actual*
++            // (rounded) coefficients that end up in `poly` -- especially when the other
++            // generated roots end up close together, which is exactly the scenario this test
++            // is designed to stress. That construction error can be much bigger than the
++            // solver's own error, and comparing against the un-refined `planted_root` makes
++            // the test flaky for reasons that have nothing to do with the solver.
++            //
++            // The natural fix is to Newton-refine `planted_root` against `poly` itself and
++            // compare against that. But a single Newton step is only trustworthy when the
++            // derivative at `planted_root` is comfortably bigger than the evaluation noise
++            // floor there: when it's tiny (planted_root sitting near a local extremum of
++            // `poly`, i.e. near an additional nearly-repeated or nearly-complex root), the
++            // step `y / dy` is dominated by noise in `dy` and can fly off towards a
++            // completely different, unrelated root instead of refining in place. In that
++            // regime, *no* double-precision Newton-type method -- including the solver
++            // under test -- can locate the root more precisely than roughly (evaluation
++            // noise) / |derivative| anyway. This is a property of the input polynomial, not
++            // of the solver, so discard such inputs instead of asserting something
++            // floating-point arithmetic cannot deliver.
++            let dpoly = poly.deriv();
++            let magnitude = poly.max_abs_coefficient().max(1.0);
++            let noise_floor = magnitude * 16.0 * f64::EPSILON;
++            let dy0 = dpoly.eval(planted_root);
++            let intrinsic_uncertainty = noise_floor / dy0.abs();
++            if !dy0.is_finite() || dy0 == 0.0 || !intrinsic_uncertainty.is_finite() || intrinsic_uncertainty > 1e-6 {
++                return Err(arbitrary::Error::IncorrectFormat);
++            }
++            let true_root = planted_root - poly.eval(planted_root) / dy0;
++
+             // We can't expect great accuracy for huge coefficients, because the
+-            // evaluations during Newton iteration are subject to error.
+-            let error = poly.max_abs_coefficient().max(1.0) * 1e-12;
++            // evaluations during Newton iteration are subject to error. Nor can we expect
++            // better accuracy than `intrinsic_uncertainty` allows for near-ill-conditioned
++            // roots (see above).
++            let error = (magnitude * 1e-12).max(intrinsic_uncertainty * 4.0);
+             assert!(
+-                roots.iter().any(|r| (r - planted_root).abs() <= error),
+-                "could not find something close to planted_root {planted_root} in found {roots:?} with allowed error {error} for poly {poly:?}"
++                roots.iter().any(|r| (r - true_root).abs() <= error),
++                "could not find something close to planted_root {planted_root} (refined to {true_root}) in found {roots:?} with allowed error {error} for poly {poly:?}"
+             );
+             Ok(())
+         })

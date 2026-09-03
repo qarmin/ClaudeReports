@@ -1,0 +1,108 @@
+diff --git a/parser/src/stateful/decode.rs b/parser/src/stateful/decode.rs
+index 39e8e856..c87398ba 100644
+--- a/parser/src/stateful/decode.rs
++++ b/parser/src/stateful/decode.rs
+@@ -17,11 +17,30 @@ use dicom_encoding::text::{
+     validate_dt, validate_tm,
+ };
+ use dicom_encoding::transfer_syntax::{DynDecoder, TransferSyntax};
+-use smallvec::smallvec;
++use smallvec::{Array, SmallVec, smallvec};
+ use snafu::{Backtrace, OptionExt, ResultExt, Snafu};
+ use std::io::Read;
+ use std::{fmt::Debug, io::Seek, io::SeekFrom};
+ 
++/// Allocates a `SmallVec` of the given length without zero-initializing it, for a caller that is
++/// about to fully overwrite every element via a `decode_*_into` call that writes every `dst`
++/// element in order - `smallvec![0; n]` pays a real, measured memset cost for content that gets
++/// fully discarded a few instructions later. Sound for any `T: Copy` with no `Drop` glue (all of
++/// `u16`/`u32`/`u64`/`i16`/`i32`/`i64`/`f32`/`f64` here): if the subsequent write is interrupted
++/// by an error, the partially-written `SmallVec` is dropped without any of its elements ever
++/// being read by safe code, and every bit pattern is already a valid value for these types, so no
++/// uninitialized-memory read ever occurs. Self-contained duplicate of candidate 009's own helper
++/// of the same name, per this workspace's "one fix per candidate" discipline.
++#[inline]
++fn uninit_smallvec<T: Copy, A: Array<Item = T>>(len: usize) -> SmallVec<A> {
++    let mut v: SmallVec<A> = SmallVec::with_capacity(len);
++    // SAFETY: see function doc - T has no Drop glue and every bit pattern is a valid T.
++    unsafe {
++        v.set_len(len);
++    }
++    v
++}
++
+ #[derive(Debug, Snafu)]
+ #[non_exhaustive]
+ pub enum Error {
+@@ -532,7 +551,7 @@ where
+         let len = self.require_known_length(header)?;
+ 
+         let n = len >> 1;
+-        let mut vec = smallvec![0; n];
++        let mut vec = uninit_smallvec(n);
+         self.basic
+             .decode_ss_into(&mut self.from, &mut vec[..])
+             .context(ReadValueDataSnafu {
+@@ -547,7 +566,7 @@ where
+         let len = self.require_known_length(header)?;
+         // sequence of 32-bit floats
+         let n = len >> 2;
+-        let mut vec = smallvec![0.; n];
++        let mut vec = uninit_smallvec(n);
+         self.basic
+             .decode_fl_into(&mut self.from, &mut vec[..])
+             .context(ReadValueDataSnafu {
+@@ -740,7 +759,7 @@ where
+         let len = self.require_known_length(header)?;
+         // sequence of 64-bit floats
+         let n = len >> 3;
+-        let mut vec = smallvec![0.; n];
++        let mut vec = uninit_smallvec(n);
+         self.basic
+             .decode_fd_into(&mut self.from, &mut vec[..])
+             .context(ReadValueDataSnafu {
+@@ -755,7 +774,7 @@ where
+         // sequence of 32-bit unsigned integers
+ 
+         let n = len >> 2;
+-        let mut vec = smallvec![0u32; n];
++        let mut vec = uninit_smallvec(n);
+         self.basic
+             .decode_ul_into(&mut self.from, &mut vec[..])
+             .context(ReadValueDataSnafu {
+@@ -783,7 +802,7 @@ where
+         // sequence of 16-bit unsigned integers
+ 
+         let n = len >> 1;
+-        let mut vec = smallvec![0; n];
++        let mut vec = uninit_smallvec(n);
+         self.basic
+             .decode_us_into(&mut self.from, &mut vec[..])
+             .context(ReadValueDataSnafu {
+@@ -805,7 +824,7 @@ where
+         // sequence of 64-bit unsigned integers
+ 
+         let n = len >> 3;
+-        let mut vec = smallvec![0; n];
++        let mut vec = uninit_smallvec(n);
+         self.basic
+             .decode_uv_into(&mut self.from, &mut vec[..])
+             .context(ReadValueDataSnafu {
+@@ -820,7 +839,7 @@ where
+         // sequence of 32-bit signed integers
+ 
+         let n = len >> 2;
+-        let mut vec = smallvec![0; n];
++        let mut vec = uninit_smallvec(n);
+         self.basic
+             .decode_sl_into(&mut self.from, &mut vec[..])
+             .context(ReadValueDataSnafu {
+@@ -835,7 +854,7 @@ where
+         // sequence of 64-bit signed integers
+ 
+         let n = len >> 3;
+-        let mut vec = smallvec![0; n];
++        let mut vec = uninit_smallvec(n);
+         self.basic
+             .decode_sv_into(&mut self.from, &mut vec[..])
+             .context(ReadValueDataSnafu {

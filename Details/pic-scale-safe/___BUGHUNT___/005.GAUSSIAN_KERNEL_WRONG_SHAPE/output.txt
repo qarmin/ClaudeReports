@@ -1,0 +1,47 @@
+Not a crash - this is a logic bug (wrong kernel shape), so "backtrace" here is the repro's real
+captured stdout/exit code, before and after the fix, from `cd repro && cargo run --release`.
+
+=== BEFORE (pristine src/math/gaussian.rs, commit 83c4801428c436678d7c6b6bea74af800924a469) ===
+$ cargo run --release
+max |gaussian(x) - normal_pdf(x)| over x in [0,2] = 9.474632953507023e-1 at x = 0.159
+slope at x=0 (central difference, h=0.000001) = -18.989182662076942
+w(sigma)/w(0) = 0.0029354219005157866, want 0.6065306597126334
+w(1)/w(0) = 5.817987982875154e-8
+REPRODUCED - 4 check(s) failed:
+  - does not match textbook normal density: max abs err 9.474632953507023e-1 at x=0.159 (tolerance 1e-6)
+  - nonzero slope at centre (cusp, not a bell): -18.989182662076942
+  - one-sigma falloff wrong: w(sigma)/w(0) = 0.0029354219005157866, want 0.6065306597126334
+  - neighbouring tap is negligible: w(1)/w(0) = 5.817987982875154e-8 (collapses to nearest-neighbour after normalization)
+$ echo $?
+1
+
+Repeated 3/3 runs total (including the one above), byte-for-byte identical output each time (pure,
+deterministic float function - no seed/layout dependence).
+
+=== AFTER (patch.diff applied to src/math/gaussian.rs) ===
+$ cargo run --release
+max |gaussian(x) - normal_pdf(x)| over x in [0,2] = 2.220446049250313e-16 at x = 0.002
+slope at x=0 (central difference, h=0.000001) = -0.000004652278562389256
+w(sigma)/w(0) = 0.6065306597126334, want 0.6065306597126334
+w(1)/w(0) = 1.6879881802155612e-2
+did not reproduce - gaussian() matches the textbook Gaussian shape
+$ echo $?
+0
+
+Repeated 2/2 runs total, identical output each time.
+
+=== Project test suite (cargo test -p pic-scale-safe), before and after ===
+Before:
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+(Doc-tests: also 0 tests, ok)
+
+After:
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+(Doc-tests: also 0 tests, ok)
+
+No tests exist in the library crate either before or after (known project fact, see
+`___BUGHUNT___/README.md` / `projects/pic-scale-safe.md`) - 0/0 both times, not a missing check.
+
+`cargo clippy -p pic-scale-safe --lib` after the fix: clean, no new warnings.

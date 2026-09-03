@@ -1,0 +1,69 @@
+diff --git a/sparse_strips/vello_cpu/src/coarse/bucketer.rs b/sparse_strips/vello_cpu/src/coarse/bucketer.rs
+index cf702419..3787240b 100644
+--- a/sparse_strips/vello_cpu/src/coarse/bucketer.rs
++++ b/sparse_strips/vello_cpu/src/coarse/bucketer.rs
+@@ -297,7 +297,40 @@ impl CommandBucketer {
+ 
+         debug_assert_tile_aligned(self.viewport_origin(), "viewport origin");
+ 
+-        for node in nodes {
++        // A `Regular` layer's contents are walked using an explicit stack instead of recursing
++        // into `bucket_commands` again, since nesting depth here is scene-controlled (arbitrarily
++        // deep clip/opacity/blend group nesting) and must not be bounded only by available stack
++        // space. Each `Frame` corresponds to one level of nesting that a recursive call would
++        // have made; `needs_pop` records whether finishing that frame's nodes must be followed by
++        // a `pop_layer` call, mirroring the recursive version's `self.pop_layer(strips)` that ran
++        // right after its own recursive call returned. `self.viewport_origin()` doesn't change
++        // across frames (it's fixed for the whole bucketing pass), so the tile-alignment check
++        // above only needs to run once, not once per nesting level.
++        struct Frame<'a> {
++            nodes: &'a [Node],
++            idx: usize,
++            needs_pop: bool,
++        }
++
++        let mut stack: Vec<Frame<'_>> = vec![Frame {
++            nodes,
++            idx: 0,
++            needs_pop: false,
++        }];
++
++        while let Some(frame) = stack.last_mut() {
++            if frame.idx >= frame.nodes.len() {
++                let needs_pop = frame.needs_pop;
++                stack.pop();
++                if needs_pop {
++                    self.pop_layer(strips);
++                }
++                continue;
++            }
++
++            let node = &frame.nodes[frame.idx];
++            frame.idx += 1;
++
+             for RecordedFill {
+                 thread_idx,
+                 strip_range,
+@@ -326,17 +359,11 @@ impl CommandBucketer {
+                     RecordedLayerKind::Regular => {
+                         // Regular layers are inlined and bucketed into the same command stream.
+                         self.push_layer(props);
+-                        // TODO: Avoid recursion to prevent stack overflows for deeply nested
+-                        // layers.
+-                        self.bucket_commands(
+-                            &layer.nodes,
+-                            draws,
+-                            layers,
+-                            strips,
+-                            encoded_paints,
+-                            filter_ctx,
+-                        );
+-                        self.pop_layer(strips);
++                        stack.push(Frame {
++                            nodes: &layer.nodes,
++                            idx: 0,
++                            needs_pop: true,
++                        });
+                     }
+                     RecordedLayerKind::Filter { placement, .. } => {
+                         let needs_layer = props.blend_mode != BlendMode::default()

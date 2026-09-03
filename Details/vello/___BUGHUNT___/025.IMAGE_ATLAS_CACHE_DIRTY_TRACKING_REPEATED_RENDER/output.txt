@@ -1,0 +1,83 @@
+Captured output from `repro/` (real `vello::Renderer::render_to_texture` calls via a real wgpu
+device, WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1 for this sandboxed environment's software GL
+rasterizer), 16x16 image, three real render_to_texture calls on the same Renderer (image, then a
+patchless/image-free scene, then the same image again).
+
+=== BEFORE the patch (pristine worktree at base_commit 75168314) ===
+
+Using adapter: AdapterInfo { name: "llvmpipe (LLVM 21.1.8, 256 bits)", vendor: 65541, device: 0, device_type: Cpu, device_pci_bus_id: "", driver: "", driver_info: "4.5 (Core Profile) Mesa 26.0.8-1ubuntu0.3", backend: Gl, subgroup_min_size: 4, subgroup_max_size: 128, transient_saves_memory: false }
+render 1 (image)            center pixel (expected opaque red [255,0,0,255]): [255, 0, 0, 255]
+render 3 (image, after a patchless render in between) center pixel: [0, 0, 0, 0]
+REPRODUCED: the first image render was correct ([255, 0, 0, 255]), but after an intervening patchless render, drawing the exact same ImageData again produced [0, 0, 0, 0] instead of [255, 0, 0, 255] - the image was silently dropped, no error/panic anywhere.
+
+(exit code 1)
+
+Re-run twice more, same build, same input - identical result both times (3/3 total):
+render 1 (image)            center pixel (expected opaque red [255,0,0,255]): [255, 0, 0, 255]
+render 3 (image, after a patchless render in between) center pixel: [0, 0, 0, 0]
+REPRODUCED: ...
+render 1 (image)            center pixel (expected opaque red [255,0,0,255]): [255, 0, 0, 255]
+render 3 (image, after a patchless render in between) center pixel: [0, 0, 0, 0]
+REPRODUCED: ...
+
+Varied input within the same bug class (CONFIRMATION.md section 7): re-ran with a 40x40 image
+(instead of the original 16x16) against the same pristine worktree - also reproduces:
+render 1 (image)            center pixel (expected opaque red [255,0,0,255]): [255, 0, 0, 255]
+render 3 (image, after a patchless render in between) center pixel: [0, 0, 0, 0]
+REPRODUCED: the first image render was correct ([255, 0, 0, 255]), but after an intervening patchless render, drawing the exact same ImageData again produced [0, 0, 0, 0] instead of [255, 0, 0, 255] - the image was silently dropped, no error/panic anywhere.
+
+=== AFTER the patch (patch.diff applied to the same worktree) ===
+
+Using adapter: AdapterInfo { name: "llvmpipe (LLVM 21.1.8, 256 bits)", vendor: 65541, device: 0, device_type: Cpu, device_pci_bus_id: "", driver: "", driver_info: "4.5 (Core Profile) Mesa 26.0.8-1ubuntu0.3", backend: Gl, subgroup_min_size: 4, subgroup_max_size: 128, transient_saves_memory: false }
+render 1 (image)            center pixel (expected opaque red [255,0,0,255]): [255, 0, 0, 255]
+render 3 (image, after a patchless render in between) center pixel: [255, 0, 0, 255]
+did not reproduce - the image survived the intervening patchless render.
+
+(exit code 0)
+
+Re-run twice more against the patched build - identical result both times (3/3 total, no longer
+reproduces):
+render 1 (image)            center pixel (expected opaque red [255,0,0,255]): [255, 0, 0, 255]
+render 3 (image, after a patchless render in between) center pixel: [255, 0, 0, 255]
+did not reproduce - the image survived the intervening patchless render.
+render 1 (image)            center pixel (expected opaque red [255,0,0,255]): [255, 0, 0, 255]
+render 3 (image, after a patchless render in between) center pixel: [255, 0, 0, 255]
+did not reproduce - the image survived the intervening patchless render.
+
+Re-ran with the varied 40x40 image against the patched worktree - also no longer reproduces:
+render 1 (image)            center pixel (expected opaque red [255,0,0,255]): [255, 0, 0, 255]
+render 3 (image, after a patchless render in between) center pixel: [255, 0, 0, 255]
+did not reproduce - the image survived the intervening patchless render.
+
+=== `just test` end-to-end run (fresh clone of repo_url at base_commit, this candidate's own
+justfile, no dependency on any pre-existing worktree) ===
+
+clone -> reproduce-before -> apply -> reproduce-after, run top to bottom exactly as `just test`
+executes them:
+
+reproduce-before (fresh clone, pristine):
+render 1 (image)            center pixel (expected opaque red [255,0,0,255]): [255, 0, 0, 255]
+render 3 (image, after a patchless render in between) center pixel: [0, 0, 0, 0]
+REPRODUCED: the first image render was correct ([255, 0, 0, 255]), but after an intervening patchless render, drawing the exact same ImageData again produced [0, 0, 0, 0] instead of [255, 0, 0, 255] - the image was silently dropped, no error/panic anywhere.
+
+apply: `git apply .../patch.diff` against the fresh clone - applied cleanly, no fuzz/reject.
+
+reproduce-after (same clone, patched):
+render 1 (image)            center pixel (expected opaque red [255,0,0,255]): [255, 0, 0, 255]
+render 3 (image, after a patchless render in between) center pixel: [255, 0, 0, 255]
+did not reproduce - the image survived the intervening patchless render.
+
+=== Project test suite, vello_encoding (unit tests) ===
+
+Before (pristine): `cargo test -p vello_encoding --release` -> 31 passed; 0 failed; 0 ignored.
+After (patched):   `cargo test -p vello_encoding --release` -> 31 passed; 0 failed; 0 ignored.
+
+=== Project test suite, vello_tests (end-to-end rendering/snapshot suite) ===
+
+`WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1 VELLO_SKIP_LFS_SNAPSHOTS=all cargo test -p vello_tests --release`
+(VELLO_SKIP_LFS_SNAPSHOTS=all needed because this checkout's snapshot PNGs are unresolved git-lfs
+pointers, not because of anything this patch touches):
+
+Before (pristine): 64 passed; 0 failed; 1 ignored (across compare_gpu_cpu, emoji, hinting,
+known_issues, property, regression, smoke_snapshots, snapshot_test_scenes test binaries).
+After (patched):   64 passed; 0 failed; 1 ignored - identical to before.

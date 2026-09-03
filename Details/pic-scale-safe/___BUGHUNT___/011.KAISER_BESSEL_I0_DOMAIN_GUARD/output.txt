@@ -1,0 +1,99 @@
+Real captured output from temporary #[cfg(test)] probes added directly to src/math/kaiser.rs
+(pub(crate) items, so only reachable from inside the crate itself - reverted afterward,
+git status confirmed clean).
+
+Build: `cargo test --lib math::kaiser::bughunt_probe --no-run` (debug profile, unoptimized +
+debuginfo), then each test run individually via the produced test binary with an 8s timeout,
+--test-threads=1.
+
+=== run 1: probe_negative_out_of_domain (kaiser(-2.0)) ===
+$ timeout 8 ./target/debug/deps/pic_scale_safe-a94128b10a1dd281 --test-threads=1 --nocapture "math::kaiser::bughunt_probe::probe_negative_out_of_domain"
+
+running 1 test
+test math::kaiser::bughunt_probe::probe_negative_out_of_domain ... kaiser(-2.0) = 0.010997608
+
+thread 'math::kaiser::bughunt_probe::probe_negative_out_of_domain' (26182) panicked at src/math/kaiser.rs:87:9:
+assertion `left == right` failed: kaiser should be 0 outside [-1,1] but returned 0.010997608
+  left: 0.010997608
+ right: 0.0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+exit: 101
+
+=== run 2: probe_negative_out_of_domain (repeat) ===
+Same command, same result: kaiser(-2.0) = 0.010997608, assertion failed, exit 101. (2/2)
+
+=== run 1: probe_bessel_i0_nan (bessel_i0(NaN)) ===
+$ timeout 8 ./target/debug/deps/pic_scale_safe-a94128b10a1dd281 --test-threads=1 --nocapture "math::kaiser::bughunt_probe::probe_bessel_i0_nan"
+
+running 1 test
+test math::kaiser::bughunt_probe::probe_bessel_i0_nan ... bessel_i0(NaN) = 1
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+exit: 0
+
+Note: this refutes the "unbounded loop on NaN" part of the original suspicion as literally
+stated - Rust's NaN comparisons are always false, so `while t > 1e-12` with t == NaN exits
+immediately (0 iterations), returning the initial s = 1.0. NaN does NOT hang this loop.
+
+=== run 1: probe_bessel_i0_large_f32_overflow (bessel_i0(1.0e30_f32)) ===
+$ timeout 8 ./target/debug/deps/pic_scale_safe-a94128b10a1dd281 --test-threads=1 --nocapture "math::kaiser::bughunt_probe::probe_bessel_i0_large_f32_overflow"
+
+running 1 test
+test math::kaiser::bughunt_probe::probe_bessel_i0_large_f32_overflow ... exit: 124   (timeout, no output emitted before the 8s deadline)
+
+=== run 2: probe_bessel_i0_large_f32_overflow (repeat) ===
+Same command, same result: exit 124 (timeout) again. (2/2 - genuinely hangs, not a one-off)
+
+Mechanism: x = 1.0e30_f32 makes x*x overflow f32 range to +inf (f32 max ~3.4e38, so
+(1e30)^2 = 1e60 rounds to +inf). y = x*x/4.0 = +inf. t = y = +inf. Loop condition
+`t > 1e-12` is true for +inf (unlike NaN, +inf compares normally). s += t makes s = +inf.
+t *= y / (i*i) = +inf * (+inf/4) = +inf - t never decreases once it becomes +inf, so the
+loop condition stays true forever: genuine unbounded loop, confirmed by direct measurement,
+not merely reasoned about.
+
+=== run 1: probe_kaiser_negative_large (kaiser(-1e20)) ===
+$ timeout 8 ./target/debug/deps/pic_scale_safe-a94128b10a1dd281 --test-threads=1 --nocapture "math::kaiser::bughunt_probe::probe_kaiser_negative_large"
+
+running 1 test
+test math::kaiser::bughunt_probe::probe_kaiser_negative_large ... kaiser(-1e20) = 0.010997608
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+exit: 0
+
+Mechanism: x = -1e20 in f32 makes x*x overflow to +inf, so 1.0 - x*x = -inf, sqrt(-inf) = NaN
+(sqrt of a negative number, not a panic in Rust float sqrt), so kaiser's own inner call
+bessel_i0(6.33 * NaN) = bessel_i0(NaN), which per the finding above returns 1.0 immediately
+(no hang) - so even this extreme boundary value does not reach the hanging code path; it only
+reaches the wrong-value path already demonstrated by probe_negative_out_of_domain.
+
+=== Why this is not reachable through generate_weights (the only real caller) ===
+src/compute_weights.rs's generate_weights is the sole place in the crate that ever calls a
+`ResamplingFilter.kernel` function pointer (kaiser is installed via
+`ResamplingFilter::new(kaiser, 2f32)` in src/sampler.rs:281, which sets `window: None`,
+`is_resizable_kernel: true`). In the `window_func` == None branch (compute_weights.rs:136-139):
+
+    let dx = dx.abs();
+    weight = resampling_function(dx * filter_scale);
+
+- `dx.abs()` is non-negative for any real `dx` (and if `dx` were NaN, `.abs()` keeps it NaN, it
+  does not become negative).
+- `filter_scale = 1.0 / filter_scale_cutoff`, and `filter_scale_cutoff = scale.max(1.0)` (or a
+  constant `1.0` for non-resizable kernels), so `filter_scale` is always in `(0.0, 1.0]` -
+  strictly positive - whenever `in_size`/`out_size` are themselves finite and positive.
+- `dx` itself (`k.as_() - center`) is bounded by the already-computed `start..end` window, which
+  in turn is bounded by `in_size`/`filter_radius`, both finite for any input that has already
+  passed the crate's own size/overflow validation (see candidate 009's already-fixed length
+  checks) - so `dx` cannot become NaN or unboundedly large through this path either.
+
+grep across the whole crate confirms `kaiser` has exactly one call site (src/sampler.rs:281,
+installing it as `resampling_filter.kernel`) and `bessel_i0` has exactly two call sites, both
+inside `kaiser` itself (src/math/kaiser.rs:75-76), with the second call's argument bounded to
+`[0, 6.33]` (valid `|x|<=1`) or `NaN` (out-of-domain `|x|>1`, sqrt of a negative) - never a large
+finite value. So `x >= 0` and bounded on entry to `kaiser`, and `bessel_i0`'s argument is always
+either small-and-finite or exactly `NaN` (which exits the loop immediately, per the finding
+above) - never the "+inf, not NaN" shape that was shown above to actually hang.

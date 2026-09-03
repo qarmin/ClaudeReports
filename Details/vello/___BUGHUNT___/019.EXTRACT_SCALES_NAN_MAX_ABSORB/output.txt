@@ -1,0 +1,68 @@
+=== Randomized search over extract_scales' exact f32 formula (200,000,000 near-diagonal,
+    perturbed matrices) - see the search program transcribed in RESULT.md ===
+
+found = 180
+(0.5923988, 0.51015484, 0.68755627, 0.59199905, 1.1976606, NaN, -5.9604645e-8)
+(0.8449424, 0.85955596, 0.83047223, 0.8449993, 1.6901101, NaN, -1.1920929e-7)
+(-0.5948196, 0.4599222, 0.76916146, -0.5949993, 1.2292161, NaN, -5.9604645e-8)
+(0.40790567, 0.747097, 0.22282755, 0.40800095, 0.96987516, NaN, -2.9802322e-8)
+(0.42179433, -0.3642786, -0.48842603, 0.42200089, 0.8527919, NaN, -2.9802322e-8)
+... (180 total NaN-producing cases found out of 200,000,000 random draws in this family)
+
+Tuple format: (a, b, c, d, scale_x, scale_y, diff) where diff = 0.5*(s1-s2) computed in f32
+before .sqrt() - note scale_y prints as NaN and diff is a small negative number in every hit.
+
+=== f32::max NaN-absorption check ===
+
+nan.max(1e-6) = 0.000001
+(1e-6f32).max(nan) = 0.000001
+
+(confirms Rust's f32::max returns the non-NaN operand regardless of argument order, i.e. NaN is
+silently replaced by 1e-6 with no trace it ever happened.)
+
+=== repro/ run against PRISTINE checkout (base_commit 7516831426fb70f36d62c521c5477f6a7265b36a),
+    real public API: vello_common::kurbo::Affine + vello_common::util::extract_scales ===
+
+     Running `target/release/repro`
+a=0.5923988 b=0.51015484 c=0.68755627 d=0.59199905 -> scale_x=1.1976606 scale_y=0.000001 <- hit the arbitrary 1e-6 floor (BUG)
+a=0.8449424 b=0.85955596 c=0.83047223 d=0.8449993 -> scale_x=1.6901101 scale_y=0.000001 <- hit the arbitrary 1e-6 floor (BUG)
+a=-0.5948196 b=0.4599222 c=0.76916146 d=-0.5949993 -> scale_x=1.2292161 scale_y=0.000001 <- hit the arbitrary 1e-6 floor (BUG)
+
+BUG PRESENT: at least one near-singular transform above collapsed to the arbitrary 1e-6 floor via NaN silently absorbed by f32::max, instead of the small but transform-specific scale_y it should have produced.
+
+(exit code 1; reproduced 4/4 runs total this session - the run above plus 3 additional reruns,
+identical output every time, fully deterministic since no randomness/seed is involved)
+
+=== f64 "ground truth" scale_y for the same 3 transforms (computed with the exact same formula,
+    but without ever downcasting a/b/c/d to f32) ===
+
+a=0.5923988 b=0.51015484 c=0.68755627 d=0.59199905 -> true(ish) f64 scale_x=1.1976605512711629 scale_y=0.00005062543802633854
+a=0.8449424 b=0.85955596 c=0.83047223 d=0.8449993 -> true(ish) f64 scale_x=1.6901100682461643 scale_y=0.0000818772868975576
+a=-0.5948196 b=0.4599222 c=0.76916146 d=-0.5949993 -> true(ish) f64 scale_x=1.229216127295244 scale_y=0.00013245415832811367
+
+(the correct scale_y is 50x-130x larger than the arbitrary 1e-6 floor the buggy code substitutes)
+
+=== repro/ run against PATCHED checkout (patch.diff applied) ===
+
+     Running `target/release/repro`
+a=0.5923988 b=0.51015484 c=0.68755627 d=0.59199905 -> scale_x=1.1976606 scale_y=0.000050625436 (not floored - a small, transform-specific value)
+a=0.8449424 b=0.85955596 c=0.83047223 d=0.8449993 -> scale_x=1.6901101 scale_y=0.00008187729 (not floored - a small, transform-specific value)
+a=-0.5948196 b=0.4599222 c=0.76916146 d=-0.5949993 -> scale_x=1.2292161 scale_y=0.00013245415 (not floored - a small, transform-specific value)
+
+BUG FIXED: every case produced a transform-specific scale_y, none hit the arbitrary 1e-6 floor.
+
+(exit code 0; matches the f64 ground truth above almost exactly)
+
+=== vello_common test suite, before and after patch (cargo test -p vello_common --release) ===
+
+BEFORE (pristine):
+test result: ok. 159 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+   Doc-tests vello_common
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+AFTER (patched):
+test result: ok. 159 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+   Doc-tests vello_common
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+(identical pass/fail counts before and after - no regressions)

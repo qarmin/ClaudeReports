@@ -1,0 +1,75 @@
+=== `just test` (fresh clone at base_commit ca273499e3e48bd2de6f02aa8e99a148984e45f3, before -> apply patch.diff -> after) ===
+
+rm -rf clone
+git clone https://github.com/linebender/kurbo.git clone
+Cloning into 'clone'...
+cd clone && git checkout ca273499e3e48bd2de6f02aa8e99a148984e45f3
+Note: switching to 'ca273499e3e48bd2de6f02aa8e99a148984e45f3'.
+HEAD is now at ca27349 ci: Update to stable Rust 1.97.1, typos 1.48.0 (#596)
+cd repro && cargo run || true
+   Compiling polycool v0.4.0 (/tmp/candidate001_verify/clone/polycool)
+   Compiling kurbo v0.13.1 (/tmp/candidate001_verify/clone/kurbo)
+   Compiling repro v0.1.0 (/tmp/candidate001_verify/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.66s
+     Running `target/debug/repro`
+
+thread 'main' (38427) panicked at /tmp/candidate001_verify/clone/kurbo/src/svg.rs:463:9:
+assertion failed: sum_of_sq != 0.0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED (debug_assert panic) - panicked: Any { .. }
+cd clone && git apply "/tmp/candidate001_verify/patch.diff"
+cd repro && cargo run
+   Compiling kurbo v0.13.1 (/tmp/candidate001_verify/clone/kurbo)
+   Compiling repro v0.1.0 (/tmp/candidate001_verify/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.56s
+     Running `target/debug/repro`
+did not reproduce - parsed cleanly: BezPath([MoveTo((0.0, 0.0)), LineTo((1e-200, 0.0))])
+
+=== Repeat-run check on pristine tree, debug build, same input, 3/3 panics (before any fix) ===
+
+$ cargo run   (repeated 3x against unpatched kurbo/src/svg.rs)
+thread 'main' (...) panicked at kurbo/src/svg.rs:463:9:
+assertion failed: sum_of_sq != 0.0
+PANICKED
+thread 'main' (...) panicked at kurbo/src/svg.rs:463:9:
+assertion failed: sum_of_sq != 0.0
+PANICKED
+thread 'main' (...) panicked at kurbo/src/svg.rs:463:9:
+assertion failed: sum_of_sq != 0.0
+PANICKED
+
+=== Release-mode behavior on pristine tree (debug_assert compiled out -> silent NaN/data corruption) ===
+
+$ cargo run --release
+OK, path = BezPath([MoveTo((0.0, 0.0))])
+
+Note: the release build does not panic (debug_assert! is a no-op in release), but the div-by-zero
+at svg.rs:471-473 (`coe * rxpy / ry`, `-coe * rypx / rx`) produces a NaN-filled `Arc`. Because
+`sweep_angle`'s NaN makes every comparison in `Arc::to_cubic_beziers`'s internal loop condition
+false, no `CurveTo` is ever emitted for the arc segment - it is silently dropped from the parsed
+path instead of being replaced by even a degenerate line, unlike the `is_straight_line()` case.
+
+=== Boundary-value variants in the same bug class, patched tree, debug build (varying radii/sign/rotation/magnitude around the triggering input) ===
+
+"M0,0 A25,25 0 0,1 1e-200,0" -> OK BezPath([MoveTo((0.0, 0.0)), LineTo((1e-200, 0.0))])
+"M0,0 A25,25 0 1,0 -1e-200,1e-205" -> OK BezPath([MoveTo((0.0, 0.0)), LineTo((-1e-200, 1e-205))])
+"M5,5 A0.001,0.001 45 1,1 5,5.0000000000000000000001e-300" -> OK BezPath([MoveTo((5.0, 5.0)), CurveTo((3.6192881122555223, 5.00000001862165), (2.499999966282522, 3.8807118877444786), (2.4999999662825214, 2.5000000000000004)), CurveTo((2.499999966282521, 1.1192881122555225), (3.619288112255522, -1.8621649111594252e-8), (5.0, 4.440892098500626e-16))])
+"M0,0 A25,25 0 0,1 5e-200,5e-200" -> OK BezPath([MoveTo((0.0, 0.0)), LineTo((5e-200, 5e-200))])
+
+(Third input is a normal, non-degenerate arc with tiny radii/large displacement - included to show
+the fix's `sum_of_sq == 0.0` check does not misfire on legitimate arcs; it still produces a real
+`CurveTo`-based arc, not a straight-line fallback.)
+
+=== Project test suite (`cargo test -p kurbo`), main worktree (/tmp/kurbo_worktrees/candidate-001) ===
+
+--- BEFORE (pristine kurbo/src/svg.rs) ---
+running 187 tests
+test result: ok. 187 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+running 55 tests
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+--- AFTER (patch.diff applied) ---
+running 187 tests
+test result: ok. 187 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+running 55 tests
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s

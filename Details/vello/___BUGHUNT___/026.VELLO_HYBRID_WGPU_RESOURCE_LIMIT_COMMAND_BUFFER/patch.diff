@@ -1,0 +1,171 @@
+diff --git a/sparse_strips/vello_hybrid/examples/wgpu_webgl/src/lib.rs b/sparse_strips/vello_hybrid/examples/wgpu_webgl/src/lib.rs
+index 45f24b00..2c8cfa64 100644
+--- a/sparse_strips/vello_hybrid/examples/wgpu_webgl/src/lib.rs
++++ b/sparse_strips/vello_hybrid/examples/wgpu_webgl/src/lib.rs
+@@ -418,13 +418,16 @@ impl AppState {
+ 
+         // 1st example — uploading pixmap directly to WebGL atlas
+         let pixmap1 = ImageScene::read_flower_image();
+-        self.renderer_wrapper.renderer.upload_image(
+-            &mut self.renderer_wrapper.resources,
+-            &self.renderer_wrapper.device,
+-            &self.renderer_wrapper.queue,
+-            &mut encoder,
+-            &pixmap1,
+-        );
++        self.renderer_wrapper
++            .renderer
++            .upload_image(
++                &mut self.renderer_wrapper.resources,
++                &self.renderer_wrapper.device,
++                &self.renderer_wrapper.queue,
++                &mut encoder,
++                &pixmap1,
++            )
++            .expect("failed to upload example image to atlas");
+ 
+         // 2nd example — uploading from a WebGL texture
+         let pixmap2 = ImageScene::read_cowboy_image();
+@@ -433,13 +436,16 @@ impl AppState {
+             &self.renderer_wrapper.queue,
+             &pixmap2,
+         );
+-        self.renderer_wrapper.renderer.upload_image(
+-            &mut self.renderer_wrapper.resources,
+-            &self.renderer_wrapper.device,
+-            &self.renderer_wrapper.queue,
+-            &mut encoder,
+-            &texture2,
+-        );
++        self.renderer_wrapper
++            .renderer
++            .upload_image(
++                &mut self.renderer_wrapper.resources,
++                &self.renderer_wrapper.device,
++                &self.renderer_wrapper.queue,
++                &mut encoder,
++                &texture2,
++            )
++            .expect("failed to upload example image to atlas");
+ 
+         self.renderer_wrapper.queue.submit([encoder.finish()]);
+     }
+diff --git a/sparse_strips/vello_hybrid/examples/winit/src/main.rs b/sparse_strips/vello_hybrid/examples/winit/src/main.rs
+index 10fe138f..09232a54 100644
+--- a/sparse_strips/vello_hybrid/examples/winit/src/main.rs
++++ b/sparse_strips/vello_hybrid/examples/winit/src/main.rs
+@@ -436,26 +436,30 @@ impl App<'_> {
+         // 1st example — uploading pixmap directly
+         let pixmap1 = ImageScene::read_flower_image();
+         let (renderer, resources, ..) = self.renderers[device_id].as_mut().unwrap();
+-        renderer.upload_image(
+-            resources,
+-            &device_handle.device,
+-            &device_handle.queue,
+-            &mut encoder,
+-            &pixmap1,
+-        );
++        renderer
++            .upload_image(
++                resources,
++                &device_handle.device,
++                &device_handle.queue,
++                &mut encoder,
++                &pixmap1,
++            )
++            .expect("failed to upload example image to atlas");
+ 
+         // 2nd example — uploading from a texture (for cases where you already have a texture)
+         let pixmap2 = ImageScene::read_cowboy_image();
+         let texture2 =
+             self.upload_image_to_texture(&device_handle.device, &device_handle.queue, &pixmap2);
+         let (renderer, resources, ..) = self.renderers[device_id].as_mut().unwrap();
+-        renderer.upload_image(
+-            resources,
+-            &device_handle.device,
+-            &device_handle.queue,
+-            &mut encoder,
+-            &texture2,
+-        );
++        renderer
++            .upload_image(
++                resources,
++                &device_handle.device,
++                &device_handle.queue,
++                &mut encoder,
++                &texture2,
++            )
++            .expect("failed to upload example image to atlas");
+ 
+         device_handle.queue.submit([encoder.finish()]);
+         self.uploaded_images[device_id] = true;
+diff --git a/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs b/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
+index 9521829f..6a13bc2e 100644
+--- a/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
++++ b/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
+@@ -561,6 +561,12 @@ impl Renderer {
+     /// 1. Reserves space in the image cache
+     /// 2. Writes the image data directly to the atlas
+     /// 3. Returns the `ImageId` for use in rendering
++    ///
++    /// # Errors
++    ///
++    /// Returns [`RenderError::AtlasError`] if the image cache has no room left for an
++    /// allocation of this size (e.g. the atlas is full and the configured atlas/atlas-count
++    /// limits have been reached).
+     pub fn upload_image<T: AtlasWriter>(
+         &mut self,
+         resources: &mut Resources,
+@@ -568,7 +574,7 @@ impl Renderer {
+         queue: &Queue,
+         encoder: &mut CommandEncoder,
+         writer: &T,
+-    ) -> vello_common::paint::ImageId {
++    ) -> Result<vello_common::paint::ImageId, RenderError> {
+         self.upload_image_with(
+             &mut resources.image_cache,
+             device,
+@@ -587,12 +593,12 @@ impl Renderer {
+         encoder: &mut CommandEncoder,
+         writer: &T,
+         padding: u16,
+-    ) -> vello_common::paint::ImageId {
++    ) -> Result<vello_common::paint::ImageId, RenderError> {
+         let width = writer.width();
+         let height = writer.height();
+-        let image_id = image_cache.allocate(width, height, padding).unwrap();
++        let image_id = image_cache.allocate(width, height, padding)?;
+         self.write_to_atlas(image_cache, device, queue, encoder, image_id, writer, None);
+-        image_id
++        Ok(image_id)
+     }
+ 
+     /// Write pixel data to an existing atlas allocation.
+diff --git a/sparse_strips/vello_sparse_tests/tests/renderer.rs b/sparse_strips/vello_sparse_tests/tests/renderer.rs
+index 29fcadbd..1360513b 100644
+--- a/sparse_strips/vello_sparse_tests/tests/renderer.rs
++++ b/sparse_strips/vello_sparse_tests/tests/renderer.rs
+@@ -367,13 +367,16 @@ impl HybridRenderer {
+         let mut encoder = self
+             .device
+             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+-        let image_id = self.renderer.upload_image(
+-            &mut self.resources,
+-            &self.device,
+-            &self.queue,
+-            &mut encoder,
+-            pixmap,
+-        );
++        let image_id = self
++            .renderer
++            .upload_image(
++                &mut self.resources,
++                &self.device,
++                &self.queue,
++                &mut encoder,
++                pixmap,
++            )
++            .expect("failed to upload test image to atlas");
+         self.queue.submit([encoder.finish()]);
+         image_id
+     }

@@ -1,0 +1,110 @@
+diff --git a/hayro-jpeg2000/src/j2c/build.rs b/hayro-jpeg2000/src/j2c/build.rs
+index b5e46e1f..33f7e261 100644
+--- a/hayro-jpeg2000/src/j2c/build.rs
++++ b/hayro-jpeg2000/src/j2c/build.rs
+@@ -4,7 +4,7 @@ use super::decode::{DecompositionStorage, TileDecompositions};
+ use super::rect::IntRect;
+ use super::tag_tree::TagTree;
+ use super::tile::{ResolutionTile, Tile};
+-use crate::error::{DecodingError, Result, ValidationError};
++use crate::error::{DecodingError, Result, ValidationError, bail};
+ use alloc::vec;
+ use core::iter;
+ use core::ops::Range;
+@@ -19,12 +19,38 @@ pub(crate) fn build(
+     build_decompositions(tile, storage, skipped_resolution_levels)
+ }
+ 
++/// Ceiling on the estimated total number of code-block *visits* a whole `decode()` call is
++/// about to cost - summed across *every tile's* components (not just the tile currently being
++/// built), at their raw (un-skipped) top resolution level, and multiplied by each tile's own
++/// quality-layer count.
++///
++/// A single, layer-independent code-block count estimate isn't enough: `segment::parse` walks
++/// every resolution level's packets (including ones `skipped_resolution_levels` will skip for
++/// decoding purposes) once *per layer*, to stay in sync with the codestream's own fixed packet
++/// order, and `build_decompositions` itself allocates one `Layer` bookkeeping entry per
++/// code-block *per layer* (`storage.layers`, populated in `build_code_blocks`) regardless of
++/// whether any of those layers are ever actually read. Both costs scale with
++/// `total_code_blocks * num_layers`, not with `total_code_blocks` alone, so a codestream that
++/// combines a large raw declared size, a small code-block size and a large (up to the format's
++/// own 32-layer maximum) layer count can stay well under a layer-independent code-block-count
++/// cap while still costing tens of times more than that cap alone would suggest. The actual
++/// configured code-block size (not a worst-case 4x4 assumption) is used, so ordinary large
++/// images with realistic code-block sizes and layer counts aren't penalized.
++///
++/// This is also not merely a per-tile cap: it is checked against `storage.raw_code_block_layer_total`,
++/// which accumulates across every tile `build_decompositions` runs for during the current
++/// `decode()` call (only reset once per call, not once per tile) - otherwise a codestream with
++/// many tiles and/or many components, each individually just under this cap, could still sum to
++/// a much larger cumulative cost across the whole call.
++const MAX_RAW_CODE_BLOCK_LAYER_ESTIMATE: u64 = 4_000_000;
++
+ fn build_decompositions(
+     tile: &Tile<'_>,
+     storage: &mut DecompositionStorage<'_>,
+     skipped_resolution_levels: u8,
+ ) -> Result<()> {
+     let mut total_coefficients = 0_usize;
++    let mut raw_code_block_layer_estimate = 0_u64;
+ 
+     for component_tile in tile.component_tiles() {
+         let decoded_resolutions =
+@@ -35,6 +61,32 @@ fn build_decompositions(
+         total_coefficients = total_coefficients
+             .checked_add(component_samples)
+             .ok_or(ValidationError::ImageTooLarge)?;
++
++        // Estimate the code-block count at the raw (un-skipped) top resolution level; the
++        // geometric decay across lower resolution levels means this alone already accounts
++        // for the large majority of the total across all levels. Multiplying by the tile's
++        // own layer count turns this into an estimate of total code-block *visits*, which is
++        // what actually drives both `storage.layers`' allocation size and `segment::parse`'s
++        // own packet-parsing work.
++        let raw_num_resolution_levels = component_tile.component_info.num_resolution_levels();
++        let raw_top_resolution = ResolutionTile::new(component_tile, raw_num_resolution_levels - 1);
++        let cb_area = u64::from(raw_top_resolution.code_block_width())
++            * u64::from(raw_top_resolution.code_block_height());
++        let component_estimate = raw_top_resolution
++            .rect
++            .area()
++            .saturating_div(cb_area)
++            .saturating_mul(u64::from(tile.num_layers));
++        raw_code_block_layer_estimate =
++            raw_code_block_layer_estimate.saturating_add(component_estimate);
++    }
++
++    storage.raw_code_block_layer_total = storage
++        .raw_code_block_layer_total
++        .saturating_add(raw_code_block_layer_estimate);
++
++    if storage.raw_code_block_layer_total > MAX_RAW_CODE_BLOCK_LAYER_ESTIMATE {
++        bail!(ValidationError::ImageTooLarge);
+     }
+ 
+     if storage.coefficients.is_empty() {
+diff --git a/hayro-jpeg2000/src/j2c/decode.rs b/hayro-jpeg2000/src/j2c/decode.rs
+index 43a62556..71b3e321 100644
+--- a/hayro-jpeg2000/src/j2c/decode.rs
++++ b/hayro-jpeg2000/src/j2c/decode.rs
+@@ -112,6 +112,7 @@ impl DecoderContext<'_> {
+     fn reset(&mut self, header: &Header<'_>, initial_tile: &Tile<'_>) -> Result<()> {
+         self.tile_decode_context.reset();
+         self.storage.reset();
++        self.storage.raw_code_block_layer_total = 0;
+ 
+         self.channel_data.clear();
+         let sample_count = (header.size_data.image_width() as usize)
+@@ -256,6 +257,12 @@ pub(crate) struct DecompositionStorage<'a> {
+     pub(crate) sub_bands: Vec<SubBand>,
+     pub(crate) decompositions: Vec<Decomposition>,
+     pub(crate) tile_decompositions: Vec<TileDecompositions>,
++    /// Running sum of `build::raw_code_block_layer_estimate` across *every* tile processed by
++    /// the current `decode()` call so far. Unlike the rest of this struct, this is intentionally
++    /// **not** cleared by `reset()` (which runs once per tile) - it is only reset once per whole
++    /// `decode()` call, in `DecoderContext::reset`, so a codestream with many tiles/components,
++    /// each individually under the per-tile estimate, is still bounded across the whole call.
++    pub(crate) raw_code_block_layer_total: u64,
+ }
+ 
+ impl DecompositionStorage<'_> {

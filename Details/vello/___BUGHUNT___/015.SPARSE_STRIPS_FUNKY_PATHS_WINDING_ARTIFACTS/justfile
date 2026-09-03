@@ -1,0 +1,38 @@
+# Self-contained reproduction for candidate 015.
+#
+# Status is "Not reproducible" - the historically-reported bug (issue #1240) is already fixed
+# upstream at base_commit (see RESULT.md), so there is no patch.diff to apply. `just test` clones
+# the repo at base_commit and demonstrates the CURRENT (fixed) behavior only.
+#
+# `just test-historical-bug` additionally proves the finding's causal mechanism: it re-applies (in
+# the clone only, then reverts) the exact pre-fix `closed`-flag logic from before commit b373c2ca
+# into the clone's own copy of flatten_simd.rs, and shows the same repro/ then DOES reproduce the
+# bug - i.e. that this repro genuinely exercises the code path that mattered, not a no-op.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Historical, pre-fix commit whose flatten_simd.rs is used only by `test-historical-bug` below.
+pre_fix_commit := "7ef9cca4cec94a804304c18c89afdb173e595c94"
+
+test: clone reproduce
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - demonstrates the bug is NOT present.
+reproduce:
+    cd repro && cargo run --release
+
+# Optional: prove the finding's causal mechanism by reintroducing the exact pre-fix `closed`-flag
+# bug (see RESULT.md's "Root cause") into the clone's own flatten_simd.rs, re-running the same
+# repro/ (now expected to print FAIL / write an unbounded-fill funky_scene.png), then reverting.
+test-historical-bug: clone
+    cd clone && git apply "{{justfile_directory()}}/historical_bug.patch"
+    -cd repro && cargo run --release
+    cd clone && git checkout -- sparse_strips/vello_common/src/flatten_simd.rs
+
+clean:
+    rm -rf clone

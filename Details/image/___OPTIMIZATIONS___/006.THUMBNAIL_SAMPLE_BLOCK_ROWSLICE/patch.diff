@@ -1,0 +1,105 @@
+diff --git a/benches/imageops.rs b/benches/imageops.rs
+index d1b33ebe..388e60f1 100644
+--- a/benches/imageops.rs
++++ b/benches/imageops.rs
+@@ -123,5 +123,17 @@ pub fn bench_resize(c: &mut Criterion) {
+     }
+ }
+ 
+-criterion_group!(benches, bench_imageops, bench_resize);
++pub fn bench_thumbnail(c: &mut Criterion) {
++    // 4032x3024 (12MP) matches the source size used elsewhere in this repo's
++    // `___OPTIMIZATIONS___` sessions to profile decode/resize, so results are comparable.
++    let src = ImageBuffer::from_fn(4032, 3024, |x, y| {
++        Rgb([x as u8, (y / 8) as u8, ((x * 13 + y) % 256) as u8])
++    });
++
++    c.bench_function("thumbnail 4032x3024 -> 200x150", |b| {
++        b.iter(|| imageops::thumbnail(&src, 200, 150));
++    });
++}
++
++criterion_group!(benches, bench_imageops, bench_resize, bench_thumbnail);
+ criterion_main!(benches);
+diff --git a/src/imageops/sample.rs b/src/imageops/sample.rs
+index 25864cac..85727405 100644
+--- a/src/imageops/sample.rs
++++ b/src/imageops/sample.rs
+@@ -608,6 +608,21 @@ where
+         return out;
+     }
+ 
++    // Fast path: if the source exposes a canonical packed-pixel view (true for the common
++    // `ImageBuffer<P, Vec<S>>` case), the dominant per-output-pixel block-averaging case below
++    // can read source rows directly through slice indexing instead of `get_pixel`'s per-call
++    // bounds checks and trait dispatch.
++    let pix_stride = <P as Pixel>::CHANNEL_COUNT as usize;
++    let fast_view: Option<(&[S], usize)> = image.to_pixel_view().and_then(|view| {
++        let (sw, row_stride) = view.strides_wh();
++        if sw == pix_stride {
++            let samples: &[S] = view.samples();
++            Some((samples, row_stride))
++        } else {
++            None
++        }
++    });
++
+     let x_ratio = width as f32 / new_width as f32;
+     let y_ratio = height as f32 / new_height as f32;
+ 
+@@ -626,7 +641,7 @@ where
+             let right = clamp(rightf.ceil() as u32, left, width);
+ 
+             let avg = if bottom != top && left != right {
+-                thumbnail_sample_block(image, left, right, bottom, top)
++                thumbnail_sample_block(image, fast_view, left, right, bottom, top)
+             } else if bottom != top {
+                 // && left == right
+                 // In the first column we have left == 0 and right > ceil(y_scale) > 0 so this
+@@ -677,7 +692,14 @@ where
+ }
+ 
+ /// Get a pixel for a thumbnail where the input window encloses at least a full pixel.
+-fn thumbnail_sample_block<I, P, S>(image: &I, left: u32, right: u32, bottom: u32, top: u32) -> P
++fn thumbnail_sample_block<I, P, S>(
++    image: &I,
++    fast_view: Option<(&[S], usize)>,
++    left: u32,
++    right: u32,
++    bottom: u32,
++    top: u32,
++) -> P
+ where
+     I: GenericImageView<Pixel = P>,
+     P: Pixel<Subpixel = S>,
+@@ -704,6 +726,7 @@ where
+             for x in (left..right).step_by(STEP_SIZE as usize) {
+                 let k = thumbnail_sample_block(
+                     image,
++                    fast_view,
+                     x,
+                     x.saturating_add(STEP_SIZE).min(right),
+                     y,
+@@ -714,6 +737,22 @@ where
+         }
+ 
+         ((right - left) as u64 / STEP_SIZE as u64) * ((top - bottom) as u64 / STEP_SIZE as u64)
++    } else if let Some((samples, row_stride)) = fast_view {
++        // standard case where all pixels are summed directly, reading straight from the
++        // source's packed-pixel view instead of through `get_pixel`'s trait dispatch.
++        let pix_stride = <P as Pixel>::CHANNEL_COUNT as usize;
++        let row_len = (right - left) as usize * pix_stride;
++        for y in bottom..top {
++            let row_start = y as usize * row_stride + left as usize * pix_stride;
++            let row = &samples[row_start..row_start + row_len];
++            for px in row.chunks_exact(pix_stride) {
++                for (s, &c) in sum.0.iter_mut().zip(px) {
++                    *s += ThumbnailSum::<S>::sample_val(c);
++                }
++            }
++        }
++
++        pixel_count
+     } else {
+         // standard case where all pixels are summed directly
+         for y in bottom..top {

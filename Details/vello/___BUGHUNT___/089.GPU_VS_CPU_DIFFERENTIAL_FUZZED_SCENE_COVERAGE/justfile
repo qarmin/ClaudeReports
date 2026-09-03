@@ -1,0 +1,46 @@
+# Self-contained harness for this candidate.
+#
+# This candidate did NOT find a reproducible GPU-vs-CPU rendering bug (see RESULT.md) - so there
+# is no patch.diff and no repro/ in the usual "prove the bug, apply the fix, prove it's gone"
+# sense. What this justfile reproduces instead is the *differential fuzz harness itself*: a real,
+# broad (thousands of randomly generated scenes x up to 2 renderer backends x 2 AA configs)
+# GPU-vs-CPU comparison, run against a real `wgpu` device, that found no divergence.
+# `harness/065_fix_needed_for_harness.patch` is candidate 065's already-recorded fix (repeated
+# here only so this folder is self-contained) - without it, `vello_tests::compare_gpu_cpu`'s FLIP
+# score is a hardcoded 0.0 self-comparison and this harness would prove nothing.
+#
+# This machine has no real GPU: SwiftShader (software Vulkan, `VK_ICD_FILENAMES`) or Mesa's
+# llvmpipe (software GL, `WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1`) is used instead. On a machine
+# with a real GPU, drop those env vars - the exact same real `vello`/wgpu renderer code runs. This
+# candidate's own RESULT.md explicitly notes real GPU hardware was still not available when this
+# was written - re-running there is a genuine, not-yet-done follow-up.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, wire in candidate 065's harness fix + this candidate's fuzz test,
+# then run the real differential fuzz sweep and print its output.
+test: clone apply-harness-fix add-fuzz-test run-fuzz
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-harness-fix:
+    cd clone && git apply "{{justfile_directory()}}/harness/065_fix_needed_for_harness.patch"
+
+add-fuzz-test:
+    cp "{{justfile_directory()}}/harness/compare_gpu_cpu_fuzz.rs" clone/vello_tests/tests/compare_gpu_cpu_fuzz.rs
+
+# Real Vulkan device (SwiftShader software ICD) by default. Swap the env vars below for
+# `WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1` to use Mesa's llvmpipe instead (see RESULT.md/
+# output.txt for the fact that both backends were checked this session). The harness as shipped
+# runs 200 (Area) + 80 (Msaa16) randomly generated scenes per invocation - see RESULT.md/
+# output.txt for the larger one-off sweeps (up to 3000 scenes) also run this session.
+run-fuzz:
+    cd clone && VK_ICD_FILENAMES={{env_var_or_default("VK_ICD_FILENAMES", "/tmp/swiftshader_icd/vk_swiftshader_icd.json")}} WGPU_BACKEND=vulkan \
+        cargo test --release -p vello_tests --test compare_gpu_cpu_fuzz -- --ignored --nocapture
+
+clean:
+    rm -rf clone

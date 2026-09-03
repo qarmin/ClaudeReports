@@ -1,0 +1,188 @@
+diff --git a/internal/core/item_rendering.rs b/internal/core/item_rendering.rs
+index 7d181113c..aa585ecca 100644
+--- a/internal/core/item_rendering.rs
++++ b/internal/core/item_rendering.rs
+@@ -223,6 +223,8 @@ pub fn render_item_children(
+                     &item_rc,
+                     item_geometry.size,
+                 )
++            } else if renderer.subtree_can_be_skipped(&item_rc) {
++                RenderingResult::ContinueRenderingWithoutChildren
+             } else {
+                 RenderingResult::ContinueRenderingChildren
+             };
+@@ -703,6 +705,15 @@ fn filter_item(
+         (self.get_current_clip().intersects(&bounding_rect), item_geometry)
+     }
+ 
++    /// Called by `render_item_children` for an `item` that `filter_item` already decided not to
++    /// draw, to ask whether its whole subtree can also be skipped (no descendant would draw
++    /// either). The default is conservative (never skip) since generic renderers have no cheap
++    /// way to know this; renderers that maintain a subtree-bounds cache (e.g. `PartialRenderer`)
++    /// can override it.
++    fn subtree_can_be_skipped(&self, _item: &ItemRc) -> bool {
++        false
++    }
++
+     fn window(&self) -> &crate::window::WindowInner;
+ 
+     /// Return the internal renderer
+diff --git a/internal/core/partial_renderer.rs b/internal/core/partial_renderer.rs
+index 9de941ab7..b0a0221b9 100644
+--- a/internal/core/partial_renderer.rs
++++ b/internal/core/partial_renderer.rs
+@@ -20,7 +20,10 @@
+     ItemRenderer, ItemRendererFeatures, RenderBorderRectangle, RenderImage, RenderRectangle,
+     RenderText,
+ };
+-use crate::item_tree::{ItemTreeRc, ItemTreeWeak, ItemVisitorResult};
++use crate::item_tree::{
++    ItemTreeRc, ItemTreeWeak, ItemVisitor, ItemVisitorResult, ItemVisitorVTable, TraversalOrder,
++    VisitChildrenResult,
++};
+ #[cfg(feature = "path")]
+ use crate::items::Path;
+ use crate::items::{BoxShadow, Clip, ItemRc, ItemRef, Layer, Opacity, RenderingResult, TextInput};
+@@ -195,10 +198,15 @@ struct PartialRenderingCachedData {
+     pub data: CachedItemBoundingBoxAndTransform,
+     /// The property tracker that should be used to evaluate whether the item needs to be re-rendered
+     pub tracker: Option<core::pin::Pin<Box<PropertyTracker>>>,
++    /// The union of the bounding rects of every descendant of this item, in this item's own
++    /// (children) coordinate frame. Recomputed every frame by `PartialRenderer::compute_subtree_bounds`,
++    /// right after `compute_dirty_regions` has refreshed `data` for the whole tree, so it is never
++    /// stale by the time rendering consults it. An empty rect means the subtree draws nothing at all.
++    pub subtree_bounds: LogicalRect,
+ }
+ impl PartialRenderingCachedData {
+     fn new(data: CachedItemBoundingBoxAndTransform) -> Self {
+-        Self { data, tracker: None }
++        Self { data, tracker: None, subtree_bounds: LogicalRect::zero() }
+     }
+ }
+ 
+@@ -472,7 +480,7 @@ fn adjust_transforms_for_child(
+                 let rendering_data = item.cached_rendering_data_offset();
+                 let mut cache = self.cache.borrow_mut();
+                 match rendering_data.get_entry(&mut cache) {
+-                    Some(PartialRenderingCachedData { data: cached_geom, tracker }) => {
++                    Some(PartialRenderingCachedData { data: cached_geom, tracker, .. }) => {
+                         let rendering_dirty = tracker.as_ref().is_some_and(|tr| tr.is_dirty());
+ 
+                         // Only repaint when the rank decreased. When two items swap it is
+@@ -635,6 +643,75 @@ fn adjust_transforms_for_child(
+                 }
+             },
+         );
++
++        // Every item's own bounding rect/transform was just refreshed above, so this is
++        // guaranteed fresh for the whole tree by construction - no separate invalidation to get
++        // wrong. See `compute_subtree_bounds`'s doc comment for what it is used for.
++        self.compute_subtree_bounds(component, -1);
++    }
++
++    /// Computes, and caches on each item's own cache entry, the union of the bounding rects of
++    /// all of that item's descendants, expressed in the item's own (children) coordinate frame.
++    /// Must run after `compute_dirty_regions` has refreshed every item's `CachedItemBoundingBoxAndTransform`
++    /// for this frame (it reads that data rather than the tracked properties directly, so it adds
++    /// no new dependency registrations).
++    ///
++    /// This lets `filter_item`/`subtree_can_be_skipped` tell whether a culled item's whole subtree
++    /// is still outside the dirty region, so `render_item_children` can skip descending into it
++    /// entirely instead of visiting every descendant just to find nothing to draw.
++    ///
++    /// Returns the computed union for `index` (relative to `index`'s own frame); the caller only
++    /// needs this for the recursive case, the top-level call (`index == -1`) discards it.
++    fn compute_subtree_bounds(&self, component: &ItemTreeRc, index: isize) -> LogicalRect {
++        let acc = RefCell::new(LogicalRect::zero());
++        let mut actual_visitor =
++            |component: &ItemTreeRc, child_index: u32, item: Pin<ItemRef>| -> VisitChildrenResult {
++                let rendering_data = item.cached_rendering_data_offset();
++                let own = {
++                    let mut cache = self.cache.borrow_mut();
++                    rendering_data
++                        .get_entry(&mut cache)
++                        .map(|entry| (*entry.data.bounding_rect(), entry.data.transform()))
++                };
++                // `None` only happens for a descendant of an item whose clip region was empty
++                // this frame (compute_dirty_regions skips refreshing those to save the work) -
++                // its stale bounds from a previous frame, if any, are still in the cache and get
++                // picked up below; if there never was one, contributing nothing here is safe
++                // because that whole branch is never rendered while its clip stays empty.
++                let Some((own_bounding_rect, own_transform)) = own else {
++                    return VisitChildrenResult::CONTINUE;
++                };
++
++                let child_subtree = self.compute_subtree_bounds(component, child_index as isize);
++                let mut merged = own_bounding_rect;
++                if !child_subtree.is_empty() {
++                    let child_subtree_in_our_frame =
++                        own_transform.outer_transformed_rect(&child_subtree.cast()).cast();
++                    merged = merged.union(&child_subtree_in_our_frame);
++                }
++
++                let mut acc = acc.borrow_mut();
++                *acc = acc.union(&merged);
++                VisitChildrenResult::CONTINUE
++            };
++        vtable::new_vref!(let mut actual_visitor : VRefMut<ItemVisitorVTable> for ItemVisitor = &mut actual_visitor);
++        vtable::VRc::borrow_pin(component).as_ref().visit_children_item(
++            index,
++            TraversalOrder::BackToFront,
++            actual_visitor,
++        );
++
++        let result = *acc.borrow();
++        if index >= 0 {
++            let item_rc = ItemRc::new(component.clone(), index as u32);
++            let item = item_rc.borrow();
++            let rendering_data = item.cached_rendering_data_offset();
++            let mut cache = self.cache.borrow_mut();
++            if let Some(entry) = rendering_data.get_entry(&mut cache) {
++                entry.subtree_bounds = result;
++            }
++        }
++        result
+     }
+ 
+     fn mark_dirty_rect(
+@@ -722,7 +799,7 @@ fn filter_item(
+         let rendering_data = item.cached_rendering_data_offset();
+         let mut cache = self.cache.borrow_mut();
+         let item_bounding_rect = match rendering_data.get_entry(&mut cache) {
+-            Some(PartialRenderingCachedData { data, tracker: _ }) => *data.bounding_rect(),
++            Some(PartialRenderingCachedData { data, .. }) => *data.bounding_rect(),
+             None => {
+                 // This item was created between the computation of the dirty region and the actual rendering.
+                 item_rc.bounding_rect(&item_geometry, window_adapter)
+@@ -739,6 +816,31 @@ fn filter_item(
+         (draw, item_geometry)
+     }
+ 
++    fn subtree_can_be_skipped(&self, item_rc: &ItemRc) -> bool {
++        let item = item_rc.borrow();
++        let rendering_data = item.cached_rendering_data_offset();
++        let mut cache = self.cache.borrow_mut();
++        let Some(PartialRenderingCachedData { subtree_bounds, .. }) =
++            rendering_data.get_entry(&mut cache)
++        else {
++            // No cache entry yet (item created between compute_dirty_regions and rendering): be
++            // conservative, same as `filter_item` is for the same case.
++            return false;
++        };
++        if subtree_bounds.is_empty() {
++            return true;
++        }
++        let clipped = self.get_current_clip().intersection(subtree_bounds);
++        match clipped {
++            None => true,
++            Some(clipped) => {
++                let screen_geom =
++                    self.current_transform().outer_transformed_rect(&clipped.cast()).cast();
++                !self.dirty_region.draw_intersects(screen_geom)
++            }
++        }
++    }
++
+     forward_rendering_call2!(fn draw_rectangle(dyn RenderRectangle));
+     forward_rendering_call2!(fn draw_border_rectangle(dyn RenderBorderRectangle));
+     forward_rendering_call2!(fn draw_window_background(dyn RenderRectangle));

@@ -1,0 +1,70 @@
+Captured output of `repro/` (real `hayro::render()`, real 764-byte PDF with a real `/JPXDecode`
+image XObject placed as a 20x20 thumbnail on a 200x200 page), run 3 times against the pristine
+`base_commit` tree ("before") and 3 times against the tree with `patch.diff` applied ("after").
+
+=== BEFORE (pristine base_commit, no fix) - run 1/3 ===
+built PoC PDF: 764 bytes (embedded JPEG2000 codestream: 80 bytes, declares 15000x15000 raw, 1 decomposition level, 4x4 code blocks; placed as a 20x20 thumbnail via `cm 20 0 0 20 90 90` on a 200x200 page)
+calling the real, public hayro::render() and timing it...
+render() returned after 1.371996715s (pixmap 200x200)
+peak RSS (VmHWM): 2753084 kB (~2688.56 MB)
+SLOW: took >= 500ms to render a 20x20 thumbnail placement - consistent with the suspected raw-dimension-driven cost, independent of the decoded/capped sample count
+
+=== BEFORE - run 2/3 ===
+built PoC PDF: 764 bytes (embedded JPEG2000 codestream: 80 bytes, declares 15000x15000 raw, 1 decomposition level, 4x4 code blocks; placed as a 20x20 thumbnail via `cm 20 0 0 20 90 90` on a 200x200 page)
+calling the real, public hayro::render() and timing it...
+render() returned after 1.324238218s (pixmap 200x200)
+peak RSS (VmHWM): 2752136 kB (~2687.63 MB)
+SLOW: took >= 500ms to render a 20x20 thumbnail placement - consistent with the suspected raw-dimension-driven cost, independent of the decoded/capped sample count
+
+=== BEFORE - run 3/3 ===
+built PoC PDF: 764 bytes (embedded JPEG2000 codestream: 80 bytes, declares 15000x15000 raw, 1 decomposition level, 4x4 code blocks; placed as a 20x20 thumbnail via `cm 20 0 0 20 90 90` on a 200x200 page)
+calling the real, public hayro::render() and timing it...
+render() returned after 1.289705026s (pixmap 200x200)
+peak RSS (VmHWM): 2753168 kB (~2688.64 MB)
+SLOW: took >= 500ms to render a 20x20 thumbnail placement - consistent with the suspected raw-dimension-driven cost, independent of the decoded/capped sample count
+
+=== AFTER (patch.diff applied) - run 1/3 ===
+built PoC PDF: 764 bytes (embedded JPEG2000 codestream: 80 bytes, declares 15000x15000 raw, 1 decomposition level, 4x4 code blocks; placed as a 20x20 thumbnail via `cm 20 0 0 20 90 90` on a 200x200 page)
+calling the real, public hayro::render() and timing it...
+render() returned after 218.173µs (pixmap 200x200)
+peak RSS (VmHWM): 6676 kB (~6.52 MB)
+FAST: rendering completed quickly
+
+=== AFTER - run 2/3 ===
+built PoC PDF: 764 bytes (embedded JPEG2000 codestream: 80 bytes, declares 15000x15000 raw, 1 decomposition level, 4x4 code blocks; placed as a 20x20 thumbnail via `cm 20 0 0 20 90 90` on a 200x200 page)
+calling the real, public hayro::render() and timing it...
+render() returned after 141.498µs (pixmap 200x200)
+peak RSS (VmHWM): 6640 kB (~6.48 MB)
+FAST: rendering completed quickly
+
+=== AFTER - run 3/3 ===
+built PoC PDF: 764 bytes (embedded JPEG2000 codestream: 80 bytes, declares 15000x15000 raw, 1 decomposition level, 4x4 code blocks; placed as a 20x20 thumbnail via `cm 20 0 0 20 90 90` on a 200x200 page)
+calling the real, public hayro::render() and timing it...
+render() returned after 193.437µs (pixmap 200x200)
+peak RSS (VmHWM): 6684 kB (~6.53 MB)
+FAST: rendering completed quickly
+
+
+=== Boundary sweep (direct hayro_jpeg2000::Image::decode() calls, DecodeSettings{target_resolution: Some((1,1))}, standalone from-scratch codestreams, WITH candidate 008's own MAX_TOTAL_SAMPLE_COUNT=256_000_000 cap applied) ===
+
+15000x15000 raw, 1 decomposition level, 4x4 code blocks -> decoded 7500x7500 = 56,250,000 samples
+(22% of the 256M cap):
+  before this candidate's fix: decode() returned Err(Validation(InvalidExponents)) after 1.146357367s, VmHWM 2750436 kB (~2.75 GB)
+  after this candidate's fix:  decode() returned Err(Validation(ImageTooLarge)) after 10.359µs, VmHWM 3040 kB
+
+30000x30000 raw, 1 decomposition level, 4x4 code blocks -> decoded 15000x15000 = 225,000,000 samples
+(88% of the 256M cap - deliberately "just under"):
+  before this candidate's fix: decode() returned Err(Validation(InvalidExponents)) after 4.367761632s, VmHWM 10990108 kB (~11.0 GB)
+  after this candidate's fix:  decode() returned Err(Validation(ImageTooLarge)) after 7.374µs, VmHWM 3060 kB
+
+15000x15000 raw, 1 decomposition level, REALISTIC 64x64 code blocks (control - not attacker-tuned)
+-> decoded 7500x7500 = 56,250,000 samples:
+  before this candidate's fix: decode() returned Err(Validation(InvalidExponents)) after 4.878332ms, VmHWM 14084 kB (unaffected - this is the expected, already-cheap case)
+  after this candidate's fix:  decode() returned Err(Validation(InvalidExponents)) after 5.481645ms, VmHWM 14044 kB (unchanged - confirms the fix doesn't penalize ordinary code-block sizes)
+
+Note: decode() returns Err(Validation(InvalidExponents)) in the "before"/realistic-cb-size cases
+because the crafted codestreams carry no real entropy-coded tile-part data (0 body bytes - not
+needed to trigger this candidate's vulnerable code path, which runs before any packet data is
+read) and use a minimal QCD marker; the error surfaces only *after* the expensive/vulnerable
+`build_decompositions` step already ran to completion, which is exactly what these timings/memory
+numbers measure.

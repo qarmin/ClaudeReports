@@ -1,0 +1,126 @@
+######################################################################
+# 1. BEFORE - repro/run.sh against the pristine cg_clif @ 2bc05d45
+#    (CLIF_ROOT=<main tree>, dist/ built by ./y.sh build, no patch)
+######################################################################
+==============================================================
+PART 0 - build core for aarch64-unknown-linux-gnu with plain rustc (LLVM), the shared baseline
+==============================================================
+libcore.rlib: 65974000 bytes
+
+==============================================================
+PART 1 - compile the REAL compiler_builtins crate for aarch64-unknown-linux-gnu
+==============================================================
+--- plain rustc (LLVM) ---
+OK: 4802730 bytes
+--- rustc-clif (cg_clif) ---
+cg_clif REFUSED to compile compiler_builtins:
+error: attempt to declare `__letf2` with signature Signature { params: [AbiParam { value_type: types::F128, purpose: Normal, extension: None }, AbiParam { value_type: types::F128, purpose: Normal, extension: None }], returns: [AbiParam { value_type: types::I64, purpose: Normal, extension: None }], call_conv: SystemV }, but it was already declared with signature Signature { params: [AbiParam { value_type: types::F128, purpose: Normal, extension: None }, AbiParam { value_type: types::F128, purpose: Normal, extension: None }], returns: [AbiParam { value_type: types::I32, purpose: Normal, extension: None }], call_conv: SystemV }
+error: aborting due to 1 previous error
+
+==============================================================
+PART 2 - build + link + RUN the f128-comparison program, LLVM vs cg_clif
+         (callee side = the LLVM-built compiler_builtins, i.e. what a
+          normal cross build gets out of the prebuilt sysroot)
+==============================================================
+  LLVM   : rc=0, 81 lines
+  cg_clif: rc=0, 81 lines
+  => MISMATCH: 35 of 81 comparison lines differ. First few:
+3c3
+< 02:14
+---
+> 02:50
+5,6c5,6
+< 04:14
+< 05:14
+---
+> 04:50
+  (mask bits: 1=eq 2=ne 4=lt 8=le 16=gt 32=ge; 14 = 'a<b', 50 = 'a>b')
+
+==============================================================
+PART 3 - same program, but the callee compiler_builtins is the one CG_CLIF built
+         (only reachable once PART 1 succeeds)
+==============================================================
+  skipped: cg_clif could not build compiler_builtins (PART 1 failed)
+
+RESULT: BUG PRESENT (cg_clif refused compiler_builtins and/or disagreed with LLVM)
+exit status: 1
+
+--- the two lines of the diff that show the actual wrong answer, in full ---
+  vals[0]=0.0  vals[2]=1.0  ->  0.0 <  1.0
+  LLVM   : 02:14   (14 = ne|lt|le  -> a < b, correct)
+  cg_clif: 02:50   (50 = ne|gt|ge  -> a > b, WRONG)
+
+--- repeatability of the BEFORE state: md5 of each side's run-time output, 3 runs ---
+  run1 llvm=671697c99028 clif=4e4b1fe93d7f
+  run2 llvm=671697c99028 clif=4e4b1fe93d7f
+  run3 llvm=671697c99028 clif=4e4b1fe93d7f
+######################################################################
+# 2. AFTER - repro/run.sh against the same tree with patch.diff applied
+#    (CLIF_ROOT=<worktree>, rebuilt with ./y.sh build)
+######################################################################
+==============================================================
+PART 0 - build core for aarch64-unknown-linux-gnu with plain rustc (LLVM), the shared baseline
+==============================================================
+libcore.rlib: 65974000 bytes
+
+==============================================================
+PART 1 - compile the REAL compiler_builtins crate for aarch64-unknown-linux-gnu
+==============================================================
+--- plain rustc (LLVM) ---
+OK: 4802730 bytes
+--- rustc-clif (cg_clif) ---
+OK: 3724182 bytes
+
+==============================================================
+PART 2 - build + link + RUN the f128-comparison program, LLVM vs cg_clif
+         (callee side = the LLVM-built compiler_builtins, i.e. what a
+          normal cross build gets out of the prebuilt sysroot)
+==============================================================
+  LLVM   : rc=0, 81 lines
+  cg_clif: rc=0, 81 lines
+  => MATCH
+
+==============================================================
+PART 3 - same program, but the callee compiler_builtins is the one CG_CLIF built
+         (only reachable once PART 1 succeeds)
+==============================================================
+  => MATCH (all-cg_clif aarch64 f128 comparison agrees with LLVM)
+
+RESULT: OK (cg_clif builds compiler_builtins for aarch64 and matches LLVM at run time)
+exit status: 0
+
+--- repeatability of the AFTER state, 3 runs of each binary ---
+  run1 llvm=671697c99028 clif=671697c99028 clif_all=671697c99028
+  run2 llvm=671697c99028 clif=671697c99028 clif_all=671697c99028
+  run3 llvm=671697c99028 clif=671697c99028 clif_all=671697c99028
+
+######################################################################
+# 3. Bug-class sweep: real compiler_builtins compiled for 7 targets
+#    (repro/sweep_targets.sh)
+######################################################################
+### BEFORE (pristine cg_clif)
+aarch64-unknown-linux-gnu  llvm=OK clif=FAIL:__letf2
+aarch64-unknown-linux-musl  llvm=OK clif=FAIL:__letf2
+aarch64-apple-darwin  llvm=OK clif=FAIL:__gttf2
+aarch64-linux-android  llvm=OK clif=FAIL:__letf2
+s390x-unknown-linux-gnu  llvm=OK clif=OK
+x86_64-unknown-linux-gnu  llvm=OK clif=OK
+riscv64gc-unknown-linux-gnu  llvm=OK clif=OK
+### AFTER (patched cg_clif)
+aarch64-unknown-linux-gnu  llvm=OK clif=OK
+aarch64-unknown-linux-musl  llvm=OK clif=OK
+aarch64-apple-darwin  llvm=OK clif=OK
+aarch64-linux-android  llvm=OK clif=OK
+s390x-unknown-linux-gnu  llvm=OK clif=OK
+x86_64-unknown-linux-gnu  llvm=OK clif=OK
+riscv64gc-unknown-linux-gnu  llvm=OK clif=OK
+
+######################################################################
+# 4. Control: the HOST x86_64 f128 comparison path is unchanged
+#    (___BUGHUNT___/tools/diffcheck.sh on an 11x11 f128 comparison
+#     matrix incl. +-0.0, +-inf, NaN, MIN_POSITIVE, opt-level 0)
+######################################################################
+--- pristine cg_clif ---
+diffcheck exit: 0 (0 = cg_clif output byte-identical to LLVM, 121 lines each)
+--- patched cg_clif ---
+diffcheck exit: 0 (0 = still byte-identical, no regression on the host path)

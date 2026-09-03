@@ -1,0 +1,124 @@
+All output below is real, captured from actually running `repro/` (candidate 055's own
+standalone crate, depending on a fresh `git clone` of the project checked out at base_commit
+7516831426fb70f36d62c521c5477f6a7265b36a) against a real Vulkan adapter (Google SwiftShader,
+software implementation, VK_ICD_FILENAMES pointed at its ICD json) reporting
+max_texture_dimension_2d = 8192 - i.e. a device whose REAL limit is well above vello_hybrid's
+hardcoded 4096 cap, so any panic below is caused by that artificial cap, not by the device's own
+capability.
+
+====================================================================
+1) BEFORE the fix (pristine clone) - 3/3 repeat runs, NUM_GRADIENTS=4200
+====================================================================
+
+=== before run 1 ===
+    Finished `release` profile [optimized] target(s) in 1.72s
+     Running `target/release/repro055`
+adapter: "SwiftShader Device (Subzero)", max_texture_dimension_2d = 8192
+Drawing 4200 distinct max-width gradients in a single frame...
+
+thread 'main' (686787) panicked at .../clone/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs:2402:13:
+Gradient texture height exceeds resource texture dimensions
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+=== before run 2 ===
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running `target/release/repro055`
+adapter: "SwiftShader Device (Subzero)", max_texture_dimension_2d = 8192
+Drawing 4200 distinct max-width gradients in a single frame...
+
+thread 'main' (686901) panicked at .../clone/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs:2402:13:
+Gradient texture height exceeds resource texture dimensions
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+=== before run 3 ===
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running `target/release/repro055`
+adapter: "SwiftShader Device (Subzero)", max_texture_dimension_2d = 8192
+Drawing 4200 distinct max-width gradients in a single frame...
+
+thread 'main' (686931) panicked at .../clone/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs:2402:13:
+Gradient texture height exceeds resource texture dimensions
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+With RUST_BACKTRACE=1, the panic's stack unwinds through the real public API entry point:
+
+thread 'main' (683245) panicked at .../clone/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs:2402:13:
+Gradient texture height exceeds resource texture dimensions
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: <vello_hybrid::render::wgpu::Renderer>::render_scene
+   3: <vello_hybrid::render::wgpu::Renderer>::render
+   4: pollster::block_on::<repro055::run::{closure#0}>
+   5: repro055::main
+
+====================================================================
+2) AFTER applying patch.diff to the same clone - 3/3 repeat runs, NUM_GRADIENTS=4200
+====================================================================
+
+=== after run 1 ===
+   Compiling vello_hybrid v0.2.0 (.../clone/sparse_strips/vello_hybrid)
+   Compiling repro055 v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 1.68s
+     Running `target/release/repro055`
+adapter: "SwiftShader Device (Subzero)", max_texture_dimension_2d = 8192
+Drawing 4200 distinct max-width gradients in a single frame...
+Rendered 4200 distinct gradients without panicking.
+
+=== after run 2 ===
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running `target/release/repro055`
+adapter: "SwiftShader Device (Subzero)", max_texture_dimension_2d = 8192
+Drawing 4200 distinct max-width gradients in a single frame...
+Rendered 4200 distinct gradients without panicking.
+
+=== after run 3 ===
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running `target/release/repro055`
+adapter: "SwiftShader Device (Subzero)", max_texture_dimension_2d = 8192
+Drawing 4200 distinct max-width gradients in a single frame...
+Rendered 4200 distinct gradients without panicking.
+
+====================================================================
+3) Boundary checks (against the patched clone) confirming the fix restores real device
+   capacity instead of just moving the threshold arbitrarily
+====================================================================
+
+--- NUM_GRADIENTS=4000 (below the OLD artificial cap) - succeeds before AND after the fix ---
+adapter: "SwiftShader Device (Subzero)", max_texture_dimension_2d = 8192
+Drawing 4000 distinct max-width gradients in a single frame...
+Rendered 4000 distinct gradients without panicking.
+
+--- NUM_GRADIENTS=8000 (above the OLD 4096 cap, but within this adapter's REAL 8192 limit) ---
+adapter: "SwiftShader Device (Subzero)", max_texture_dimension_2d = 8192
+Drawing 8000 distinct max-width gradients in a single frame...
+Rendered 8000 distinct gradients without panicking.
+(Before the fix, this same NUM_GRADIENTS=8000 also panics with the identical
+"Gradient texture height exceeds resource texture dimensions" message as the 4200 case above -
+the pristine code cannot use this device's real capacity at all.)
+
+--- NUM_GRADIENTS=8500 (exceeds this adapter's REAL 8192 limit) - correctly still panics after the fix ---
+adapter: "SwiftShader Device (Subzero)", max_texture_dimension_2d = 8192
+Drawing 8500 distinct max-width gradients in a single frame...
+
+thread 'main' (687143) panicked at .../clone/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs:2447:13:
+Gradient texture height exceeds device texture dimensions
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+This shows the fix isn't "remove the safety check" - the assert still correctly fires once the
+scene's gradient-LUT data genuinely exceeds what the real device can hold (8192 in this case); it
+just no longer fires 2x too early because of an artificial width-only cap being reused as a
+height cap too.
+
+====================================================================
+4) Project test suite (sparse_strips/vello_hybrid), before vs after the patch
+   (cargo test --release -p vello_hybrid --lib)
+====================================================================
+
+--- BEFORE (pristine source, main project's own working tree used for this check) ---
+test result: ok. 122 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+--- AFTER (patch.diff applied) ---
+test result: ok. 122 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+No regressions: same 122/122 pass count before and after.

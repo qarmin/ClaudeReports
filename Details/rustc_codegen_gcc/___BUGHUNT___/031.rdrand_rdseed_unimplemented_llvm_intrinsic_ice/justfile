@@ -1,0 +1,51 @@
+# Self-contained reproduction for candidate 031 (rdrand_rdseed_unimplemented_llvm_intrinsic_ice).
+#
+# The thing under test is a compiler backend, not a library - so "run the repro" means "compile a
+# small Rust source file through the real backend (`rustc -Zcodegen-backend=...`, via `./y.sh
+# rustc`) and run the resulting binary", the same pattern candidates 004/018/025/030 in this
+# workspace use.
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+test: clone build reproduce-before apply rebuild reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r repro clone/repro
+
+# One-time setup: downloads a prebuilt libgccjit.so and builds the sysroot (core/alloc/std).
+# ~2-3 minutes on a modern multi-core machine, per this workspace's own README.md.
+build:
+    echo 'download-gccjit = true' > clone/config.toml
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Compile the repro against the pristine (unpatched) backend, with the same
+# `-C target-feature=+rdrand,+rdseed` flag `-C target-cpu=native` would enable on hardware that
+# supports these instructions (note: `./y.sh rustc` execs `rustc` directly and does not read
+# `RUSTFLAGS`, unlike `./y.sh cargo`, so the flag is passed as a plain trailing argument here) -
+# this should panic with an ICE ("not implemented: ***** unsupported LLVM intrinsic
+# llvm.x86.rdrand.16") instead of compiling.
+reproduce-before:
+    ulimit -c 0
+    cd clone && CHANNEL=release ./y.sh rustc repro/rdrand_rdseed.rs -o /tmp/rdrand_rdseed_before -C target-feature=+rdrand,+rdseed || true
+    @echo "^ expected: an ICE panic mentioning 'unsupported LLVM intrinsic llvm.x86.rdrand' (or rdseed), exit 101 - see this candidate's own output.txt for a full captured example"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+rebuild:
+    cd clone && CHANNEL=release ./y.sh build --release
+
+# Same repro again, now against the patched backend - should compile cleanly and print
+# "all rdrand/rdseed steps completed without an ICE", exit 0.
+reproduce-after:
+    ulimit -c 0
+    cd clone && CHANNEL=release ./y.sh rustc repro/rdrand_rdseed.rs -o /tmp/rdrand_rdseed_after -C target-feature=+rdrand,+rdseed
+    /tmp/rdrand_rdseed_after
+
+clean:
+    rm -rf clone

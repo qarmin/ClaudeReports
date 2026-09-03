@@ -1,0 +1,58 @@
+diff --git a/src/images/dynimage.rs b/src/images/dynimage.rs
+index 594325dd..0c8ecd47 100644
+--- a/src/images/dynimage.rs
++++ b/src/images/dynimage.rs
+@@ -1186,23 +1186,44 @@ impl DynamicImage {
+     /// This method operates on pixel channel values directly without taking into account color
+     /// space data.
+     pub fn resize_to_fill(&mut self, nwidth: u32, nheight: u32, filter: imageops::FilterType) {
+-        let (width2, height2) =
+-            resize_dimensions(self.width(), self.height(), nwidth, nheight, true);
+-        self.resize_exact(width2, height2, filter);
++        let (width, height) = self.dimensions();
++        let (width2, height2) = resize_dimensions(width, height, nwidth, nheight, true);
+ 
+-        let (iwidth, iheight) = self.dimensions();
+-        let ratio = u64::from(iwidth) * u64::from(nheight);
+-        let nratio = u64::from(nwidth) * u64::from(iheight);
++        let ratio = u64::from(width2) * u64::from(nheight);
++        let nratio = u64::from(nwidth) * u64::from(height2);
+ 
+         let select = if nratio > ratio {
+-            let y = (iheight - nheight) / 2;
++            let y = (height2 - nheight) / 2;
+             Rect::from_xy_ranges(0..nwidth, y..y + nheight)
+         } else {
+-            let x = (iwidth - nwidth) / 2;
++            let x = (width2 - nwidth) / 2;
+             Rect::from_xy_ranges(x..x + nwidth, 0..nheight)
+         };
+ 
+-        *self = self.crop(select);
++        // Map `select` (computed in the `width2 x height2` fill-resize's coordinate space) back
++        // into the *source* image's own coordinates, and crop there first instead of actually
++        // resizing to `width2 x height2` before cropping. For a source with an extreme aspect
++        // ratio relative to the target, `width2`/`height2` can be orders of magnitude larger than
++        // `nwidth`/`nheight` (e.g. a 1x1_000_000 source targeting 100x100 fills to
++        // 100x100_000_000) even though almost all of that intermediate image is immediately
++        // discarded by the crop below - materializing it can exhaust memory on a small, valid
++        // input. Cropping first bounds every allocation in this function by the source image's
++        // own size.
++        let scale_x = f64::from(width2) / f64::from(width);
++        let scale_y = f64::from(height2) / f64::from(height);
++
++        let src_x0 = ((f64::from(select.x) / scale_x).round() as u32).min(width);
++        let src_x1 = ((f64::from(select.x + select.width) / scale_x).round() as u32)
++            .clamp(src_x0, width);
++        let src_y0 = ((f64::from(select.y) / scale_y).round() as u32).min(height);
++        let src_y1 = ((f64::from(select.y + select.height) / scale_y).round() as u32)
++            .clamp(src_y0, height);
++
++        let src_select =
++            Rect::from_xy_ranges(src_x0..src_x1.max(src_x0 + 1), src_y0..src_y1.max(src_y0 + 1));
++
++        *self = self.crop(src_select);
++        self.resize_exact(nwidth, nheight, filter);
+     }
+ 
+     /// Performs a Gaussian blur on this image.

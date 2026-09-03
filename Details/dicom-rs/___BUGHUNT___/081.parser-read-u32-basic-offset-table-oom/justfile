@@ -1,0 +1,53 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# This candidate's bug (an unguarded `vec.resize` in `StatefulDecoder::read_u32`) sits directly
+# behind another, already-recorded, still-unmerged bug at the same call site: candidate 080's
+# `Vec::with_capacity(len)` in `parser/src/dataset/read.rs`, which requests 4x more memory for
+# the exact same declared length and so aborts first on a pristine clone, before this candidate's
+# own code ever runs. `prereq-080.patch` (a copy of candidate 080's own verified fix) is applied
+# first purely to isolate that - see RESULT.md's "Root cause" section for the full explanation.
+# `reproduce-master-baseline` demonstrates the pristine (no prereq) behavior for comparison: it
+# still aborts, but via candidate 080's site, not this one - included so nobody mistakes it for a
+# fresh repro of this candidate's own bug.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone apply-prereq reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Isolate this candidate's bug from candidate 080's (see header comment above).
+apply-prereq:
+    cd clone && git apply "{{justfile_directory()}}/prereq-080.patch"
+
+# Build+run the standalone repro against the clone (080's fix applied, this candidate's not yet)
+# - should demonstrate the bug: a 500 MB virtual-memory cap makes the abort fast and deterministic
+# instead of depending on how much RAM this machine happens to have free.
+reproduce-before:
+    cd repro && cargo build --release
+    (ulimit -v 500000; ./repro/target/release/repro) || true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now with this candidate's own fix also applied - should no longer abort.
+reproduce-after:
+    cd repro && cargo build --release
+    (ulimit -v 500000; ./repro/target/release/repro)
+
+# Pristine clone, neither patch applied (real current master) - for comparison only, not part of
+# `test`. Still aborts, but via candidate 080's `Vec::with_capacity(len)` site (a 4x-larger
+# allocation for the same declared length), not via this candidate's `read_u32`.
+reproduce-master-baseline: clone
+    cd repro && cargo build --release
+    (ulimit -v 500000; ./repro/target/release/repro) || true
+
+clean:
+    rm -rf clone repro/target

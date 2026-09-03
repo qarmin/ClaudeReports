@@ -1,0 +1,46 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# Needs a real (possibly software) Vulkan adapter reachable by wgpu, whose reported
+# `max_texture_array_layers` exceeds 256 (real hardware commonly reports far more - this
+# candidate was verified against Google's SwiftShader CPU implementation, which reports 2048; see
+# this workspace's own README.md for how that ICD was obtained). Set VK_ICD_FILENAMES to a usable
+# Vulkan ICD if there is no real GPU available.
+#
+# NOTE: this repo's `.gitattributes` marks the snapshot-test reference PNGs as `git-lfs`-tracked;
+# a `git-lfs`-less environment will still `clone` fine (git-lfs pointer stubs are plain text
+# files, not real images) but cannot use those particular snapshot tests - irrelevant here, this
+# candidate's own repro never touches them.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - demonstrates the panic (debug
+# build; `debug_assertions` is what surfaces this as a clean panic instead of silent corruption).
+reproduce-before:
+    cd repro && cargo run --bin before
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same scenario again, now against the patched clone - uploads exactly as many images as the
+# fixed `max_atlases` cap now allows (256) and confirms the highest addressable atlas id (255)
+# renders without panicking.
+reproduce-after:
+    cd repro && cargo run --bin after
+
+clean:
+    rm -rf clone

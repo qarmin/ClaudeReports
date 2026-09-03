@@ -1,0 +1,88 @@
+diff --git a/internal/backends/qt/qt_widgets/button.rs b/internal/backends/qt/qt_widgets/button.rs
+index aff2e2b8d..90149e4e0 100644
+--- a/internal/backends/qt/qt_widgets/button.rs
++++ b/internal/backends/qt/qt_widgets/button.rs
+@@ -124,6 +124,10 @@ pub struct NativeButton {
+     widget_ptr: std::cell::Cell<SlintTypeErasedWidgetPtr>,
+     animation_tracker: Property<i32>,
+     pub cached_rendering_data: CachedRenderingData,
++    // Rasterizing `icon` (e.g. an SVG source) is expensive; `actual_icon()` is called on every
++    // paint (from both `render()` and `layout_info()`), so cache the result keyed by the
++    // (image, icon_size) pair that produced it.
++    icon_pixmap_cache: std::cell::RefCell<Option<(i_slint_core::graphics::Image, u32, qttypes::QPixmap)>>,
+ }
+ 
+ impl NativeButton {
+@@ -170,9 +174,18 @@ fn actual_icon(
+             Some(StandardButtonKind::Ignore) => QStyle_StandardPixmap_SP_DialogIgnoreButton,
+             _ => {
+                 let icon_size = self.icon_size().get().round() as u32;
++                let icon = self.icon();
++                let mut cache = self.icon_pixmap_cache.borrow_mut();
++                if let Some((cached_icon, cached_size, cached_pixmap)) = cache.as_ref() {
++                    if *cached_icon == icon && *cached_size == icon_size {
++                        return cached_pixmap.clone();
++                    }
++                }
+                 let source_size = Some(euclid::Size2D::new(icon_size, icon_size));
+-                return crate::qt_window::image_to_pixmap((&self.icon()).into(), source_size)
+-                    .unwrap_or_default();
++                let pixmap =
++                    crate::qt_window::image_to_pixmap((&icon).into(), source_size).unwrap_or_default();
++                *cache = Some((icon, icon_size, pixmap.clone()));
++                return pixmap;
+             }
+         };
+         let widget_ptr: NonNull<()> = SlintTypeErasedWidgetPtr::qwidget_ptr(&self.widget_ptr);
+diff --git a/internal/backends/qt/qt_widgets/tabwidget.rs b/internal/backends/qt/qt_widgets/tabwidget.rs
+index 573e2b413..ce66b34b7 100644
+--- a/internal/backends/qt/qt_widgets/tabwidget.rs
++++ b/internal/backends/qt/qt_widgets/tabwidget.rs
+@@ -384,6 +384,24 @@ pub struct NativeTab {
+     widget_ptr: std::cell::Cell<SlintTypeErasedWidgetPtr>,
+     animation_tracker: Property<i32>,
+     pub cached_rendering_data: CachedRenderingData,
++    // Rasterizing `icon` (e.g. an SVG source) is expensive; it's read from both `layout_info()`
++    // and `render()` on every paint, so cache the result keyed by the image that produced it.
++    icon_pixmap_cache: std::cell::RefCell<Option<(i_slint_core::graphics::Image, qttypes::QPixmap)>>,
++}
++
++impl NativeTab {
++    fn actual_icon(self: Pin<&Self>) -> qttypes::QPixmap {
++        let icon = self.icon();
++        let mut cache = self.icon_pixmap_cache.borrow_mut();
++        if let Some((cached_icon, cached_pixmap)) = cache.as_ref() {
++            if *cached_icon == icon {
++                return cached_pixmap.clone();
++            }
++        }
++        let pixmap = crate::qt_window::image_to_pixmap((&icon).into(), None).unwrap_or_default();
++        *cache = Some((icon, pixmap.clone()));
++        pixmap
++    }
+ }
+ 
+ impl Item for NativeTab {
+@@ -405,8 +423,7 @@ fn layout_info(
+         _self_rc: &ItemRc,
+     ) -> LayoutInfo {
+         let text: qttypes::QString = self.title().as_str().into();
+-        let icon: qttypes::QPixmap =
+-            crate::qt_window::image_to_pixmap((&self.icon()).into(), None).unwrap_or_default();
++        let icon: qttypes::QPixmap = self.actual_icon();
+         let tab_index: i32 = self.tab_index();
+         let num_tabs: i32 = self.num_tabs();
+         let widget: NonNull<()> = SlintTypeErasedWidgetPtr::qwidget_ptr(&self.widget_ptr);
+@@ -538,11 +555,7 @@ fn focus_event(
+     fn_render! { this dpr size painter widget initial_state =>
+         let down: bool = this.pressed();
+         let text: qttypes::QString = this.title().as_str().into();
+-        let icon: qttypes::QPixmap = crate::qt_window::image_to_pixmap(
+-            (&this.icon()).into(),
+-            None,
+-        )
+-        .unwrap_or_default();
++        let icon: qttypes::QPixmap = this.actual_icon();
+         let enabled: bool = this.enabled();
+         let current: i32 = this.current();
+         let current_focused: i32 = this.current_focused();

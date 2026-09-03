@@ -1,0 +1,36 @@
+# Self-contained reproduction for this candidate.
+#
+# No patch.diff exists for this candidate (Confirmed, no bounded fix attempted this session - see
+# RESULT.md's "The fix"), so this only has a `reproduce-before` step, not the usual
+# clone/apply/reproduce-after cycle.
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && cp config.example.toml config.toml
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Compile the repro through both the plain (LLVM) backend and this project's own GCC backend and
+# print both outputs - should show `_4 = 0` (LLVM) vs `_4 = -9223372036854775808` (GCC backend).
+reproduce-before:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone
+    SYSROOT="$(pwd)/build/build_sysroot/sysroot"
+    BACKEND="$(pwd)/target/release/librustc_codegen_gcc.so"
+    echo "--- LLVM (reference) ---"
+    rustc -O --edition 2021 "{{justfile_directory()}}/repro/src/main.rs" -o /tmp/repro034_llvm
+    /tmp/repro034_llvm
+    echo "--- GCC backend (rustc_codegen_gcc) ---"
+    rustc -O --edition 2021 --sysroot "$SYSROOT" -Zcodegen-backend="$BACKEND" "{{justfile_directory()}}/repro/src/main.rs" -o /tmp/repro034_gcc
+    /tmp/repro034_gcc
+
+clean:
+    rm -rf clone

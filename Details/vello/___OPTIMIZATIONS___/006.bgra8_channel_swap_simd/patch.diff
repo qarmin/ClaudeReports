@@ -1,0 +1,126 @@
+diff --git a/sparse_strips/vello_bench/benches/main.rs b/sparse_strips/vello_bench/benches/main.rs
+index 4e3a6662..cc25ec27 100644
+--- a/sparse_strips/vello_bench/benches/main.rs
++++ b/sparse_strips/vello_bench/benches/main.rs
+@@ -9,6 +9,7 @@ use vello_bench::{allocator, fine, flatten, glyph, integration, pixmap, sort, st
+ 
+ criterion_group!(allocator_bench, allocator::allocator);
+ criterion_group!(pixmap_bench, pixmap::pixmap);
++criterion_group!(pixmap_bgra_to_rgba, pixmap::bgra_to_rgba);
+ criterion_group!(fine_solid, fine::fill);
+ criterion_group!(fine_strip, fine::strip);
+ criterion_group!(fine_pack, fine::pack);
+@@ -27,6 +28,7 @@ criterion_group!(sort_tiles, sort::sort);
+ criterion_group!(integration_bench, integration::images);
+ criterion_main!(
+     pixmap_bench,
++    pixmap_bgra_to_rgba,
+     allocator_bench,
+     tile,
+     render_strips,
+diff --git a/sparse_strips/vello_bench/src/pixmap.rs b/sparse_strips/vello_bench/src/pixmap.rs
+index dc129975..98f6614f 100644
+--- a/sparse_strips/vello_bench/src/pixmap.rs
++++ b/sparse_strips/vello_bench/src/pixmap.rs
+@@ -2,7 +2,8 @@
+ // SPDX-License-Identifier: Apache-2.0 OR MIT
+ 
+ use criterion::{BatchSize, Criterion, black_box};
+-use vello_common::peniko::ImageAlphaType;
++use vello_common::paint::ImageSource;
++use vello_common::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+ use vello_common::pixmap::{PixelMetadata, Pixmap};
+ 
+ const WIDTH: u16 = 1920;
+@@ -69,6 +70,29 @@ pub fn pixmap(c: &mut Criterion) {
+     group.finish();
+ }
+ 
++/// Benches [`ImageSource::from_peniko_image_data`]'s BGRA8 -> RGBA8 channel swap, which
++/// runs once per loaded/decoded image (e.g. every `image::open` result fed into a scene).
++pub fn bgra_to_rgba(c: &mut Criterion) {
++    let pixel_count = usize::from(WIDTH) * usize::from(HEIGHT);
++    let bgra = OPAQUE_BLUE.repeat(pixel_count);
++
++    let mut group = c.benchmark_group("pixmap/bgra_to_rgba");
++    group.bench_function("swap", |b| {
++        b.iter_batched(
++            || ImageData {
++                data: Blob::from(bgra.clone()),
++                format: ImageFormat::Bgra8,
++                alpha_type: ImageAlphaType::Alpha,
++                width: u32::from(WIDTH),
++                height: u32::from(HEIGHT),
++            },
++            |image_data| black_box(ImageSource::from_peniko_image_data(&image_data)),
++            BatchSize::LargeInput,
++        );
++    });
++    group.finish();
++}
++
+ fn interleaved_pixels(pixel_count: usize) -> Vec<u8> {
+     let mut rgba = Vec::with_capacity(pixel_count * 4);
+     for index in 0..pixel_count {
+diff --git a/sparse_strips/vello_common/src/paint.rs b/sparse_strips/vello_common/src/paint.rs
+index 042697d1..8d5085ba 100644
+--- a/sparse_strips/vello_common/src/paint.rs
++++ b/sparse_strips/vello_common/src/paint.rs
+@@ -4,6 +4,7 @@
+ //! Types for paints.
+ 
+ use crate::TextureId;
++use crate::fearless_simd::{Level, Simd, dispatch};
+ use crate::geometry::RectU16;
+ use crate::pixmap::{PixelMetadata, Pixmap};
+ use alloc::sync::Arc;
+@@ -179,10 +180,7 @@ impl ImageSource {
+         match image.format {
+             peniko::ImageFormat::Rgba8 => {}
+             peniko::ImageFormat::Bgra8 => {
+-                // TODO: SIMDify
+-                for pixel in rgba.chunks_exact_mut(4) {
+-                    pixel.swap(0, 2);
+-                }
++                bgra_to_rgba(&mut rgba);
+             }
+             format => unimplemented!("Unsupported image format: {format:?}"),
+         }
+@@ -198,6 +196,37 @@ impl ImageSource {
+     }
+ }
+ 
++/// Swaps the red and blue channels of each RGBA8 pixel in `data`, converting BGRA8 to RGBA8
++/// (and vice versa, since the swap is its own inverse).
++fn bgra_to_rgba(data: &mut [u8]) {
++    // Unfortunately we need to construct a custom level here and cannot use the one
++    // from the Vello CPU / Vello Hybrid context. This does mean we are not testing
++    // all possible combinations in CI, but the used intrinsics are very simple and
++    // also used in other parts of the pipeline, so risk is very low.
++    let level = Level::try_detect().unwrap_or(Level::baseline());
++
++    dispatch!(level, simd => bgra_to_rgba_impl(simd, data));
++}
++
++#[inline(always)]
++fn bgra_to_rgba_impl<S: Simd>(simd: S, data: &mut [u8]) {
++    let (body, tail) = data.as_chunks_mut::<64>();
++
++    for chunk in body {
++        let bgra = simd.load_interleaved_128_u8x64(chunk);
++        let (bg, ra) = simd.split_u8x64(bgra);
++        let (b, g) = simd.split_u8x32(bg);
++        let (r, a) = simd.split_u8x32(ra);
++
++        let rgba = simd.combine_u8x32(simd.combine_u8x16(r, g), simd.combine_u8x16(b, a));
++        simd.store_interleaved_128_u8x64(rgba, chunk);
++    }
++
++    for pixel in tail.chunks_exact_mut(4) {
++        pixel.swap(0, 2);
++    }
++}
++
+ /// An image.
+ pub type Image = peniko::ImageBrush<ImageSource>;
+ 

@@ -1,0 +1,56 @@
+Captured output from `just test` (fresh clone of pristine upstream df2b9e42, reproduce-before,
+apply patch.diff, reproduce-after), run twice independently for determinism confirmation.
+
+=== Run 1 ===
+
+--- reproduce-before (pristine df2b9e42) ---
+looking up transfer syntax UID: "1.2.3.4.5.6.7.8.9.999.not.a.real.transfer.syntax"
+
+thread 'main' (251007) panicked at src/main.rs:38:52:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+(non-zero exit expected here: bug reproduced)
+
+--- reproduce-after (patched clone) ---
+cd clone && cargo build -p dicom-storescp --all-features
+   Compiling dicom-storescp v0.10.0 (.../clone/storescp)
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+(exit code: 0, as expected: patched crate builds cleanly)
+
+=== Run 2 (independent, fresh clone) ===
+
+--- reproduce-before (pristine df2b9e42) ---
+thread 'main' (255461) panicked at src/main.rs:38:52:
+called `Option::unwrap()` on a `None` value
+(non-zero exit expected here: bug reproduced)
+
+--- reproduce-after (patched clone) ---
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+(exit code: 0, as expected: patched crate builds cleanly)
+
+=== In-tree verification (main project checkout, during investigation) ===
+
+`cargo test -p dicom-storescp --all-features`: 1 passed, 0 failed (unaffected by this fix; the
+crate's only test is a CLI-argument-parsing smoke test).
+
+`cargo test --workspace --lib` before and after: 351 passed / 0 failed / 2 ignored -> unchanged
+(this fix is confined to a binary-only crate with no `--lib` target).
+
+=== Provenance ===
+
+Found via git archaeology: `git log --all --grep="#768"` (see candidate 056's provenance for the
+full technique) surfaced commit `866a1942`, the same unmerged commit adopted for candidate 057
+(`LOGIC_10`, SOP Instance UID path traversal). That commit fixes two distinct issues together;
+this candidate covers the other one, `LOGIC_9`. `git merge-base --is-ancestor 866a1942 df2b9e42`
+confirmed the fix was never merged - the panic is live in the exact commit this session audits.
+
+Static analysis of `dicom-ul`'s association negotiation (`ServerAssociationOptions::choose_ts`,
+`is_supported`/`is_supported_with_repo`) suggests that, for `storescp`'s own specific
+configuration (which always registers every transfer syntax from `TransferSyntaxRegistry`, or the
+two hardcoded uncompressed ones), an *accepted* presentation context's `transfer_syntax` field
+should always already be a registry-recognized UID by construction - and a *rejected* one falls
+back to a hardcoded, always-valid UID. No concrete, guaranteed-reachable-via-the-network-protocol
+trigger path was established this session (see RESULT.md's "What's not done"); the panic itself
+was confirmed by directly reproducing the exact vulnerable line
+(`TransferSyntaxRegistry.get(ts).unwrap()`) with an unrecognized UID, matching this session's
+established practice for verifying vulnerable logic embedded in binary-only crates.

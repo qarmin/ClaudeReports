@@ -1,0 +1,88 @@
+diff --git a/src/runner/runner_variants/adaptive_chunk/state.rs b/src/runner/runner_variants/adaptive_chunk/state.rs
+index 39c3252c..b5f596cc 100644
+--- a/src/runner/runner_variants/adaptive_chunk/state.rs
++++ b/src/runner/runner_variants/adaptive_chunk/state.rs
+@@ -200,3 +200,83 @@ impl State {
+ fn min3(a: usize, b: usize, c: usize) -> usize {
+     min(min(a, b), c)
+ }
++
++#[cfg(test)]
++mod bughunt_candidate_008_tests {
++    use super::*;
++    use super::super::chunk_state::ChunkState;
++    use std::println;
++    use std::thread::sleep;
++    use std::time::Duration;
++
++    // Builds a ChunkState whose elapsed_ns() / requested_chunk_size lands close to
++    // `target_ns_per_item` by sleeping a controlled amount over a huge chunk size, so the
++    // per-item noise floor of a single `Instant::now()` call is negligible relative to the
++    // sleep duration.
++    fn chunk_with_ns_per_item(target_ns_per_item: u64) -> ChunkState {
++        const ITEMS: u64 = 10_000_000;
++        let cs = ChunkState::new(ITEMS as usize);
++        sleep(Duration::from_nanos(target_ns_per_item * ITEMS));
++        cs
++    }
++
++    #[test]
++    fn convergence_should_eventually_fire_for_stable_sub_50ns_per_item_samples() {
++        // Exit-code convention (see repro/): this test asserts the CORRECT/expected behavior, so
++        // it fails (reproduces the bug) on pristine code and passes once the fix is applied.
++        let state = State::new(4, 1, None, None);
++
++        // Feed identical (zero-change) samples repeatedly: change == 0 every time, so the
++        // convergence counter should increment on every call once prev_avg > 0, reaching
++        // CONVERGENCE_THRESHOLD quickly for *any* correctly-computed nonzero threshold.
++        for _ in 0..(CONVERGENCE_THRESHOLD + 5) {
++            state.record_chunk(chunk_with_ns_per_item(20));
++        }
++
++        let avg = state.avg_ns_per_item.load(Ordering::Relaxed);
++        let converged = state.converged_samples.load(Ordering::Relaxed);
++        println!(
++            "sub-50ns/item case: avg_ns_per_item={avg} converged_samples={converged} (threshold={})",
++            CONVERGENCE_THRESHOLD
++        );
++
++        assert!(
++            avg > 0 && avg < 50,
++            "test setup invariant violated: avg_ns_per_item should have converged below 50, got {avg}"
++        );
++        assert!(
++            converged >= CONVERGENCE_THRESHOLD,
++            "BUG: converged_samples should reach CONVERGENCE_THRESHOLD ({}) once prev_avg < 50 \
++             and every sample is identical (change == 0), but got converged_samples={converged}. \
++             Root cause: threshold = prev_avg / CONVERGENCE_STABILITY_DIVISOR truncates to 0 \
++             whenever prev_avg < 50, so `change < threshold` i.e. `change < 0` on an unsigned \
++             `change` can never be true.",
++            CONVERGENCE_THRESHOLD
++        );
++    }
++
++    #[test]
++    fn convergence_does_fire_for_the_same_identical_samples_once_avg_is_above_50ns_per_item() {
++        // Same experiment, but with a per-item cost comfortably above the 50ns truncation
++        // boundary, to show convergence-based stopping works exactly as designed there - i.e.
++        // this is specifically a sub-50ns/item regression, not a general convergence-tracking bug.
++        let state = State::new(4, 1, None, None);
++
++        for _ in 0..(CONVERGENCE_THRESHOLD + 5) {
++            state.record_chunk(chunk_with_ns_per_item(200));
++        }
++
++        let avg = state.avg_ns_per_item.load(Ordering::Relaxed);
++        let converged = state.converged_samples.load(Ordering::Relaxed);
++        println!(
++            "above-50ns/item control case: avg_ns_per_item={avg} converged_samples={converged}"
++        );
++
++        assert!(avg >= 50, "test setup invariant violated: expected avg_ns_per_item >= 50, got {avg}");
++        assert!(
++            converged >= CONVERGENCE_THRESHOLD,
++            "control case failed: convergence should fire once prev_avg >= 50 and samples are \
++             identical, got converged_samples={converged}"
++        );
++    }
++}

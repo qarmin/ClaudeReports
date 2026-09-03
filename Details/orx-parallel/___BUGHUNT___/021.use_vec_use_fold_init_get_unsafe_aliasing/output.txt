@@ -1,0 +1,125 @@
+Captured from `repro/` run against a real clone of base_commit b9214fbeb714e4bb8f8858676a818cef2f21b097
+(git@github.com:orxfun/orx-parallel.git), via `cargo run --release` and `cargo +nightly miri run`.
+
+============================== BEFORE (pristine tree) ==============================
+
+=== approach 1: plain release run, run 1/3 ===
+r1 = 222, r2 = 222
+REPRODUCED: r1 and r2 alias the same memory (both 222), from 100% safe code.
+exit=1
+
+=== approach 1: plain release run, run 2/3 ===
+r1 = 222, r2 = 222
+REPRODUCED: r1 and r2 alias the same memory (both 222), from 100% safe code.
+exit=1
+
+=== approach 1: plain release run, run 3/3 ===
+r1 = 222, r2 = 222
+REPRODUCED: r1 and r2 alias the same memory (both 222), from 100% safe code.
+exit=1
+
+=== approach 2: cargo +nightly miri run (Stacked Borrows, default), run 1/2 ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-unknown-linux-gnu/debug/repro`
+error: Undefined Behavior: attempting a write access using <2755> at alloc276[0x0], but that tag does not exist in the borrow stack for this location
+  --> src/main.rs:20:5
+   |
+20 |     *r1 = 111;
+   |     ^^^^^^^^^ this error occurs as part of an access at alloc276[0x0..0x4]
+   |
+   = help: this indicates a potential bug in the program: it performed an invalid operation, but the Stacked Borrows rules it violated are still experimental
+   = help: see https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/stacked-borrows.md for further information
+help: <2755> was created by a Unique retag at offsets [0x0..0x4]
+  --> src/main.rs:17:24
+   |
+17 |     let r1: &mut i32 = uv.init_get(0);
+   |                        ^^^^^^^^^^^^^^
+help: <2755> was later invalidated at offsets [0x0..0x4] by a write access
+  --> src/main.rs:18:24
+   |
+18 |     let r2: &mut i32 = uv.init_get(0);
+   |                        ^^^^^^^^^^^^^^
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error
+
+=== approach 2: cargo +nightly miri run (Stacked Borrows, default), run 2/2 ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-unknown-linux-gnu/debug/repro`
+error: Undefined Behavior: attempting a write access using <2755> at alloc276[0x0], but that tag does not exist in the borrow stack for this location
+  --> src/main.rs:20:5
+   |
+20 |     *r1 = 111;
+   |     ^^^^^^^^^ this error occurs as part of an access at alloc276[0x0..0x4]
+   |
+   = help: this indicates a potential bug in the program: it performed an invalid operation, but the Stacked Borrows rules it violated are still experimental
+   = help: see https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/stacked-borrows.md for further information
+help: <2755> was created by a Unique retag at offsets [0x0..0x4]
+  --> src/main.rs:17:24
+   |
+17 |     let r1: &mut i32 = uv.init_get(0);
+   |                        ^^^^^^^^^^^^^^
+help: <2755> was later invalidated at offsets [0x0..0x4] by a write access
+  --> src/main.rs:18:24
+   |
+18 |     let r2: &mut i32 = uv.init_get(0);
+   |                        ^^^^^^^^^^^^^^
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error
+
+============================== AFTER (patch.diff applied to the clone) ==============================
+
+=== after patch.diff applied: cargo run --release (expected: compile-time rejection) ===
+   Compiling repro v0.1.0 (.../021.use_vec_use_fold_init_get_unsafe_aliasing/repro)
+error[E0133]: call to unsafe function `init_get` is unsafe and requires unsafe function or block
+  --> src/main.rs:17:24
+   |
+17 |     let r1: &mut i32 = uv.init_get(0);
+   |                        ^^^^^^^^^^^^^^ call to unsafe function
+   |
+   = note: consult the function's documentation for information on how to avoid undefined behavior
+
+error[E0133]: call to unsafe function `init_get` is unsafe and requires unsafe function or block
+  --> src/main.rs:18:24
+   |
+18 |     let r2: &mut i32 = uv.init_get(0);
+   |                        ^^^^^^^^^^^^^^ call to unsafe function
+   |
+   = note: consult the function's documentation for information on how to avoid undefined behavior
+
+For more information about this error, try `rustc --explain E0133`.
+error: could not compile `repro` (bin "repro") due to 2 previous errors
+exit=101
+
+This compile-time rejection *is* the fix working (same reasoning as candidate 002's justfile note):
+`init_get` was a safe fn that could be called an unbounded number of times for the same
+`thread_idx` from `&self`, producing aliased `&mut` references from 100% safe caller code. After
+the patch it is `unsafe fn`, so this exact repro (which deliberately calls it twice with no
+`unsafe` block, to demonstrate the pre-patch soundness hole) now fails to compile instead of
+compiling and exhibiting UB - the repro is not "broken", the caller-side misuse it was built to
+demonstrate is no longer expressible without an explicit `unsafe` block.
+
+============================== project test suite (patched clone) ==============================
+
+test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.37s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 260 passed; 0 failed; 16 ignored; 0 measured; 0 filtered out; finished in 1.18s
+
+Totals: 440 passed / 0 failed / 16 ignored - identical to the pristine (pre-patch) tree's own run
+of `cargo test --quiet`, which produced the exact same 16 lines with the exact same per-line counts.

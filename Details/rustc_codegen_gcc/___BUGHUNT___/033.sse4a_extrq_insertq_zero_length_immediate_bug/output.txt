@@ -1,0 +1,34 @@
+=== Host CPU sse4a support ===
+sse4a
+
+=== rustc --version (nightly toolchain used) ===
+rustc 1.99.0-nightly (504869653 2026-08-03)
+
+=== Reference oracle: plain rustc (LLVM backend), -O ===
+$ rustc --edition 2021 -O repro/zero_len.rs -o /tmp/zero_len_llvm
+$ /tmp/zero_len_llvm
+total=4128 failures=0
+ALL OK
+exit code: 0
+
+=== Under test: rustc_codegen_gcc (this backend), CHANNEL=release ./y.sh rustc ===
+$ CHANNEL=release ./y.sh rustc repro/zero_len.rs -o /tmp/zero_len_gcc
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `/home/rafal/Projekty/Obce/rustc_codegen_gcc/build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+$ /tmp/zero_len_gcc
+total=4128 failures=0
+ALL OK
+exit code: 0
+
+=== Disassembly check: real extrq/insertq hardware instructions with literal immediate 0 ===
+$ objdump -d /tmp/zero_len_gcc | grep -i -B2 -A1 'extrq\|insertq'
+   a39b8:	c5 f9 6f 08          	vmovdqa (%rax),%xmm1
+   a39bc:	c5 f9 6f 45 90       	vmovdqa -0x70(%rbp),%xmm0
+   a39c1:	f2 0f 78 c1 00 00    	insertq $0x0,$0x0,%xmm1,%xmm0
+   a39c7:	48 8b 45 b8          	mov    -0x48(%rbp),%rax
+--
+   a3a04:	48 8d 45 e0          	lea    -0x20(%rbp),%rax
+   a3a08:	c5 f9 6f 00          	vmovdqa (%rax),%xmm0
+   a3a0c:	66 0f 78 c0 00 00    	extrq  $0x0,$0x0,%xmm0
+   a3a12:	48 8b 45 d8          	mov    -0x28(%rbp),%rax

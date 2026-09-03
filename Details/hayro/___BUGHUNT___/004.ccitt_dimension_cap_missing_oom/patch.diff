@@ -1,0 +1,31 @@
+diff --git a/hayro-syntax/src/filter/ccitt.rs b/hayro-syntax/src/filter/ccitt.rs
+index 7a4af451..1130afc7 100644
+--- a/hayro-syntax/src/filter/ccitt.rs
++++ b/hayro-syntax/src/filter/ccitt.rs
+@@ -9,6 +9,14 @@ use alloc::vec::Vec;
+ use core::iter;
+ use hayro_ccitt::{DecodeSettings, Decoder, DecoderContext, EncodingMode};
+ 
++/// A sanity ceiling on the total number of pixels (`columns * rows`) we're willing to eagerly
++/// allocate an output buffer for, independent of the actual amount of encoded data supplied.
++/// `columns`/`rows` are taken directly from the (untrusted) `DecodeParms`/image dictionary, so
++/// without this cap a tiny stream declaring huge dimensions can force an allocation of
++/// arbitrary size before any decoding happens at all. 64 megapixels comfortably covers even a
++/// full-page 600dpi scan.
++const MAX_PIXELS: usize = 64_000_000;
++
+ pub(crate) fn decode(
+     data: &[u8],
+     params: &Dict<'_>,
+@@ -24,6 +32,11 @@ pub(crate) fn decode(
+         .unwrap_or(0)
+         .max(image_params.height);
+     let output_len = (columns as usize).checked_mul(rows as usize)?;
++
++    if output_len > MAX_PIXELS {
++        return None;
++    }
++
+     let end_of_block = params.get::<bool>(END_OF_BLOCK).unwrap_or(true);
+ 
+     let settings = DecodeSettings {

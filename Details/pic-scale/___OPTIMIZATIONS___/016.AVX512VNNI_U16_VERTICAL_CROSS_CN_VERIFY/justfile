@@ -1,0 +1,50 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+#
+# This candidate reuses candidate 014's exact patch.diff byte-for-byte (confirmed via `diff`
+# against that folder's patch.diff when this one was written) - it does not change the source
+# again, it only measures the same dispatch branch against three more bench cases (CbCr/RGB/RGBA
+# u16 vertical convolution, CN=2/3/4) that candidate 014 did not cover (it only measured CN=1 via
+# resize_plane).
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the three benches, check bit-exactness.
+test: clone apply bench correctness
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Runs the three existing criterion cases this candidate measured - "Pic scale CbCr10: Lanczos 3"
+# (NOT "CbCr16" - see RESULT.md for why that substitution was made), "Pic scale RGB10: Lanczos 3",
+# and "Pic scale RGBA10 without alpha: Lanczos 3". All three already exist in the harness (no
+# bench-file changes needed), all single-threaded by construction (ThreadingPolicy::Single) and
+# all use bit_depth=10 (<=12), so all three reach the LB column-filter dispatch branch this
+# candidate's patch touches (CN=2/3/4 respectively). Pin with `taskset -c N` yourself for a
+# single-core-ranking run; unpinned is the realistic multi-core wall-clock run.
+bench:
+    cd clone && cargo bench -p app --bench resize_cbcr -- "Pic scale CbCr10: Lanczos 3"
+    cd clone && cargo bench -p app --bench resize_rgb -- "Pic scale RGB10: Lanczos 3"
+    cd clone && cargo bench -p app --bench resize_rgba -- "Pic scale RGBA10 without alpha: Lanczos 3"
+
+# Bit-exactness check: builds bit_exact_check/ against ./clone once as-is (patched, since
+# `apply` already ran) and prints three hash lines (CbCr10, RGB10, RGBA10_no_alpha). Run
+# `just clone` (without `apply`) and then `just correctness` separately to get the pre-patch
+# hashes to diff against by eye - both must print the same `len=... hash=...` lines.
+correctness:
+    cd bit_exact_check && cargo build --release
+    ./bit_exact_check/target/release/correctness_check
+
+clean:
+    rm -rf clone

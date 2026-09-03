@@ -1,0 +1,58 @@
+diff --git a/kurbo/src/stroke.rs b/kurbo/src/stroke.rs
+index 4c9477d..067cdf9 100644
+--- a/kurbo/src/stroke.rs
++++ b/kurbo/src/stroke.rs
+@@ -714,20 +714,49 @@ const DASH_ACCURACY: f64 = 1e-6;
+ ///
+ /// Accuracy is currently hard-coded to 1e-6. This is better than generally
+ /// expected, and care is taken to get cusps correct, among other things.
++///
++/// An empty `dashes` slice means "no dashing" (matching [`stroke`]'s own
++/// handling of an empty [`Stroke::dash_pattern`]): the input is passed
++/// through unchanged rather than panicking.
+ pub fn dash<'a>(
+     inner: impl Iterator<Item = PathEl> + 'a,
+     dash_offset: f64,
+     dashes: &'a [f64],
+ ) -> impl Iterator<Item = PathEl> + 'a {
+-    dash_iter(inner, dash_offset, dashes, false)
++    if dashes.is_empty() {
++        MaybeDashed::Passthrough(inner)
++    } else {
++        MaybeDashed::Dashed(Box::new(dash_iter(inner, dash_offset, dashes, false)))
++    }
+ }
+ 
+-fn dash_iter<'a>(
+-    inner: impl Iterator<Item = PathEl> + 'a,
++/// Either a [`DashIterator`], or a plain passthrough of the input when there's no dash pattern.
++///
++/// Exists so [`dash`] can return a single concrete `impl Iterator` type from both branches of its
++/// empty-`dashes` check. `Dashed` is boxed since `DashIterator` is much larger than the
++/// `Passthrough` variant's typical caller-supplied iterator.
++enum MaybeDashed<'a, T> {
++    Dashed(Box<DashIterator<'a, T>>),
++    Passthrough(T),
++}
++
++impl<'a, T: Iterator<Item = PathEl>> Iterator for MaybeDashed<'a, T> {
++    type Item = PathEl;
++
++    fn next(&mut self) -> Option<PathEl> {
++        match self {
++            MaybeDashed::Dashed(it) => it.next(),
++            MaybeDashed::Passthrough(it) => it.next(),
++        }
++    }
++}
++
++fn dash_iter<'a, T: Iterator<Item = PathEl> + 'a>(
++    inner: T,
+     dash_offset: f64,
+     dashes: &'a [f64],
+     stable_dash_order: bool,
+-) -> DashIterator<'a, impl Iterator<Item = PathEl> + 'a> {
++) -> DashIterator<'a, T> {
+     // Ensure that offset is positive and minimal by normalization using period
+     let period = dashes.iter().sum();
+     // The SVG spec requires odd-length dash arrays to be doubled to become even-length:

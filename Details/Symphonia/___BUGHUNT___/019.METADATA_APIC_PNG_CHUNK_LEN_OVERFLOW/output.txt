@@ -1,0 +1,65 @@
+=== BEFORE FIX (pristine ee35874, cargo run --release, overflow-checks = true) ===
+crafted ID3v2 tag with malicious APIC/PNG: 74 bytes
+
+thread 'main' (5500) panicked at /tmp/candidate019_test/clone/symphonia-metadata/src/utils/images.rs:156:47:
+attempt to add with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+=== BEFORE FIX, full backtrace (RUST_BACKTRACE=1, run against the main checkout) ===
+crafted ID3v2 tag with malicious APIC/PNG: 74 bytes
+
+thread 'main' (3495) panicked at symphonia-metadata/src/utils/images.rs:156:47:
+attempt to add with overflow
+stack backtrace:
+   0: rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::panicking::panic_const::panic_const_add_overflow
+   3: symphonia_metadata::utils::images::parse_png
+             at ./symphonia-metadata/src/utils/images.rs:156:47
+   4: symphonia_metadata::utils::images::try_get_image_info::{closure#1}
+             at ./symphonia-metadata/src/utils/images.rs:60:28
+   5: core::iter::traits::iterator::Iterator::find_map::check::<&symphonia_metadata::utils::images::try_get_image_info::Parser, symphonia_metadata::utils::images::ImageInfo, symphonia_metadata::utils::images::try_get_image_info::{closure#1}>::{closure#0}
+             at .../core/src/iter/traits/iterator.rs:2998:32
+   6: core::iter::adapters::filter::filter_try_fold::<...>::{closure#0}
+             at .../core/src/iter/adapters/filter.rs:86:44
+   7: <core::slice::iter::Iter<...> as core::iter::traits::iterator::Iterator>::try_fold::<...>
+             at .../core/src/iter/traits/iterator.rs:2494:21
+   8: <core::iter::adapters::filter::Filter<...> as core::iter::traits::iterator::Iterator>::try_fold::<...>
+             at .../core/src/iter/adapters/filter.rs:157:19
+   9: <core::iter::adapters::filter::Filter<...> as core::iter::traits::iterator::Iterator>::find_map::<...>
+             at .../core/src/iter/traits/iterator.rs:3004:14
+  10: symphonia_metadata::utils::images::try_get_image_info
+             at ./symphonia-metadata/src/utils/images.rs:60:10
+  11: symphonia_metadata::id3v2::frames::readers::read_apic_frame
+             at ./symphonia-metadata/src/id3v2/frames/readers.rs:339:22
+  12: symphonia_metadata::id3v2::frames::read_id3v2p3_frame::<symphonia_core::io::scoped_stream::ScopedStream<&mut symphonia_core::io::media_source_stream::MediaSourceStream>>
+             at ./symphonia-metadata/src/id3v2/frames.rs:578:11
+  13: symphonia_metadata::id3v2::read_id3v2_body::<symphonia_core::io::scoped_stream::ScopedStream<&mut symphonia_core::io::media_source_stream::MediaSourceStream>>
+             at ./symphonia-metadata/src/id3v2/mod.rs:305:18
+  14: symphonia_metadata::id3v2::read_id3v2::<symphonia_core::io::media_source_stream::MediaSourceStream>
+             at ./symphonia-metadata/src/id3v2/mod.rs:383:9
+  15: <symphonia_metadata::id3v2::Id3v2Reader as symphonia_core::meta::MetadataReader>::read_all
+             at ./symphonia-metadata/src/id3v2/mod.rs:593:9
+  16: test_png_overflow::main
+             at ./symphonia-metadata/examples/test_png_overflow.rs:73:18
+  17: <fn() as core::ops::function::FnOnce<()>>::call_once
+             at .../core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+Reproduced 3/3 identical runs (deterministic, no randomness involved) both against the main
+checkout's own tree (via a temporary `symphonia-metadata/examples/test_png_overflow.rs`) and,
+separately, against a genuinely fresh `git clone` at base_commit driven by `just test` in this
+candidate's own repro/ + justfile.
+
+=== AFTER FIX (repro/ + justfile's `just apply` then `just reproduce-after`, fresh clone) ===
+cd repro && cargo run --release
+   Compiling symphonia-metadata v0.6.1 (/tmp/candidate019_test/clone/symphonia-metadata)
+   Compiling repro v0.1.0 (/tmp/candidate019_test/repro)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.15s
+     Running `target/release/repro`
+crafted ID3v2 tag with malicious APIC/PNG: 74 bytes
+parsed OK (no crash)
+
+=== Project test suite, symphonia-metadata package (cargo test -p symphonia-metadata) ===
+Before fix: 11 passed; 0 failed; 0 ignored
+After fix:  11 passed; 0 failed; 0 ignored

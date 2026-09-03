@@ -1,0 +1,100 @@
+diff --git a/kurbo/src/arc.rs b/kurbo/src/arc.rs
+index 0704deb..cb8191d 100644
+--- a/kurbo/src/arc.rs
++++ b/kurbo/src/arc.rs
+@@ -105,6 +105,10 @@ impl Arc {
+     /// Converts an `Arc` into a series of cubic bezier segments.
+     ///
+     /// The closure `p` will be invoked with the control points for each segment.
++    // The body is a three-line loop, but callers are in `stroke`, `svg` and `bezpath`; leaving it
++    // outlined also perturbs codegen-unit partitioning enough to un-inline it inside
++    // `stroke::round_join`.
++    #[inline]
+     pub fn to_cubic_beziers<P>(self, tolerance: f64, mut p: P)
+     where
+         P: FnMut(Point, Point, Point),
+diff --git a/kurbo/src/bezpath.rs b/kurbo/src/bezpath.rs
+index a290df1..2735934 100644
+--- a/kurbo/src/bezpath.rs
++++ b/kurbo/src/bezpath.rs
+@@ -218,6 +218,7 @@ impl BezPath {
+     }
+ 
+     /// Push a generic path element onto the path.
++    #[inline]
+     pub fn push(&mut self, el: PathEl) {
+         self.0.push(el);
+         debug_assert!(
+@@ -271,6 +272,7 @@ impl BezPath {
+     ///
+     /// Will panic with a debug assert when the path is empty and there is no
+     /// "move to" element on the path.
++    #[inline]
+     pub fn close_path(&mut self) {
+         debug_assert!(!self.0.is_empty(), "uninitialized subpath (missing MoveTo)");
+         self.push(PathEl::ClosePath);
+@@ -309,6 +311,7 @@ impl BezPath {
+     }
+ 
+     /// Shorten the path, keeping the first `len` elements.
++    #[inline]
+     pub fn truncate(&mut self, len: usize) {
+         self.0.truncate(len);
+     }
+@@ -1323,6 +1326,9 @@ impl PathSeg {
+     /// Compute endpoint tangents of a path segment.
+     ///
+     /// This version is robust to the path segment not being a regular curve.
++    // Callers are in `offset` and `simplify`; the `(Vec2, Vec2)` return goes through memory
++    // when this is not inlined.
++    #[inline]
+     pub(crate) fn tangents(&self) -> (Vec2, Vec2) {
+         const EPS: f64 = 1e-12;
+         match self {
+diff --git a/kurbo/src/common.rs b/kurbo/src/common.rs
+index 9df3fc7..c957f5f 100644
+--- a/kurbo/src/common.rs
++++ b/kurbo/src/common.rs
+@@ -243,6 +243,10 @@ pub fn solve_cubic(c0: f64, c1: f64, c2: f64, c3: f64) -> ArrayVec<f64, 3> {
+ /// the other root might be out of representable range. In the degenerate
+ /// case where all coefficients are zero, so that all values of x satisfy
+ /// the equation, a single `0.0` is returned.
++// Every caller lives in another module (`cubicbez`, `quadbez`, `bezpath`, `offset`, `stroke`,
++// `fit`), and release builds use 16 codegen units, so without this hint the `ArrayVec<f64, 2>`
++// return is round-tripped through memory on every call.
++#[inline]
+ pub fn solve_quadratic(c0: f64, c1: f64, c2: f64) -> ArrayVec<f64, 2> {
+     let mut result = ArrayVec::new();
+     let sc0 = c0 * c2.recip();
+diff --git a/kurbo/src/cubicbez.rs b/kurbo/src/cubicbez.rs
+index 899a351..4f9b459 100644
+--- a/kurbo/src/cubicbez.rs
++++ b/kurbo/src/cubicbez.rs
+@@ -356,6 +356,7 @@ impl CubicBez {
+     ///
+     /// See <https://www.caffeineowl.com/graphics/2d/vectorial/cubic-inflexion.html>
+     /// for the theory.
++    #[inline]
+     pub fn inflections(&self) -> ArrayVec<f64, 2> {
+         let a = self.p1 - self.p0;
+         let b = (self.p2 - self.p1) - a;
+diff --git a/kurbo/src/svg.rs b/kurbo/src/svg.rs
+index 0935381..a6c36df 100644
+--- a/kurbo/src/svg.rs
++++ b/kurbo/src/svg.rs
+@@ -380,6 +380,7 @@ impl SvgLexer<'_> {
+         }
+     }
+ 
++    #[inline]
+     fn get_number_pair(&mut self) -> Result<Point, SvgParseError> {
+         let x = self.get_number()?;
+         self.opt_comma();
+@@ -388,6 +389,7 @@ impl SvgLexer<'_> {
+         Ok(Point::new(x, y))
+     }
+ 
++    #[inline]
+     fn get_maybe_relative(&mut self, cmd: u8) -> Result<Point, SvgParseError> {
+         let pt = self.get_number_pair()?;
+         if cmd.is_ascii_lowercase() {

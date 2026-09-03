@@ -1,0 +1,99 @@
+Captured output from `just test` (fresh clone of pristine upstream df2b9e42, reproduce-before,
+apply patch.diff, reproduce-after), run twice independently for determinism confirmation.
+
+=== Run 1 ===
+
+--- reproduce-before (pristine df2b9e42) ---
+JSON: {"00080100":{"vr":"LO","Value":["a","","b"]}}
+InMemDicomObject {
+    entries: {
+        Tag(0x0008, 0x0100): DataElement {
+            header: DataElementHeader {
+                tag: Tag(0x0008, 0x0100),
+                vr: LO,
+                len: Length(
+                    6,
+                ),
+            },
+            value: Primitive(
+                Strs(
+                    [
+                        "a",
+                        " ",
+                        "b ",
+                    ],
+                ),
+            ),
+        },
+    },
+    dict: StandardDataDictionary,
+    len: Length(Undefined),
+    charset_changed: false,
+}
+====
+InMemDicomObject {
+    entries: {
+        Tag(0x0008, 0x0100): DataElement {
+            header: DataElementHeader {
+                tag: Tag(0x0008, 0x0100),
+                vr: LO,
+                len: Length(
+                    4,
+                ),
+            },
+            value: Primitive(
+                Strs(
+                    [
+                        "a",
+                        "",
+                        "b",
+                    ],
+                ),
+            ),
+        },
+    },
+    dict: StandardDataDictionary,
+    len: Length(Undefined),
+    charset_changed: false,
+}
+BUG REPRODUCED: the middle item's whitespace-only content was silently trimmed away during JSON serialization, corrupting the round trip.
+(exit code: 1, as expected: bug reproduced)
+
+--- reproduce-after (patched clone) ---
+JSON: {"00080100":{"vr":"LO","Value":["a"," ","b"]}}
+No corruption observed: the middle item's whitespace content survived.
+(exit code: 0, as expected: bug fixed)
+
+=== Run 2 (independent, fresh clone) ===
+
+Same output as Run 1 in both phases - reproduce-before again shows the middle item " " turned
+into "" (JSON: {"00080100":{"vr":"LO","Value":["a","","b"]}}, exit code 1); reproduce-after again
+shows it preserved (JSON: {"00080100":{"vr":"LO","Value":["a"," ","b"]}}, exit code 0).
+
+=== Provenance ===
+
+Found via a short, ad-hoc, throwaway JSON round-trip fuzz harness (built entirely outside this
+workspace, in /tmp, discarded after use) exercising `dicom_json::to_string`/`from_str` round
+trips of arbitrary `InMemDicomObject`s containing multi-valued strings, numbers, tags, dates, and
+nested sequences - the same general technique that found candidate 048 earlier in this session.
+
+Two earlier crashes from the same harness were investigated and ruled out as false positives
+caused by flaws in the harness itself, not the library:
+  1. A harness bug where individual string items were pre-padded to even length one at a time
+     (rather than padding only the final item of the *joined* representation, matching how DICOM
+     values are actually padded on the wire) - this doesn't reflect any real defect and was fixed
+     in the harness rather than reported.
+  2. A rediscovery of already-known, already-fixed candidate 011 (missing `float_roundtrip`
+     feature on `serde_json`) via a subnormal float value - confirmed by re-testing the exact
+     crash input with candidate 011's patch applied, which made the crash disappear entirely.
+
+A first attempt at fixing the genuine defect found here - modifying `PrimitiveValue::to_multi_str()`
+itself (in `dicom-core`) to only trim the last item - was tried, verified to fix this repro, but
+then found to **break** an existing, deliberate test
+(`json::ser::value::tests::serialize_primitive_value_as_numbers`) covering `AsNumbers`'s handling
+of space-padded numeric strings (e.g. `dicom_value!(Strs, ["5 ", "6 ", "-7"])` needing every item's
+trailing space trimmed so each substring parses as a number). That approach was reverted. The
+final fix instead only changes `AsStrings` (the JSON serializer type used for *generic* string
+VRs, as opposed to `AsNumbers`, used for numeric VRs that may also hold string values) to stop
+using the shared `to_multi_str()` helper and trim only the last item directly - leaving
+`to_multi_str()` and `AsNumbers`'s own behavior completely untouched.

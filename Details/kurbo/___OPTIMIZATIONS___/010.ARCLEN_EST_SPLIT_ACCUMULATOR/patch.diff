@@ -1,0 +1,36 @@
+diff --git a/kurbo/src/cubicbez.rs b/kurbo/src/cubicbez.rs
+index 899a351..99a7e7f 100644
+--- a/kurbo/src/cubicbez.rs
++++ b/kurbo/src/cubicbez.rs
+@@ -639,16 +639,21 @@ fn arclen_rec(c: &CubicBez, accuracy: f64, depth: usize) -> f64 {
+     let dm1 = 0.5 * (dd2 + dd1); // second derivative at midpoint
+     let dm2 = 0.25 * (dd2 - dd1); // 0.5 * (third derivative at midpoint)
+ 
+-    let est = GAUSS_LEGENDRE_COEFFS_8
+-        .iter()
+-        .map(|&(wi, xi)| {
+-            wi * {
+-                let d_norm2 = (dm + dm1 * xi + dm2 * (xi * xi)).hypot2();
+-                let dd_norm2 = (dm1 + dm2 * (2.0 * xi)).hypot2();
+-                dd_norm2 / d_norm2
+-            }
+-        })
+-        .sum::<f64>();
++    // Two independent partial sums rather than one `.sum()`: the single accumulator makes the
++    // eight additions a serial dependency chain, which costs more than the arithmetic itself
++    // here. Summing even and odd terms separately halves that chain.
++    let (mut est_a, mut est_b) = (0.0, 0.0);
++    for (i, &(wi, xi)) in GAUSS_LEGENDRE_COEFFS_8.iter().enumerate() {
++        let d_norm2 = (dm + dm1 * xi + dm2 * (xi * xi)).hypot2();
++        let dd_norm2 = (dm1 + dm2 * (2.0 * xi)).hypot2();
++        let term = wi * (dd_norm2 / d_norm2);
++        if i % 2 == 0 {
++            est_a += term;
++        } else {
++            est_b += term;
++        }
++    }
++    let est = est_a + est_b;
+     let est_gauss8_error = (est.powi(3) * 2.5e-6).min(3e-2) * lp_lc;
+     if est_gauss8_error < accuracy {
+         return arclen_quadrature_core(GAUSS_LEGENDRE_COEFFS_8_HALF, dm, dm1, dm2);

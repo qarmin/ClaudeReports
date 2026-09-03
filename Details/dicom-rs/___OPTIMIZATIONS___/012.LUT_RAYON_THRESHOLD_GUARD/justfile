@@ -1,0 +1,49 @@
+# Self-contained reproduction for candidate 012.LUT_RAYON_THRESHOLD_GUARD.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern). Self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cp "{{justfile_directory()}}/testdata/vlut_04.dcm" clone/
+    cp "{{justfile_directory()}}/testdata/CT1_RLE.dcm" clone/
+    echo "=== bit-exactness check ==="
+    for f in vlut_04 CT1_RLE; do
+        ./bin_baseline dump-image "clone/$f.dcm" > "/tmp/candidate012_${f}_baseline.raw"
+        ./bin_patched dump-image "clone/$f.dcm" > "/tmp/candidate012_${f}_patched.raw"
+        cmp "/tmp/candidate012_${f}_baseline.raw" "/tmp/candidate012_${f}_patched.raw" && echo "$f: bit-exact" || echo "$f: DIFFERS (unexpected)"
+    done
+    echo "=== 8-bit (256-entry table, below threshold) - expect a ~37% win ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- tovec clone/vlut_04.dcm 2000
+    echo "=== 16-bit (65,536-entry table, above threshold) - expect NOT consistent (no change) ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- tovec clone/CT1_RLE.dcm 60
+
+clean:
+    rm -rf clone bin_baseline bin_patched

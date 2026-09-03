@@ -1,0 +1,101 @@
+Repro: ___BUGHUNT___/001.tile_msaa_needs_clamping_tautology/repro
+Build: `cargo run --release` (repro/Cargo.toml sets debug-assertions = true, overflow-checks = true
+in the release profile so panics aren't masked by a real release build).
+
+=====================================================================
+BEFORE (pristine checkout, commit 75168314, sparse_strips/vello_common/src/tile.rs unmodified)
+Run 1 of 2 (repeated to confirm determinism, per CONFIRMATION.md section 1):
+=====================================================================
+== Check 1 (documentary, not a before/after signal): is `needs_clamping` a
+   tautology for finite input, per the formula quoted from the source? ==
+Tautology check: 2000000 random finite (p0_x, p1_x) pairs, 0 counterexamples (cases where needs_clamping was false).
+-> the formula was true for every finite sample; the "unclamped" branch it gates is unreachable for any of these inputs. Note: this check reimplements the formula standalone, so it holds identically whether run against the pristine or the patched tree (the patch deletes the check/branch rather than changing this arithmetic fact) - it's supporting evidence for the root cause, not the before/after signal.
+
+== Check 2 (the actual before/after signal): real public API call with a NaN
+   line coordinate ==
+Tile x-coordinates produced (sorted): [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+-> REPRODUCED: every emitted tile collapsed to column x=0, even though the line's finite endpoint (50.0, tile column 12) means a correct/expected result should span more than one column - a phantom column of geometry at the wrong location. This is the NaN-reachable manifestation of the dead "unclamped" branch's missing NaN-rescuing clamp (before the fix).
+process exit code: 1
+
+Run 2 of 2 (identical output, omitted for brevity except the differing lines):
+Tile x-coordinates produced (sorted): [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+-> REPRODUCED: ... (same as run 1)
+process exit code: 1
+
+=====================================================================
+AFTER (patch.diff applied to the same pristine checkout)
+=====================================================================
+== Check 1 (documentary, not a before/after signal): is `needs_clamping` a
+   tautology for finite input, per the formula quoted from the source? ==
+Tautology check: 2000000 random finite (p0_x, p1_x) pairs, 0 counterexamples (cases where needs_clamping was false).
+-> the formula was true for every finite sample; the "unclamped" branch it gates is unreachable for any of these inputs. Note: this check reimplements the formula standalone, so it holds identically whether run against the pristine or the patched tree (the patch deletes the check/branch rather than changing this arithmetic fact) - it's supporting evidence for the root cause, not the before/after signal.
+
+== Check 2 (the actual before/after signal): real public API call with a NaN
+   line coordinate ==
+Tile x-coordinates produced (sorted): []
+-> did not reproduce: no phantom x=0 column artifact (after the fix, this line's tiles are computed by what used to be the "clamped" path only, which discards the NaN via f32::min/max instead of propagating it).
+process exit code: 0
+
+=====================================================================
+Supplementary experiment (NOT part of repro/, required modifying private/internal source so it
+cannot be expressed as a standalone public-API repro): fault-injecting the source so the
+"unclamped" branch is actually reachable for realistic (non-NaN) input, to determine whether that
+branch is safe if it were ever reached.
+
+Step A: `let needs_clamping = min_x < line_left_x || max_x >= line_right_x;` temporarily replaced
+with `let needs_clamping = false;` (forcing the previously-dead branch unconditionally), full
+`cargo test -p vello_common --lib tile::` run:
+
+test tile::tests::overflow ... FAILED
+thread 'tile::tests::overflow' panicked at sparse_strips/vello_common/src/tile.rs:1284:25:
+attempt to add with overflow
+  (stack backtrace pinpoints the panic to the push_edge! macro's `let x_right_f = (x_idx + 1) as
+  f32;` - `x_idx` saturated to u16::MAX from a line extending far past the tile grid on its right
+  edge, since the dead branch's `xe = rx as u16` has no `tile_columns` clamp, then `x_idx + 1`
+  overflows u16 in a debug build)
+
+9 further pre-existing regression tests (originally exercising ordinary in-viewport geometry, not
+just the overflow case) diverge from the MSAA-vs-analytic-AA reference oracle used by
+`assert_tiles_match`, e.g.:
+
+thread 'tile::tests::horizontal_line_crossing_left_viewport' panicked:
+assertion `left == right` failed: MSAA: Tile buffer mismatch
+  left: [Tile { packed_winding_line_idx: 3, x: 0, y: 2 }]
+ right: [Tile { packed_winding_line_idx: 12, x: 0, y: 2 }, Tile { packed_winding_line_idx: 12, x: 1, y: 2 }, Tile { packed_winding_line_idx: 4, x: 2, y: 2 }]
+
+test result: FAILED. 50 passed; 10 failed; 0 ignored; 0 measured; 100 filtered out
+
+Step B: reverted step A; instead applied only a partial, viewport-bounds-only fix (making
+`needs_clamping` compare against `tile_columns`/`0.0` as its own comment describes, while keeping
+`process_row!`'s two branches, and adding a `tile_columns` clamp to the previously-unclamped
+branch too). Re-ran `cargo test -p vello_common --lib tile::`:
+
+test result: FAILED. 55 passed; 5 failed; 0 ignored; 0 measured; 100 filtered out
+
+failures:
+    tile::tests::horizontal_line_left_to_right_three_tile
+    tile::tests::horizontal_line_multi_tile
+    tile::tests::horizontal_line_right_to_left_three_tile
+    tile::tests::resize_works_correctly
+    tile::tests::same_tile_right
+
+(All 5 are horizontal, non-tile-aligned lines - a *second*, independent defect in the same dead
+branch: for horizontal lines `x_slope = dx/dy = dx/0.0 = +-infinity`, and
+`row_top_x = p0_x + (row_top_y - p0_y) * x_slope` computes `0.0 * infinity = NaN` whenever
+`row_top_y == p0_y` exactly. The always-executed "clamped" branch happens to rescue this via
+`f32::min/max` discarding the NaN operand in favor of `line_left_x`/`line_right_x`; the "unclamped"
+branch has no such rescue and collapses to a spurious `x=0` tile, exactly as check 2 above showed
+for the NaN-coordinate-input case.)
+
+This is why the shipped fix removes the dead branch entirely rather than attempting to repair
+"needs_clamping" into a real fast path - Step B shows that a naive, well-intentioned fix restoring
+the check's literal documented intent (comparing against viewport bounds) is not sufficient on its
+own; the branch has a second, independent defect.
+=====================================================================
+
+Project test suite (full workspace, VELLO_SKIP_LFS_SNAPSHOTS=all to skip unrelated LFS-pointer
+snapshot failures caused by git-lfs not being installed in this environment - unrelated to this
+candidate):
+  Before (pristine):  504 passed, 0 failed
+  After (patch.diff): 504 passed, 0 failed
+`cargo test -p vello_common --lib` alone: 159 passed, 0 failed, 1 ignored (both before and after).

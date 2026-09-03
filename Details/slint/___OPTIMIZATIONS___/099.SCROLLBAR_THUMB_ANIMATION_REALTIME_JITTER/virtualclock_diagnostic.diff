@@ -1,0 +1,35 @@
+--- a/perf_test/src/bench.rs
++++ b/perf_test/src/bench.rs
+@@ -272,10 +272,22 @@
+     window: Rc<MinimalSoftwareWindow>,
+ }
+ 
++// DIAGNOSTIC (candidate 099): a deterministic virtual clock, advanced by a fixed amount per frame
++// instead of reading the real wall clock, to test whether animated widget-internal properties
++// (e.g. the ScrollBar thumb's `animate width, height`) sampled against real elapsed time are the
++// source of the residual run-to-run pixel non-determinism.
++thread_local! {
++    static VIRTUAL_NOW: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
++}
++
+ impl Platform for BenchPlatform {
+     fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
+         Ok(self.window.clone())
+     }
++
++    fn duration_since_start(&self) -> Duration {
++        VIRTUAL_NOW.with(|now| now.get())
++    }
+ }
+ 
+ struct Phase {
+@@ -669,6 +681,9 @@
+                 ),
+             });
+         }
++        // DIAGNOSTIC (candidate 099): advance the virtual clock by a fixed synthetic amount per
++        // frame instead of letting it track real elapsed wall-clock time.
++        VIRTUAL_NOW.with(|now| now.set(now.get() + Duration::from_millis(16)));
+         slint::platform::update_timers_and_animations();
+         window.request_redraw();
+ 

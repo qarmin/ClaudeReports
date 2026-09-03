@@ -1,0 +1,64 @@
+diff --git a/hayro-jpeg2000/src/j2c/build.rs b/hayro-jpeg2000/src/j2c/build.rs
+index b5e46e1f..e358e835 100644
+--- a/hayro-jpeg2000/src/j2c/build.rs
++++ b/hayro-jpeg2000/src/j2c/build.rs
+@@ -4,7 +4,7 @@ use super::decode::{DecompositionStorage, TileDecompositions};
+ use super::rect::IntRect;
+ use super::tag_tree::TagTree;
+ use super::tile::{ResolutionTile, Tile};
+-use crate::error::{DecodingError, Result, ValidationError};
++use crate::error::{DecodingError, Result, ValidationError, bail};
+ use alloc::vec;
+ use core::iter;
+ use core::ops::Range;
+@@ -19,12 +19,29 @@ pub(crate) fn build(
+     build_decompositions(tile, storage, skipped_resolution_levels)
+ }
+ 
++/// Ceiling on the estimated number of code-blocks that would need to be built (across all
++/// resolution levels of a tile, *including* ones `skipped_resolution_levels` will skip for
++/// decoding purposes) before doing so. Unlike the decoded sample count, this can't simply be
++/// skipped for resolution levels above `decoded_resolutions`: `segment::parse` must still walk
++/// every resolution level's packets structurally to stay in sync with the codestream's own,
++/// fixed packet order, so their precinct/code-block bookkeeping has to exist too - only their
++/// coefficient *storage* can be skipped (see `added_coefficients` below). Left unchecked, a
++/// codestream can declare a huge raw size and a tiny (down to 4x4) code-block size, driving
++/// `build_precincts`/`build_code_blocks` to do work proportional to the *raw*, pre-downscale
++/// dimensions regardless of any `target_resolution` hint or of `DecoderContext::reset`'s own
++/// (decoded-sample-count-based) cap. The actual configured code-block size is used (not a
++/// worst-case 4x4 assumption) so ordinary large images with realistic code-block sizes aren't
++/// penalized - only a codestream that combines a huge raw size with an unusually small
++/// code-block size trips this.
++const MAX_RAW_CODE_BLOCK_ESTIMATE: u64 = 4_000_000;
++
+ fn build_decompositions(
+     tile: &Tile<'_>,
+     storage: &mut DecompositionStorage<'_>,
+     skipped_resolution_levels: u8,
+ ) -> Result<()> {
+     let mut total_coefficients = 0_usize;
++    let mut raw_code_block_estimate = 0_u64;
+ 
+     for component_tile in tile.component_tiles() {
+         let decoded_resolutions =
+@@ -35,6 +52,20 @@ fn build_decompositions(
+         total_coefficients = total_coefficients
+             .checked_add(component_samples)
+             .ok_or(ValidationError::ImageTooLarge)?;
++
++        // Estimate the code-block count at the raw (un-skipped) top resolution level; the
++        // geometric decay across lower resolution levels means this alone already accounts
++        // for the large majority of the total across all levels.
++        let raw_num_resolution_levels = component_tile.component_info.num_resolution_levels();
++        let raw_top_resolution = ResolutionTile::new(component_tile, raw_num_resolution_levels - 1);
++        let cb_area = u64::from(raw_top_resolution.code_block_width())
++            * u64::from(raw_top_resolution.code_block_height());
++        raw_code_block_estimate = raw_code_block_estimate
++            .saturating_add(raw_top_resolution.rect.area().saturating_div(cb_area));
++    }
++
++    if raw_code_block_estimate > MAX_RAW_CODE_BLOCK_ESTIMATE {
++        bail!(ValidationError::ImageTooLarge);
+     }
+ 
+     if storage.coefficients.is_empty() {

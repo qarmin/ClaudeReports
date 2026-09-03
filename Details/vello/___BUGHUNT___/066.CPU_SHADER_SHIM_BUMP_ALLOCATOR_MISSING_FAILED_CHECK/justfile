@@ -1,0 +1,59 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# What this demonstrates: three of vello_shaders' CPU-shader-shim bump-allocator buffers
+# (tile_alloc.rs's `tiles`, path_count.rs's `seg_counts`, binning.rs's `bin_data`) panic with an
+# index-out-of-bounds when a real scene's demand exceeds the buffer's fixed hand-picked capacity
+# (vello_encoding::config::BufferSizes::new) - a condition the real GPU path handles safely via
+# BumpAllocators::failed plus an offset-reset-to-0 clamp already present in the equivalent WGSL
+# shaders. `patch.diff` adds the same clamp-and-flag behavior (plus defensive bounds guards on the
+# resulting writes, since the CPU shim has no wgpu/naga-style implicit storage-buffer bounds
+# clamp) to all three files.
+#
+# This machine has no real GPU: point VK_ICD_FILENAMES at a software Vulkan ICD (e.g. Google's
+# SwiftShader) to get a real wgpu::Device without real GPU hardware. Any real GPU backend
+# (Vulkan/Metal/DX12/GL) exercises the exact same GPU/CPU-shim dispatch code in vello_shaders; on
+# a machine with a real GPU, VK_ICD_FILENAMES can simply be dropped (or WGPU_BACKEND unset to let
+# wgpu pick the first working backend).
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+git_no_lfs := "git -c filter.lfs.smudge= -c filter.lfs.clean= -c filter.lfs.process= -c filter.lfs.required=false"
+
+export WGPU_BACKEND := "vulkan"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    {{git_no_lfs}} clone {{repo_url}} clone
+    cd clone && {{git_no_lfs}} checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone (expected: 3 panics, at
+# tile_alloc.rs:52, path_count.rs:150, binning.rs:102).
+# Requires VK_ICD_FILENAMES to point at a working Vulkan ICD if there's no real GPU (see header
+# comment above) - e.g.:
+#   VK_ICD_FILENAMES=/path/to/vk_swiftshader_icd.json just test
+reproduce-before:
+    cd repro && cargo run --release --bin pipeline_checks
+
+apply:
+    cd clone && {{git_no_lfs}} apply ../patch.diff
+
+# Re-run against the patched clone. Expected: none of the three original panics occur any more
+# (tile_alloc.rs:52 / path_count.rs:150 / binning.rs:102 are gone) - but note this is a bounded
+# fix for exactly those three files, not a systemic fix for the whole CPU shim. The same
+# unfixed bug class exists in sibling files (coarse.rs's `ptcl` buffer, path_tiling.rs's
+# `segments` buffer - see RESULT.md's "What's not done"), so the same three adversarial scenes
+# still panic overall, just one pipeline stage later (coarse.rs:68, coarse.rs:382,
+# path_tiling.rs:164) - this is expected and does not indicate the patch failed.
+reproduce-after:
+    cd repro && cargo run --release --bin pipeline_checks
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

@@ -1,0 +1,68 @@
+=== In-tree repro, before fix (3 runs) ===
+decoded value: Primitive(Strs(["A\u{e002} "]))
+BUG REPRODUCED: writing the object back out failed: Could not print data set
+decoded value: Primitive(Strs(["A\u{e002} "]))
+BUG REPRODUCED: writing the object back out failed: Could not print data set
+decoded value: Primitive(Strs(["A\u{e002} "]))
+BUG REPRODUCED: writing the object back out failed: Could not print data set
+
+Full error (first run):
+BUG REPRODUCED: writing the object back out failed: Could not print data set
+full error: PrintDataSet { source: WriteValue { source: EncodeText { position: 18, source: EncodeCustom { message: "unrepresentable character", backtrace: ... } } } }
+
+=== In-tree repro, after fix (3 runs) ===
+decoded value: Primitive(Strs(["A\u{e002} "]))
+round trip OK, 30 bytes written
+decoded value: Primitive(Strs(["A\u{e002} "]))
+round trip OK, 30 bytes written
+decoded value: Primitive(Strs(["A\u{e002} "]))
+round trip OK, 30 bytes written
+
+=== `just test` against a genuinely fresh clone of upstream df2b9e42 ===
+
+$ just clone
+Cloning into 'clone'...
+HEAD is now at df2b9e42 Merge pull request #821 from youdie006/fix/812-json-sq-primitive-panic
+
+$ just reproduce-before
+   Compiling dicom-object v0.10.0 (.../clone/object)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 8.54s
+     Running `target/release/repro`
+decoded value: Primitive(Strs(["A\u{e002} "]))
+BUG REPRODUCED: a well-formed data set that decoded successfully failed to write back out: Could not print data set
+error: Recipe `reproduce-before` failed on line 12 with exit code 1
+
+$ just apply reproduce-after
+    Finished `release` profile [optimized] target(s) in 2.20s
+     Running `target/release/repro`
+decoded value: Primitive(Strs(["A\u{e002} "]))
+round trip OK, 30 bytes written
+
+=== Extra boundary-value check: same bug class, other bytes in the same
+    Shift-JIS/CP932 IBM-extension row (0xF0-0xF9), all fail the same way
+    before the fix and all succeed after (standalone check via dicom-encoding's
+    unit test harness, not part of repro/) ===
+byte 0xf0 -> "A\u{e002}" -> before: EncodeCustom("unrepresentable character") / after: [65, 63]
+byte 0xf1 -> "A\u{e0be}" -> before: EncodeCustom("unrepresentable character") / after: [65, 63]
+byte 0xf2 -> "A\u{e17a}" -> before: EncodeCustom("unrepresentable character") / after: [65, 63]
+byte 0xf3 -> "A\u{e236}" -> before: EncodeCustom("unrepresentable character") / after: [65, 63]
+byte 0xf9 -> "A\u{e69e}" -> before: EncodeCustom("unrepresentable character") / after: [65, 63]
+
+=== Extra check: an arbitrary unencodable Unicode character (not from any
+    decode trap or table asymmetry - e.g. a caller-constructed string
+    containing an emoji) under the DefaultCharacterSetCodec (ISO_IR 6) ===
+before: codec.encode("AB\u{1F600}CD") -> Err(EncodeCustom { message: "unrepresentable character", ... })
+after:  codec.encode("AB\u{1F600}CD") -> Ok([65, 66, 63, 67, 68])
+
+=== Workspace test suite ===
+Before fix:
+  cargo test -p dicom-encoding --lib -> 40 passed; 0 failed
+  cargo test -p dicom-parser --lib   -> 49 passed; 0 failed
+  cargo test -p dicom-object --lib   -> 75 passed; 0 failed
+
+After fix:
+  cargo test -p dicom-encoding --lib -> 40 passed; 0 failed
+  cargo test -p dicom-parser --lib   -> 49 passed; 0 failed
+  cargo test -p dicom-object --lib   -> 75 passed; 0 failed
+  cargo test --workspace --lib       -> 351 passed; 0 failed; 2 ignored (identical to before)

@@ -1,0 +1,42 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Standalone bench (./bench): a headless MinimalSoftwareWindow scene with 10000 small
+# rectangles tiling an 800x600 window, plus one `ChildWindow` PopupWindow opened and closed
+# 300 times. Reports the dirty region's bounding box and the render() wall-clock time for the
+# frame right after each close() - and a pixel hash proving the patch never changes content,
+# only how much of it gets redrawn.
+# Note: if this candidate folder is run from inside a checkout that has its own ancestor
+# `.cargo/config.toml` setting `target-dir` (e.g. still nested under the main slint repo this
+# was produced in), the binary lands in that repo's own `target/release/`, not `bench/target/` -
+# cargo resolves `target-dir` relative to whichever `.cargo/config.toml` it finds walking up
+# from the current directory. Copied out standalone (e.g. attached to a GitHub issue) there is
+# no such ancestor config and the binary lands where this recipe expects it.
+bench:
+    cd bench && cargo build --release
+    @echo "Baseline vs patched are compared by running this same binary against each checkout -"
+    @echo "this recipe only builds/runs the patched (./clone) version; see RESULT.md for the"
+    @echo "paired baseline numbers this was compared against."
+    taskset -c 0 ./bench/target/release/popup_teardown_bench --rows 10000 --cycles 300
+
+clean:
+    rm -rf clone bench/target

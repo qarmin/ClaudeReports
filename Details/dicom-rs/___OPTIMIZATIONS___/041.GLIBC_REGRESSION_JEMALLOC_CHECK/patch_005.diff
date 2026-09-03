@@ -1,0 +1,145 @@
+diff --git a/encoding/src/text.rs b/encoding/src/text.rs
+index 4e3f9220..9edb83af 100644
+--- a/encoding/src/text.rs
++++ b/encoding/src/text.rs
+@@ -30,7 +30,64 @@ use encoding::all::{
+     GB18030, GBK, ISO_2022_JP, ISO_8859_1, ISO_8859_2, ISO_8859_3, ISO_8859_4, ISO_8859_5,
+     ISO_8859_6, ISO_8859_7, ISO_8859_8, UTF_8, WINDOWS_31J, WINDOWS_874, WINDOWS_949,
+ };
++use encoding::codec::singlebyte::SingleByteEncoding;
+ use encoding::{DecoderTrap, EncoderTrap, Encoding, RawDecoder, StringWriter};
++
++/// Bulk single-byte decode, bypassing `encoding`'s generic per-character virtual-dispatch
++/// `RawDecoder`/`StringWriter` machinery. Only valid for genuine `SingleByteEncoding` instances
++/// (ISO-8859-1..8, WINDOWS_874) - a 1:1 byte<->codepoint mapping, unlike WINDOWS_31J/ISO_2022_JP/
++/// WINDOWS_949/GB18030/GBK, which are each their own distinct multi-byte codec type in the
++/// `encoding` crate and don't have this shortcut. Replicates `SingleByteDecoder::raw_feed` and
++/// `decode_text_trap` exactly (ASCII passthrough for <= 0x7f, `index_forward` lookup otherwise,
++/// falling back to a `\OOO` octal escape of the raw byte for an unmapped one - the trap always
++/// succeeds, so this never actually errors).
++fn fast_singlebyte_decode(enc: &SingleByteEncoding, text: &[u8]) -> String {
++    let mut out = String::with_capacity(text.len());
++    for &byte in text {
++        if byte <= 0x7f {
++            out.push(byte as char);
++        } else {
++            let code = (enc.index_forward)(byte);
++            if code != 0xffff {
++                out.push(char::from_u32(code as u32).expect("valid codepoint from index_forward"));
++            } else {
++                let o0 = byte & 7;
++                let o1 = (byte & 56) >> 3;
++                let o2 = (byte & 192) >> 6;
++                out.push('\\');
++                out.push((o2 + b'0') as char);
++                out.push((o1 + b'0') as char);
++                out.push((o0 + b'0') as char);
++            }
++        }
++    }
++    out
++}
++
++/// Bulk single-byte encode, the `EncoderTrap::Strict` counterpart of [`fast_singlebyte_decode`] -
++/// see that function's doc for which codecs this applies to. Replicates
++/// `SingleByteEncoder::raw_feed` exactly (ASCII passthrough for <= '\u{7f}', `index_backward`
++/// lookup otherwise, erroring on an unrepresentable character - `index_backward` returning 0 is
++/// the `encoding` crate's own sentinel for "not found").
++fn fast_singlebyte_encode(enc: &SingleByteEncoding, text: &str) -> EncodeResult<Vec<u8>> {
++    let mut out = Vec::with_capacity(text.len());
++    for ch in text.chars() {
++        if ch <= '\u{7f}' {
++            out.push(ch as u8);
++        } else {
++            let index = (enc.index_backward)(ch as u32);
++            if index != 0 {
++                out.push(index);
++            } else {
++                return EncodeCustomSnafu {
++                    message: format!("unrepresentable character '{ch}'"),
++                }
++                .fail();
++            }
++        }
++    }
++    Ok(out)
++}
+ use snafu::{Backtrace, Snafu};
+ use std::borrow::Cow;
+ use std::fmt::Debug;
+@@ -369,6 +426,33 @@ macro_rules! decl_character_set {
+     };
+ }
+ 
++/// Same as [`decl_character_set`], but for a genuine `&'static SingleByteEncoding` `$val` -
++/// uses the bulk fast path instead of going through `encoding`'s generic virtual-dispatch
++/// `RawDecoder`/`RawEncoder` machinery.
++macro_rules! decl_singlebyte_character_set {
++    ($typ: ident, $term: literal, $val: expr) => {
++        #[derive(Debug, Default, Copy, Clone, Eq, Hash, PartialEq)]
++        #[doc = "Data type for the "]
++        #[doc = $term]
++        #[doc = "character set encoding."]
++        pub struct $typ;
++
++        impl TextCodec for $typ {
++            fn name(&self) -> Cow<'static, str> {
++                Cow::Borrowed($term)
++            }
++
++            fn decode(&self, text: &[u8]) -> DecodeResult<String> {
++                Ok(fast_singlebyte_decode($val, text))
++            }
++
++            fn encode(&self, text: &str) -> EncodeResult<Vec<u8>> {
++                fast_singlebyte_encode($val, text)
++            }
++        }
++    };
++}
++
+ /// Data type representing the default character set.
+ #[derive(Debug, Default, Copy, Clone, Eq, Hash, PartialEq)]
+ pub struct DefaultCharacterSetCodec;
+@@ -381,30 +465,26 @@ impl TextCodec for DefaultCharacterSetCodec {
+     fn decode(&self, text: &[u8]) -> DecodeResult<String> {
+         // Using 8859-1 because it is a superset. Reiterations of this impl
+         // should check for invalid character codes (#40).
+-        ISO_8859_1
+-            .decode(text, DecoderTrap::Call(decode_text_trap))
+-            .map_err(|message| DecodeCustomSnafu { message }.build())
++        Ok(fast_singlebyte_decode(ISO_8859_1, text))
+     }
+ 
+     fn encode(&self, text: &str) -> EncodeResult<Vec<u8>> {
+-        ISO_8859_1
+-            .encode(text, EncoderTrap::Strict)
+-            .map_err(|message| EncodeCustomSnafu { message }.build())
++        fast_singlebyte_encode(ISO_8859_1, text)
+     }
+ }
+ 
+ decl_character_set!(IsoIr13CharacterSetCodec, "ISO_IR 13", WINDOWS_31J);
+ decl_character_set!(IsoIr87CharacterSetCodec, "ISO_IR 87", ISO_2022_JP);
+-decl_character_set!(IsoIr100CharacterSetCodec, "ISO_IR 100", ISO_8859_1);
+-decl_character_set!(IsoIr101CharacterSetCodec, "ISO_IR 101", ISO_8859_2);
+-decl_character_set!(IsoIr109CharacterSetCodec, "ISO_IR 109", ISO_8859_3);
+-decl_character_set!(IsoIr110CharacterSetCodec, "ISO_IR 110", ISO_8859_4);
+-decl_character_set!(IsoIr126CharacterSetCodec, "ISO_IR 126", ISO_8859_7);
+-decl_character_set!(IsoIr127CharacterSetCodec, "ISO_IR 127", ISO_8859_6);
+-decl_character_set!(IsoIr138CharacterSetCodec, "ISO_IR 138", ISO_8859_8);
+-decl_character_set!(IsoIr144CharacterSetCodec, "ISO_IR 144", ISO_8859_5);
++decl_singlebyte_character_set!(IsoIr100CharacterSetCodec, "ISO_IR 100", ISO_8859_1);
++decl_singlebyte_character_set!(IsoIr101CharacterSetCodec, "ISO_IR 101", ISO_8859_2);
++decl_singlebyte_character_set!(IsoIr109CharacterSetCodec, "ISO_IR 109", ISO_8859_3);
++decl_singlebyte_character_set!(IsoIr110CharacterSetCodec, "ISO_IR 110", ISO_8859_4);
++decl_singlebyte_character_set!(IsoIr126CharacterSetCodec, "ISO_IR 126", ISO_8859_7);
++decl_singlebyte_character_set!(IsoIr127CharacterSetCodec, "ISO_IR 127", ISO_8859_6);
++decl_singlebyte_character_set!(IsoIr138CharacterSetCodec, "ISO_IR 138", ISO_8859_8);
++decl_singlebyte_character_set!(IsoIr144CharacterSetCodec, "ISO_IR 144", ISO_8859_5);
+ decl_character_set!(IsoIr149CharacterSetCodec, "ISO_IR 149", WINDOWS_949);
+-decl_character_set!(IsoIr166CharacterSetCodec, "ISO_IR 166", WINDOWS_874);
++decl_singlebyte_character_set!(IsoIr166CharacterSetCodec, "ISO_IR 166", WINDOWS_874);
+ decl_character_set!(Utf8CharacterSetCodec, "ISO_IR 192", UTF_8);
+ decl_character_set!(Gb18030CharacterSetCodec, "GB18030", GB18030);
+ decl_character_set!(GBKCharacterSetCodec, "GBK", GBK);

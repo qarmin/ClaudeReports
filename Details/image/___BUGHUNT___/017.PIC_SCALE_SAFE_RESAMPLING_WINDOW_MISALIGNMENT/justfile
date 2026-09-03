@@ -1,0 +1,47 @@
+# Self-contained reproduction for this candidate.
+#
+# The bug lives in the `pic-scale-safe` dependency (github.com/awxkee/pic-scale-safe), not in the
+# `image` repo itself, but the trigger path is `image`'s own public API
+# (`DynamicImage::resize_exact`), which is what a real caller would use - so this clones *both*
+# repos: `image` (the real end-to-end entry point) and `pic-scale-safe` (where patch.diff applies).
+#
+# repo_url/base_commit: `image-rs/image`, read via `git remote get-url origin` / `git rev-parse
+# HEAD` in the main project at the moment patch.diff was captured.
+# dep_repo_url/dep_base_commit: `awxkee/pic-scale-safe`, the exact version `image`'s Cargo.lock
+# resolved to at that same moment (0.1.11, tag `0.1.11` == this commit).
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+dep_repo_url := "https://github.com/awxkee/pic-scale-safe.git"
+dep_base_commit := "83c4801428c436678d7c6b6bea74af800924a469"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone dep_clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{dep_repo_url}} dep_clone
+    cd dep_clone && git checkout {{dep_base_commit}}
+
+# Build+run the standalone repro. `repro/Cargo.toml` always points pic-scale-safe at
+# `../dep_clone` via a path patch (see that file) - at this point dep_clone is still the
+# pristine, unpatched checkout, so this exercises the real bug through the real
+# DynamicImage::resize_exact entry point: should show a real disagreement (many gray levels, not
+# +-1 rounding noise) against the independent legacy imageops::resize oracle.
+reproduce-before:
+    cd repro && cargo run --release || true
+
+# Patch the pic-scale-safe clone in place. `repro`'s manifest already points at this same path,
+# so no manifest edits are needed here - Cargo picks up a path dependency's changed source
+# directly on the next build.
+apply:
+    cd dep_clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched pic-scale-safe - should agree with the oracle to
+# within ordinary +-1 rounding noise on every case.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone dep_clone

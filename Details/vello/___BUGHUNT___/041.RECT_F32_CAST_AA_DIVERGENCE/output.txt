@@ -1,0 +1,38 @@
+$ cd repro && cargo run --release   (against a fresh clone of linebender/vello @ 7516831426fb70f36d62c521c5477f6a7265b36a)
+
+    Finished `release` profile [optimized] target(s) in 0.01s
+     Running `target/release/repro`
+=== Step 1: does fill_path's flattening pipeline actually keep rect coords in f64? ===
+  v=0.03              rect.rs cast=0.03            flatten::Point::from-equivalent cast=0.03            equal=true
+  v=3.71              rect.rs cast=3.71            flatten::Point::from-equivalent cast=3.71            equal=true
+  v=999.9999          rect.rs cast=999.9999        flatten::Point::from-equivalent cast=999.9999        equal=true
+  v=30000.123456      rect.rs cast=30000.123       flatten::Point::from-equivalent cast=30000.123       equal=true
+  v=65531.987654321   rect.rs cast=65531.99        flatten::Point::from-equivalent cast=65531.99        equal=true
+Confirmed: both `fill_rect`'s fast path (rect.rs:49-52) and `fill_path`'s flattening pipeline (flatten.rs's `impl From<kurbo::Point> for Point`) downcast rect corners from f64 to f32 with the exact same `as f32` cast on the exact same value - the general pipeline does NOT keep coordinates in f64 through flattening, contrary to the candidate's premise.
+
+=== Step 2: curated differential sweep (sub-pixel positions, tile-boundary sizes, near-u16::MAX) ===
+Checked 7056 rect configurations (7056 total pixel comparisons across all of them); 0 pixel(s) differed between fill_rect and fill_path.
+
+=== Step 3: seeded random fuzz (fixed seed, deterministic/repeatable) ===
+Processed 4981 random rects; 0 pixel(s) differed.
+
+=== Verdict ===
+No divergence found between fill_rect and fill_path(rect.to_path(eps)) across all checks. The candidate's claimed 1/255 alpha divergence did not reproduce.
+
+--- Re-run (second invocation, to confirm determinism/repeatability) ---
+Identical output to the run above, byte-for-byte (diffed, no differences).
+
+--- Separate check: does `cargo clippy -- -W clippy::cast_precision_loss` actually flag rect.rs:49-52, as the candidate claims? ---
+$ cargo clippy -p vello_common --lib -- -W clippy::cast_precision_loss 2>&1 | grep -B2 "rect.rs"
+
+warning: casting `usize` to `f32` may cause a loss of precision (`usize` can be up to 64 bits wide depending on the target architecture, but `f32`'s mantissa is only 23 bits wide)
+   --> sparse_strips/vello_common/src/rect.rs:138:18
+    |
+138 |         let px = (start as usize + i) as f32;
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Only line 138 (an integer->float cast inside the unrelated `coverage()` helper) is flagged.
+`clippy::cast_precision_loss` does not fire on the f64->f32 casts at rect.rs:49-52 at all -
+clippy's `cast_precision_loss` lint only covers integer-to-float casts, not float64-to-float32
+narrowing. The candidate's claim that lines 49-52 are "flagged by clippy cast_precision_loss" does
+not hold for this checkout.

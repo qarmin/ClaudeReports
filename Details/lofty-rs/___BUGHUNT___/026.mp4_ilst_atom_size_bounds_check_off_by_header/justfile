@@ -1,0 +1,33 @@
+repo_url := "https://github.com/Serial-ATA/lofty-rs.git"
+base_commit := "5c6565e36d35b9ea7de049daa67acc0be0fd3b01"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+# `reproduce-before` intentionally exits non-zero when the bug reproduces (see repro/src/main.rs),
+# so each step is run with `-@` continue-on-error rather than a plain dependency chain that would
+# otherwise abort right after successfully demonstrating the bug.
+test:
+    just clone
+    -just reproduce-before
+    just apply
+    just reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug
+# (non-zero exit, a panic printed to stderr).
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer demonstrate the bug
+# (exit 0, read_from now gracefully rejects the malformed file instead of panicking later).
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

@@ -1,0 +1,79 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate's harness (bench_pipeline) is untracked in the main dicom-rs repo (it was built
+# by the perf-optimize skill itself), so this justfile is self-contained only *given the whole
+# ___OPTIMIZATIONS___ folder kept together* - it copies the canonical harness copy from
+# ../harness/bench_pipeline into ./clone as part of `clone:` (see SKILL.md's "Bench harnesses:
+# grow a few, don't multiply" / "Why per-candidate folders clone" for why this relaxation exists).
+#
+# patch.diff is the whole fix here: pixeldata/Cargo.toml's `default` feature list drops "rayon",
+# so build-baseline / build-patched below just build the harness before/after `apply` - no
+# feature-flag juggling needed on the harness's own Cargo.toml (unlike candidate 002, where the
+# rayon toggle had to be done via the harness's own dependency line because the *patch* wasn't
+# the feature toggle itself).
+#
+# `just test` clones dicom-rs at the pinned commit, builds a BASELINE bench binary, applies
+# patch.diff, builds a PATCHED bench binary, then runs both the `decode-frame-raw` (single-frame
+# decode) and `decode-raw` (all-frames decode) modes for both single-core (taskset -c 0) and
+# multi-core (unpinned) comparisons - see RESULT.md for what each combination showed.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    rm -rf clone/___bench_pipeline
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___bench_pipeline
+    # the harness path-depends on ../../../{object,core,encoding,pixeldata,transfer-syntax-registry}
+    # relative to ___OPTIMIZATIONS___/harness/bench_pipeline; from clone/___bench_pipeline that's
+    # one level shallower, so rewrite the path deps to match where it landed inside clone/.
+    sed -i 's#\.\./\.\./\.\./#../#g' clone/___bench_pipeline/Cargo.toml
+
+# The built binary is kept inside clone/___bench_pipeline/target/release/ (renamed, not copied
+# out) because dicom-test-files::get_data_path() resolves its download cache by walking up from
+# the running executable's own path looking for an ancestor directory literally named "target" -
+# copying the binary out to the candidate folder root breaks that lookup for the `decode-raw`/
+# `decode-frame-raw` modes below, which resolve the test file by name via dicom-test-files.
+build-baseline:
+    cd clone/___bench_pipeline && cargo build --release
+    cp clone/___bench_pipeline/target/release/bench clone/___bench_pipeline/target/release/bench_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___bench_pipeline && cargo build --release
+    cp clone/___bench_pipeline/target/release/bench clone/___bench_pipeline/target/release/bench_patched
+
+bin_baseline := "clone/___bench_pipeline/target/release/bench_baseline"
+bin_patched := "clone/___bench_pipeline/target/release/bench_patched"
+testfile := "pydicom/color3d_jpeg_baseline.dcm"
+
+bench:
+    @echo "=== correctness: dump-image byte-for-byte, baseline vs patched ==="
+    {{bin_baseline}} dump-image {{testfile}} 1
+    mv /tmp/dump_image.bin /tmp/dump_image_baseline.bin
+    {{bin_patched}} dump-image {{testfile}} 1
+    mv /tmp/dump_image.bin /tmp/dump_image_patched.bin
+    cmp /tmp/dump_image_baseline.bin /tmp/dump_image_patched.bin && echo "IDENTICAL"
+    @echo "=== decode-frame-raw (single frame/call), multi-core (unpinned), baseline vs patched ==="
+    {{bin_baseline}} decode-frame-raw {{testfile}} 2000
+    {{bin_patched}} decode-frame-raw {{testfile}} 2000
+    @echo "=== decode-frame-raw (single frame/call), single-core (taskset -c 0), baseline vs patched ==="
+    taskset -c 0 {{bin_baseline}} decode-frame-raw {{testfile}} 2000
+    taskset -c 0 {{bin_patched}} decode-frame-raw {{testfile}} 2000
+    @echo "=== decode-raw (all ~120 frames/call), multi-core (unpinned), baseline vs patched ==="
+    {{bin_baseline}} decode-raw {{testfile}} 15
+    {{bin_patched}} decode-raw {{testfile}} 15
+    @echo "=== decode-raw (all ~120 frames/call), single-core (taskset -c 0), baseline vs patched ==="
+    taskset -c 0 {{bin_baseline}} decode-raw {{testfile}} 15
+    taskset -c 0 {{bin_patched}} decode-raw {{testfile}} 15
+    @echo "Run each of the above a few times / use ../../tools/paired.sh for a real paired comparison - see RESULT.md for the numbers this candidate recorded."
+
+clean:
+    rm -rf clone

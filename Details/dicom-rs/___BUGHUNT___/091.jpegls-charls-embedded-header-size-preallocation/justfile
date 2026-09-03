@@ -1,0 +1,33 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug (a
+# 989-byte JPEG-LS fragment whose own embedded SOF55 header declares a ~512 GiB frame aborts the
+# whole process with SIGABRT/"memory allocation ... failed", driven purely by the fragment's own
+# internal header/length disagreement - the DICOM object's own Rows/Columns/SamplesPerPixel are
+# small and self-consistent).
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer abort, just a normal
+# Result::Err.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

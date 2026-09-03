@@ -1,0 +1,57 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate is a measurement-only investigation - there is no patch.diff (no fix was made
+# to the tested project's own source; see RESULT.md's "Does it change behavior/output?"). `just
+# test` instead reproduces the phase-timing measurement: probe_phase_timing.diff adds 3
+# AtomicU64 phase-time totals (entropy / idct dispatch / upsample+colorconvert) to
+# src/decoder.rs, exposed via src/lib.rs accessors, and harness_phase_probe_main.rs is a full
+# drop-in replacement for the canonical bench_decode harness's main.rs that adds a `--scale W H`
+# flag (calling Decoder::scale(w, h)) and prints the three phase totals alongside the normal
+# min/p50/mean/p95/max.
+#
+# This candidate's harness copy-in makes it self-contained given the whole ___OPTIMIZATIONS___
+# folder (harness_dir below), not fully standalone with zero other setup - see
+# ___OPTIMIZATIONS___/README.md / SKILL.md's "Bench harnesses: grow a few, don't multiply" for why.
+
+repo_url := "https://github.com/image-rs/jpeg-decoder.git"
+base_commit := "eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c"
+harness_dir := "../harness/bench_decode"
+
+test: clone build bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git -C clone apply "{{justfile_directory()}}/probe_phase_timing.diff"
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/bench_decode
+    sed -i 's#path = "\.\./\.\./\.\."#path = ".."#' clone/bench_decode/Cargo.toml
+    cp "{{justfile_directory()}}/harness_phase_probe_main.rs" clone/bench_decode/src/main.rs
+
+build:
+    cd clone/bench_decode && cargo +stable build --release
+    cp clone/bench_decode/target/release/bench_decode ./bin_phase_probe
+
+bench:
+    @echo "=== mjpeg.jpg (960x720, 4:2:2 H2V1 - the only real-sized subsampled image in-repo) ==="
+    @echo "--- full ---"
+    ./bin_phase_probe clone/tests/reftest/images/mjpeg.jpg 30
+    @echo "--- 1/2 scale (480x360) ---"
+    ./bin_phase_probe clone/tests/reftest/images/mjpeg.jpg 30 "" --scale 480 360
+    @echo "--- 1/4 scale (240x180) ---"
+    ./bin_phase_probe clone/tests/reftest/images/mjpeg.jpg 30 "" --scale 240 180
+    @echo "--- 1/8 scale (120x90) ---"
+    ./bin_phase_probe clone/tests/reftest/images/mjpeg.jpg 30 "" --scale 120 90
+    @echo ""
+    @echo "=== benches/large_image.jpg (2268x1512, 4:4:4 - non-subsampled control) ==="
+    @echo "--- full ---"
+    ./bin_phase_probe clone/benches/large_image.jpg 30
+    @echo "--- 1/2 scale (1134x756) ---"
+    ./bin_phase_probe clone/benches/large_image.jpg 30 "" --scale 1134 756
+    @echo "--- 1/4 scale (567x378) ---"
+    ./bin_phase_probe clone/benches/large_image.jpg 30 "" --scale 567 378
+    @echo "--- 1/8 scale (284x189) ---"
+    ./bin_phase_probe clone/benches/large_image.jpg 30 "" --scale 284 189
+
+clean:
+    rm -rf clone bin_phase_probe

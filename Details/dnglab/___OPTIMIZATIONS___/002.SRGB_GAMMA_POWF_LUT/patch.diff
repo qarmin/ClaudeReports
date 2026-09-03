@@ -1,0 +1,89 @@
+diff --git a/rawler/src/imgop/srgb.rs b/rawler/src/imgop/srgb.rs
+index 88a93ee1..8c6bd48f 100644
+--- a/rawler/src/imgop/srgb.rs
++++ b/rawler/src/imgop/srgb.rs
+@@ -1,6 +1,8 @@
+ // SPDX-License-Identifier: LGPL-2.1
+ // Copyright 2021 Daniel Vogelbacher <daniel@chaospixel.com>
+ 
++use std::sync::OnceLock;
++
+ use rayon::prelude::*;
+ 
+ // Reference for sRGB:
+@@ -27,12 +29,74 @@ const SRGB_GAIN: f32 = 1.055;
+ /// sRGB offset for exponential part
+ const SRGB_OFFSET: f32 = SRGB_GAIN - 1.0; // 0.055
+ 
++/// Exponent applied to the linear value in the exponential part of the curve (1/2.4).
++const GAMMA_EXP: f32 = 1.0 / SRGB_GAMMA;
++
++/// Number of interpolation intervals covering the IEEE-754 mantissa range `[1.0, 2.0)`.
++const MANTISSA_LUT_SIZE: usize = 1024;
++
++/// Range of (unbiased, base-2) exponents covered by `EXP_LUT` before falling back to `powf`.
++/// `[-16, 16]` covers linear values from ~1.5e-5 up to 65536, far beyond anything
++/// `clip_euclidean_norm_avg` (imgop/raw.rs) lets through in practice.
++const EXP_LUT_MIN: i32 = -16;
++const EXP_LUT_MAX: i32 = 16;
++const EXP_LUT_SIZE: usize = (EXP_LUT_MAX - EXP_LUT_MIN + 1) as usize;
++
++/// `m.powf(GAMMA_EXP)` for `m` linearly spaced over `[1.0, 2.0]`, interpolated at lookup time.
++fn mantissa_lut() -> &'static [f32; MANTISSA_LUT_SIZE + 1] {
++  static LUT: OnceLock<[f32; MANTISSA_LUT_SIZE + 1]> = OnceLock::new();
++  LUT.get_or_init(|| {
++    let mut table = [0f32; MANTISSA_LUT_SIZE + 1];
++    for (i, v) in table.iter_mut().enumerate() {
++      let m = 1.0 + i as f32 / MANTISSA_LUT_SIZE as f32;
++      *v = m.powf(GAMMA_EXP);
++    }
++    table
++  })
++}
++
++/// `2f32.powf(e as f32 * GAMMA_EXP)` for every unbiased exponent `e` in `[EXP_LUT_MIN, EXP_LUT_MAX]`.
++fn exp_lut() -> &'static [f32; EXP_LUT_SIZE] {
++  static LUT: OnceLock<[f32; EXP_LUT_SIZE]> = OnceLock::new();
++  LUT.get_or_init(|| {
++    let mut table = [0f32; EXP_LUT_SIZE];
++    for (i, v) in table.iter_mut().enumerate() {
++      let e = EXP_LUT_MIN + i as i32;
++      *v = 2f32.powf(e as f32 * GAMMA_EXP);
++    }
++    table
++  })
++}
++
++/// Approximates `v.powf(1.0 / SRGB_GAMMA)` for `v > 0` using the IEEE-754 decomposition
++/// `v = m * 2^e` (`m` in `[1.0, 2.0)`), so that `v.powf(p) == m.powf(p) * 2f32.powf(e as f32 * p)`.
++/// `m.powf(p)` is looked up in a small interpolated table (low curvature over a factor-2 range,
++/// so linear interpolation error is negligible relative to the eventual u16 quantization step);
++/// `2f32.powf(e as f32 * p)` is an exact table lookup since `e` is an integer. Falls back to the
++/// real `powf` outside the exponent range the table covers.
++#[inline]
++fn fast_pow_gamma(v: f32) -> f32 {
++  let bits = v.to_bits();
++  let exponent = ((bits >> 23) & 0xff) as i32 - 127;
++  if exponent < EXP_LUT_MIN || exponent > EXP_LUT_MAX {
++    return v.powf(GAMMA_EXP);
++  }
++  let mantissa_bits = (bits & 0x007f_ffff) | (127u32 << 23);
++  let m = f32::from_bits(mantissa_bits);
++  let scaled = (m - 1.0) * MANTISSA_LUT_SIZE as f32;
++  let idx = scaled as usize;
++  let frac = scaled - idx as f32;
++  let lut = mantissa_lut();
++  let m_pow = lut[idx] + frac * (lut[idx + 1] - lut[idx]);
++  m_pow * exp_lut()[(exponent - EXP_LUT_MIN) as usize]
++}
++
+ /// Apply sRGB gamma
+ pub fn srgb_apply_gamma(v: f32) -> f32 {
+   if v <= SRGB_CROSSOVER_POINT {
+     v * LINEAR_GAIN
+   } else {
+-    v.powf(1.0 / SRGB_GAMMA) * SRGB_GAIN - SRGB_OFFSET
++    fast_pow_gamma(v) * SRGB_GAIN - SRGB_OFFSET
+   }
+ }
+ 

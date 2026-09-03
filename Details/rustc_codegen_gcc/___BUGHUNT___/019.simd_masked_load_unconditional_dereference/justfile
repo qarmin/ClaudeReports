@@ -1,0 +1,32 @@
+# Self-contained reproduction for candidate 019 (simd_masked_load_unconditional_dereference).
+#
+# Not reproducible - no patch.diff, so only `reproduce-before` exists (per candidate_justfile's
+# own template note). This still builds and runs the real end-to-end path (the real public
+# `std::simd::Simd::load_select_ptr` API, which lowers to `simd_masked_load`, through the real
+# codegen backend) - it just demonstrates the suspected bug does NOT occur, per RESULT.md.
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && cp config.example.toml config.toml
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Build+run both repro binaries against the real backend - both are expected to print
+# correct results and exit 0 (that's the point: the hypothesized unconditional-dereference bug
+# does not reproduce).
+reproduce-before:
+    rm -rf repro/target
+    cd repro && CHANNEL=release "{{justfile_directory()}}/clone/y.sh" cargo build --manifest-path Cargo.toml --bins
+    ulimit -c 0; \
+    repro/target/debug/masked_load_repro; echo "masked_load_repro exit=$?"; \
+    repro/target/debug/all_disabled; echo "all_disabled exit=$?"
+
+clean:
+    rm -rf clone repro/target

@@ -1,0 +1,38 @@
+# Self-contained reproduction for candidate 024 (ISOMP4_TRUN_WRONG_BITMASK_FIRST_SAMPLE_DURATION).
+#
+# repro/assets/frag.mp4 is a real fragmented AAC-in-MP4 file produced by ffmpeg
+# (`-movflags frag_keyframe+empty_moov+default_base_moof`), reused from candidate 017's asset.
+# repro/assets/evil_first_sample_flags.mp4 is the same file with only its first fragment's trun
+# atom binary-patched: `trun` flags 0x1 -> 0x5 (adds first-sample-flags-present) and a
+# first_sample_flags value of 0x02000004 inserted (0x02000000 is the exact sample_depends_on=2
+# value already used unmodified by this same file's own tfhd.default_sample_flags - only the low
+# 0x4 bit was added on top of it). traf/moof atom sizes and trun.data_offset were adjusted by the
+# same +4 bytes to keep the file otherwise byte-for-byte identical and structurally valid.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - demonstrates that
+# IsoMp4Reader::next_packet() panics with an out-of-bounds index on trun.rs's sample_duration[0]
+# when reading the first fragment of evil_first_sample_flags.mp4, while the real baseline
+# (frag.mp4) decodes cleanly.
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - next_packet() should no longer panic on
+# either file.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target

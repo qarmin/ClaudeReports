@@ -1,0 +1,102 @@
+diff --git a/pixeldata/src/lib.rs b/pixeldata/src/lib.rs
+index 6ede5847..b9ab551a 100644
+--- a/pixeldata/src/lib.rs
++++ b/pixeldata/src/lib.rs
+@@ -1992,26 +1992,29 @@ fn convert_colorspace_u8(i: &mut [u8]) {
+     #[cfg(not(feature = "rayon"))]
+     let iter = i.chunks_mut(3);
+ 
+-    // Matrix multiplication taken from
++    // Fixed-point (Q16.16, i32) reimplementation of the matrix multiplication from
+     // https://github.com/pydicom/pydicom/blob/f36517e10/pydicom/pixel_data_handlers/util.py#L576
++    // Coefficients below are the same constants rounded to the nearest 1/65536:
++    // 1.402, (0.114*1.772/0.587), (-0.299*1.402/0.587), 1.772.
++    const SHIFT: u32 = 16;
++    const C_CR_R: i32 = 91881;
++    const C_CG_B: i32 = 22553;
++    const C_CG_R: i32 = -46802;
++    const C_CB_B: i32 = 116130;
++    const HALF: i32 = 1 << (SHIFT - 1);
++
+     iter.for_each(|pixel| {
+-        let y = pixel[0] as f32;
+-        let b: f32 = pixel[1] as f32;
+-        let r: f32 = pixel[2] as f32;
+-        let b = b - 128.0;
+-        let r = r - 128.0;
+-
+-        let cr = (y + 1.402 * r) + 0.5;
+-        let cg = (y + (0.114 * 1.772 / 0.587) * b + (-0.299 * 1.402 / 0.587) * r) + 0.5;
+-        let cb = (y + 1.772 * b) + 0.5;
+-
+-        let cr = cr.floor().clamp(0.0, u8::MAX as f32) as u8;
+-        let cg = cg.floor().clamp(0.0, u8::MAX as f32) as u8;
+-        let cb = cb.floor().clamp(0.0, u8::MAX as f32) as u8;
+-
+-        pixel[0] = cr;
+-        pixel[1] = cg;
+-        pixel[2] = cb;
++        let y = pixel[0] as i32;
++        let b = pixel[1] as i32 - 128;
++        let r = pixel[2] as i32 - 128;
++
++        let cr = ((y << SHIFT) + C_CR_R * r + HALF) >> SHIFT;
++        let cg = ((y << SHIFT) + C_CG_B * b + C_CG_R * r + HALF) >> SHIFT;
++        let cb = ((y << SHIFT) + C_CB_B * b + HALF) >> SHIFT;
++
++        pixel[0] = cr.clamp(0, u8::MAX as i32) as u8;
++        pixel[1] = cg.clamp(0, u8::MAX as i32) as u8;
++        pixel[2] = cb.clamp(0, u8::MAX as i32) as u8;
+     });
+ }
+ 
+@@ -2038,26 +2041,31 @@ fn convert_colorspace_u16(i: &mut [u16]) {
+     #[cfg(not(feature = "rayon"))]
+     let iter = i.chunks_mut(3);
+ 
+-    // Matrix multiplication taken from
++    // Fixed-point (Q16.16, i64) reimplementation of the matrix multiplication from
+     // https://github.com/pydicom/pydicom/blob/f36517e10/pydicom/pixel_data_handlers/util.py#L576
++    // Coefficients below are the same constants rounded to the nearest 1/65536:
++    // 1.402, (0.114*1.772/0.587), (-0.299*1.402/0.587), 1.772.
++    // i64 is required here (unlike the u8 variant's i32): y<<16 alone can reach ~4.3e9 for
++    // 16-bit samples, which already exceeds i32::MAX before adding the other terms.
++    const SHIFT: u32 = 16;
++    const C_CR_R: i64 = 91881;
++    const C_CG_B: i64 = 22553;
++    const C_CG_R: i64 = -46802;
++    const C_CB_B: i64 = 116130;
++    const HALF: i64 = 1 << (SHIFT - 1);
++
+     iter.for_each(|pixel| {
+-        let y = pixel[0] as f32;
+-        let b: f32 = pixel[1] as f32;
+-        let r: f32 = pixel[2] as f32;
+-        let b = b - 32768.0;
+-        let r = r - 32768.0;
+-
+-        let cr = (y + 1.402 * r) + 0.5;
+-        let cg = (y + (0.114 * 1.772 / 0.587) * b + (-0.299 * 1.402 / 0.587) * r) + 0.5;
+-        let cb = (y + 1.772 * b) + 0.5;
+-
+-        let cr = cr.floor().clamp(0.0, u16::MAX as f32) as u16;
+-        let cg = cg.floor().clamp(0.0, u16::MAX as f32) as u16;
+-        let cb = cb.floor().clamp(0.0, u16::MAX as f32) as u16;
+-
+-        pixel[0] = cr;
+-        pixel[1] = cg;
+-        pixel[2] = cb;
++        let y = pixel[0] as i64;
++        let b = pixel[1] as i64 - 32768;
++        let r = pixel[2] as i64 - 32768;
++
++        let cr = ((y << SHIFT) + C_CR_R * r + HALF) >> SHIFT;
++        let cg = ((y << SHIFT) + C_CG_B * b + C_CG_R * r + HALF) >> SHIFT;
++        let cb = ((y << SHIFT) + C_CB_B * b + HALF) >> SHIFT;
++
++        pixel[0] = cr.clamp(0, u16::MAX as i64) as u16;
++        pixel[1] = cg.clamp(0, u16::MAX as i64) as u16;
++        pixel[2] = cb.clamp(0, u16::MAX as i64) as u16;
+     });
+ }
+ 

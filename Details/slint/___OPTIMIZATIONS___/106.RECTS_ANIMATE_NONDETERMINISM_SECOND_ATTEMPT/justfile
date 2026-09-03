@@ -1,0 +1,46 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# This candidate found nothing to patch (patch.diff is empty, investigation only) - `just test`
+# builds the pristine harness and re-runs the exact scenario this candidate tried to reproduce a
+# non-determinism in. A "1" printed for the unique-hash count means bit-identical across runs
+# (this session's outcome); anything else would be the reproduction this candidate was looking for.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+test: clone bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+# No patch to apply - patch.diff is intentionally empty for this investigation-only candidate.
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff" || true
+
+# perf_test/ is untracked in the main repo (see this workspace's README.md), so a fresh clone
+# needs it copied in from wherever it's kept alongside the main checkout - this justfile assumes
+# it's a sibling of the main clone the way it is in the session that produced this candidate.
+# If perf_test/ isn't available, this recipe can't run standalone; the runs in RESULT.md were
+# taken directly against the main project's own working copy instead.
+bench:
+    cd clone/perf_test && cargo build --profile rdebug --bin perf_test --features software
+    mkdir -p /tmp/106_check
+    for f in 5 10 20 30; do \
+      ./clone/target/rdebug/perf_test --bench --mode rects --animate --count 2000 --frames $f --snapshot /tmp/106_check/f${f}_a.ppm >/dev/null; \
+      ./clone/target/rdebug/perf_test --bench --mode rects --animate --count 2000 --frames $f --snapshot /tmp/106_check/f${f}_b.ppm >/dev/null; \
+      echo "frames=$f:"; sha256sum /tmp/106_check/f${f}_a.ppm /tmp/106_check/f${f}_b.ppm; \
+    done
+
+clean:
+    rm -rf clone

@@ -1,0 +1,53 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+#
+# Fill in repo_url/base_commit when this candidate is created (read them once with
+# `git remote get-url origin` / `git rev-parse HEAD` in the main project, at the moment
+# patch.diff is captured) - patch.diff is a diff against that exact commit and may stop
+# applying cleanly once the main branch moves on.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "fb263fd4b78225112c71c374386fd986b9a54e44"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# The original bench used a standalone `perf_test` harness with a `SortModel`-backed `list`
+# scene (`--model-adapter sort --mutate 200 --mutate-mode push`), measured via
+# `tools/matrix.sh`. That harness is NOT part of the main repo's tracked history (it lives
+# in perf_test/ at the repo root of the original checkout, untracked by the main repo's
+# git). To fully reproduce the bench numbers, copy perf_test/ manually into ./clone next to
+# this justfile's clone before running `just bench` - `just apply` alone only gets you the
+# patched adapters.rs and the unit test additions, which you can already exercise with:
+#   cd clone && cargo test -p i-slint-core --all-features sort_model
+# For the full frame-time comparison, once perf_test/ is copied in:
+#   cd clone/perf_test && tools/matrix.sh \
+#     "bare 100000|--mode list --count 100000 --mutate 200 --mutate-mode push" \
+#     "sorted 100000|--mode list --count 100000 --model-adapter sort --mutate 200 --mutate-mode push"
+bench:
+    cd clone && cargo test -p i-slint-core --all-features sort_model
+
+clean:
+    rm -rf clone

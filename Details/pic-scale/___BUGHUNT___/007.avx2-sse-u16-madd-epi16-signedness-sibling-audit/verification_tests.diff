@@ -1,0 +1,140 @@
+diff --git a/src/avx2/alpha_u16.rs b/src/avx2/alpha_u16.rs
+index 0b52e0f..c0116bb 100644
+--- a/src/avx2/alpha_u16.rs
++++ b/src/avx2/alpha_u16.rs
+@@ -461,7 +461,7 @@ fn avx_unpremultiply_alpha_rgba_u16_row_avx(in_place: &mut [u16], bit_depth: usi
+ 
+         packed = _mm256_min_epu16(packed, v_max_test);
+ 
+-        packed = _mm256_blendv_epi8(packed, rgba, is_zero_alpha_mask);
++        packed = _mm256_blendv_epi8(packed, _mm256_setzero_si256(), is_zero_alpha_mask);
+         packed = _mm256_blendv_epi8(packed, rgba, copy_alpha_mask);
+ 
+         unsafe {
+@@ -471,3 +471,63 @@ fn avx_unpremultiply_alpha_rgba_u16_row_avx(in_place: &mut [u16], bit_depth: usi
+         rem.copy_from_slice(&dst_buffer[..rem.len()]);
+     }
+ }
++
++#[cfg(test)]
++mod bughunt_diff_tests {
++    use super::avx_unpremultiply_alpha_rgba_u16;
++    use crate::alpha_handle_u16::unpremultiply_alpha_rgba_row;
++
++    fn next(state: &mut u32) -> u32 {
++        *state ^= *state << 13;
++        *state ^= *state >> 17;
++        *state ^= *state << 5;
++        *state
++    }
++
++    /// candidate 007: audits `avx_unpremultiply_alpha_rgba_u16` (the unpremultiply direction)
++    /// against the scalar reference across the full u16 domain at bit_depth=16, including alpha
++    /// == 0 pixels with nonzero color (the scalar reference leaves these entirely unchanged).
++    #[test]
++    fn avx2_unpremultiply_u16_bit_depth_16_matches_scalar_reference_across_full_range() {
++        if !std::arch::is_x86_feature_detected!("avx2") {
++            return;
++        }
++
++        let mut src: Vec<u16> = Vec::new();
++
++        // alpha == 0 with every boundary color - the scalar reference leaves these bytes
++        // entirely untouched; this is candidate 007's confirmed bug (AVX2 used to zero the
++        // color channels here instead).
++        let boundary = [0u16, 1, 32766, 32767, 32768, 32769, 65534, 65535];
++        for &c in &boundary {
++            src.extend_from_slice(&[c, c, c, 0]);
++        }
++
++        // Full-range random data respecting the premultiplied invariant (color <= alpha), the
++        // shape real premultiplied pixel data actually has - this avoids the unrelated, separate
++        // int32-overflow-before-cast issue in this same function (only reachable with
++        // invariant-violating color/alpha combinations, not confirmed reachable via the crate's
++        // public resize API - see IDEAS.md), keeping this test focused on the alpha==0 bug.
++        let mut state = 0x1234_5678u32;
++        for _ in 0..50_000 {
++            let a = (next(&mut state) & 0xFFFF) as u16;
++            let c = if a == 0 {
++                0
++            } else {
++                (next(&mut state) % (a as u32 + 1)) as u16
++            };
++            src.extend_from_slice(&[c, c, c, a]);
++        }
++
++        let mut expected = src.clone();
++        unpremultiply_alpha_rgba_row(&mut expected, 16);
++
++        let mut actual = src.clone();
++        avx_unpremultiply_alpha_rgba_u16(&mut actual, 16);
++
++        assert_eq!(
++            actual, expected,
++            "AVX2 unpremultiply diverged from the scalar reference at bit_depth=16"
++        );
++    }
++}
+diff --git a/src/sse/alpha_u16.rs b/src/sse/alpha_u16.rs
+index c286920..e1a3de6 100644
+--- a/src/sse/alpha_u16.rs
++++ b/src/sse/alpha_u16.rs
+@@ -425,3 +425,58 @@ fn premultiply_alpha_sse_rgba_u16_row_impl(dst: &mut [u16], src: &[u16], bit_dep
+         pma_sse41_rgba16_dispatch(dst, src, bit_depth, Sse41PremultiplyExecutorAny::default())
+     }
+ }
++
++#[cfg(test)]
++mod bughunt_diff_tests {
++    use super::unpremultiply_alpha_sse_rgba_u16;
++    use crate::alpha_handle_u16::unpremultiply_alpha_rgba_row;
++
++    fn next(state: &mut u32) -> u32 {
++        *state ^= *state << 13;
++        *state ^= *state >> 17;
++        *state ^= *state << 5;
++        *state
++    }
++
++    /// candidate 007: audits `unpremultiply_alpha_sse_rgba_u16` against the scalar reference
++    /// across the full u16 domain at bit_depth=16, including alpha == 0 pixels with nonzero
++    /// color - unlike the AVX2 counterpart (candidate 007's confirmed bug), SSE already handles
++    /// this correctly via `_mm_select_si128`. This test documents that it stays correct.
++    #[test]
++    fn sse_unpremultiply_u16_bit_depth_16_matches_scalar_reference_across_full_range() {
++        if !std::arch::is_x86_feature_detected!("sse4.1") {
++            return;
++        }
++
++        let mut src: Vec<u16> = Vec::new();
++
++        let boundary = [0u16, 1, 32766, 32767, 32768, 32769, 65534, 65535];
++        for &c in &boundary {
++            src.extend_from_slice(&[c, c, c, 0]);
++        }
++
++        // See the AVX2 sibling test for why color is kept <= alpha here (avoids the separate,
++        // not-fixed-in-this-patch overflow issue - see IDEAS.md).
++        let mut state = 0x8765_4321u32;
++        for _ in 0..50_000 {
++            let a = (next(&mut state) & 0xFFFF) as u16;
++            let c = if a == 0 {
++                0
++            } else {
++                (next(&mut state) % (a as u32 + 1)) as u16
++            };
++            src.extend_from_slice(&[c, c, c, a]);
++        }
++
++        let mut expected = src.clone();
++        unpremultiply_alpha_rgba_row(&mut expected, 16);
++
++        let mut actual = src.clone();
++        unpremultiply_alpha_sse_rgba_u16(&mut actual, 16);
++
++        assert_eq!(
++            actual, expected,
++            "SSE unpremultiply diverged from the scalar reference at bit_depth=16"
++        );
++    }
++}

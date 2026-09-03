@@ -1,0 +1,48 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# Uses the crate's own existing `benches/decode.rs` criterion bench (no standalone bench crate
+# needed - shape 1 from the template).
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone && cargo bench --bench decode --no-run
+    cp "$(find clone/target/release/deps -maxdepth 1 -name 'decode-*' -type f -executable | xargs ls -t | head -1)" ./bin_baseline
+
+build-patched:
+    cd clone && cargo bench --bench decode --no-run
+    cp "$(find clone/target/release/deps -maxdepth 1 -name 'decode-*' -type f -executable | xargs ls -t | head -1)" ./bin_patched
+
+# Prints criterion's own before/after comparison for each of the three bit depths this patch
+# touches (Core_1_Bit/Core_4_Bit/Core_8_Bit.bmp - the same "small" corpus scale used by
+# candidates 037/041/042/046/047). 2-bit is not covered - no case exists in the default
+# benches/decode.rs BENCH_DEFS list, see RESULT.md "What's not done".
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Run from inside clone/ - the bench resolves its test-image paths (tests/images/...)
+    # relative to the current working directory, not the binary's own location.
+    cd clone
+    for bench in "Bmp/Core_1_Bit" "Bmp/Core_4_Bit" "Bmp/Core_8_Bit"; do
+        name=$(echo "$bench" | tr '/ ' '__')
+        echo "=== $bench ==="
+        ../bin_baseline --bench "$bench" --save-baseline "b051_${name}"
+        ../bin_patched --bench "$bench" --baseline "b051_${name}"
+    done
+
+clean:
+    rm -rf clone bin_baseline bin_patched target

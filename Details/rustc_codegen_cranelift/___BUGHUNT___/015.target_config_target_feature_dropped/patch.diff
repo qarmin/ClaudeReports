@@ -1,0 +1,133 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 6d2a3537..8bc6ecbc 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -157,22 +157,7 @@ fn thin_lto_supported(&self) -> bool {
+     }
+ 
+     fn target_config(&self, sess: &Session) -> TargetConfig {
+-        // FIXME return the actually used target features. this is necessary for #[cfg(target_feature)]
+-        let target_features = match sess.target.arch {
+-            Arch::X86_64 if sess.target.os != Os::None => {
+-                // x86_64 mandates SSE2 support and rustc requires the x87 feature to be enabled
+-                vec![sym::fxsr, sym::sse, sym::sse2, Symbol::intern("x87")]
+-            }
+-            Arch::AArch64 => match &sess.target.os {
+-                Os::None => vec![],
+-                // On macOS the aes, sha2 and sha3 features are enabled by default and ring
+-                // fails to compile on macOS when they are not present.
+-                Os::MacOs => vec![sym::neon, sym::aes, sym::sha2, sym::sha3],
+-                // AArch64 mandates Neon support
+-                _ => vec![sym::neon],
+-            },
+-            _ => vec![],
+-        };
++        let target_features = crate_target_features(sess);
+ 
+         // FIXME(f16_f128): `rustc_codegen_llvm` currently disables support on Windows GNU
+         // targets due to GCC using a different ABI than LLVM. Therefore `f16` and `f128`
+@@ -187,7 +172,9 @@ fn target_config(&self, sess: &Session) -> TargetConfig {
+         let has_reliable_f128_math = has_reliable_f16_f128 && sess.target.env == Env::Gnu;
+ 
+         TargetConfig {
+-            internal_target_features: UnordSet::from_iter(target_features),
++            internal_target_features: UnordSet::from_iter(
++                target_features.into_iter().map(Symbol::intern),
++            ),
+             // `rustc_codegen_cranelift` polyfills functionality not yet
+             // available in Cranelift.
+             has_reliable_f16: has_reliable_f16_f128,
+@@ -248,6 +235,93 @@ fn fallback_intrinsics(&self) -> Vec<Symbol> {
+     }
+ }
+ 
++/// The set of target features that are enabled for the whole crate.
++///
++/// This is the base feature set mandated by the target's baseline ISA, with `-C target-feature`
++/// applied on top. It ends up in `sess.internal_target_features`, so it drives
++/// `cfg(target_feature = "...")`, the `#[target_feature]` safety rules and rustc's
++/// `abi_required_features` check for SIMD vectors in `extern` fn signatures - meaning that
++/// dropping `-C target-feature` here makes the generated program take different `#[cfg]` branches
++/// than the same source built by another backend, and makes valid programs fail to compile.
++///
++/// `-C target-cpu` is deliberately *not* expanded into a feature set: unlike LLVM, Cranelift has
++/// no per-CPU feature table that could be queried for one.
++fn crate_target_features(sess: &Session) -> Vec<&'static str> {
++    let mut features: Vec<&'static str> = match sess.target.arch {
++        Arch::X86_64 if sess.target.os != Os::None => {
++            // x86_64 mandates SSE2 support and rustc requires the x87 feature to be enabled
++            vec!["fxsr", "sse", "sse2", "x87"]
++        }
++        Arch::AArch64 => match &sess.target.os {
++            Os::None => vec![],
++            // On macOS the aes, sha2 and sha3 features are enabled by default and ring
++            // fails to compile on macOS when they are not present.
++            Os::MacOs => vec!["neon", "aes", "sha2", "sha3"],
++            // AArch64 mandates Neon support
++            _ => vec!["neon"],
++        },
++        _ => vec![],
++    };
++
++    let known = sess.target.rust_target_features();
++    let lookup = |name: &str| known.iter().find(|(known_name, _, _)| *known_name == name);
++    // Whether `name` transitively implies `implied`, so that `-C target-feature=-x` also drops
++    // everything that would have re-enabled `x`.
++    let transitively_implies = |name: &str, implied: &str| {
++        let mut stack = vec![name];
++        let mut seen = vec![];
++        while let Some(feature) = stack.pop() {
++            if feature == implied {
++                return true;
++            }
++            if seen.contains(&feature) {
++                continue;
++            }
++            seen.push(feature);
++            if let Some((_, _, sub)) = lookup(feature) {
++                stack.extend_from_slice(sub);
++            }
++        }
++        false
++    };
++
++    for requested in sess.opts.cg.target_feature.split(',') {
++        let (enable, name) = match requested.split_at_checked(1) {
++            Some(("+", name)) => (true, name),
++            Some(("-", name)) => (false, name),
++            // `-C target-feature=<name>` without a sign, `crt-static` (handled by rustc itself)
++            // and the empty string. rustc diagnoses the malformed ones on its own.
++            _ => continue,
++        };
++        // Unknown or nightly-only features are skipped rather than diagnosed: matching
++        // rustc_codegen_llvm's diagnostics here would need the full stability plumbing, and
++        // claiming a feature rustc considers unstable would make `cfg(target_feature)` differ
++        // from every other backend in the opposite direction.
++        let Some(&(name, stability, implied)) = lookup(name) else { continue };
++        if !stability.toggle_allowed().is_ok() || !stability.in_cfg() {
++            continue;
++        }
++
++        if enable {
++            let mut stack = vec![name];
++            stack.extend_from_slice(implied);
++            while let Some(feature) = stack.pop() {
++                if features.contains(&feature) {
++                    continue;
++                }
++                features.push(feature);
++                if let Some((_, _, sub)) = lookup(feature) {
++                    stack.extend_from_slice(sub);
++                }
++            }
++        } else {
++            features.retain(|feature| !transitively_implies(feature, name));
++        }
++    }
++
++    features
++}
++
+ /// Determine if the Cranelift ir verifier should run.
+ ///
+ /// Returns true when `-Zverify-llvm-ir` is passed, the `CG_CLIF_ENABLE_VERIFIER` env var is set to

@@ -1,0 +1,36 @@
+# Self-contained reproduction for candidate 018 (flood filter flooding the full wide-tile bbox of
+# the filtered content instead of the tight per-pixel filter region, issue #1423). Status: Not
+# reproducible on current HEAD - see RESULT.md. No patch.diff exists for this candidate (nothing to
+# fix on the current tree), so this justfile only has a `reproduce-before` step, per the template's
+# own instructions for that case.
+#
+# `repo_url`/`base_commit` were read via `git remote get-url origin` / `git rev-parse HEAD` in the
+# main project at investigation time.
+#
+# Note: this environment's git-lfs binary may be missing from PATH in some shells, which makes a
+# plain `git clone`/`git checkout` of this repo fail on its LFS-tracked PNG test snapshots. The
+# repro below never touches those files, so the clone step disables the LFS filter outright
+# (`-c filter.lfs.*`) to stay robust regardless of whether git-lfs is installed/on PATH on the
+# machine running this.
+
+# https (not the ssh form `git remote get-url origin` actually returns) so `just clone` works
+# without an ssh key/agent configured.
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false clone {{repo_url}} clone
+    cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone. Renders a 3x3 rect inside a flood
+# filter layer and checks whether pixels far from the rect were also flooded - on current HEAD they
+# are not (bug not present here; see RESULT.md for the historical confirmation against an older
+# commit and the commit that incidentally fixed it).
+reproduce-before:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

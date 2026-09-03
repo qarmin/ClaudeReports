@@ -1,0 +1,47 @@
+# Self-contained reproduction for candidate 006 (MergeSubTask::execute panic-safety hole in
+# par_experimental_sort's standard-merge loop).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# NOTE: on base_commit b9214fbe, the crate does not compile at all under `--features
+# experimental` (a separate, already-Confirmed bug: candidate 001, a plain type mismatch in
+# src/infallible/par_runner.rs). That bug is unrelated to this one but blocks reaching it, so
+# `prereq_001.patch` (a copy of 001's own already-verified one-line fix) is applied right after
+# cloning, purely so the pristine tree can build under the feature this candidate needs - it is
+# NOT part of this candidate's own fix and is applied identically in both reproduce-before and
+# reproduce-after.
+
+repo_url := "https://github.com/orxfun/orx-parallel.git"
+base_commit := "b9214fbeb714e4bb8f8858676a818cef2f21b097"
+
+# Full cycle: clone pristine, unblock the build, prove the bug exists, apply this candidate's
+# own fix, prove it's gone.
+test: clone prereq reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+prereq:
+    cd clone && git apply "{{justfile_directory()}}/prereq_001.patch"
+
+# Build+run the standalone repro against the pristine (prereq-only) clone - should abort with a
+# real double-free reported by the system allocator. Run more than once if a particular run
+# happens to panic before reaching the merge phase at all (see RESULT.md for repeat-run data);
+# in practice this has reproduced on every run tried during investigation.
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - the comparator still panics (expected, a
+# user comparator is allowed to panic), but the process should no longer crash: the caller's
+# slice stays a valid permutation and drops cleanly.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

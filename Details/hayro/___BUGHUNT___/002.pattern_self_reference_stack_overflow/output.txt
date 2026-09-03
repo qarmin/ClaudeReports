@@ -1,0 +1,60 @@
+Captured output of `___BUGHUNT___/002.pattern_self_reference_stack_overflow/repro/` (`cargo run
+--release`), run against `hayro` at commit `5a5f0e247c970df948505ee0bb36e2df2504bf86` (the pristine
+tree) and again after applying `patch.diff`.
+
+=== BEFORE (pristine tree, unpatched hayro-interpret/src/pattern.rs) ===
+
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running `target/release/repro`
+
+thread 'main' (34618) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+[original fuzzer-found crash file (crash-51b715b89668b0bd90d214f9249269abac0b05a2)] REPRODUCED - child process crashed (child status: signal: 6 (SIGABRT) (core dumped))
+
+thread 'main' (34619) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+[independently hand-crafted self-referential tiling pattern] REPRODUCED - child process crashed (child status: signal: 6 (SIGABRT) (core dumped))
+
+exit code: 1
+
+(Reproduced identically 3/3 runs against the pristine tree, both for the original 4369-byte
+fuzzer-found `crash_input.pdf` and the independently hand-crafted 733-byte `self_pattern.pdf`.)
+
+Separately, running the same `crash_input.pdf` through the actual `hayro-fuzz` `fuzz_pdf_render`
+cargo-fuzz/libFuzzer/ASan target (not part of this repro/, see RESULT.md "What was tried") produces
+the ASan diagnostic that first identified this as a stack overflow rather than some other crash
+kind:
+
+    AddressSanitizer:DEADLYSIGNAL
+    =================================================================
+    ==17955==ERROR: AddressSanitizer: stack-overflow on address 0x7ffffc98dff8 (pc 0x5a04a9ccc5d9 bp 0x737e9a8237a0 sp 0x7ffffc98e000 T0)
+    ==17955== libFuzzer: run interrupted; exiting
+
+A `gdb` backtrace captured on that same ASan build at the moment of the SIGSEGV (see RESULT.md
+"Root cause") shows the actual recursive call chain that overflows the stack:
+
+    #2028 hayro_interpret::interpret::interpret<hayro::Renderer> (...) at hayro-interpret/src/interpret/mod.rs:466
+    #2029 hayro_interpret::pattern::TilingPattern::interpret<hayro::Renderer> (...) at hayro-interpret/src/pattern.rs:258
+    #2030 hayro::Renderer::set_paint<...> (...) at hayro/src/paint.rs:157
+    #2031 hayro::Renderer::draw_rect (...) at hayro/src/path.rs:103
+    #2032 hayro::{impl#2}::draw_rect (...) at hayro/src/lib.rs:171
+    #2033 hayro_interpret::interpret::path::fill_path_impl::{closure#0}<hayro::Renderer> (...) at hayro-interpret/src/interpret/path.rs:68
+    #2034 hayro_interpret::interpret::path::fill_path_impl<hayro::Renderer> (...) at hayro-interpret/src/interpret/path.rs:91
+    #2035 hayro_interpret::interpret::path::fill_path<hayro::Renderer> (...) at hayro-interpret/src/interpret/path.rs:12
+    #2036 hayro_interpret::interpret::interpret<hayro::Renderer> (...)
+    #2037 hayro_interpret::pattern::TilingPattern::interpret<hayro::Renderer> (...) at hayro-interpret/src/pattern.rs:258
+    #2038 hayro::Renderer::set_paint<...> (...) at hayro/src/paint.rs:157
+    ... (this exact 9-frame cycle repeats identically for well over 2000 levels before the crash) ...
+
+=== AFTER (same tree with patch.diff applied) ===
+
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running `target/release/repro`
+rendered a 200x200 pixmap without crashing
+[original fuzzer-found crash file (crash-51b715b89668b0bd90d214f9249269abac0b05a2)] did not reproduce - render() completed normally (child status: exit status: 0)
+rendered a 100x100 pixmap without crashing
+[independently hand-crafted self-referential tiling pattern] did not reproduce - render() completed normally (child status: exit status: 0)
+
+exit code: 0
+
+(Reproduced-gone identically 3/3 runs against the patched tree, both inputs.)

@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate is a MEASUREMENT/instrumentation fix, not a runtime performance patch to real
+# source: it extends candidates 007/010/011/017's existing whole-match-arm bucket instrumentation
+# (`../_reference/interpret_dispatch_instrumentation.diff` +
+# `../_reference/pipeline_breakdown_profiling_instrumentation.diff`) with call-depth-aware "self
+# time" accounting, so the `xobject_misc` bucket no longer double-counts a Form XObject's own
+# recursive `interpret()` call. patch.diff below is fully self-contained: it includes the two
+# base instrumentation diffs verbatim PLUS this candidate's own additions (the SELF-time
+# counters/subtraction in hayro-interpret/src/lib.rs + interpret/mod.rs) AND the new
+# `hayro/examples/bench_ops_reference.rs` example file (added as a new file in the diff, unlike
+# candidates 011/017's own patch.diff which omitted it and relies on a human copying it in
+# manually) - `just test` below builds and runs for real from a fresh clone with zero manual
+# steps.
+#
+# No permanent source change is being proposed here - see RESULT.md.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone at the pinned commit, apply the instrumentation (incl. the new bench
+# example), build, run the depth-aware breakdown against both test PDFs in this folder's
+# testdata/.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Prints the full operator-bucket time breakdown, including both the old (candidate 007/011,
+# double-counting) "whole-match-arm" buckets AND the new (candidate 027) call-depth-aware SELF
+# buckets, against both test PDFs, taskset-pinned for low noise. Override iteration count with
+# `just bench 40`.
+bench iterations="20":
+    cd clone && cargo build --release --example bench_ops_reference -p hayro
+    taskset -c 2 ./clone/target/release/examples/bench_ops_reference "{{justfile_directory()}}/testdata/tile_clamp_bug.pdf" {{iterations}}
+    taskset -c 2 ./clone/target/release/examples/bench_ops_reference "{{justfile_directory()}}/testdata/animated-distributions.pdf" {{iterations}}
+
+clean:
+    rm -rf clone

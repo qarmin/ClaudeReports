@@ -1,0 +1,49 @@
+diff --git a/pixeldata/src/gdcm.rs b/pixeldata/src/gdcm.rs
+index d82f56f6..c13573a5 100644
+--- a/pixeldata/src/gdcm.rs
++++ b/pixeldata/src/gdcm.rs
+@@ -1,10 +1,10 @@
+ //! Decode pixel data using GDCM when the default features are enabled.
+ 
+ use crate::{
+-    DecodePixelDataSnafu, DecodedPixelData, InvalidPixelDataSnafu, LengthMismatchRescaleSnafu,
+-    LengthMismatchWindowLevelSnafu, PixelDecoder, Rescale, Result, UnknownTransferSyntaxSnafu,
+-    UnsupportedPhotometricInterpretationSnafu, UnsupportedTransferSyntaxSnafu, VoiLutFunction,
+-    WindowLevel,
++    DecodePixelDataSnafu, DecodedPixelData, FrameOutOfRangeSnafu, InvalidPixelDataSnafu,
++    LengthMismatchRescaleSnafu, LengthMismatchWindowLevelSnafu, PixelDecoder, Rescale, Result,
++    UnknownTransferSyntaxSnafu, UnsupportedPhotometricInterpretationSnafu,
++    UnsupportedTransferSyntaxSnafu, VoiLutFunction, WindowLevel,
+ };
+ use dicom_core::{DataDictionary, DicomValue};
+ use dicom_dictionary_std::tags;
+@@ -124,8 +124,27 @@ where
+                 }
+             }
+             DicomValue::Primitive(p) => {
+-                // Non-encoded, just return the pixel data of the first frame
+-                p.to_bytes().to_vec()
++                // Non-encoded, just return the pixel data for all frames
++                let data = p.to_bytes();
++
++                if bits_allocated == 1 {
++                    // Samples are packed 8 per byte: unpack to one byte (0/255) per pixel
++                    let frame_pixels = (rows as usize) * (cols as usize);
++                    let frame_samples = frame_pixels * (samples_per_pixel as usize);
++                    let frame_size = frame_samples.div_ceil(8);
++                    let frame_size_all = frame_size * (number_of_frames as usize);
++
++                    let frame_data = data.get(0..frame_size_all).context(FrameOutOfRangeSnafu {
++                        frame_number: frame_size_all as u32,
++                    })?;
++                    frame_data
++                        .iter()
++                        .flat_map(|&byte| (0..8).map(move |bit| ((byte >> bit) & 1) * 255))
++                        .take(frame_pixels * number_of_frames as usize)
++                        .collect()
++                } else {
++                    data.to_vec()
++                }
+             }
+             DicomValue::Sequence(_) => InvalidPixelDataSnafu.fail()?,
+         };

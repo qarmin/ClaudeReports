@@ -1,0 +1,107 @@
+# Self-contained reproduction for candidate 016.
+#
+# NOTE (shape 3, see templates/candidate_justfile): kurbo's own benchmarks don't reach this code
+# path, so this uses the `kurbo_bench` harness built for this workspace. That harness is UNTRACKED
+# in the kurbo repo - a fresh `git clone` of repo_url will never contain it - so `clone:` copies it
+# in from `../harness/kurbo_bench` and rewrites its kurbo dependency path. That makes this folder
+# self-contained *given the whole ___OPTIMIZATIONS___ folder kept together*, not as a single
+# isolated subfolder.
+#
+# `clone:` also applies `harness_fit_dump.diff` to the copied harness, which adds four untimed
+# `--dump` targets (`fit`, `fit-count`, `simplify`, `simplify-count`) that the canonical harness
+# did not have. Those are what the characterized-difference section of RESULT.md is measured with;
+# they do not touch any timed code path.
+#
+# `just test` clones at the pinned commit, builds a baseline binary, applies patch.diff, builds a
+# patched binary, and prints a real before/after for the three affected scenes plus the paired
+# comparisons that carry the conclusion, plus the output-difference characterization.
+
+repo_url := "https://github.com/linebender/kurbo.git"
+base_commit := "ca273499e3e48bd2de6f02aa8e99a148984e45f3"
+harness_dir := "../harness/kurbo_bench"
+
+test: clone build-baseline apply build-patched bench diff-output
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout --quiet {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/kurbo_bench
+    rm -rf clone/kurbo_bench/target
+    # The harness lives at ___OPTIMIZATIONS___/harness/kurbo_bench in the workspace, but at
+    # clone/kurbo_bench here, so its relative path to the kurbo crate changes.
+    sed -i 's|path = "../../../kurbo"|path = "../kurbo"|' clone/kurbo_bench/Cargo.toml
+    patch -p1 -d clone/kurbo_bench < "{{justfile_directory()}}/harness_fit_dump.diff"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/kurbo_bench && cargo build --release
+    cp clone/kurbo_bench/target/release/kurbo_bench ./bin_baseline
+
+build-patched:
+    find clone/kurbo/src -name '*.rs' -exec touch {} +
+    cd clone/kurbo_bench && cargo build --release
+    cp clone/kurbo_bench/target/release/kurbo_bench ./bin_patched
+
+bench:
+    @echo "=== the two binaries must differ, or the patch didn't apply ==="
+    md5sum ./bin_baseline ./bin_patched
+    @echo ""
+    @echo "=== fit: baseline then patched ==="
+    ulimit -c 0 && ./bin_baseline fit 20
+    ulimit -c 0 && ./bin_patched  fit 20
+    @echo ""
+    @echo "=== fit-opt: baseline then patched ==="
+    ulimit -c 0 && ./bin_baseline fit-opt 5
+    ulimit -c 0 && ./bin_patched  fit-opt 5
+    @echo ""
+    @echo "=== simplify: baseline then patched ==="
+    ulimit -c 0 && ./bin_baseline simplify 500
+    ulimit -c 0 && ./bin_patched  simplify 500
+    @echo ""
+    @echo "=== paired comparisons (alternating runs; the win count carries the conclusion) ==="
+    ulimit -c 0 && TASKSET=2 RUNS=9 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- fit 20
+    ulimit -c 0 && TASKSET=2 RUNS=9 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- fit-opt 5
+    ulimit -c 0 && TASKSET=2 RUNS=9 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- simplify 500
+    @echo ""
+    @echo "NOTE: the CHECK lines above differ by design - this candidate is not bit-exact."
+    @echo "      Only fit / fit-opt / simplify change; the other 22 scenes are bit-identical."
+
+# Reproduces the characterized-difference numbers in RESULT.md.
+diff-output:
+    @echo "=== element counts per output path (must be identical for a coordinate diff to mean anything) ==="
+    ./bin_baseline --dump fit-count > base_fitcount.txt
+    ./bin_patched  --dump fit-count > pat_fitcount.txt
+    diff -q base_fitcount.txt pat_fitcount.txt && echo "fit: element counts IDENTICAL for all 500 sources"
+    ./bin_baseline --dump simplify-count
+    ./bin_patched  --dump simplify-count
+    @echo ""
+    @echo "=== fit: coordinate-wise difference ==="
+    ./bin_baseline --dump fit > base_fit.txt
+    ./bin_patched  --dump fit > pat_fit.txt
+    paste base_fit.txt pat_fit.txt | awk '{d=$1-$2; if(d<0)d=-d; if(d>0)n++; if(d>m)m=d} END {printf "total %d  differing %d (%.2f%%)  max_abs %.3e\n", NR, n, 100*n/NR, m}'
+    paste base_fit.txt pat_fit.txt | awk '{d=$1-$2; if(d<0)d=-d; if(d>1e-6)k++} END {printf "coordinates differing by more than 1e-6: %d\n", k+0}'
+    @echo ""
+    @echo "=== simplify: coordinate-wise difference (accuracy 1.0) ==="
+    ./bin_baseline --dump simplify > base_simplify.txt
+    ./bin_patched  --dump simplify > pat_simplify.txt
+    paste base_simplify.txt pat_simplify.txt | awk '{d=$1-$2; if(d<0)d=-d; if(d>0)n++; if(d>m)m=d} END {printf "total %d  differing %d (%.2f%%)  max_abs %.4g\n", NR, n, 100*n/NR, m}'
+
+# Deterministic instruction counts - immune to host load, the fallback when wall clock is noisy.
+callgrind:
+    ulimit -n 4096 && valgrind --tool=callgrind --callgrind-out-file=/dev/null ./bin_baseline fit 3 2>&1 | grep -o 'refs: .*'
+    ulimit -n 4096 && valgrind --tool=callgrind --callgrind-out-file=/dev/null ./bin_patched  fit 3 2>&1 | grep -o 'refs: .*'
+    ulimit -n 4096 && valgrind --tool=callgrind --callgrind-out-file=/dev/null ./bin_baseline fit-opt 1 2>&1 | grep -o 'refs: .*'
+    ulimit -n 4096 && valgrind --tool=callgrind --callgrind-out-file=/dev/null ./bin_patched  fit-opt 1 2>&1 | grep -o 'refs: .*'
+    ulimit -n 4096 && valgrind --tool=callgrind --callgrind-out-file=/dev/null ./bin_baseline simplify 20 2>&1 | grep -o 'refs: .*'
+    ulimit -n 4096 && valgrind --tool=callgrind --callgrind-out-file=/dev/null ./bin_patched  simplify 20 2>&1 | grep -o 'refs: .*'
+
+tests:
+    cd clone && cargo test --workspace --all-features
+    cd clone && cargo build -p kurbo --no-default-features --features libm
+    cd clone && cargo clippy --workspace --all-features
+
+clean:
+    rm -rf clone bin_baseline bin_patched *_fit.txt *_fitcount.txt *_simplify.txt

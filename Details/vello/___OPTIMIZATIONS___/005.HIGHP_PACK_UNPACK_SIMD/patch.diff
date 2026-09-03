@@ -1,0 +1,100 @@
+diff --git a/sparse_strips/vello_cpu/src/fine/highp/mod.rs b/sparse_strips/vello_cpu/src/fine/highp/mod.rs
+index f4386f52..bb7e9a81 100644
+--- a/sparse_strips/vello_cpu/src/fine/highp/mod.rs
++++ b/sparse_strips/vello_cpu/src/fine/highp/mod.rs
+@@ -16,7 +16,7 @@
+ use crate::filter::context::ScratchBuffer;
+ use crate::filter::filter_highp;
+ use crate::fine::FineKernel;
+-use crate::fine::{COLOR_COMPONENTS, Painter, Splat4thExt};
++use crate::fine::{COLOR_COMPONENTS, NumericVec, Painter, Splat4thExt, TILE_HEIGHT_COMPONENTS};
+ use crate::peniko::BlendMode;
+ use crate::region::Region;
+ use vello_common::fearless_simd::*;
+@@ -25,7 +25,6 @@ use vello_common::kurbo::Affine;
+ use vello_common::mask::Mask;
+ use vello_common::paint::{PremulColor, Tint, TintMode};
+ use vello_common::pixmap::Pixmap;
+-use vello_common::tile::Tile;
+ 
+ pub(crate) mod blend;
+ pub(crate) mod compose;
+@@ -269,33 +268,53 @@ impl<S: Simd> FineKernel<S> for F32Kernel {
+         }
+     }
+ 
+-    fn pack(_simd: S, scratch: &[Self::Numeric], width: usize, region: &mut Region<'_>) {
+-        for y in 0..region.height {
+-            let row = &mut region.row_mut(y)[..width * COLOR_COMPONENTS];
+-            // TODO: SIMDify
+-            for (dx, pixel) in row.chunks_exact_mut(COLOR_COMPONENTS).enumerate() {
+-                let idx = COLOR_COMPONENTS * (Tile::HEIGHT as usize * dx + usize::from(y));
+-                let src = &scratch[idx..idx + COLOR_COMPONENTS];
+-                pixel[0] = (src[0] * 255.0 + 0.5) as u8;
+-                pixel[1] = (src[1] * 255.0 + 0.5) as u8;
+-                pixel[2] = (src[2] * 255.0 + 0.5) as u8;
+-                pixel[3] = (src[3] * 255.0 + 0.5) as u8;
+-            }
+-        }
++    fn pack(simd: S, scratch: &[Self::Numeric], width: usize, region: &mut Region<'_>) {
++        let height = usize::from(region.height);
++        let areas = region.areas();
++
++        simd.vectorize(
++            #[inline(always)]
++            || {
++                for dx in 0..width {
++                    let idx = TILE_HEIGHT_COMPONENTS * dx;
++                    let packed = u8x16::from_f32(
++                        simd,
++                        f32x16::from_slice(simd, &scratch[idx..idx + TILE_HEIGHT_COMPONENTS]),
++                    );
++                    let bytes: [u8; 16] = packed.into();
++                    let start = dx * COLOR_COMPONENTS;
++
++                    for (y, area) in areas.iter_mut().take(height).enumerate() {
++                        area[start..start + COLOR_COMPONENTS]
++                            .copy_from_slice(&bytes[y * COLOR_COMPONENTS..(y + 1) * COLOR_COMPONENTS]);
++                    }
++                }
++            },
++        );
+     }
+ 
+-    fn unpack(_simd: S, region: &mut Region<'_>, width: usize, scratch: &mut [Self::Numeric]) {
+-        for y in 0..region.height {
+-            let row = &region.row_mut(y)[..width * COLOR_COMPONENTS];
+-            // TODO: SIMDify + multiply by 1.0/255.0 instead.
+-            for (dx, pixel) in row.chunks_exact(COLOR_COMPONENTS).enumerate() {
+-                let idx = COLOR_COMPONENTS * (Tile::HEIGHT as usize * dx + usize::from(y));
+-                scratch[idx] = pixel[0] as f32 / 255.0;
+-                scratch[idx + 1] = pixel[1] as f32 / 255.0;
+-                scratch[idx + 2] = pixel[2] as f32 / 255.0;
+-                scratch[idx + 3] = pixel[3] as f32 / 255.0;
+-            }
+-        }
++    fn unpack(simd: S, region: &mut Region<'_>, width: usize, scratch: &mut [Self::Numeric]) {
++        let height = usize::from(region.height);
++        let areas = region.areas();
++
++        simd.vectorize(
++            #[inline(always)]
++            || {
++                for dx in 0..width {
++                    let mut bytes = [0_u8; 16];
++                    let start = dx * COLOR_COMPONENTS;
++
++                    for (y, area) in areas.iter().take(height).enumerate() {
++                        bytes[y * COLOR_COMPONENTS..(y + 1) * COLOR_COMPONENTS]
++                            .copy_from_slice(&area[start..start + COLOR_COMPONENTS]);
++                    }
++
++                    let converted = f32x16::from_u8(simd, u8x16::from_slice(simd, &bytes));
++                    let idx = TILE_HEIGHT_COMPONENTS * dx;
++                    converted.store_slice(&mut scratch[idx..idx + TILE_HEIGHT_COMPONENTS]);
++                }
++            },
++        );
+     }
+ }
+ 

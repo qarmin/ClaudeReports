@@ -1,0 +1,48 @@
+diff --git a/pixeldata/src/lib.rs b/pixeldata/src/lib.rs
+index 6ede5847..833899a1 100644
+--- a/pixeldata/src/lib.rs
++++ b/pixeldata/src/lib.rs
+@@ -1201,7 +1201,7 @@ impl DecodedPixelData<'_> {
+                             }
+                             // Signed 16-bit representation
+                             PixelRepresentation::Signed => {
+-                                let mut signed_buffer = vec![0; frame_length / 2];
++                                let mut signed_buffer: Vec<i16> = uninit_vec(frame_length / 2);
+                                 NativeEndian::read_i16_into(
+                                     &self.data[frame_start..frame_end],
+                                     &mut signed_buffer,
+@@ -1753,7 +1753,7 @@ impl DecodedPixelData<'_> {
+                             }
+                             // Signed 16 bit 2s complement representation
+                             PixelRepresentation::Signed => {
+-                                let mut signed_buffer = vec![0; data.len() / 2];
++                                let mut signed_buffer: Vec<i16> = uninit_vec(data.len() / 2);
+                                 NativeEndian::read_i16_into(data, &mut signed_buffer);
+ 
+                                 #[cfg(feature = "rayon")]
+@@ -1976,9 +1976,24 @@ impl DecodedPixelData<'_> {
+     }
+ }
+ 
++/// Allocates a `Vec<T>` of the given length without zero-initializing it, for a caller about to
++/// immediately fully overwrite every element (e.g. via a `NativeEndian::read_*_into` call, which
++/// writes every `dst` element in order) - `vec![0; len]` pays a real memset cost for content that
++/// gets fully discarded a few instructions later. Sound for `T: Copy` with no `Drop` glue and
++/// every bit pattern valid (`u16`/`i16` here): if the write is interrupted, the caller must not
++/// read the buffer before it's fully written - true of every call site using this helper.
++fn uninit_vec<T: Copy>(len: usize) -> Vec<T> {
++    let mut v: Vec<T> = Vec::with_capacity(len);
++    // SAFETY: see function doc.
++    unsafe {
++        v.set_len(len);
++    }
++    v
++}
++
+ fn bytes_to_vec_u16(data: &[u8]) -> Vec<u16> {
+     debug_assert!(data.len() % 2 == 0);
+-    let mut pixel_array: Vec<u16> = vec![0; data.len() / 2];
++    let mut pixel_array: Vec<u16> = uninit_vec(data.len() / 2);
+     NativeEndian::read_u16_into(data, &mut pixel_array);
+     pixel_array
+ }

@@ -1,0 +1,89 @@
+Captured output from `just test` (full clone-based repro, base_commit 5c6565e36d35b9ea7de049daa67acc0be0fd3b01),
+run from this candidate folder. Build noise (cargo `Compiling`/`Locking`/`Cloning` lines) trimmed.
+
+=== reproduce-before (pristine clone, patch.diff not yet applied) ===
+
+original file: duration=3.708s channels=Some(2)
+malformed file (stbl size +16, everything else untouched): read_from -> Ok, duration=3.708s channels=Some(2)
+REPRODUCED - a `stbl` atom lying about its own size by 16 bytes past the real remaining space inside `minf` was silently accepted instead of rejected, because `find_child_atom`'s search budget for `stbl` within `minf` is `minf`'s full, header-inclusive declared length even though the reader has already been seeked past `minf`'s own 8-byte header by this point.
+
+(exit code 1)
+
+=== apply (git apply patch.diff) === succeeded, no output
+
+=== reproduce-after (same clone, patch.diff applied) ===
+
+original file: duration=3.708s channels=Some(2)
+malformed file: read_from -> Err: FileParseError { ty: Some(Mp4), .. }
+did not reproduce - the malformed input was rejected instead of being silently accepted
+
+(exit code 0)
+
+=== Reconfirmation directly against the main project's own working tree (this session, before
+this candidate folder was finalized) ===
+
+Temporary, non-committed scratch test (`lofty/tests/probe_033_scratch_test.rs`, deleted before
+this candidate folder was written) built the same +16-mutated `has-tags.m4a` (on-disk `stbl` size
+field at byte offset 1862 incremented by 16, every other byte untouched) and called the real
+public `Mp4File::read_from` via
+`cargo test -p lofty --test probe_033_scratch_test minf_stbl_plus16_desync -- --nocapture`, run
+3 times each way:
+
+Unpatched mainline, 3 runs:
+Run 1: OK: duration=3.708s (properties parsed without error)
+Run 2: OK: duration=3.708s (properties parsed without error)
+Run 3: OK: duration=3.708s (properties parsed without error)
+
+With this candidate's fix applied directly to lofty/src/mp4/properties.rs (the same patch
+captured in patch.diff), 3 runs:
+Run 1: Err: FileParseError { ty: Some(Mp4), .. }
+Run 2: Err: FileParseError { ty: Some(Mp4), .. }
+Run 3: Err: FileParseError { ty: Some(Mp4), .. }
+
+=== Isolating this candidate's own contribution from candidate 026's separate, still-unpatched
+`atom_info.rs` bug (a distinct, already-documented off-by-`ATOM_HEADER_LEN` bug present at every
+`AtomInfo::read` call site, including this one, which independently leaks its own 8 bytes of
+slack) ===
+
+With ONLY candidate 026's already-verified fix applied (`lofty/src/mp4/atom_info.rs`, `if len >
+reader_size`) and this candidate's own call site at properties.rs:489 left unpatched, the same
++16 file:
+`Err: FileParseError { ty: Some(Mp4), .. }`
+- rejected. Since 026's own bug alone tops out at 8 bytes of slack, this +16 rejection with 026
+fixed alone shows the *combined* max is now bounded by this candidate's own 8-byte contribution -
+consistent with, but not yet isolating, this candidate's own bug (a +16 file already exceeds even
+this candidate's own max-8 slack alone once 026 is fixed).
+
+=== Demonstrating concrete (not just theoretical) harm: a well-formed file's real, untouched audio
+properties become genuinely unreadable, not just "accepted when it should have been rejected" ===
+
+Using the same +16 `stbl` size mutation, plus renaming the fourcc of the real, valid `udta` atom
+that immediately follows `trak`/`mdia`/`minf`/`stbl`'s shared true end (offset 2773, `udta` ->
+`stsd`) - engineering the specific case where the bytes `Minf::parse`'s desynced loop reads past
+`stbl`'s true end happen to look like a plausible `stsd` atom instead of harmlessly skippable data:
+
+Unpatched mainline (both this candidate's bug and candidate 026's present):
+`Err: FileParseError { ty: Some(Mp4), .. }`
+- the file's own, correct, already-parsed `stsd_data` is silently overwritten with 2331 bytes of
+real `meta` atom content (misread as if it were `stsd` content), and re-parsing that garbage as
+`stsd` fails - a well-formed file whose only "malformation" was letting a legitimate-looking atom
+sit exactly where this bug's overrun reads from is turned into an outright, spurious parse
+failure, not silent corruption or silent success.
+
+With this candidate's own fix applied and candidate 026's `atom_info.rs` bug left UNPATCHED (i.e.
+isolating that 026's own separate 8-byte slack alone is not why this specific +16 case fails):
+`Err: FileParseError { ty: Some(Mp4), .. }`
+(rejected outright at the length-check stage, since +16 exceeds 026's own max-8 slack on its own -
+consistent with the fix closing this candidate's own contribution).
+
+Verified with `read_properties(false)` on the same fourcc-renamed file: `Ok` (the top-level
+`Moov::parse` tolerates the renamed atom on its own with no error), confirming the `Err` seen above
+comes specifically from the `read_properties`/`Minf::parse` path (this candidate's bug), not from
+an unrelated confound introduced by the fourcc rename itself.
+
+=== Project test suite (cargo test -p lofty --lib --tests -- --test-threads=1) ===
+
+Before fix: 646 passed; 0 failed; 73 ignored
+After fix:  646 passed; 0 failed; 73 ignored
+(identical - no change, no new failures; counts exclude the temporary, non-committed scratch test
+file used only for this candidate's own investigation)

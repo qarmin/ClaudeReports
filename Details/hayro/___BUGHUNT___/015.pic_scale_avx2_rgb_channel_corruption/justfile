@@ -1,0 +1,38 @@
+# Self-contained reproduction for this candidate.
+#
+# The bug is entirely inside pic-scale (a crates.io dependency, not vendored) - patch.diff is a
+# one-line Cargo.lock bump (pic-scale 0.7.9 -> 0.7.11, already released upstream, no hayro source
+# touched). `just test` builds hayro's own `hayro/examples/render.rs` example twice from a fresh
+# clone - once with hayro's default features (pic-scale's AVX2 handlers compiled in and, on an
+# AVX2 machine, selected at runtime) and once with only the scalar fallback (no SIMD features at
+# all, which pic-scale's own bug never affected) - and diffs the two renders of img.pdf. Before
+# the patch: 26/500395 pixels differ. After: bit-identical.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp "{{justfile_directory()}}/img.pdf" clone/img.pdf
+
+# Renders img.pdf with hayro's default features (simd/AVX2 on) and with only the scalar fallback
+# (no simd feature at all), then diffs the two PNGs.
+reproduce:
+    cd clone && cargo run --release -p hayro --example render -- img.pdf out_simd 1.0
+    cd clone && cargo run --release -p hayro --example render --no-default-features --features embed-fonts,embed-cmaps -- img.pdf out_scalar 1.0
+    @echo "=== diff between AVX2-enabled and scalar-fallback renders (see RESULT.md for the expected count/deviation before vs. after patch.diff) ==="
+    compare -metric AE -fuzz 0% clone/out_simd/rendered_0.png clone/out_scalar/rendered_0.png diff_out.png || true
+
+reproduce-before: reproduce
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+reproduce-after: reproduce
+
+clean:
+    rm -rf clone diff_out.png

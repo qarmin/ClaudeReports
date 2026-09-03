@@ -1,0 +1,53 @@
+# Self-contained reproduction for this candidate.
+#
+# This bug is only externally observable under UBSan instrumentation of the *compiled program*
+# (see RESULT.md - the OOB read never affects the final result), and rustc_codegen_gcc has no
+# built-in `-Zsanitizer=` support, so `clone` does the full project setup (matching candidate
+# 001's justfile reasoning: that setup is itself part of what's needed to reproduce, and is the
+# slow part) AND applies `repro/ubsan_hook.patch` - a tiny opt-in instrumentation hook to
+# src/gcc_util.rs, NOT part of the fix - so the backend can be told (via CG_GCCJIT_UBSAN=1) to
+# forward `-fsanitize=undefined` into libgccjit.
+#
+# Requires GCC's own libubsan on the host (`gcc -print-file-name=libubsan.a`; the `libubsan1`
+# package on Debian/Ubuntu) - see repro/README.md.
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && cp config.example.toml config.toml
+    cd clone && patch -p1 < "{{justfile_directory()}}/repro/ubsan_hook.patch"
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Build+run the standalone repro against the pristine (unpatched src/builder.rs) clone - should
+# print ~40 UBSan "runtime error: load of address ... with insufficient space" diagnostics from
+# swizzle.rs, while still printing "ok" and passing every assertion (the OOB read is never
+# actually selected by the shuffle mask - see RESULT.md's root cause).
+reproduce-before:
+    rm -rf repro/target
+    cd repro && CG_GCCJIT_UBSAN=1 \
+      CG_RUSTFLAGS="-Clinker=gcc -Clink-arg=-fsanitize=undefined -Clink-arg=-lubsan" \
+      CHANNEL=release "{{justfile_directory()}}/clone/y.sh" cargo build --manifest-path Cargo.toml
+    ulimit -c 0 && repro/target/debug/shuffle_oob_repro
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && ./y.sh build --release
+
+# Same repro again, now against the patched clone - should print zero UBSan diagnostics while
+# producing the exact same ("ok", all asserts pass) output as before.
+reproduce-after:
+    rm -rf repro/target
+    cd repro && CG_GCCJIT_UBSAN=1 \
+      CG_RUSTFLAGS="-Clinker=gcc -Clink-arg=-fsanitize=undefined -Clink-arg=-lubsan" \
+      CHANNEL=release "{{justfile_directory()}}/clone/y.sh" cargo build --manifest-path Cargo.toml
+    ulimit -c 0 && repro/target/debug/shuffle_oob_repro
+
+clean:
+    rm -rf clone repro/target

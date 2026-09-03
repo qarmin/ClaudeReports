@@ -1,0 +1,36 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# repo_url/base_commit read at the moment patch.diff was captured (`git remote get-url origin` /
+# `git rev-parse HEAD` in the main project).
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the isolated microbench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# No existing project bench reaches hayro-syntax::math::round_f32 (its only real call site,
+# filter/jpx.rs::scale(), is never exercised by any PDF in hayro-tests' 360-file corpus - see
+# RESULT.md). Re-adds the same temporary #[cfg(test)] microbenchmark used to produce this
+# candidate's numbers, mirroring scale()'s per-byte round_f32 loop shape (a plausible 1241x1752,
+# 1-component, 4-bit-palette image), then removes it again so `clone/` is left clean.
+bench:
+    cd clone && python3 "{{justfile_directory()}}/inject_bench.py" hayro-syntax/src/math.rs
+    cd clone && taskset -c 2 cargo test -p hayro-syntax --release --features std,images --lib round_f32_scale_bench -- --ignored --nocapture --test-threads=1
+    cd clone && taskset -c 2 cargo test -p hayro-syntax --release --features std,images --lib round_f32_scale_bench -- --ignored --nocapture --test-threads=1
+    cd clone && cargo test -p hayro-syntax --release --features std,images --lib round_f32_scale_bench -- --ignored --nocapture --test-threads=1
+    cd clone && cargo test -p hayro-syntax --release --features std,images --lib round_f32_scale_bench -- --ignored --nocapture --test-threads=1
+
+clean:
+    rm -rf clone

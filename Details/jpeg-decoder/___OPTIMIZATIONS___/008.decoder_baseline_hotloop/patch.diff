@@ -1,0 +1,37 @@
+diff --git a/src/decoder.rs b/src/decoder.rs
+index b8eb531..4d67b28 100644
+--- a/src/decoder.rs
++++ b/src/decoder.rs
+@@ -869,6 +869,12 @@ impl<R: Read> Decoder<R> {
+         let mut expected_rst_num = 0;
+         let mut eob_run = 0;
+         let mut mcu_row_coefficients = vec![vec![]; components.len()];
++        // Buffered instead of sent to the worker immediately (one `append_row` call per MCU
++        // row): dequantization+IDCT for a row has no dependency on any other row once its
++        // coefficients are decoded, so batching every row of the scan into one `append_rows`
++        // call lets the worker (rayon backend) run them in parallel instead of serially
++        // interleaved with the (inherently sequential) Huffman decode below.
++        let mut pending_rows: Vec<(usize, Vec<i16>)> = Vec::new();
+ 
+         if !is_progressive {
+             for (i, component) in components.iter().enumerate().filter(|&(i, _)| finished[i]) {
+@@ -1053,13 +1059,16 @@ impl<R: Read> Decoder<R> {
+                         )
+                     };
+ 
+-                    // FIXME: additional potential work stealing opportunities for rayon case if we
+-                    // also internally can parallelize over components.
+-                    worker.append_row((i, row_coefficients))?;
++                    pending_rows.push((i, row_coefficients));
+                 }
+             }
+         }
+ 
++        // Now that entropy decoding for the whole scan is done, hand every row's coefficients
++        // to the worker in one batch so the rayon backend can dequantize+IDCT them in parallel
++        // (see `pending_rows` above).
++        worker.append_rows(&mut pending_rows.into_iter())?;
++
+         let mut marker = huffman.take_marker(&mut self.reader)?;
+         while let Some(Marker::RST(_)) = marker {
+             marker = self.read_marker().ok();

@@ -1,0 +1,44 @@
+# Self-contained reproduction attempt for this candidate.
+#
+# Status: Not reproducible (see RESULT.md) - none of the three patterns from GitHub issue #165
+# (LOGIC_1 thread-count min/max swap, LOGIC_3 unconditional `None => break` in `_use` variants,
+# LOGIC_5/UAF_1 `min_split_len` min/max swap feeding an unsafe `first_unchecked()`) exist in the
+# current, fully-rewritten codebase. There is no patch.diff - this justfile only runs the "before"
+# side (against pristine `base_commit`), exactly as this session ran it.
+#
+# Unrelated prerequisite: building this crate with `--features experimental` (needed only for
+# `sort_boundary`/`miri_sort_boundary`, to reach the public `par_experimental_sort` entry point)
+# currently fails to compile on pristine `base_commit` due to a *different*, already-confirmed bug
+# (candidate 001, `collect_arb_over_bag_bool_type_mismatch` - see
+# ../001.collect_arb_over_bag_bool_type_mismatch/RESULT.md). `apply-prereq-fix` applies that one-line
+# fix directly to the clone (not this candidate's own finding) purely so the clone compiles at all;
+# it is not part of what this candidate is reporting.
+
+repo_url := "git@github.com:orxfun/orx-parallel.git"
+base_commit := "b9214fbeb714e4bb8f8858676a818cef2f21b097"
+
+# Full cycle: clone pristine, apply the unrelated prerequisite fix, run every scenario binary.
+test: clone apply-prereq-fix reproduce-before
+
+clone:
+    rm -rf clone
+    mkdir -p clone
+    git clone {{repo_url}} clone/orx-parallel
+    cd clone/orx-parallel && git checkout {{base_commit}}
+
+# See header note: unrelated to this candidate, needed only so `--features experimental` compiles.
+apply-prereq-fix:
+    sed -i 's/self.nt_state(params, &iter, iter.size_hint(), None)/self.nt_state(params, I::is_source_serialized(), iter.size_hint(), None)/' clone/orx-parallel/src/infallible/par_runner.rs
+
+# Runs every scenario binary against the (prereq-patched) pristine clone - all are expected to
+# print "OK: ..." and exit 0, matching output.txt. `miri_sort_boundary` additionally runs under
+# Miri; `-Zmiri-ignore-leaks` suppresses an unrelated leak-checker artifact on thread-pool
+# teardown already documented by candidate 004 (not this candidate's finding).
+reproduce-before:
+    cd repro && cargo run --bin thread_count_boundary
+    cd repro && cargo run --bin use_none_handling
+    cd repro && cargo run --bin sort_boundary
+    cd repro && MIRIFLAGS=-Zmiri-ignore-leaks cargo +nightly miri run --bin miri_sort_boundary --features orx-parallel/experimental
+
+clean:
+    rm -rf clone

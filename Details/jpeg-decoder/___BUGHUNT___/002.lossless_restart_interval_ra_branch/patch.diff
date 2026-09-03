@@ -1,0 +1,65 @@
+diff --git a/src/decoder/lossless.rs b/src/decoder/lossless.rs
+index cd00476..a72bf6b 100644
+--- a/src/decoder/lossless.rs
++++ b/src/decoder/lossless.rs
+@@ -47,8 +47,13 @@ impl<R: Read> Decoder<R> {
+         let height = frame.image_size.height as usize;
+ 
+         let mut differences = vec![Vec::with_capacity(npixel); ncomp];
+-        for _mcu_y in 0..height {
+-            for _mcu_x in 0..width {
++        // Per-MCU record of whether this pixel is the first one after a restart marker (H.1.2.3
++        // requires the predictor to reset to the frame default there, same as pixel (0, 0)).
++        // Recorded here, while the restart bookkeeping is live, since the prediction pass below
++        // runs after all restart markers have already been consumed.
++        let mut restarts = vec![false; npixel];
++        for mcu_y in 0..height {
++            for mcu_x in 0..width {
+                 if self.restart_interval > 0 {
+                     if mcus_left_until_restart == 0 {
+                         match huffman.take_marker(reader)? {
+@@ -61,6 +66,7 @@ impl<R: Read> Decoder<R> {
+                                 }
+ 
+                                 huffman.reset();
++                                restarts[mcu_y * width + mcu_x] = true;
+ 
+                                 expected_rst_num = (expected_rst_num + 1) % 8;
+                                 mcus_left_until_restart = self.restart_interval;
+@@ -114,22 +120,32 @@ impl<R: Read> Decoder<R> {
+                 let result = result << scan.point_transform;
+                 results[i][0] = result;
+ 
+-                // calculate leftmost column, using top pixel as predictor
++                // calculate leftmost column, using top pixel as predictor, unless this MCU is
++                // the first one after a restart marker, in which case the predictor resets to
++                // the frame default (H.1.2.3) rather than carrying over the previous pixel.
+                 let mut previous = result;
+                 for mcu_y in 1..height {
+                     let diff = differences[i][mcu_y * width];
+-                    let prediction = previous as i32;
++                    let prediction = if restarts[mcu_y * width] {
++                        1 << (frame.precision - scan.point_transform - 1) as i32
++                    } else {
++                        previous as i32
++                    };
+                     let result = ((prediction + diff) & 0xFFFF) as u16; // modulo 2^16
+                     let result = result << scan.point_transform;
+                     results[i][mcu_y * width] = result;
+                     previous = result;
+                 }
+ 
+-                // calculate rows, using left pixel as predictor
++                // calculate rows, using left pixel as predictor, with the same restart reset.
+                 for mcu_y in 0..height {
+                     for mcu_x in 1..width {
+                         let diff = differences[i][mcu_y * width + mcu_x];
+-                        let prediction = results[i][mcu_y * width + mcu_x - 1] as i32;
++                        let prediction = if restarts[mcu_y * width + mcu_x] {
++                            1 << (frame.precision - scan.point_transform - 1) as i32
++                        } else {
++                            results[i][mcu_y * width + mcu_x - 1] as i32
++                        };
+                         let result = ((prediction + diff) & 0xFFFF) as u16; // modulo 2^16
+                         let result = result << scan.point_transform;
+                         results[i][mcu_y * width + mcu_x] = result;

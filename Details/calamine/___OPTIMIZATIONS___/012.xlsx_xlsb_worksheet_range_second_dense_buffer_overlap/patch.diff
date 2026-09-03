@@ -1,0 +1,97 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 3945c90..8c94729 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -101,8 +101,10 @@ use std::cmp::{max, min};
+ use std::fmt;
+ use std::fs::File;
+ use std::io::{BufReader, Read, Seek};
++use std::mem;
+ use std::ops::{Index, IndexMut};
+ use std::path::Path;
++use std::ptr;
+ 
+ pub use crate::auto::{open_workbook_auto, open_workbook_auto_from_rs, Sheets};
+ pub use crate::datatype::{Data, DataRef, DataType, ExcelDateTime, ExcelDateTimeType};
+@@ -1647,6 +1649,45 @@ impl<T: CellType> Range<T> {
+     }
+ }
+ 
++impl<'c> Range<DataRef<'c>> {
++    /// Converts a dense `Range<DataRef>` into `Range<Data>` by writing each converted value back
++    /// into the same backing allocation, cell by cell, instead of the
++    /// `.into_iter().map(Into::into).collect()` used at every XLSX/XLSB `worksheet_range()` call
++    /// site. `DataRef` and `Data` have the same size and alignment (asserted below), so reusing
++    /// the allocation is sound: each slot is read exactly once, converted, and overwritten before
++    /// the loop advances, so no slot is ever read after being overwritten and no destructor runs
++    /// twice.
++    pub(crate) fn into_data_in_place(self) -> Range<Data> {
++        const _: () = assert!(mem::size_of::<DataRef>() == mem::size_of::<Data>());
++        const _: () = assert!(mem::align_of::<DataRef>() == mem::align_of::<Data>());
++
++        let mut inner = mem::ManuallyDrop::new(self.inner);
++        let len = inner.len();
++        let cap = inner.capacity();
++        let ptr = inner.as_mut_ptr();
++        // SAFETY: `ptr`/`len`/`cap` came from a live `Vec<DataRef>` that is never touched again
++        // after this point (it's wrapped in `ManuallyDrop`). Each of the `len` slots is read
++        // exactly once via `ptr::read` (taking ownership without running `DataRef`'s destructor
++        // at the old location) and immediately overwritten with a same-size/align `Data` value
++        // via `ptr::write` before any other slot is touched, so the buffer ends up fully
++        // initialized as `[Data; len]` and `Vec::from_raw_parts` reconstructs it with the same
++        // allocation, length and capacity the original `Vec<DataRef>` had.
++        unsafe {
++            for i in 0..len {
++                let slot = ptr.add(i);
++                let old = ptr::read(slot);
++                let new: Data = old.into();
++                ptr::write(slot.cast::<Data>(), new);
++            }
++            Range {
++                start: self.start,
++                end: self.end,
++                inner: Vec::from_raw_parts(ptr.cast::<Data>(), len, cap),
++            }
++        }
++    }
++}
++
+ impl<T: CellType + fmt::Display> Range<T> {
+     /// Get headers for a `Range`.
+     ///
+diff --git a/src/xlsb/mod.rs b/src/xlsb/mod.rs
+index a9adef8..d33060c 100644
+--- a/src/xlsb/mod.rs
++++ b/src/xlsb/mod.rs
+@@ -520,12 +520,7 @@ impl<RS: Read + Seek> Reader<RS> for Xlsb<RS> {
+     /// MS-XLSB 2.1.7.62
+     fn worksheet_range(&mut self, name: &str) -> Result<Range<Data>, XlsbError> {
+         let rge = self.worksheet_range_ref(name)?;
+-        let inner = rge.inner.into_iter().map(|v| v.into()).collect();
+-        Ok(Range {
+-            start: rge.start,
+-            end: rge.end,
+-            inner,
+-        })
++        Ok(rge.into_data_in_place())
+     }
+ 
+     /// MS-XLSB 2.1.7.62
+diff --git a/src/xlsx/mod.rs b/src/xlsx/mod.rs
+index 02c55a4..f8ed859 100644
+--- a/src/xlsx/mod.rs
++++ b/src/xlsx/mod.rs
+@@ -2592,12 +2592,7 @@ impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
+ 
+     fn worksheet_range(&mut self, name: &str) -> Result<Range<Data>, XlsxError> {
+         let rge = self.worksheet_range_ref(name)?;
+-        let inner = rge.inner.into_iter().map(|v| v.into()).collect();
+-        Ok(Range {
+-            start: rge.start,
+-            end: rge.end,
+-            inner,
+-        })
++        Ok(rge.into_data_in_place())
+     }
+ 
+     fn worksheet_formula(&mut self, name: &str) -> Result<Range<String>, XlsxError> {

@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# patch.diff touches only src/metadata/cicp.rs (clamp_rgb_luma/clamp_rgba_luma); no harness
+# change was needed since benches/convert.rs already had cast_dynamic_rgba8_l8 (clamp_rgb_luma)
+# and cast_dynamic_rgba8_la16 (clamp_rgba_luma) covering both functions this patch touches.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone && cargo bench --bench convert --no-run
+    cp "$(ls -t clone/target/release/deps/convert-* | grep -v '\.d$' | head -1)" ./bin_baseline
+
+build-patched:
+    cd clone && cargo bench --bench convert --no-run
+    cp "$(ls -t clone/target/release/deps/convert-* | grep -v '\.d$' | head -1)" ./bin_patched
+
+bench:
+    @echo "=== baseline (before patch), single-core, Rgb->Luma path ==="
+    taskset -c 0 ./bin_baseline --bench "cast_dynamic_rgba8_l8" --exact --warm-up-time 1 --measurement-time 2
+    @echo "=== patched (after patch), single-core, Rgb->Luma path ==="
+    taskset -c 0 ./bin_patched --bench "cast_dynamic_rgba8_l8" --exact --warm-up-time 1 --measurement-time 2
+    @echo "=== baseline (before patch), single-core, Rgba->LumaAlpha path (the regressed one) ==="
+    taskset -c 0 ./bin_baseline --bench "cast_dynamic_rgba8_la16" --exact --warm-up-time 1 --measurement-time 2
+    @echo "=== patched (after patch), single-core, Rgba->LumaAlpha path (the regressed one) ==="
+    taskset -c 0 ./bin_patched --bench "cast_dynamic_rgba8_la16" --exact --warm-up-time 1 --measurement-time 2
+    @echo "For a rigorous paired comparison instead of one-shot criterion runs, use paired_convert.sh:"
+    @echo "  bash paired_convert.sh ./bin_baseline ./bin_patched \"cast_dynamic_rgba8_l8\" single 10"
+    @echo "  bash paired_convert.sh ./bin_baseline ./bin_patched \"cast_dynamic_rgba8_la16\" single 10"
+
+clean:
+    rm -rf clone bin_baseline bin_patched target

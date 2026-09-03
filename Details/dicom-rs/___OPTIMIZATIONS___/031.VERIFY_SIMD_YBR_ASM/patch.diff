@@ -1,0 +1,132 @@
+diff --git a/pixeldata/src/lib.rs b/pixeldata/src/lib.rs
+index 6ede5847..f228b1e0 100644
+--- a/pixeldata/src/lib.rs
++++ b/pixeldata/src/lib.rs
+@@ -1985,6 +1985,26 @@ fn bytes_to_vec_u16(data: &[u8]) -> Vec<u16> {
+ 
+ // Convert u8 pixel array from YBR_FULL or YBR_FULL_422 to RGB
+ // Every pixel is replaced with an RGB value
++// Fixed-point (Q12.20, i32) coefficients for the YCbCr->RGB matrix below,
++// avoiding a per-pixel f32 multiply chain + libm `floor` call. Rounding the
++// coefficients to the nearest 1/2^20 introduces a small, one-directional
++// discrepancy against the f32 path at rounding boundaries (measured: ~0.053%
++// of channel values come out exactly 1 LSB lower than the float version,
++// never higher and never off by more than 1 LSB - see candidate
++// 002.YBR_TO_RGB_FIXED_POINT's RESULT.md for the exhaustive check).
++#[cfg(feature = "image")]
++const YBR_SHIFT_U8: i32 = 20;
++#[cfg(feature = "image")]
++const YBR_C1_U8: i32 = 1_470_104; // round(1.402 * 2^20)
++#[cfg(feature = "image")]
++const YBR_C2_U8: i32 = 360_853; // round(0.114 * 1.772 / 0.587 * 2^20)
++#[cfg(feature = "image")]
++const YBR_C3_U8: i32 = -748_826; // round(-0.299 * 1.402 / 0.587 * 2^20)
++#[cfg(feature = "image")]
++const YBR_C4_U8: i32 = 1_858_077; // round(1.772 * 2^20)
++#[cfg(feature = "image")]
++const YBR_HALF_U8: i32 = 1 << (YBR_SHIFT_U8 - 1);
++
+ #[cfg(feature = "image")]
+ fn convert_colorspace_u8(i: &mut [u8]) {
+     #[cfg(feature = "rayon")]
+@@ -1995,23 +2015,18 @@ fn convert_colorspace_u8(i: &mut [u8]) {
+     // Matrix multiplication taken from
+     // https://github.com/pydicom/pydicom/blob/f36517e10/pydicom/pixel_data_handlers/util.py#L576
+     iter.for_each(|pixel| {
+-        let y = pixel[0] as f32;
+-        let b: f32 = pixel[1] as f32;
+-        let r: f32 = pixel[2] as f32;
+-        let b = b - 128.0;
+-        let r = r - 128.0;
+-
+-        let cr = (y + 1.402 * r) + 0.5;
+-        let cg = (y + (0.114 * 1.772 / 0.587) * b + (-0.299 * 1.402 / 0.587) * r) + 0.5;
+-        let cb = (y + 1.772 * b) + 0.5;
+-
+-        let cr = cr.floor().clamp(0.0, u8::MAX as f32) as u8;
+-        let cg = cg.floor().clamp(0.0, u8::MAX as f32) as u8;
+-        let cb = cb.floor().clamp(0.0, u8::MAX as f32) as u8;
+-
+-        pixel[0] = cr;
+-        pixel[1] = cg;
+-        pixel[2] = cb;
++        let y = pixel[0] as i32;
++        let b = pixel[1] as i32 - 128;
++        let r = pixel[2] as i32 - 128;
++
++        let y = y << YBR_SHIFT_U8;
++        let cr = (y + YBR_C1_U8 * r + YBR_HALF_U8) >> YBR_SHIFT_U8;
++        let cg = (y + YBR_C2_U8 * b + YBR_C3_U8 * r + YBR_HALF_U8) >> YBR_SHIFT_U8;
++        let cb = (y + YBR_C4_U8 * b + YBR_HALF_U8) >> YBR_SHIFT_U8;
++
++        pixel[0] = cr.clamp(0, u8::MAX as i32) as u8;
++        pixel[1] = cg.clamp(0, u8::MAX as i32) as u8;
++        pixel[2] = cb.clamp(0, u8::MAX as i32) as u8;
+     });
+ }
+ 
+@@ -2031,6 +2046,28 @@ fn interleave<T: Copy>(data: &[T]) -> Vec<T> {
+ 
+ // Convert u16 pixel array from YBR_FULL or YBR_FULL_422 to RGB
+ // Every pixel is replaced with an RGB value
++// Fixed-point (Q33.30, i64) coefficients for the u16 path - needs i64 and a
++// higher shift than the u8 path because `y` here ranges up to 65535, so a
++// 32-bit accumulator with enough coefficient precision to keep the
++// float-vs-fixed discrepancy small would overflow (verified: i32 with a
++// shift high enough for good precision overflows at y=65535). Rounding
++// discrepancy vs. the f32 path (measured, sampled + boundary-swept): ~0.37%
++// of channel values 1 LSB lower, a much smaller fraction 1 LSB higher, never
++// off by more than 1 LSB - see candidate 002.YBR_TO_RGB_FIXED_POINT's
++// RESULT.md.
++#[cfg(feature = "image")]
++const YBR_SHIFT_U16: i64 = 30;
++#[cfg(feature = "image")]
++const YBR_C1_U16: i64 = 1_505_386_037; // round(1.402 * 2^30)
++#[cfg(feature = "image")]
++const YBR_C2_U16: i64 = 369_513_524; // round(0.114 * 1.772 / 0.587 * 2^30)
++#[cfg(feature = "image")]
++const YBR_C3_U16: i64 = -766_797_999; // round(-0.299 * 1.402 / 0.587 * 2^30)
++#[cfg(feature = "image")]
++const YBR_C4_U16: i64 = 1_902_670_512; // round(1.772 * 2^30)
++#[cfg(feature = "image")]
++const YBR_HALF_U16: i64 = 1 << (YBR_SHIFT_U16 - 1);
++
+ #[cfg(feature = "image")]
+ fn convert_colorspace_u16(i: &mut [u16]) {
+     #[cfg(feature = "rayon")]
+@@ -2041,23 +2078,18 @@ fn convert_colorspace_u16(i: &mut [u16]) {
+     // Matrix multiplication taken from
+     // https://github.com/pydicom/pydicom/blob/f36517e10/pydicom/pixel_data_handlers/util.py#L576
+     iter.for_each(|pixel| {
+-        let y = pixel[0] as f32;
+-        let b: f32 = pixel[1] as f32;
+-        let r: f32 = pixel[2] as f32;
+-        let b = b - 32768.0;
+-        let r = r - 32768.0;
+-
+-        let cr = (y + 1.402 * r) + 0.5;
+-        let cg = (y + (0.114 * 1.772 / 0.587) * b + (-0.299 * 1.402 / 0.587) * r) + 0.5;
+-        let cb = (y + 1.772 * b) + 0.5;
+-
+-        let cr = cr.floor().clamp(0.0, u16::MAX as f32) as u16;
+-        let cg = cg.floor().clamp(0.0, u16::MAX as f32) as u16;
+-        let cb = cb.floor().clamp(0.0, u16::MAX as f32) as u16;
+-
+-        pixel[0] = cr;
+-        pixel[1] = cg;
+-        pixel[2] = cb;
++        let y = pixel[0] as i64;
++        let b = pixel[1] as i64 - 32768;
++        let r = pixel[2] as i64 - 32768;
++
++        let y = y << YBR_SHIFT_U16;
++        let cr = (y + YBR_C1_U16 * r + YBR_HALF_U16) >> YBR_SHIFT_U16;
++        let cg = (y + YBR_C2_U16 * b + YBR_C3_U16 * r + YBR_HALF_U16) >> YBR_SHIFT_U16;
++        let cb = (y + YBR_C4_U16 * b + YBR_HALF_U16) >> YBR_SHIFT_U16;
++
++        pixel[0] = cr.clamp(0, u16::MAX as i64) as u16;
++        pixel[1] = cg.clamp(0, u16::MAX as i64) as u16;
++        pixel[2] = cb.clamp(0, u16::MAX as i64) as u16;
+     });
+ }
+ 

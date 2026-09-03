@@ -1,0 +1,45 @@
+=== BEFORE (pristine, base_commit ca27349) - `cargo run` in repro/ ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running `target/debug/repro`
+
+thread 'main' (53704) panicked at /tmp/kurbo_worktrees/candidate-003/kurbo/src/simplify.rs:315:36:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - simplify_bezpath panicked: Any { .. }
+exit code: 1
+
+(repeated 3/3 runs against a fresh, independently cloned pristine checkout of ca27349, all three
+with the identical panic at kurbo/src/simplify.rs:315:36; also confirmed once more against a
+release build (`cargo run --release`), same panic - `.unwrap()` panics unconditionally regardless
+of build profile, so this is not build-profile dependent.)
+
+=== AFTER (patch.diff applied) - `cargo run` in repro/ ===
+   Compiling kurbo v0.13.1 (path dependency)
+   Compiling repro v0.1.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.54s
+     Running `target/debug/repro`
+did not reproduce - simplify_bezpath completed normally: BezPath([])
+exit code: 0
+
+=== Additional boundary-value checks against the patched tree (same bug class, not just the
+exact triggering input - see CONFIRMATION.md section 7) ===
+LineTo-first:  BezPath([])
+QuadTo-first:  BezPath([])
+CurveTo-first: BezPath([])
+Mixed (garbage draw commands before any MoveTo, followed by a real well-formed subpath):
+  BezPath([MoveTo((0.0, 0.0)), LineTo((10.0, 0.0)), LineTo((10.0, 10.0))])
+Well-formed input (BezPath built normally via move_to/line_to) is unaffected:
+  simplify_bezpath(path.clone(), 1.0, &SimplifyOptions::default()) == path  -> OK
+
+=== Project test suite (kurbo package), before and after the patch ===
+Before (pristine ca27349, fresh clone):
+  running 187 tests
+  test result: ok. 187 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+  running 55 tests (doctests)
+  test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+After (patch.diff applied):
+  running 187 tests
+  test result: ok. 187 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+  running 55 tests (doctests)
+  test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out

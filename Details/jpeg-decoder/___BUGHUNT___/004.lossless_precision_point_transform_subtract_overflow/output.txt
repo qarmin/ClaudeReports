@@ -1,0 +1,119 @@
+=== Approach 1: real GitHub issue #277 PoC attachment against the PUBLISHED, pre-fix crate (jpeg-decoder = "=0.3.1", pulled from crates.io) ===
+
+$ cat Cargo.toml
+[package]
+name = "verify-old"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+jpeg-decoder = "=0.3.1"
+
+[workspace]
+
+$ cat src/main.rs
+fn main() {
+    let data = std::fs::read("poc.jpg").unwrap();
+    let mut decoder = jpeg_decoder::Decoder::new(data.as_slice());
+    let result = decoder.decode();
+    println!("{:?}", result.map(|v| v.len()));
+}
+
+(poc.jpg = the exact "jpeg-decode-crash.xx" attachment from
+https://github.com/image-rs/jpeg-decoder/files/14173982/jpeg-decode-crash.xx.zip, unzipped
+unmodified, 508 bytes, SHA256 recorded in RESULT.md)
+
+$ RUST_BACKTRACE=1 cargo run
+   Compiling jpeg-decoder v0.3.1
+   Compiling verify-old v0.1.0 (/tmp/bughunt-004-verify-old)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.00s
+     Running `target/debug/verify-old`
+
+thread 'main' panicked at /home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/jpeg-decoder-0.3.1/src/decoder/lossless.rs:112:40:
+attempt to subtract with overflow
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/17067e9ac6d7ecb70e50f92c1944e545188d2359/library/std/src/panicking.rs:697:5
+   1: core::panicking::panic_fmt
+             at /rustc/17067e9ac6d7ecb70e50f92c1944e545188d2359/library/core/src/panicking.rs:75:14
+   2: core::panicking::panic_const::panic_const_sub_overflow
+             at /rustc/17067e9ac6d7ecb70e50f92c1944e545188d2359/library/core/src/panicking.rs:178:21
+   3: jpeg_decoder::decoder::lossless::<impl jpeg_decoder::decoder::Decoder<R>>::decode_scan_lossless
+             at /home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/jpeg-decoder-0.3.1/src/decoder/lossless.rs:112:40
+   4: jpeg_decoder::decoder::Decoder<R>::decode_internal
+             at /home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/jpeg-decoder-0.3.1/src/decoder.rs:415:46
+   5: jpeg_decoder::decoder::Decoder<R>::decode::{{closure}}
+             at /home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/jpeg-decoder-0.3.1/src/decoder.rs:294:36
+   6: jpeg_decoder::worker::WorkerScope::with
+             at /home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/jpeg-decoder-0.3.1/src/worker/mod.rs:61:9
+   7: jpeg_decoder::decoder::Decoder<R>::decode
+             at /home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/jpeg-decoder-0.3.1/src/decoder.rs:294:9
+   8: verify_old::main
+             at ./src/main.rs:4:18
+
+Repeated 3/3 runs, identical panic location/message every time (deterministic).
+
+=== Same exact PoC bytes, run through the REAL current-HEAD source (eb2d7c0, via a worktree of
+    the project being checked, debug build with default debug-assertions) ===
+
+$ cp jpeg-decode-crash.xx tests/crashtest/images/issue277-poc.jpg
+$ cargo test --test lib crashtest      # project's own crashtest harness, real public API
+running 1 test
+test crashtest::crashtest ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 17.17s
+
+$ cat examples/decode277.rs
+fn main() {
+    let data = std::fs::read("tests/crashtest/images/issue277-poc.jpg").unwrap();
+    let mut decoder = jpeg_decoder::Decoder::new(data.as_slice());
+    let result = decoder.decode();
+    println!("{:?}", result.map(|v| v.len()));
+}
+
+$ cargo run --example decode277   (x3, identical every time)
+Err(Format("invalid point transform, must be less than the frame precision"))
+Err(Format("invalid point transform, must be less than the frame precision"))
+Err(Format("invalid point transform, must be less than the frame precision"))
+
+=== Approach 2: git bisect-by-inspection of what changed between 0.3.1 (panics) and 0.3.2 (doesn't) ===
+
+$ git log --oneline c1a1fe0..95550d7 -- src/
+95550d7 Fix panic when prediction calculation is invalid (#282)
+
+Exactly one src/ commit landed between the two releases, and it is the fix for issue #282:
+
+diff --git a/src/parser.rs b/src/parser.rs
+@@ parse_sos()
++    if point_transform >= frame.precision {
++        return Err(Error::Format(
++            "invalid point transform, must be less than the frame precision".to_owned(),
++        ));
++    }
+
+Combined with the pre-existing (older) guard in src/decoder.rs's SOF handling:
+    if !(2..=16).contains(&frame.precision) {
+        return Err(Error::Unsupported(UnsupportedFeature::SamplePrecision(frame.precision)));
+    }
+this guarantees, by the time decode_scan_lossless's line 112 runs:
+  frame.precision (u8) is in [2, 16]      (checked at SOF time, decoder.rs)
+  scan.point_transform (u8) < frame.precision   (checked at SOS time, parser.rs)
+=> frame.precision - scan.point_transform >= 1
+=> frame.precision - scan.point_transform - 1 >= 0   (no underflow possible, u8 arithmetic)
+
+=== Approach 3: exhaustive boundary-value sweep against current HEAD (eb2d7c0), debug-assertions +
+    overflow-checks explicitly enabled even in the release profile, driven through the real
+    Decoder::decode() public API on hand-built minimal lossless (SOF3) JPEGs ===
+
+Swept ALL u8 precision values (0..=255) x ALL 4-bit point_transform values (0..=15) x all 7
+lossless predictor selections (Ra, Rb, Rc, RaRbRc1, RaRbRc2, RaRbRc3, RaRb) = 28,672 synthetic
+JPEGs total, each decoded through jpeg_decoder::Decoder::new(..).decode() wrapped in
+std::panic::catch_unwind.
+
+$ cargo run --release
+    Finished `release` profile [optimized] target(s)
+     Running `target/release/sweep`
+oks=945 errs=27727 panics=0
+
+Zero panics across the full sweep; 945 combinations decoded successfully (precision in [2,16],
+point_transform < precision), the remaining 27,727 were correctly rejected with Error::Format /
+Error::Unsupported.

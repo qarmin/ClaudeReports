@@ -1,0 +1,79 @@
+diff --git a/sparse_strips/vello_common/src/record.rs b/sparse_strips/vello_common/src/record.rs
+index 8a2f8797..ceca0b0e 100644
+--- a/sparse_strips/vello_common/src/record.rs
++++ b/sparse_strips/vello_common/src/record.rs
+@@ -303,8 +303,16 @@ impl<D> CommandRecorder<D> {
+     }
+ 
+     /// Pop the currently active layer.
++    ///
++    /// # Panics
++    ///
++    /// Panics if there is no currently open layer, i.e. this was called without a matching
++    /// prior call to [`Self::push_layer`].
+     pub fn pop_layer(&mut self) -> PoppedLayer {
+-        let layer = self.layer_stack.pop().unwrap();
++        let layer = self
++            .layer_stack
++            .pop()
++            .expect("pop_layer called without a matching push_layer");
+         let id = layer.id;
+ 
+         let (popped_layer, bbox_in_parent) = {
+diff --git a/sparse_strips/vello_cpu/src/dispatch/multi_threaded.rs b/sparse_strips/vello_cpu/src/dispatch/multi_threaded.rs
+index c90a3396..8f4c3332 100644
+--- a/sparse_strips/vello_cpu/src/dispatch/multi_threaded.rs
++++ b/sparse_strips/vello_cpu/src/dispatch/multi_threaded.rs
+@@ -577,11 +577,16 @@ impl Dispatcher for MultiThreadedDispatcher {
+     }
+ 
+     fn pop_layer(&mut self) {
+-        self.register_task(RenderTaskType::PopLayer);
++        // Check for underflow before queuing the task: if this panics, the mismatched
++        // `PopLayer` must not end up in the queue, since it would otherwise be replayed against
++        // `self.recorder` later during `flush`/`Drop`, panicking a second time (potentially
++        // during unwinding of the first panic, aborting the process instead of a single,
++        // catchable panic).
+         self.layer_depth = self
+             .layer_depth
+             .checked_sub(1)
+-            .expect("layer stack underflow");
++            .expect("pop_layer called without a matching push_layer");
++        self.register_task(RenderTaskType::PopLayer);
+     }
+ 
+     fn reset(&mut self, width: u16, height: u16) {
+diff --git a/sparse_strips/vello_cpu/src/render.rs b/sparse_strips/vello_cpu/src/render.rs
+index d604c5d5..40cb79a0 100644
+--- a/sparse_strips/vello_cpu/src/render.rs
++++ b/sparse_strips/vello_cpu/src/render.rs
+@@ -572,6 +572,12 @@ impl RenderContext {
+     }
+ 
+     /// Pop the last-pushed layer.
++    ///
++    /// # Panics
++    ///
++    /// Panics if there is no currently open layer, i.e. this was called without a matching
++    /// prior call to [`Self::push_layer`] (or one of `push_clip_layer`/`push_blend_layer`/
++    /// `push_opacity_layer`/`push_mask_layer`/`push_filter_layer`).
+     pub fn pop_layer(&mut self) {
+         self.dispatcher.pop_layer();
+         self.root_transforms.pop_root();
+diff --git a/sparse_strips/vello_hybrid/src/scene.rs b/sparse_strips/vello_hybrid/src/scene.rs
+index 8826f9b3..0c48dd1d 100644
+--- a/sparse_strips/vello_hybrid/src/scene.rs
++++ b/sparse_strips/vello_hybrid/src/scene.rs
+@@ -697,6 +697,12 @@ impl Scene {
+     }
+ 
+     /// Pop the last pushed layer.
++    ///
++    /// # Panics
++    ///
++    /// Panics if there is no currently open layer, i.e. this was called without a matching
++    /// prior call to [`Self::push_layer`] (or one of `push_clip_layer`/`push_blend_layer`/
++    /// `push_opacity_layer`/`push_mask_layer`/`push_filter_layer`).
+     pub fn pop_layer(&mut self) {
+         if self.recorder.pop_layer() == PoppedLayer::Filter {
+             self.viewport_state.pop_root_viewport();

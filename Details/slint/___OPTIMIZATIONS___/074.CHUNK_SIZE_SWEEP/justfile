@@ -1,0 +1,57 @@
+# Self-contained reproduction for this candidate, GIVEN the whole ___OPTIMIZATIONS___ folder is
+# kept together (not just this subfolder) - see ../README.md's "Reproducing a candidate
+# standalone" section for why: `perf_test` is untracked in the main repo, so a fresh clone never
+# contains it, and this justfile copies it in from ../harness/perf_test instead of assuming the
+# reader already has a checkout with it.
+#
+# patch.diff is candidate 073's full patch, UNMODIFIED (CHUNK_SIZE = 256) - chunked_arena does
+# not exist on master, so this is the prerequisite every swept value in RESULT.md is a one-line
+# edit on top of. `just test` below compares plain master (no chunked_arena at all) against this
+# patch at CHUNK_SIZE=256 - the reference point RESULT.md's own sweep varies from. To reproduce a
+# specific swept value instead: `just clone apply`, edit
+# `clone/internal/core/partial_renderer.rs`'s `const CHUNK_SIZE: usize = 256;` to the value you
+# want, then `just build-patched` and compare against a saved copy of the 256 binary (see
+# RESULT.md's table for which values were measured, and its own paired-comparison methodology -
+# a single `bench` run of each is a smoke test, not a substitute for that).
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+harness_dir := "../harness/perf_test"
+
+# Full cycle: clone, build a BASELINE binary (plain master) before touching anything, apply the
+# patch, build a PATCHED binary (CHUNK_SIZE=256), then run both and print both results.
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/perf_test
+
+# Cargo's target-dir is set by clone/.cargo/config.toml (target-dir = "target", resolved relative
+# to that file) and applies regardless of which subdirectory cargo is invoked from - so this
+# lands at clone/target/rdebug/perf_test even though the build is run from clone/perf_test/, which
+# has its own (empty) [workspace] table. Don't "fix" this path without re-checking that file.
+build-baseline:
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug
+    cp clone/target/rdebug/perf_test ./perf_test_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug
+    cp clone/target/rdebug/perf_test ./perf_test_patched
+
+bench:
+    @echo "=== baseline (plain master, no chunked_arena) ==="
+    ./perf_test_baseline --bench --mode scroll --count 100000 --row-style layout --scroll-step 0 --frames 20
+    @echo "=== patched (candidate 073's ChunkedArena, CHUNK_SIZE=256) ==="
+    ./perf_test_patched --bench --mode scroll --count 100000 --row-style layout --scroll-step 0 --frames 20
+
+clean:
+    rm -rf clone perf_test_baseline perf_test_patched

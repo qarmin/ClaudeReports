@@ -1,0 +1,122 @@
+Captured by actually running repro/ against the main worktree checkout at base_commit
+7516831426fb70f36d62c521c5477f6a7265b36a (both BEFORE = pristine tree, and AFTER = same tree with
+patch.diff applied). No git-lfs on this machine, so `git -c filter.lfs.smudge= -c
+filter.lfs.process= -c filter.lfs.required=false` was used for the worktree/clone checkout - this
+only affects LFS-tracked snapshot PNGs, unrelated to this candidate.
+
+====================================================================
+BEFORE (pristine tree) - debug build, 5 repeat runs, all byte-identical
+====================================================================
+--- run 1 (through 5 are identical) ---
+width=         1 height=         1 -> packed=0x00010001 decoded=(1, 1) OK
+  end-to-end resolve(): final GPU buffer width_height=0x00010001 decoded=(1, 1)
+width=     65535 height=         1 -> packed=0xffff0001 decoded=(65535, 1) OK
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+width=     65536 height=         1 -> packed=0x00000001 decoded=(0, 1) CORRUPTED
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+width=     65537 height=         1 -> packed=0x00010001 decoded=(1, 1) CORRUPTED
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+width=    131072 height=         1 -> packed=0x00000001 decoded=(0, 1) CORRUPTED
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+width=    100000 height=     50000 -> packed=0x86a0c350 decoded=(34464, 50000) CORRUPTED
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+width=         1 height=     65536 -> packed=0x00010000 decoded=(1, 0) CORRUPTED
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+REPRODUCED - width_height packing silently corrupts for width/height >= 65536
+exit=1
+
+(runs 2-5 produced byte-for-byte identical output to run 1 - omitted here, see the session
+transcript; all 5/5 runs reproduced identically, deterministically, no seed/layout dependence)
+
+====================================================================
+BEFORE (pristine tree) - release build
+====================================================================
+width=         1 height=         1 -> packed=0x00010001 decoded=(1, 1) OK
+  end-to-end resolve(): final GPU buffer width_height=0x00010001 decoded=(1, 1)
+width=     65535 height=         1 -> packed=0xffff0001 decoded=(65535, 1) OK
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+width=     65536 height=         1 -> packed=0x00000001 decoded=(0, 1) CORRUPTED
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+width=     65537 height=         1 -> packed=0x00010001 decoded=(1, 1) CORRUPTED
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+width=    131072 height=         1 -> packed=0x00000001 decoded=(0, 1) CORRUPTED
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+width=    100000 height=     50000 -> packed=0x86a0c350 decoded=(34464, 50000) CORRUPTED
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+width=         1 height=     65536 -> packed=0x00010000 decoded=(1, 0) CORRUPTED
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+REPRODUCED - width_height packing silently corrupts for width/height >= 65536
+exit=1
+
+Note the aliasing in the pristine tree: width=65536 and width=131072 both decode back to a
+completely different, mutually-indistinguishable width (0) despite representing very different
+declared image sizes - this is unbounded modular wraparound, not a bounded/predictable clamp.
+
+Also note: the "end-to-end resolve()" line is 0x00000000 for EVERY case with width or height >
+8192 in this run, INCLUDING width=65535 (which is *not* corrupted by the 16-bit packing bug at
+all - it round-trips correctly as shown by "decoded=(65535, 1) OK" on the line above it). This is
+because `vello_encoding::image_cache::MAX_ATLAS_SIZE` is a hardcoded 8192, independent of this
+bug: `Resolver::resolve` explicitly zeroes both the atlas xy and width_height words whenever an
+image fails to fit the atlas, for ANY oversized image, corrupted or not. Since 65536 (this bug's
+trigger threshold) is always > 8192 (the atlas's own unrelated cap), every input that triggers
+this packing bug is ALSO independently zeroed by that pre-existing safety net before reaching the
+real GPU-submitted buffer through vello::Renderer's actual pipeline. See RESULT.md for the full
+discussion of what this does and doesn't mean for "Confirmed".
+
+====================================================================
+AFTER (patch.diff applied) - debug build, 3 repeat runs, all byte-identical
+====================================================================
+--- run 1 (through 3 are identical) ---
+width=         1 height=         1 -> packed=0x00010001 decoded=(1, 1) OK
+  end-to-end resolve(): final GPU buffer width_height=0x00010001 decoded=(1, 1)
+width=     65535 height=         1 -> packed=0xffff0001 decoded=(65535, 1) OK
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+width=     65536 height=         1 -> PANICKED (debug_assert caught the out-of-range dimensions)
+  end-to-end resolve(): PANICKED (debug_assert caught the out-of-range dimensions)
+width=     65537 height=         1 -> PANICKED (debug_assert caught the out-of-range dimensions)
+  end-to-end resolve(): PANICKED (debug_assert caught the out-of-range dimensions)
+width=    131072 height=         1 -> PANICKED (debug_assert caught the out-of-range dimensions)
+  end-to-end resolve(): PANICKED (debug_assert caught the out-of-range dimensions)
+width=    100000 height=     50000 -> PANICKED (debug_assert caught the out-of-range dimensions)
+  end-to-end resolve(): PANICKED (debug_assert caught the out-of-range dimensions)
+width=         1 height=     65536 -> PANICKED (debug_assert caught the out-of-range dimensions)
+  end-to-end resolve(): PANICKED (debug_assert caught the out-of-range dimensions)
+did not reproduce
+exit=0
+
+====================================================================
+AFTER (patch.diff applied) - release build (debug_assert compiled out)
+====================================================================
+width=         1 height=         1 -> packed=0x00010001 decoded=(1, 1) OK
+  end-to-end resolve(): final GPU buffer width_height=0x00010001 decoded=(1, 1)
+width=     65535 height=         1 -> packed=0xffff0001 decoded=(65535, 1) OK
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+width=     65536 height=         1 -> packed=0xffff0001 decoded=(65535, 1) CORRUPTED
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+width=     65537 height=         1 -> packed=0xffff0001 decoded=(65535, 1) CORRUPTED
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+width=    131072 height=         1 -> packed=0xffff0001 decoded=(65535, 1) CORRUPTED
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+width=    100000 height=     50000 -> packed=0xffffc350 decoded=(65535, 50000) CORRUPTED
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+width=         1 height=     65536 -> packed=0x0001ffff decoded=(1, 65535) CORRUPTED
+  end-to-end resolve(): final GPU buffer width_height=0x00000000 decoded=(0, 0)
+REPRODUCED - width_height packing silently corrupts for width/height >= 65536
+exit=1
+
+Note: `check()`'s simple exact round-trip test necessarily still reports "CORRUPTED"/"REPRODUCED"
+in the release build after the fix, because a dimension >= 65536 fundamentally cannot be encoded
+losslessly in a 16-bit field - clamping, not exact preservation, is the only sane release-mode
+option once debug_assert is compiled out. The actual improvement in the release build is visible
+in the *values themselves*: every out-of-range case now clamps deterministically to the same
+bounded maximum (65535), instead of wrapping unpredictably to values that alias with completely
+different, legitimately-sized images (e.g. width=65536 no longer decodes identically to
+width=131072 - compare the BEFORE block above, where both decode to width=0).
+
+====================================================================
+vello_encoding + vello + vello_tests test suite (VELLO_SKIP_LFS_SNAPSHOTS=all)
+====================================================================
+BEFORE (pristine): 95 passed, 1 ignored, 0 failed (across vello_encoding's unit tests,
+  vello_tests' compare_gpu_cpu/emoji/hinting/known_issues/property/regression/smoke_snapshots/
+  snapshot_test_scenes integration tests)
+AFTER (patched):   95 passed, 1 ignored, 0 failed (identical pass/fail counts, same test names)

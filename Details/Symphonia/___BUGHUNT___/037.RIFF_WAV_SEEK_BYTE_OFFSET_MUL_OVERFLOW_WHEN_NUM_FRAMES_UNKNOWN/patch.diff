@@ -1,0 +1,25 @@
+diff --git a/symphonia-format-riff/src/wave/mod.rs b/symphonia-format-riff/src/wave/mod.rs
+index bf5b9ff..020b3bb 100644
+--- a/symphonia-format-riff/src/wave/mod.rs
++++ b/symphonia-format-riff/src/wave/mod.rs
+@@ -292,9 +292,17 @@ impl FormatReader for WavReader<'_> {
+         // the same timestamps regardless if the stream was seeked or not.
+         let actual_ts = self.packet_info.get_actual_ts(required_ts);
+ 
+-        // Calculate the absolute byte offset of the desired audio frame.
+-        let seek_pos =
+-            self.data_start_pos + (actual_ts.get() as u64 * self.packet_info.block_size.get());
++        // Calculate the absolute byte offset of the desired audio frame. The timestamp is only
++        // bounded by the number of frames in the track, which is unknown for a stream with an
++        // unknown data chunk length, so the offset must be calculated with checked arithmetic.
++        let seek_pos = (actual_ts.get() as u64)
++            .checked_mul(self.packet_info.block_size.get())
++            .and_then(|offset| self.data_start_pos.checked_add(offset));
++
++        let Some(seek_pos) = seek_pos
++        else {
++            return seek_error(SeekErrorKind::OutOfRange);
++        };
+ 
+         // If the reader supports seeking we can seek directly to the frame's offset wherever it may
+         // be.

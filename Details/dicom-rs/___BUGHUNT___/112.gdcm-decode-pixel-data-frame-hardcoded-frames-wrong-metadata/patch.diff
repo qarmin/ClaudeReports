@@ -1,0 +1,46 @@
+diff --git a/pixeldata/src/gdcm.rs b/pixeldata/src/gdcm.rs
+index d82f56f6..8c266b11 100644
+--- a/pixeldata/src/gdcm.rs
++++ b/pixeldata/src/gdcm.rs
+@@ -341,6 +341,20 @@ where
+             })
+             .collect();
+ 
++        // These metadata arrays were built above from the whole object (potentially one
++        // entry per frame, e.g. via PerFrameFunctionalGroupsSequence), but this function
++        // only ever returns a single decoded frame with `number_of_frames` hardcoded to 1.
++        // A caller addresses that single frame as frame 0 (see `DecodedPixelData::to_dynamic_image`/
++        // `to_vec_frame`, which index these arrays by the frame argument they were given, not by
++        // the frame that was actually decoded here) - so narrow each per-frame array down to just
++        // the entry for the frame actually decoded, keeping it at index 0. Arrays that are shared
++        // across all frames (length 1) are left untouched.
++        let frame_idx = frame as usize;
++        let rescale = select_frame_metadata(rescale, frame_idx);
++        let window = window.map(|w| select_frame_metadata(w, frame_idx));
++        let voi_lut_function = voi_lut_function.map(|f| select_frame_metadata(f, frame_idx));
++        let voi_lut_sequence = voi_lut_sequence.map(|v| select_frame_metadata(v, frame_idx));
++
+         Ok(DecodedPixelData {
+             data: Cow::from(decoded_pixel_data),
+             cols: cols.into(),
+@@ -370,6 +384,20 @@ where
+     }
+ }
+ 
++/// Narrow a per-frame metadata array down to the single entry for `frame`, keeping it at
++/// index 0, so that a `DecodedPixelData` describing only one already-selected frame still
++/// gets indexed correctly by callers that address it as frame 0. Arrays with 0 or 1 entries
++/// (no per-frame data, or a value shared across all frames) are returned unchanged.
++fn select_frame_metadata<T: Clone>(values: Vec<T>, frame: usize) -> Vec<T> {
++    if values.len() <= 1 {
++        return values;
++    }
++    match values.get(frame) {
++        Some(v) => vec![v.clone()],
++        None => vec![values[0].clone()],
++    }
++}
++
+ fn interleave_planes(cols: usize, rows: usize, bits_allocated: usize, data: Vec<u8>) -> Vec<u8> {
+     let frame_size = cols * rows * (bits_allocated / 8);
+     let mut interleaved = Vec::with_capacity(data.len());

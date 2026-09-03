@@ -1,0 +1,486 @@
+diff --git a/sparse_strips/vello_common/src/encode.rs b/sparse_strips/vello_common/src/encode.rs
+index e3b5075f..8bfd4e93 100644
+--- a/sparse_strips/vello_common/src/encode.rs
++++ b/sparse_strips/vello_common/src/encode.rs
+@@ -524,6 +524,8 @@ impl EncodeExt for Image {
+             x_advance,
+             y_advance,
+             tint,
++            // If needed, this will be updated by backends afterward.
++            custom: 0,
+         };
+ 
+         paints.push(EncodedPaint::Image(encoded));
+@@ -593,6 +595,23 @@ pub struct EncodedImage {
+     pub y_advance: Vec2,
+     /// Optional tint applied to the image.
+     pub tint: Option<Tint>,
++    /// A custom field that can be used by rendering backends to
++    /// attach additional information to the image.
++    pub custom: u8,
++}
++
++impl EncodedImage {
++    const GPU_FAST_PATH: u8 = 1 << 0;
++
++    /// Indicate that the GPU-native bilinear sampling fast path should be used for this image.
++    pub fn set_use_gpu_fast_path(&mut self) {
++        self.custom |= Self::GPU_FAST_PATH;
++    }
++
++    /// Whether to use the GPU-native bilinear sampling fast path.
++    pub fn use_gpu_fast_path(&self) -> bool {
++        self.custom & Self::GPU_FAST_PATH != 0
++    }
+ }
+ 
+ /// Computed properties of a linear gradient.
+diff --git a/sparse_strips/vello_cpu/src/coarse/bucketer.rs b/sparse_strips/vello_cpu/src/coarse/bucketer.rs
+index cf702419..de84b349 100644
+--- a/sparse_strips/vello_cpu/src/coarse/bucketer.rs
++++ b/sparse_strips/vello_cpu/src/coarse/bucketer.rs
+@@ -565,6 +565,7 @@ impl CommandBucketer {
+             x_advance: Vec2::new(1.0, 0.0),
+             y_advance: Vec2::new(0.0, 1.0),
+             tint: None,
++            custom: 0,
+         }));
+         let attrs_idx = self.paint_fill_attrs.len() as u32;
+         self.paint_fill_attrs.push(PaintFillAttrs {
+diff --git a/sparse_strips/vello_hybrid/src/draw.rs b/sparse_strips/vello_hybrid/src/draw.rs
+index 47b78803..421fccd4 100644
+--- a/sparse_strips/vello_hybrid/src/draw.rs
++++ b/sparse_strips/vello_hybrid/src/draw.rs
+@@ -636,6 +636,7 @@ mod tests {
+             x_advance: Vec2::new(1.0, 0.0),
+             y_advance: Vec2::new(0.0, 1.0),
+             tint: None,
++            custom: 0,
+         })
+     }
+ 
+@@ -653,6 +654,7 @@ mod tests {
+             x_advance: Vec2::new(1.0, 0.0),
+             y_advance: Vec2::new(0.0, 1.0),
+             tint: None,
++            custom: 0,
+         })
+     }
+ 
+diff --git a/sparse_strips/vello_hybrid/src/render/common.rs b/sparse_strips/vello_hybrid/src/render/common.rs
+index 03308506..12531e8f 100644
+--- a/sparse_strips/vello_hybrid/src/render/common.rs
++++ b/sparse_strips/vello_hybrid/src/render/common.rs
+@@ -28,9 +28,14 @@ pub(crate) const GPU_SWEEP_GRADIENT_SIZE_TEXELS: u32 = (size_of::<GpuSweepGradie
+ pub(crate) const GPU_BLURRED_ROUNDED_RECT_SIZE_TEXELS: u32 =
+     (size_of::<GpuBlurredRoundedRect>() / 16) as u32;
+ 
+-// TODO: If we want to use native bilinear sampling for uploaded images,
+-// we can pass 1 instead of 0 here.
+-pub(crate) const IMAGE_PADDING: u16 = 0;
++// One pixel of transparent padding to account for GPU-native bilinear filtering
++// at atlas image edges (see `IMAGE_QUALITY_GPU_FAST_PATH`).
++pub(crate) const IMAGE_PADDING: u16 = 1;
++
++/// Sentinel `EncodedImage`/GPU-image quality value meaning "use GPU-native bilinear
++/// sampling with transparent padding" (see `Scene::draw_image`). Not one of peniko's
++/// `ImageQuality` variants.
++pub(crate) const IMAGE_QUALITY_GPU_FAST_PATH: u32 = 3;
+ 
+ /// Texture limits reported by the rendering device.
+ #[derive(Debug, Clone, Copy)]
+diff --git a/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs b/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
+index 9521829f..f0d486bb 100644
+--- a/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
++++ b/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
+@@ -19,7 +19,7 @@ only break in edge cases, and some of them are also only related to conversions
+ )]
+ 
+ use crate::draw::ExternalTextureRun;
+-use crate::render::common::IMAGE_PADDING;
++use crate::render::common::{IMAGE_PADDING, IMAGE_QUALITY_GPU_FAST_PATH};
+ use crate::util::RangedSlice;
+ use crate::{
+     GpuStrip, LayersConfig, RenderError, RenderSettings, RenderSize, Resources,
+@@ -794,8 +794,18 @@ impl Renderer {
+         let transform = image.transform.as_coeffs().map(|x| x as f32);
+         let image_size = pack_image_size(image_resource.width, image_resource.height);
+         let image_offset = pack_image_offset(image_resource.offset[0], image_resource.offset[1]);
++        // Values 0-2 represent the peniko `ImageQuality` variants; value 3
++        // (`IMAGE_QUALITY_GPU_FAST_PATH`) stands for "GPU-native bilinear sampling with
++        // transparent padding" (set by `Scene::draw_image`). When it's used, the extend
++        // modes are repurposed to distinguish between bilinear and nearest-neighbor
++        // sampling instead of their usual meaning (see the shader).
++        let quality = if image.use_gpu_fast_path() {
++            IMAGE_QUALITY_GPU_FAST_PATH
++        } else {
++            image.sampler.quality as u32
++        };
+         let image_params = pack_image_params(
+-            image.sampler.quality as u32,
++            quality,
+             image.sampler.x_extend as u32,
+             image.sampler.y_extend as u32,
+             image_resource.atlas_id.as_u32(),
+@@ -1037,6 +1047,8 @@ struct GpuResources {
+     atlas_layer_count: u32,
+     /// Bind group for paint sources: an atlas textures as texture array plus an external texture.
+     atlas_bind_group: BindGroup,
++    /// Bilinear sampler used by the GPU-native image sampling fast path.
++    atlas_sampler: Sampler,
+     /// Transparent 1x1 placeholder texture in case no external texture is bound by the user.
+     placeholder_external_texture_view: TextureView,
+     /// Texture for encoded paints
+@@ -1185,6 +1197,12 @@ impl Programs {
+                         },
+                         count: None,
+                     },
++                    wgpu::BindGroupLayoutEntry {
++                        binding: 2,
++                        visibility: wgpu::ShaderStages::FRAGMENT,
++                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
++                        count: None,
++                    },
+                 ],
+             });
+ 
+@@ -1648,6 +1666,14 @@ impl Programs {
+             min_filter: wgpu::FilterMode::Linear,
+             ..Default::default()
+         });
++        // Bilinear sampler for the GPU-native image sampling fast path (see
++        // `IMAGE_QUALITY_GPU_FAST_PATH`).
++        let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
++            label: Some("Atlas Bilinear Sampler"),
++            mag_filter: wgpu::FilterMode::Linear,
++            min_filter: wgpu::FilterMode::Linear,
++            ..Default::default()
++        });
+ 
+         let layer_textures: [Vec<TextureView>; 2] = core::array::from_fn(|_| Vec::new());
+         let scratch_texture = None;
+@@ -1696,6 +1722,7 @@ impl Programs {
+             &atlas_bind_group_layout,
+             &atlas_texture_array_view,
+             &placeholder_external_texture_view,
++            &atlas_sampler,
+         );
+ 
+         // Create a 1x1 stub atlas texture array for use during render_to_atlas.
+@@ -1708,6 +1735,7 @@ impl Programs {
+             &atlas_bind_group_layout,
+             &stub_atlas_view,
+             &placeholder_external_texture_view,
++            &atlas_sampler,
+         );
+ 
+         const INITIAL_ENCODED_PAINTS_TEXTURE_HEIGHT: u32 = 1;
+@@ -1776,6 +1804,7 @@ impl Programs {
+             atlas_size,
+             atlas_layer_count,
+             atlas_bind_group,
++            atlas_sampler,
+             placeholder_external_texture_view,
+             stub_atlas_bind_group,
+             encoded_paints_texture,
+@@ -2127,6 +2156,7 @@ impl Programs {
+         atlas_bind_group_layout: &BindGroupLayout,
+         atlas_texture_array_view: &TextureView,
+         external_texture_view: &TextureView,
++        atlas_sampler: &Sampler,
+     ) -> BindGroup {
+         let entries = [
+             wgpu::BindGroupEntry {
+@@ -2137,6 +2167,10 @@ impl Programs {
+                 binding: 1,
+                 resource: wgpu::BindingResource::TextureView(external_texture_view),
+             },
++            wgpu::BindGroupEntry {
++                binding: 2,
++                resource: wgpu::BindingResource::Sampler(atlas_sampler),
++            },
+         ];
+         device.create_bind_group(&wgpu::BindGroupDescriptor {
+             label: Some("Paint Source Bind Group"),
+@@ -2475,6 +2509,7 @@ impl Programs {
+                     atlas_bind_group_layout,
+                     &new_atlas_texture_array_view,
+                     &resources.placeholder_external_texture_view,
++                    &resources.atlas_sampler,
+                 );
+                 resources.atlas_texture_array_view = new_atlas_texture_array_view;
+                 resources.atlas_bind_group = new_atlas_bind_group;
+@@ -2506,6 +2541,7 @@ impl Programs {
+                 atlas_bind_group_layout,
+                 &new_atlas_texture_array_view,
+                 &resources.placeholder_external_texture_view,
++                &resources.atlas_sampler,
+             );
+ 
+             // Replace the old resources
+@@ -2526,6 +2562,7 @@ impl Programs {
+             &self.atlas_bind_group_layout,
+             &self.resources.atlas_texture_array_view,
+             external_texture_view,
++            &self.resources.atlas_sampler,
+         )
+     }
+ 
+diff --git a/sparse_strips/vello_hybrid/src/scene.rs b/sparse_strips/vello_hybrid/src/scene.rs
+index 8826f9b3..e01e7d8c 100644
+--- a/sparse_strips/vello_hybrid/src/scene.rs
++++ b/sparse_strips/vello_hybrid/src/scene.rs
+@@ -21,11 +21,11 @@ use vello_common::geometry::{RectU16, SizeU16};
+ use vello_common::kurbo::{Affine, BezPath, Rect, Shape, Stroke};
+ use vello_common::mask::Mask;
+ use vello_common::multi_atlas::AtlasConfig;
+-use vello_common::paint::{Paint, PaintType, Tint};
++use vello_common::paint::{Image, ImageSource, Paint, PaintType, Tint};
+ #[cfg(feature = "text")]
+ use vello_common::peniko::FontData;
+ use vello_common::peniko::color::palette::css::BLACK;
+-use vello_common::peniko::{BlendMode, Fill};
++use vello_common::peniko::{BlendMode, Extend, Fill, ImageQuality, ImageSampler};
+ use vello_common::record::{CommandRecorder, Drawable, LayerClip, LayerProps, PoppedLayer};
+ use vello_common::render_state::RenderState;
+ use vello_common::strip::Strip;
+@@ -453,6 +453,53 @@ impl Scene {
+         });
+     }
+ 
++    /// Draw an image using nearest-neighbor or bilinear filtering.
++    ///
++    /// If you want more room for customization, you can also paint an image by setting
++    /// an image paint via [`Scene::set_paint`] and specifying parameters like extend and
++    /// filtering quality manually. However, if you only want to draw a simple image
++    /// without bicubic filtering or any special extend mode, it is recommended to use
++    /// this method, since it leverages GPU-native sampling capabilities and is therefore
++    /// significantly faster in the hybrid renderer.
++    ///
++    /// This method respects the current affine transformation in place (set via
++    /// [`Scene::set_transform`]), but is not affected by the current paint transform (set
++    /// via [`Scene::set_paint_transform`]).
++    pub fn draw_image(&mut self, image: ImageSource, rect: &Rect, bilinear: bool) {
++        let old_paint_transform = *self.transforms().paint_transform();
++        let old_paint = self.render_state.paint.clone();
++
++        self.set_paint_transform(Affine::IDENTITY);
++        self.set_paint(Image {
++            image,
++            sampler: ImageSampler {
++                // The fast path always samples transparent pixels outside of the image
++                // bounds, so the extend mode itself becomes irrelevant. We therefore
++                // repurpose the field to communicate whether to use bilinear or
++                // nearest-neighbor filtering to the renderer backend (see
++                // `EncodedImage::set_use_gpu_fast_path`).
++                x_extend: if bilinear {
++                    Extend::Repeat
++                } else {
++                    Extend::Pad
++                },
++                y_extend: Extend::Pad,
++                quality: ImageQuality::Medium,
++                alpha: 1.0,
++            },
++        });
++
++        let paint_idx = self.encoded_paints.len();
++        self.fill_rect(rect);
++
++        if let Some(EncodedPaint::Image(img)) = self.encoded_paints.get_mut(paint_idx) {
++            img.set_use_gpu_fast_path();
++        }
++
++        self.set_paint_transform(old_paint_transform);
++        self.set_paint(old_paint);
++    }
++
+     fn record_generated_path<F>(&mut self, paint: Paint, generate: F)
+     where
+         F: FnOnce(&mut StripGenerator, &mut StripStorage, Option<PathDataRef<'_>>),
+diff --git a/sparse_strips/vello_sparse_shaders/shaders/helpers/image.wesl b/sparse_strips/vello_sparse_shaders/shaders/helpers/image.wesl
+index 3b787617..5469ff7e 100644
+--- a/sparse_strips/vello_sparse_shaders/shaders/helpers/image.wesl
++++ b/sparse_strips/vello_sparse_shaders/shaders/helpers/image.wesl
+@@ -7,6 +7,10 @@
+ const IMAGE_QUALITY_LOW: u32 = 0u;
+ const IMAGE_QUALITY_MEDIUM: u32 = 1u;
+ const IMAGE_QUALITY_HIGH: u32 = 2u;
++/// Sentinel quality value: use GPU-native bilinear sampling with transparent padding
++/// (see `Scene::draw_image`). When this is set, `extend_modes.x` is repurposed to
++/// distinguish between bilinear (1) and nearest-neighbor (0) sampling.
++const IMAGE_QUALITY_GPU_FAST_PATH: u32 = 3u;
+ 
+ /// Image source kinds.
+ const IMAGE_SOURCE_ATLAS: u32 = 0u;
+diff --git a/sparse_strips/vello_sparse_shaders/shaders/render.wesl b/sparse_strips/vello_sparse_shaders/shaders/render.wesl
+index 755595ff..7cf5efa9 100644
+--- a/sparse_strips/vello_sparse_shaders/shaders/render.wesl
++++ b/sparse_strips/vello_sparse_shaders/shaders/render.wesl
+@@ -40,6 +40,7 @@ import package::helpers::gradient::{
+ };
+ import package::helpers::geometry::{pixel_to_ndc, quad_corner};
+ import package::helpers::image::{
++    IMAGE_QUALITY_GPU_FAST_PATH,
+     IMAGE_QUALITY_HIGH,
+     IMAGE_QUALITY_MEDIUM,
+     IMAGE_SOURCE_EXTERNAL,
+@@ -225,6 +226,9 @@ var atlas_texture_array: texture_2d_array<f32>;
+ @group(1) @binding(1)
+ var external_texture: texture_2d<f32>;
+ 
++@group(1) @binding(2)
++var atlas_sampler: sampler;
++
+ @group(2) @binding(0)
+ var encoded_paints_texture: texture_2d<u32>;
+ 
+@@ -290,6 +294,14 @@ fn vs_main(
+             out.sample_xy = get_image_translate(image_texel1, image_texel2)
+                 + get_image_offset(image_texel0)
+                 + get_image_transform(image_texel0, image_texel1) * pos;
++
++            // In the GPU-native bilinear fast path, coordinates need to be normalized to
++            // [0, 1] since we use `textureSample` instead of `textureLoad`.
++            if get_image_quality(image_texel0) == IMAGE_QUALITY_GPU_FAST_PATH
++                && get_image_extend_modes(image_texel0).x == 1u {
++                let atlas_dims = vec2<f32>(textureDimensions(atlas_texture_array));
++                out.sample_xy = out.sample_xy / atlas_dims;
++            }
+         } else if paint_type == PAINT_TYPE_LINEAR_GRADIENT || paint_type == PAINT_TYPE_RADIAL_GRADIENT || paint_type == PAINT_TYPE_SWEEP_GRADIENT || paint_type == PAINT_TYPE_BLURRED_ROUNDED_RECT {
+             // Use view coordinates for gradient transform (always in global view space)
+             out.sample_xy = vec2<f32>(
+@@ -406,59 +418,84 @@ fn fs_main(
+             let packed_tint = image_texel2.y;
+             let image_tint = unpack4x8unorm(packed_tint);
+             let is_multiply = image_texel2.z == TINT_MODE_MULTIPLY;
+-            let local_xy = sample_xy - image_offset;
+-            // This offset doesn't exist in vello_cpu, and we use it because 45 degree skewing seems to cause
+-            // artifacts on the GPU. We have something similar in place for gradients. It might be worth revisiting
+-            // this to see whether a better approach is possible.
+-            let offset = 0.00001;
+-            let extended_xy = vec2<f32>(
+-                extend_mode(local_xy.x + offset, image_extend_modes.x, image_size.x),
+-                extend_mode(local_xy.y + offset, image_extend_modes.y, image_size.y)
+-            );
+-
+-            // TODO: add a fast path for images where we are using bilinear sampling and want transparent pixels,
+-            // using GPU-native bilinear sampling
+ 
+             var sample_color: vec4<f32>;
+-            if image_source_kind == IMAGE_SOURCE_EXTERNAL {
+-                let final_xy = image_offset + extended_xy;
+-                sample_color = sample_external_image(
+-                    external_texture,
+-                    image_quality,
+-                    final_xy,
+-                    image_offset,
+-                    image_size,
+-                );
+-            } else if image_quality == IMAGE_QUALITY_HIGH {
+-                let final_xy = image_offset + extended_xy;
+-                sample_color = bicubic_sample(
+-                    atlas_texture_array,
+-                    final_xy,
+-                    i32(image_atlas_index),
+-                    image_offset,
+-                    image_size,
+-                    image_extend_modes,
+-                    image_padding,
+-                );
+-            } else if image_quality == IMAGE_QUALITY_MEDIUM {
+-                let final_xy = image_offset + extended_xy - vec2(0.5);
+-                sample_color = bilinear_sample(
+-                    atlas_texture_array,
+-                    final_xy,
+-                    i32(image_atlas_index),
+-                    image_offset,
+-                    image_size,
+-                    image_extend_modes,
+-                    image_padding,
+-                );
++            if image_quality == IMAGE_QUALITY_GPU_FAST_PATH {
++                // `image_extend_modes.x` is repurposed here to mean "use bilinear
++                // sampling" (1) vs. "use nearest-neighbor sampling" (0); see
++                // `Scene::draw_image`. The image atlas allocation is padded with
++                // transparent pixels (`IMAGE_PADDING`), so we don't need to replicate
++                // the extend-mode/clamping logic below: sampling outside the image but
++                // inside its padding simply fades to transparent.
++                if image_extend_modes.x == 1u {
++                    sample_color = textureSample(
++                        atlas_texture_array,
++                        atlas_sampler,
++                        sample_xy,
++                        i32(image_atlas_index),
++                    );
++                } else {
++                    // Same floating-point nudge as the `offset` used below, to avoid
++                    // rounding onto the wrong pixel when `sample_xy` lands exactly on
++                    // an integer boundary.
++                    sample_color = textureLoad(
++                        atlas_texture_array,
++                        vec2<i32>(sample_xy + 0.00001),
++                        i32(image_atlas_index),
++                        0,
++                    );
++                }
+             } else {
+-                let final_xy = image_offset + extended_xy;
+-                sample_color = textureLoad(
+-                    atlas_texture_array,
+-                    vec2<u32>(final_xy),
+-                    i32(image_atlas_index),
+-                    0,
++                let local_xy = sample_xy - image_offset;
++                // This offset doesn't exist in vello_cpu, and we use it because 45 degree skewing seems to cause
++                // artifacts on the GPU. We have something similar in place for gradients. It might be worth revisiting
++                // this to see whether a better approach is possible.
++                let offset = 0.00001;
++                let extended_xy = vec2<f32>(
++                    extend_mode(local_xy.x + offset, image_extend_modes.x, image_size.x),
++                    extend_mode(local_xy.y + offset, image_extend_modes.y, image_size.y)
+                 );
++
++                if image_source_kind == IMAGE_SOURCE_EXTERNAL {
++                    let final_xy = image_offset + extended_xy;
++                    sample_color = sample_external_image(
++                        external_texture,
++                        image_quality,
++                        final_xy,
++                        image_offset,
++                        image_size,
++                    );
++                } else if image_quality == IMAGE_QUALITY_HIGH {
++                    let final_xy = image_offset + extended_xy;
++                    sample_color = bicubic_sample(
++                        atlas_texture_array,
++                        final_xy,
++                        i32(image_atlas_index),
++                        image_offset,
++                        image_size,
++                        image_extend_modes,
++                        image_padding,
++                    );
++                } else if image_quality == IMAGE_QUALITY_MEDIUM {
++                    let final_xy = image_offset + extended_xy - vec2(0.5);
++                    sample_color = bilinear_sample(
++                        atlas_texture_array,
++                        final_xy,
++                        i32(image_atlas_index),
++                        image_offset,
++                        image_size,
++                        image_extend_modes,
++                        image_padding,
++                    );
++                } else {
++                    let final_xy = image_offset + extended_xy;
++                    sample_color = textureLoad(
++                        atlas_texture_array,
++                        vec2<u32>(final_xy),
++                        i32(image_atlas_index),
++                        0,
++                    );
++                }
+             }
+ 
+             final_color = alpha * select(

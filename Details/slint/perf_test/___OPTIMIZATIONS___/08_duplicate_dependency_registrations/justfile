@@ -1,0 +1,26 @@
+harness := justfile_directory() + "/../.."
+core := justfile_directory() + "/../../../internal/core/properties.rs"
+
+# Show the duplicate-registration measurement (instrumented build; timings are meaningless there)
+run:
+    cd {{ harness }} && cargo build --profile rdebug --bin perf_test --features dep-stats
+    cd {{ harness }} && for s in "scroll 100000" "list 100000" "rects 3000" "text 100000"; do \
+        set -- $s; printf "%-16s " "$1 $2"; \
+        ../target/rdebug/perf_test --bench --mode $1 --count $2 --frames 4 | grep -A1 "dependency registrations" | tail -2 | tr '\n' ' '; echo; done
+    cd {{ harness }} && cargo build --profile rdebug --bin perf_test
+
+# Before/after timing of the change itself (needs git to stash the core patch)
+run-ab:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{ harness }}/..
+    git stash push internal/core/properties.rs
+    trap 'cd {{ harness }}/.. && git stash pop' EXIT
+    cd {{ harness }} && cargo build --profile rdebug --bin perf_test
+    cp ../target/rdebug/perf_test /tmp/perf_test_base
+    cd {{ harness }}/.. && git stash pop && git stash push --keep-index -- /dev/null 2>/dev/null || true
+    cd {{ harness }} && cargo build --profile rdebug --bin perf_test
+    for bin in /tmp/perf_test_base ../target/rdebug/perf_test; do
+        printf "%-28s " "$bin"
+        $bin --bench --mode scroll --count 100000 --frames 6 | awk '/^later frames/{printf "%s %s allocs=%s\n", $3, $5, $7}'
+    done

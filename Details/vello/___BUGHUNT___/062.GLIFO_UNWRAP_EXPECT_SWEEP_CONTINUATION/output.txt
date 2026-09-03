@@ -1,0 +1,142 @@
+=== BEFORE (unpatched glifo/src/atlas/cache.rs, at base_commit 7516831426fb70f36d62c521c5477f6a7265b36a) ===
+
+$ cargo run   (debug build - this bug is #[cfg(all(debug_assertions, feature = "std"))]-gated)
+   Compiling repro v0.1.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+     Running `target/debug/repro`
+cached entries after rendering one COLR glyph: 1
+
+thread 'main' (92116) panicked at /tmp/vello-062-worktree/glifo/src/atlas/cache.rs:481:13:
+index out of bounds: the len is 4 but the index is 4
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:80:14
+   2: core::panicking::panic_bounds_check
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:271:5
+   3: <glifo::atlas::cache::GlyphAtlas>::stats
+             at /tmp/vello-062-worktree/glifo/src/atlas/cache.rs:481:13
+   4: repro::main
+             at ./src/main.rs:190:44
+   5: <fn() as core::ops::function::FnOnce<()>>::call_once
+             at .../library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+exit code: 101
+
+--- repeat runs, debug build, no RUST_BACKTRACE (to confirm determinism) ---
+
+run 1:
+cached entries after rendering one COLR glyph: 1
+
+thread 'main' (76163) panicked at /tmp/vello-062-worktree/glifo/src/atlas/cache.rs:481:13:
+index out of bounds: the len is 4 but the index is 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit code: 101
+
+run 2:
+cached entries after rendering one COLR glyph: 1
+
+thread 'main' (76175) panicked at /tmp/vello-062-worktree/glifo/src/atlas/cache.rs:481:13:
+index out of bounds: the len is 4 but the index is 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit code: 101
+
+run 3:
+cached entries after rendering one COLR glyph: 1
+
+thread 'main' (76187) panicked at /tmp/vello-062-worktree/glifo/src/atlas/cache.rs:481:13:
+index out of bounds: the len is 4 but the index is 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit code: 101
+
+run 4:
+cached entries after rendering one COLR glyph: 1
+
+thread 'main' (79135) panicked at /tmp/vello-062-worktree/glifo/src/atlas/cache.rs:481:13:
+index out of bounds: the len is 4 but the index is 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit code: 101
+
+run 5 (also this candidate's own `just reproduce-before`, against a genuinely fresh clone
+of base_commit, not the reused worktree used for runs 1-4):
+cached entries after rendering one COLR glyph: 1
+
+thread 'main' (88506) panicked at .../clone/glifo/src/atlas/cache.rs:481:13:
+index out of bounds: the len is 4 but the index is 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit code: 101
+
+=> Reproduces 5/5 debug-build runs, deterministic (fixed font bytes, fixed glyph id, fixed
+   font size, no seed/layout dependence - a plain safe-Rust slice index).
+
+--- release build (--release) ---
+
+$ cargo run --release
+   Compiling repro v0.1.0
+    Finished `release` profile [optimized] target(s)
+     Running `target/release/repro`
+cached entries after rendering one COLR glyph: 1
+GlyphAtlas::stats is debug_assertions-gated; run without --release to reproduce
+
+=> Does not reproduce in release: `GlyphCacheStats`/`GlyphAtlas::stats` are themselves
+   `#[cfg(all(debug_assertions, feature = "std"))]`-gated in glifo, so the API this bug is in
+   does not even exist in a release build. This bug is debug-build-only by construction, not
+   because the underlying defect only manifests under debug-assertions checked arithmetic -
+   it is a plain out-of-bounds slice index, which panics identically in debug and release; it
+   simply cannot be *reached* in release because the whole diagnostics API compiles away.
+
+=== Second input in the same bug class: bitmap glyph (SUBPIXEL_BITMAP = 5) sentinel ===
+
+Verified via a temporary in-tree unit test (glifo/src/glyph.rs, `--features png`, using the
+project's own bundled `NotoColorEmoji-CBTF-Subset.ttf` bitmap-glyph test font and the crate's
+own `TestResources`/`draw_test_glyph` test harness already used by
+`bitmap_glyph_is_cached_when_atlas_cache_is_enabled`) - removed again before this candidate's
+patch.diff was captured, since it was only a verification aid, not part of the delivered fix:
+
+BEFORE (unpatched):
+$ cargo test -p glifo --features png bitmap_glyph_stats_does_not_panic
+thread 'glyph::tests::bitmap_glyph_stats_does_not_panic' (81514) panicked at glifo/src/atlas/cache.rs:481:13:
+index out of bounds: the len is 4 but the index is 5
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out
+
+AFTER (patched):
+$ cargo test -p glifo --features png bitmap_glyph_stats_does_not_panic
+test glyph::tests::bitmap_glyph_stats_does_not_panic ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out
+
+=== AFTER (patched glifo/src/atlas/cache.rs, patch.diff applied) ===
+
+$ cargo run   (debug build, same font/glyph/config as BEFORE)
+   Compiling glifo v0.3.0
+   Compiling repro v0.1.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+     Running `target/debug/repro`
+cached entries after rendering one COLR glyph: 1
+did not reproduce: GlyphCacheStats { static_glyphs: 1, variable_glyphs: 0, page_count: 1, unique_glyph_ids: 1, subpixel_distribution: [0, 0, 0, 0], sizes_used: [16.0] }
+
+=> No panic; `subpixel_distribution` correctly stays `[0, 0, 0, 0]` (the COLR entry has no
+   outline subpixel bucket of its own and is correctly excluded, per the fix), while
+   `static_glyphs`/`unique_glyph_ids`/`sizes_used` still correctly count the real cached entry.
+   Confirmed again via this candidate's own `just reproduce-after` against the same fresh
+   clone with patch.diff applied - identical output.
+
+=== Project test suite (cargo test -p glifo), before vs. after ===
+
+Default features (no `png`):
+  before: 22 passed; 0 failed; 0 ignored
+  after:  22 passed; 0 failed; 0 ignored
+  (identical - the existing suite does not exercise GlyphAtlas::stats at all, consistent with
+  this being a genuine, previously-untested gap)
+
+With `--features png` (includes the temporary verification test while it existed):
+  before: 24 passed; 1 failed (bitmap_glyph_stats_does_not_panic - the temporary test itself,
+          demonstrating the bug)
+  after:  25 passed; 0 failed
+
+cargo test -p vello_cpu --lib, before vs. after: 81 passed; 0 failed; 0 ignored (identical both
+ways - vello_cpu's own test suite never calls GlyphAtlas::stats at all; its own wrapper around
+it, text_debug.rs's GlyphAtlasResources::stats(), is pub(crate) dead code with
+#![allow(dead_code, reason = "only used for debugging purposes")], never called from anywhere
+in vello_cpu itself, so this test run is an unaffected sanity baseline, not evidence either way
+about this specific bug).

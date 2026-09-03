@@ -1,0 +1,53 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder (testdata/jpx_scale_gray4.pdf - a
+# synthetic PDF built specifically to reach hayro-syntax::filter::jpx::scale()/round_f32, see
+# testdata/make_pdf.py for how it was built), or fetched by `just clone` into ./clone
+# (gitignored). This candidate's own patch.diff is the same round_f32 sse4.1/neon-gating fix
+# candidate 015 already measured in isolation - what THIS candidate adds is a real PDF that
+# drives it end-to-end, plus a bit-exact correctness check across the whole render pipeline.
+#
+# `just test` clones the project, builds baseline + patched `render_bench`/`render` binaries,
+# times both against testdata/jpx_scale_gray4.pdf, and diffs their rendered PNG output.
+
+repo_url := "https://github.com/LaurenzV/hayro"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone && cargo build --release -p hayro-bench --bin render_bench
+    cd clone && cargo build --release -p hayro --example render
+    cp clone/target/release/render_bench ./render_bench_baseline
+    cp clone/target/release/examples/render ./render_example_baseline
+
+build-patched:
+    cd clone && cargo build --release -p hayro-bench --bin render_bench
+    cd clone && cargo build --release -p hayro --example render
+    cp clone/target/release/render_bench ./render_bench_patched
+    cp clone/target/release/examples/render ./render_example_patched
+
+bench:
+    @echo "=== timing: baseline (before patch), render_bench, 50000 iterations ==="
+    ./render_bench_baseline testdata --backend hayro --iter 50000
+    @echo "=== timing: patched (after patch), render_bench, 50000 iterations ==="
+    ./render_bench_patched testdata --backend hayro --iter 50000
+    @echo "=== correctness: rendering testdata/jpx_scale_gray4.pdf with both builds ==="
+    rm -rf out_baseline out_patched
+    ./render_example_baseline testdata/jpx_scale_gray4.pdf out_baseline
+    ./render_example_patched testdata/jpx_scale_gray4.pdf out_patched
+    @echo "=== sha256 of rendered PNG, baseline vs patched (must match for a bit-exact result) ==="
+    sha256sum out_baseline/rendered_0.png out_patched/rendered_0.png
+    @echo "=== sha256 of rendered PNG vs the checked-in expected reference ==="
+    sha256sum testdata/rendered_expected.png
+
+clean:
+    rm -rf clone render_bench_baseline render_bench_patched render_example_baseline render_example_patched out_baseline out_patched

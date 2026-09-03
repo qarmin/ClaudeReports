@@ -1,0 +1,61 @@
+Captured output from `repro/` (candidate 021: image minification aliasing), built and run against
+this workspace's own git worktree checkout of base_commit 7516831426fb70f36d62c521c5477f6a7265b36a
+(vello_cpu/vello_common as path dependencies), debug build, 3/3 identical runs in each case.
+
+=== BEFORE the patch (pristine tree) - exit code 1 ===
+
+--- exact 8x downscale (phase-aligned, bilinear) ---
+source 512x512 (stripe period 8px, quality Medium), scale 0.1250 -> output 64x64
+ideal (proper minification filter): value ~= 31.9 uniformly, variance ~= 0
+actual: mean = 128.00 (+302% vs ideal), variance = 0.00, min = 128, max = 128
+=> ALIASED (bug reproduces)
+--- non-integer ~8.4x downscale (phase drifts, bilinear) ---
+source 512x512 (stripe period 8px, quality Medium), scale 0.1191 -> output 61x61
+ideal (proper minification filter): value ~= 31.9 uniformly, variance ~= 0
+actual: mean = 31.84 (-0% vs ideal), variance = 4398.20, min = 0, max = 245
+=> ALIASED (bug reproduces)
+--- exact 8x downscale (phase-aligned, bicubic) ---
+source 512x512 (stripe period 8px, quality High), scale 0.1250 -> output 64x64
+ideal (proper minification filter): value ~= 31.9 uniformly, variance ~= 0
+actual: mean = 136.00 (+327% vs ideal), variance = 0.00, min = 136, max = 136
+=> ALIASED (bug reproduces)
+
+REPRODUCED - at least one case showed minification aliasing
+
+(repeated 3x: exit code 1 all 3 runs, identical output every time)
+
+=== AFTER the patch (patch.diff applied) - exit code 0 ===
+
+--- exact 8x downscale (phase-aligned, bilinear) ---
+source 512x512 (stripe period 8px, quality Medium), scale 0.1250 -> output 64x64
+ideal (proper minification filter): value ~= 31.9 uniformly, variance ~= 0
+actual: mean = 32.00 (+0% vs ideal), variance = 0.00, min = 32, max = 32
+=> OK (matches proper minification filter)
+--- non-integer ~8.4x downscale (phase drifts, bilinear) ---
+source 512x512 (stripe period 8px, quality Medium), scale 0.1191 -> output 61x61
+ideal (proper minification filter): value ~= 31.9 uniformly, variance ~= 0
+actual: mean = 32.00 (+0% vs ideal), variance = 0.00, min = 32, max = 32
+=> OK (matches proper minification filter)
+--- exact 8x downscale (phase-aligned, bicubic) ---
+source 512x512 (stripe period 8px, quality High), scale 0.1250 -> output 64x64
+ideal (proper minification filter): value ~= 31.9 uniformly, variance ~= 0
+actual: mean = 32.00 (+0% vs ideal), variance = 0.00, min = 32, max = 32
+=> OK (matches proper minification filter)
+
+did not reproduce - all cases matched a proper minification filter
+
+(repeated 3x: exit code 0 all 3 runs, identical output every time)
+
+=== Project test suite (cargo test -p vello_common -p vello_cpu --lib), same worktree ===
+
+Before patch:
+  vello_common: test result: ok. 159 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+  vello_cpu:    test result: ok. 81 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+After patch:
+  vello_common: test result: ok. 159 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+  vello_cpu:    test result: ok. 81 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+(vello_sparse_tests' own snapshot-comparison suite could not be run in this sandbox - the
+reference PNGs are Git-LFS-tracked and git-lfs is not installed here; see
+___BUGHUNT___/README.md's documented limitation.)

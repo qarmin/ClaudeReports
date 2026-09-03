@@ -1,0 +1,43 @@
+# Self-contained reproduction for candidate 035 (AAC_STALE_UNINIT_OUTPUT_FRAMES_RETURNED_AS_OK).
+#
+# repro/ writes its own ADTS (native AAC) bitstreams bit by bit (see repro/src/main.rs - no
+# encoder emits a raw_data_block that is only ID_TERM, or a lone SCE in a stereo stream, so the
+# frames have to be crafted) and decodes them through Symphonia's real public
+# AdtsReader -> AacDecoder path. Nothing outside this folder is referenced; ./clone is fetched by
+# `just clone`.
+#
+# `reproduce-before` exits non-zero (that is the bug), `reproduce-after` exits zero.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - frames that decode no channel
+# element at all (or only one channel of a stereo pair) come back as Ok with the *previous*
+# packet's samples, bit for bit.
+reproduce-before:
+    #!/usr/bin/env bash
+    ulimit -c 0
+    cd repro
+    if cargo run; then
+        echo ">>> UNEXPECTED: repro did NOT reproduce the bug against the pristine clone"
+        exit 1
+    fi
+    echo ">>> expected non-zero exit: the bug reproduced against the pristine clone"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - the malformed frames must be rejected with a
+# decode error, and the three well-formed control streams must still decode every frame.
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo run
+
+clean:
+    rm -rf clone repro/target

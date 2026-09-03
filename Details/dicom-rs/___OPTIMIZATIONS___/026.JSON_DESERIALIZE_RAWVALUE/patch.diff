@@ -1,0 +1,152 @@
+diff --git a/json/Cargo.toml b/json/Cargo.toml
+index 952b20a5..252d858c 100644
+--- a/json/Cargo.toml
++++ b/json/Cargo.toml
+@@ -16,7 +16,7 @@ dicom-dictionary-std = { path = "../dictionary-std", version = "0.10" }
+ dicom-object = { path = "../object", version = "0.10" }
+ num-traits = "0.2.15"
+ serde = { version = "1.0.164", features = ["derive"] }
+-serde_json = { version = "1.0.96", features = ["preserve_order"] }
++serde_json = { version = "1.0.96", features = ["preserve_order", "raw_value"] }
+ tracing = "0.1.34"
+ 
+ [dev-dependencies]
+diff --git a/json/src/de/mod.rs b/json/src/de/mod.rs
+index 35f41cd6..87763e21 100644
+--- a/json/src/de/mod.rs
++++ b/json/src/de/mod.rs
+@@ -142,7 +142,11 @@ where
+     {
+         let mut values: Option<_> = None;
+         let mut vr = None;
+-        let mut value: Option<serde_json::Value> = None;
++        // captured as raw, unparsed JSON text (not an eagerly-built `serde_json::Value` DOM) -
++        // the VR isn't known until the whole map has been scanned, so the actual typed
++        // deserialization below happens in one pass directly from this raw text once the VR is
++        // known, instead of two passes (text -> generic `Value` tree, then tree -> typed `Vec<T>`)
++        let mut value: Option<Box<serde_json::value::RawValue>> = None;
+         let mut inline_binary = None;
+         let mut bulk_data_uri = None;
+ 
+@@ -218,7 +222,7 @@ where
+                 // sequence
+                 VR::SQ => {
+                     let items: Vec<DicomJson<InMemDicomObject<D>>> =
+-                        serde_json::from_value(value).map_err(A::Error::custom)?;
++                        serde_json::from_str(value.get()).map_err(A::Error::custom)?;
+                     let items: Vec<_> = items.into_iter().map(DicomJson::into_inner).collect();
+                     values = Some(Value::Sequence(items.into()));
+                 }
+@@ -238,7 +242,7 @@ where
+                 | VR::UC
+                 | VR::UI => {
+                     let items: Vec<Option<String>> =
+-                        serde_json::from_value(value).map_err(A::Error::custom)?;
++                        serde_json::from_str(value.get()).map_err(A::Error::custom)?;
+                     let items: Vec<String> =
+                         items.into_iter().map(|v| v.unwrap_or_default()).collect();
+                     values = Some(PrimitiveValue::Strs(items.into()).into());
+@@ -247,30 +251,30 @@ where
+                 // should always be signed 16-bit integers
+                 VR::SS => {
+                     let items: Vec<i16> =
+-                        serde_json::from_value(value).map_err(A::Error::custom)?;
++                        serde_json::from_str(value.get()).map_err(A::Error::custom)?;
+                     values = Some(PrimitiveValue::I16(items.into()).into());
+                 }
+                 // should always be unsigned 16-bit integers
+                 VR::US | VR::OW => {
+                     let items: Vec<u16> =
+-                        serde_json::from_value(value).map_err(A::Error::custom)?;
++                        serde_json::from_str(value.get()).map_err(A::Error::custom)?;
+                     values = Some(PrimitiveValue::U16(items.into()).into());
+                 }
+                 // should always be signed 32-bit integers
+                 VR::SL => {
+                     let items: Vec<i32> =
+-                        serde_json::from_value(value).map_err(A::Error::custom)?;
++                        serde_json::from_str(value.get()).map_err(A::Error::custom)?;
+                     values = Some(PrimitiveValue::I32(items.into()).into());
+                 }
+                 VR::OB => {
+-                    let items: Vec<u8> = serde_json::from_value(value).map_err(A::Error::custom)?;
++                    let items: Vec<u8> = serde_json::from_str(value.get()).map_err(A::Error::custom)?;
+                     values = Some(PrimitiveValue::U8(items.into()).into());
+                 }
+                 // sometimes numbers, sometimes text,
+                 // should parse on the spot
+                 VR::FL | VR::OF => {
+                     let items: Vec<NumberOrText<f32>> =
+-                        serde_json::from_value(value).map_err(A::Error::custom)?;
++                        serde_json::from_str(value.get()).map_err(A::Error::custom)?;
+                     let items: C<f32> = items
+                         .into_iter()
+                         .map(|v| v.to_num())
+@@ -280,7 +284,7 @@ where
+                 }
+                 VR::FD | VR::OD => {
+                     let items: Vec<NumberOrText<f64>> =
+-                        serde_json::from_value(value).map_err(A::Error::custom)?;
++                        serde_json::from_str(value.get()).map_err(A::Error::custom)?;
+                     let items: C<f64> = items
+                         .into_iter()
+                         .map(|v| v.to_num())
+@@ -290,7 +294,7 @@ where
+                 }
+                 VR::SV => {
+                     let items: Vec<NumberOrText<i64>> =
+-                        serde_json::from_value(value).map_err(A::Error::custom)?;
++                        serde_json::from_str(value.get()).map_err(A::Error::custom)?;
+                     let items: C<i64> = items
+                         .into_iter()
+                         .map(|v| v.to_num())
+@@ -300,7 +304,7 @@ where
+                 }
+                 VR::UL | VR::OL => {
+                     let items: Vec<NumberOrText<u32>> =
+-                        serde_json::from_value(value).map_err(A::Error::custom)?;
++                        serde_json::from_str(value.get()).map_err(A::Error::custom)?;
+                     let items: C<u32> = items
+                         .into_iter()
+                         .map(|v| v.to_num())
+@@ -310,7 +314,7 @@ where
+                 }
+                 VR::UV | VR::OV => {
+                     let items: Vec<NumberOrText<u64>> =
+-                        serde_json::from_value(value).map_err(A::Error::custom)?;
++                        serde_json::from_str(value.get()).map_err(A::Error::custom)?;
+                     let items: C<u64> = items
+                         .into_iter()
+                         .map(|v| v.to_num())
+@@ -322,27 +326,27 @@ where
+                 // but retain string form
+                 VR::DS => {
+                     let items: Vec<NumberOrText<f64>> =
+-                        serde_json::from_value(value).map_err(A::Error::custom)?;
++                        serde_json::from_str(value.get()).map_err(A::Error::custom)?;
+                     let items: C<String> = items.into_iter().map(|v| v.to_string()).collect();
+                     values = Some(PrimitiveValue::Strs(items).into());
+                 }
+                 VR::IS => {
+                     let items: Vec<NumberOrText<f64>> =
+-                        serde_json::from_value(value).map_err(A::Error::custom)?;
++                        serde_json::from_str(value.get()).map_err(A::Error::custom)?;
+                     let items: C<String> = items.into_iter().map(|v| v.to_string()).collect();
+                     values = Some(PrimitiveValue::Strs(items).into());
+                 }
+                 // person names
+                 VR::PN => {
+                     let items: Vec<DicomJsonPerson> =
+-                        serde_json::from_value(value).map_err(A::Error::custom)?;
++                        serde_json::from_str(value.get()).map_err(A::Error::custom)?;
+                     let items: C<String> = items.into_iter().map(|v| v.to_string()).collect();
+                     values = Some(PrimitiveValue::Strs(items).into());
+                 }
+                 // tags
+                 VR::AT => {
+                     let items: Vec<DicomJson<Tag>> =
+-                        serde_json::from_value(value).map_err(A::Error::custom)?;
++                        serde_json::from_str(value.get()).map_err(A::Error::custom)?;
+                     let items: C<Tag> = items.into_iter().map(DicomJson::into_inner).collect();
+                     values = Some(PrimitiveValue::Tags(items).into());
+                 }

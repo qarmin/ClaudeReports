@@ -1,0 +1,43 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# NOTE: this repo's .gitattributes marks two snapshot-PNG directories as `filter=lfs required=true`.
+# A plain `git clone` fails here if `git-lfs` isn't installed on PATH (unrelated to this bug) -
+# install git-lfs first, or see this workspace's own README.md for a sparse-checkout workaround
+# that avoids touching those paths.
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - panics on all three exercised
+# inputs (see RESULT.md): a bare `pop_clip_path()` with no preceding `push_clip_path()`, under
+# both the single-threaded and multi-threaded dispatchers, and an extra pop after otherwise-
+# balanced push/pop nesting - demonstrating the bug.
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - still panics (unbalanced push/pop is by
+# design an error condition, not silently ignored), but now with a clear, documented message
+# ("pop_clip called without a matching push_clip") instead of the raw "clip stack underflowed"
+# message, on all three inputs.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

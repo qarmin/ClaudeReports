@@ -1,0 +1,21 @@
+REBUILT to meet CONFIRMATION.md section 11's real end-to-end bar (this candidate's original
+repro fed a custom in-process `Read` impl to `PDataReader` with no real socket at all - see
+RESULT.md's note on this). The repro below wraps a real `TcpStream` and feeds it from a
+genuinely separate thread over a REAL loopback TCP socket.
+
+$ just clone && just reproduce-before   (pristine clone at df2b9e4236298efa3fa37a1f360fc4bf284d586a)
+
+reading from a real socket fed by a real, independent attacker thread...
+got an error: Connection closed by peer
+BUG: buffered the attacker's entire stream (unbounded growth) before finally failing with a generic disconnect error, instead of rejecting the oversized PDU declaration early
+(non-zero exit expected here: bug reproduced)
+
+$ just apply && just reproduce-after   (patch.diff applied to the same clone)
+
+reading from a real socket fed by a real, independent attacker thread...
+got an error: PDU too large: 532274 bytes buffered without a complete PDU (max 524300)
+correctly rejected the oversized PDU early, without buffering the attacker's entire stream
+
+Also confirmed directly against the live project tree's own dicom-ul crate (a separate
+confirmation before packaging this repro): identical unbounded-growth failure before the patch,
+identical early rejection after.

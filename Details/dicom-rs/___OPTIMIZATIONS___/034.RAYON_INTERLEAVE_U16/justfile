@@ -1,0 +1,53 @@
+# Self-contained reproduction for candidate 034.RAYON_INTERLEAVE_U16.
+#
+# Re-applies candidate 004's own patch.diff unchanged (see RESULT.md - no new library source
+# change here, just measuring the same fix's u16 instantiation via a harness-only gen-planar-rgb
+# extension). Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see
+# SKILL.md's "shape 3" pattern), self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept
+# together.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched genfixtures bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+    rm -rf clone/___OPTIMIZATIONS___/harness/bench_pipeline/target
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+# dicom-test-files' path() resolves its cache dir by walking UP from the running executable's own
+# path until it finds a "target" path component - so this step must run the binary from inside
+# clone's own target/release/ (not the ./bin_baseline copy at this folder's top level, which has
+# no "target" ancestor and would panic with "Cannot find target directory"). Writes fixtures with
+# an absolute path back into this folder.
+genfixtures:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && ./target/release/bench gen-planar-rgb pydicom/SC_rgb_16bit.dcm "{{justfile_directory()}}/testdata_below.dcm" 25000 16
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && ./target/release/bench gen-planar-rgb pydicom/SC_rgb_16bit.dcm "{{justfile_directory()}}/testdata_10m.dcm" 100000 16
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && ./target/release/bench gen-planar-rgb pydicom/SC_rgb_16bit.dcm "{{justfile_directory()}}/testdata_20m.dcm" 200000 16
+
+bench:
+    @echo "=== below threshold, 2.5M px, multi-core ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- colorspace-fast testdata_below.dcm 15
+    @echo "=== 10M px, multi-core ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- colorspace-fast testdata_10m.dcm 15
+    @echo "=== 20M px, multi-core ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- colorspace-fast testdata_20m.dcm 15
+
+clean:
+    rm -rf clone bin_baseline bin_patched testdata_below.dcm testdata_10m.dcm testdata_20m.dcm

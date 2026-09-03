@@ -1,0 +1,35 @@
+Captured output of `just test` (== `cd repro && cargo run --release`) run against a fresh clone
+of linebender/vello at commit 7516831426fb70f36d62c521c5477f6a7265b36a (build warnings about an
+unrelated `single_use_lifetimes` lint expectation omitted below - not related to this finding).
+
+Repeated 3 times against the local worktree build (identical each time, bit-for-bit):
+
+$ ./target/release/repro
+bump.failed = 0, n_lines = 10
+line p0=[1380.0, -2263.0] p1=[1404.0, -2240.5]  dev0=0.6027 dev1=2.5122
+line p0=[1404.0, -2240.5] p1=[1440.0, -2215.5]  dev0=2.5122 dev1=0.2632
+line p0=[1440.0, -2215.5] p1=[1420.0, -2228.5]  dev0=0.2632 dev1=2.2158
+line p0=[1420.0, -2228.5] p1=[1396.0, -2250.0]  dev0=2.2158 dev1=0.1081
+line p0=[664.0, 208.5] p1=[692.0, 230.0]  dev0=0.2300 dev1=0.3532
+line p0=[648.0, 195.5] p1=[664.0, 208.5]  dev0=0.7245 dev1=0.2300
+line p0=[680.0, 220.5] p1=[648.0, 195.5]  dev0=0.5264 dev1=0.7245
+line p0=[708.0, 243.0] p1=[680.0, 220.5]  dev0=0.1414 dev1=0.5264
+line p0=[1396.0, -2250.0] p1=[708.0, 243.0]  dev0=0.1081 dev1=0.1414
+line p0=[692.0, 230.0] p1=[1380.0, -2263.0]  dev0=0.3532 dev1=0.6027
+max deviation from ideal straight offset edge: 2.5122 device px (tol=0.25)
+REPRODUCED: flattened stroke offset points deviate 2.5122 device px from the true straight line, far exceeding the algorithm's own 0.25 px tolerance budget
+exit code: 1
+
+Interpretation:
+- The 10 emitted `LineSoup` segments are the real production output of vello_shaders::cpu::flatten
+  (the same function vello::Renderer dispatches as its CPU-shader fallback, and functionally
+  identical to the WGSL flatten.wgsl compute shader that runs on GPU) for the two stroke-offset
+  curves of a single stroked `Line` (linebender/vello#1139's exact repro input).
+- `ideal_top*`/`ideal_bot*` (computed independently in this harness, in f64, from the exact
+  geometric definition of a stroke offset edge: local point + width/2 * unit-normal, then the
+  same affine transform) mark where each edge truly should be.
+- Every emitted point's device-space perpendicular distance from its corresponding ideal edge is
+  printed as dev0/dev1. Two of the ten segments deviate by ~2.2-2.5 device pixels - a full order of
+  magnitude past the 0.25 device-pixel error budget documented in flatten_euler's own tolerance
+  constant (`tol` in vello_shaders/src/cpu/flatten.rs) - while adjacent segments deviate by only a
+  few tenths of a pixel, producing exactly the zig-zag/jagged pattern the original issue reports.

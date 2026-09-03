@@ -1,0 +1,40 @@
+diff --git a/app/benches/resize_cbcr/main.rs b/app/benches/resize_cbcr/main.rs
+index 830e878..1368e4e 100644
+--- a/app/benches/resize_cbcr/main.rs
++++ b/app/benches/resize_cbcr/main.rs
+@@ -16,6 +16,35 @@ pub fn criterion_benchmark(c: &mut Criterion) {
+     let dimensions = img.dimensions();
+     let binding = img.to_luma_alpha16();
+     let src_bytes = binding.as_raw().to_vec();
++    let binding8 = img.to_luma_alpha8();
++    let src_bytes8 = binding8.as_raw().to_vec();
++
++    c.bench_function("Pic scale CbCr8 wide filter: Lanczos 3", |b| {
++        let copied: Vec<u8> = src_bytes8.to_vec();
++        let store =
++            ImageStore::<u8, 2>::from_slice(&copied, dimensions.0 as usize, dimensions.1 as usize)
++                .unwrap();
++        let scaler = Scaler::new(ResamplingFunction::Lanczos3)
++            .set_threading_policy(ThreadingPolicy::Single)
++            .set_workload_strategy(WorkloadStrategy::PreferSpeed);
++        let resampler = scaler
++            .plan_cbcr_resampling(
++                store.size(),
++                ImageSize::new(dimensions.0 as usize / 16, dimensions.1 as usize / 16),
++            )
++            .unwrap();
++        let mut scratch = resampler.alloc_scratch();
++        let mut target = ImageStoreMut::alloc_with_depth(
++            dimensions.0 as usize / 16,
++            dimensions.1 as usize / 16,
++            8,
++        );
++        b.iter(|| {
++            resampler
++                .resample_with_scratch(&store, &mut target, &mut scratch)
++                .unwrap();
++        })
++    });
+ 
+     c.bench_function("Pic scale CbCr10: Lanczos 3", |b| {
+         let copied: Vec<u16> = src_bytes.to_vec();

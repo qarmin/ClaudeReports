@@ -1,0 +1,123 @@
+=== repro/ under LLVM (plain cargo, opt-level 0) - the oracle ===
+$ cd repro && CARGO_TARGET_DIR=target-llvm cargo run --quiet
+--- f16 identity simd_cast, lane counts 1/2/4/8/16 ---
+[32256]
+[0, 32768]
+[15872, 49280, 64511, 1]
+[0, 32768, 15872, 49280, 16896, 14336, 32256, 31744]
+[0, 32768, 15872, 49280, 16896, 14336, 32256, 31744, 64512, 64511, 31743, 1024, 1, 48128, 31743, 15360]
+--- f16 identity simd_as ---
+[15872, 49280, 64511, 1]
+--- f128 identity simd_cast, lane counts 1/2/4 ---
+[170138587312039964317873038467719495680]
+[0, 170141183460469231731687303715884105728]
+[0, 170141183460469231731687303715884105728, 170138587312039964317873038467719495680, 170135991163610696904058773219554885631]
+--- f128 identity simd_as ---
+[170135991163610696904058773219554885631, 170141183460469231731687303715884105728]
+--- controls: non-identity f16/f128 SIMD casts ---
+[1069547520, 3222274048, 3347046400, 864026624]
+[15872, 49280, 31744, 32256]
+[85067995581805348452029386609777442816, 255212424227811164450984521885867311104, 0, 170138587312039964317873038467719495680]
+[0, 9223372036854775808, 9221120237041090560, 9218868437227405312]
+exit 0
+
+=== repro/ under cg_clif @ 2bc05d45, UNPATCHED (dist/cargo-clif, opt-level 0) ===
+$ cd repro && CARGO_TARGET_DIR=target-clif ../../../dist/cargo-clif run --quiet
+
+thread 'rustc' (2564503) panicked at src/codegen_f16_f128.rs:197:18:
+internal error: entered unreachable code: types::F16 -> types::F16
+stack backtrace:
+   0:     0x7d6438e09766 - <<std[2998bee3b0e5d588]::sys::backtrace::BacktraceLock>::print::DisplayBacktrace as core[3cf3978926eb57e0]::fmt::Display>::fmt
+   1:     0x7d643940bd8f - core[3cf3978926eb57e0]::fmt::write
+   2:     0x7d6438e1ec4c - <std[2998bee3b0e5d588]::sys::stdio::unix::Stderr as core[3cf3978926eb57e0]::io::write::Write>::write_fmt
+   3:     0x7d6438ddcb3a - std[2998bee3b0e5d588]::panicking::default_hook::{closure#0}
+   4:     0x7d6438dfd9c3 - std[2998bee3b0e5d588]::panicking::default_hook
+   5:     0x7d6437db0a0f - std[2998bee3b0e5d588]::panicking::update_hook::<alloc[592e58dec68c5427]::boxed::Box<rustc_driver_impl[554ade12355b72f6]::install_ice_hook::{closure#1}>>::{closure#0}
+   6:     0x7d6438dfde62 - std[2998bee3b0e5d588]::panicking::panic_with_hook
+   7:     0x7d6438ddcbf2 - std[2998bee3b0e5d588]::panicking::panic_handler::{closure#0}
+   8:     0x7d6438dd3a29 - std[2998bee3b0e5d588]::sys::backtrace::__rust_end_short_backtrace::<std[2998bee3b0e5d588]::panicking::panic_handler::{closure#0}, !>
+   9:     0x7d6438dde52d - __rustc[6adebc3d073c6bff]::rust_begin_unwind
+  10:     0x7d6435a952bc - core[3cf3978926eb57e0]::panicking::panic_fmt
+  11:     0x7d6425c4b870 - rustc_codegen_cranelift[fa8037e011ca6e71]::codegen_f16_f128::codegen_cast
+  12:     0x7d6425bb5986 - rustc_codegen_cranelift[fa8037e011ca6e71]::intrinsics::simd_for_each_lane
+  13:     0x7d6425bfc01e - rustc_codegen_cranelift[fa8037e011ca6e71]::intrinsics::simd::codegen_simd_intrinsic_call
+  14:     0x7d6425bb5d42 - rustc_codegen_cranelift[fa8037e011ca6e71]::intrinsics::codegen_intrinsic_call
+  15:     0x7d6425b9682d - rustc_codegen_cranelift[fa8037e011ca6e71]::abi::codegen_terminator_call
+  16:     0x7d6425bd5962 - rustc_codegen_cranelift[fa8037e011ca6e71]::base::codegen_fn_body
+  17:     0x7d6425bd05a8 - rustc_codegen_cranelift[fa8037e011ca6e71]::base::codegen_fn
+  18:     0x7d6425cb4eb9 - rustc_codegen_cranelift[fa8037e011ca6e71]::driver::aot::codegen_cgu
+  19:     0x7d6425c63f0d - <std[2998bee3b0e5d588]::thread::local::LocalKey<core[3cf3978926eb57e0]::cell::Cell<*const ()>>>::with::<rustc_middle[29759ea568b6cf8d]::ty::context::tls::enter_context<<rustc_codegen_cranelift[fa8037e011ca6e71]::driver::aot::AotDriver as rustc_codegen_ssa[e78300e6ca9435]::traits::backend::ExtraBackendMethods>::compile_codegen_unit::{closure#0}, rustc_codegen_ssa[e78300e6ca9435]::ModuleCodegen<rustc_codegen_cranelift[fa8037e011ca6e71]::driver::aot::AotModule>>::{closure#0}, rustc_codegen_ssa[e78300e6ca9435]::ModuleCodegen<rustc_codegen_cranelift[fa8037e011ca6e71]::driver::aot::AotModule>>
+  20:     0x7d6425cb5a59 - <rustc_codegen_cranelift[fa8037e011ca6e71]::driver::aot::AotDriver as rustc_codegen_ssa[e78300e6ca9435]::traits::backend::ExtraBackendMethods>::compile_codegen_unit
+  21:     0x7d6425bb082a - rustc_codegen_ssa[e78300e6ca9435]::base::codegen_crate::<rustc_codegen_cranelift[fa8037e011ca6e71]::driver::aot::AotDriver, rustc_codegen_cranelift[fa8037e011ca6e71]::driver::aot::AotModule>
+  22:     0x7d6425baecf2 - <rustc_codegen_cranelift[fa8037e011ca6e71]::CraneliftCodegenBackend as rustc_codegen_ssa[e78300e6ca9435]::traits::backend::CodegenBackend>::codegen_crate
+  23:     0x7d643a6d7756 - <rustc_interface[bfce04871fb1cdcf]::queries::Linker>::codegen_and_build_linker
+  24:     0x7d643a6cf04b - rustc_interface[bfce04871fb1cdcf]::interface::run_compiler::<(), rustc_driver_impl[554ade12355b72f6]::run_compiler::{closure#0}>::{closure#2}
+  25:     0x7d643a77e282 - std[2998bee3b0e5d588]::sys::backtrace::__rust_begin_short_backtrace::<rustc_interface[bfce04871fb1cdcf]::util::run_in_thread_with_globals<rustc_interface[bfce04871fb1cdcf]::util::run_in_thread_pool_with_globals<rustc_interface[bfce04871fb1cdcf]::interface::run_compiler<(), rustc_driver_impl[554ade12355b72f6]::run_compiler::{closure#0}>::{closure#2}, ()>::{closure#0}, ()>::{closure#0}::{closure#0}, ()>
+  26:     0x7d643a77e02d - <std[2998bee3b0e5d588]::thread::lifecycle::spawn_unchecked<rustc_interface[bfce04871fb1cdcf]::util::run_in_thread_with_globals<rustc_interface[bfce04871fb1cdcf]::util::run_in_thread_pool_with_globals<rustc_interface[bfce04871fb1cdcf]::interface::run_compiler<(), rustc_driver_impl[554ade12355b72f6]::run_compiler::{closure#0}>::{closure#2}, ()>::{closure#0}, ()>::{closure#0}::{closure#0}, ()>::{closure#1} as core[3cf3978926eb57e0]::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+  27:     0x7d643a786987 - <std[2998bee3b0e5d588]::sys::thread::unix::Thread>::new::thread_start
+  28:     0x7d6433c8307a - start_thread
+                               at ./nptl/pthread_create.c:454:8
+  29:     0x7d6433d16534 - clone
+                               at ./misc/../sysdeps/unix/sysv/linux/x86_64/clone.S:100:0
+  30:                0x0 - <unknown>
+
+error: the compiler unexpectedly panicked. This is a bug
+
+note: using internal features is not supported and expected to cause internal compiler errors when used incorrectly
+
+note: please attach the file at `/home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/013.simd_cast_f16_identity_ice/repro/rustc-ice-2026-09-03T06_43_02-2564501.txt` to your bug report
+
+note: rustc 1.100.0-nightly (fb6531d55 2026-08-23) running on x86_64-unknown-linux-gnu
+
+note: compiler flags: --crate-type bin -C embed-bitcode=no -C debuginfo=2 -C linker=clang -C incremental=[REDACTED] -C panic=abort -Z panic-abort-tests -Z codegen-backend=/home/rafal/Projekty/Obce/rustc_codegen_cranelift/dist/lib/librustc_codegen_cranelift.so
+
+note: some of the compiler flags provided by cargo are hidden
+
+query stack during panic:
+end of query stack
+terminator _0 = simd_cast::<F16x1, F16x1>(copy _1) -> [return: bb1, unwind unreachable]
+fn cast_f16x1(_1: F16x1) -> F16x1 {
+    debug a => _1;
+    let mut _0: F16x1;
+
+    bb0: {
+        _0 = std::intrinsics::simd::simd_cast::<F16x1, F16x1>(copy _1) -> [return: bb1, unwind unreachable];
+    }
+
+    bb1: {
+        return;
+    }
+}
+
+error: could not compile `simd_cast_f16_identity_ice` (bin "simd_cast_f16_identity_ice")
+
+Caused by:
+  process didn't exit successfully: `/home/rafal/.rustup/toolchains/nightly-2026-08-24-x86_64-unknown-linux-gnu/bin/rustc --crate-name simd_cast_f16_identity_ice --edition=2021 src/main.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=710705271480da4a --out-dir /home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/013.simd_cast_f16_identity_ice/repro/target-clif/debug/build/simd_cast_f16_identity_ice/9bbce618aedef74e/out -C linker=clang -C incremental=/home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/013.simd_cast_f16_identity_ice/repro/target-clif/debug/incremental -Cpanic=abort -Zpanic-abort-tests -Zcodegen-backend=/home/rafal/Projekty/Obce/rustc_codegen_cranelift/dist/lib/librustc_codegen_cranelift.so --sysroot /home/rafal/Projekty/Obce/rustc_codegen_cranelift/dist` (exit status: 101)
+exit 101
+
+=== repro/ under cg_clif @ 2bc05d45 + patch.diff (opt-level 0) ===
+$ cd repro && CARGO_TARGET_DIR=target-clif <patched>/dist/cargo-clif run --quiet
+--- f16 identity simd_cast, lane counts 1/2/4/8/16 ---
+[32256]
+[0, 32768]
+[15872, 49280, 64511, 1]
+[0, 32768, 15872, 49280, 16896, 14336, 32256, 31744]
+[0, 32768, 15872, 49280, 16896, 14336, 32256, 31744, 64512, 64511, 31743, 1024, 1, 48128, 31743, 15360]
+--- f16 identity simd_as ---
+[15872, 49280, 64511, 1]
+--- f128 identity simd_cast, lane counts 1/2/4 ---
+[170138587312039964317873038467719495680]
+[0, 170141183460469231731687303715884105728]
+[0, 170141183460469231731687303715884105728, 170138587312039964317873038467719495680, 170135991163610696904058773219554885631]
+--- f128 identity simd_as ---
+[170135991163610696904058773219554885631, 170141183460469231731687303715884105728]
+--- controls: non-identity f16/f128 SIMD casts ---
+[1069547520, 3222274048, 3347046400, 864026624]
+[15872, 49280, 31744, 32256]
+[85067995581805348452029386609777442816, 255212424227811164450984521885867311104, 0, 170138587312039964317873038467719495680]
+[0, 9223372036854775808, 9221120237041090560, 9218868437227405312]
+exit 0
+
+=== diff of the two run-time outputs ===
+$ diff llvm.out clif.out
+(no output - byte-identical)

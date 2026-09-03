@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>candidate 010 repro</title></head>
+<body>
+<pre id="log"></pre>
+<script type="module">
+    const log = (msg) => {
+        console.log(msg);
+        document.getElementById("log").textContent += msg + "\n";
+    };
+
+    // Spy on the real Worker instances the module under test creates, purely
+    // as an observer: forwards to the real Worker constructor untouched, and
+    // additionally records every message the real worker thread posts (in
+    // real arrival order) so we can see what happened to it *after*
+    // startWorkers()'s own Promise.race already settled - startWorkers()
+    // itself never exposes the underlying Worker objects.
+    const RealWorker = window.Worker;
+    const messagesByWorker = [];
+    window.Worker = class SpyWorker extends RealWorker {
+        constructor(...args) {
+            super(...args);
+            const idx = messagesByWorker.length;
+            messagesByWorker.push([]);
+            this.addEventListener("message", (event) => {
+                messagesByWorker[idx].push({ t: performance.now(), data: event.data });
+            });
+        }
+    };
+
+    const { startWorkers } = await import("./snippets/orx_parallel-00000000/src/pool/pool_impl/wasm_web_start_workers.js");
+
+    const t0 = performance.now();
+    let resolved = false;
+    let rejected = null;
+    try {
+        // module/memory args are opaque to startWorkers itself; it only
+        // forwards them to the worker's own orx_parallel_worker_init message.
+        await startWorkers({}, {}, 1);
+        resolved = true;
+    } catch (err) {
+        rejected = String(err && err.message ? err.message : err);
+    }
+    const dt = performance.now() - t0;
+
+    log("startWorkers resolved=" + resolved + " rejected=" + rejected + " after " + dt.toFixed(1) + "ms");
+
+    // Give the worker's post-ready error (if any) time to actually arrive
+    // before we report the final verdict.
+    await new Promise((r) => setTimeout(r, 500));
+
+    const worker0Messages = messagesByWorker[0] || [];
+    log("worker0 real message sequence: " + JSON.stringify(worker0Messages.map((m) => m.data)));
+
+    const gotReady = worker0Messages.some((m) => m.data && m.data.type === "orx_parallel_worker_ready");
+    const errorMsg = worker0Messages.find((m) => m.data && m.data.type === "orx_parallel_worker_error");
+
+    log("FINAL: startWorkers_resolved=" + resolved + " worker_posted_ready=" + gotReady +
+        " worker_posted_error_after_ready=" + (errorMsg !== undefined) +
+        " error_message=" + (errorMsg ? errorMsg.data.message : null));
+    window.__done = { resolved, rejected, gotReady, errorMsg: errorMsg ? errorMsg.data.message : null };
+</script>
+</body>
+</html>

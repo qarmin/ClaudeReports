@@ -1,0 +1,56 @@
+# Self-contained reproduction for this candidate.
+#
+# This is a re-measurement of candidate 004 (../004.upsampler_row_buffer_reuse/) under
+# `--no-default-features` (single-threaded, no rayon) - it reuses 004's own patch.diff verbatim
+# rather than duplicating it. See 004.upsampler_row_buffer_reuse/patch.diff for the change
+# applied here.
+#
+# Self-contained given the whole ___OPTIMIZATIONS___ folder kept together (shape 3 from
+# templates/candidate_justfile): the project's own bench harness (bench_decode) is untracked in
+# the main jpeg-decoder repo, so it's copied in from ../harness/bench_decode/ below, and the
+# patch applied is read from ../004.upsampler_row_buffer_reuse/patch.diff, not duplicated into
+# this folder. Unlike a normal harness copy, this candidate ALSO disables the jpeg-decoder path
+# dependency's default features (adds `default-features = false`) after copying, since that is
+# the only way to actually build the single-threaded fallback path this candidate measures -
+# `cargo build --no-default-features` on the bench_decode crate itself has no effect on a
+# dependency's own default features unless the manifest says so.
+
+repo_url := "https://github.com/image-rs/jpeg-decoder.git"
+base_commit := "eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c"
+harness_dir := "../harness/bench_decode"
+patch_path := "../004.upsampler_row_buffer_reuse/patch.diff"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/bench_decode
+    sed -i 's#path = "\.\./\.\./\.\."#path = ".."#' clone/bench_decode/Cargo.toml
+    sed -i 's#path = ".."\ }#path = "..", default-features = false }#' clone/bench_decode/Cargo.toml
+    grep -q 'default-features = false' clone/bench_decode/Cargo.toml || (echo "sed rewrite failed, aborting" >&2 && exit 1)
+
+build-baseline:
+    cd clone/bench_decode && cargo +stable build --release
+    cp clone/bench_decode/target/release/bench_decode ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/{{patch_path}}"
+
+build-patched:
+    cd clone/bench_decode && cargo +stable build --release
+    cp clone/bench_decode/target/release/bench_decode ./bin_patched
+
+bench:
+    @echo "=== baseline (--no-default-features, before patch), large_image.jpg ==="
+    ./bin_baseline clone/benches/large_image.jpg 30
+    @echo "=== patched (--no-default-features, after patch), large_image.jpg ==="
+    ./bin_patched clone/benches/large_image.jpg 30
+    @echo "=== paired comparison, large_image.jpg (RUNS=9) ==="
+    RUNS=9 "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- clone/benches/large_image.jpg 30
+    @echo "=== control: lossless image (Upsampler is never reached here) ==="
+    RUNS=9 "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- clone/tests/reftest/images/lossless/1/jpeg_lossless_sel1-rgb.jpg 30
+
+clean:
+    rm -rf clone bin_baseline bin_patched

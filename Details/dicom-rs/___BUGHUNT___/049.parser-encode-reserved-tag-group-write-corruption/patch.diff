@@ -1,0 +1,40 @@
+diff --git a/parser/src/stateful/encode.rs b/parser/src/stateful/encode.rs
+index addfea46..3dd4df0b 100644
+--- a/parser/src/stateful/encode.rs
++++ b/parser/src/stateful/encode.rs
+@@ -10,7 +10,7 @@ use dicom_encoding::{
+     encode::EncodeTo,
+     text::{DefaultCharacterSetCodec, SpecificCharacterSet, TextCodec},
+ };
+-use snafu::{Backtrace, OptionExt, ResultExt, Snafu};
++use snafu::{Backtrace, OptionExt, ResultExt, Snafu, ensure};
+ use std::io::Write;
+ 
+ #[derive(Debug, Snafu)]
+@@ -46,6 +46,18 @@ pub enum Error {
+         source: std::io::Error,
+         backtrace: Backtrace,
+     },
++
++    /// Tags in group 0xFFFE (Item, Item Delimitation, Sequence Delimitation)
++    /// are reserved for those structural markers and are always encoded
++    /// without a VR field, even in transfer syntaxes that otherwise encode
++    /// VR explicitly - so a data element header with a tag in this group can
++    /// never be represented on the wire without becoming indistinguishable
++    /// from (or colliding with) one of those markers when read back.
++    #[snafu(display(
++        "Cannot encode a data element header with reserved tag {} (group 0xFFFE is reserved for item/delimiter markers)",
++        tag
++    ))]
++    ReservedTag { tag: Tag, backtrace: Backtrace },
+ }
+ 
+ pub type Result<T> = std::result::Result<T, Error>;
+@@ -98,6 +110,7 @@ where
+ {
+     /// Encode and write a data element header.
+     pub fn encode_element_header(&mut self, mut de: DataElementHeader) -> Result<()> {
++        ensure!(de.tag.group() != 0xFFFE, ReservedTagSnafu { tag: de.tag });
+         if let Some(len) = de.len.get() {
+             de.len = Length(even_len(len))
+         }

@@ -1,0 +1,32 @@
+diff --git a/hayro/src/glyph.rs b/hayro/src/glyph.rs
+index 0d4638e7..52008a4b 100644
+--- a/hayro/src/glyph.rs
++++ b/hayro/src/glyph.rs
+@@ -124,13 +124,25 @@ impl Renderer<'_> {
+         match &props.paint {
+             Paint::Color(_) => {
+                 let clip_path = self.begin_fill_run(props, Rect::ZERO);
++
++                // Combine every glyph's outline (transformed into the run's shared coordinate
++                // space) into one path so the whole run goes through a single `fill_path` call
++                // instead of one per glyph. Sound for `NonZero` fill as long as glyphs in the
++                // same run don't overlap - true for normal text, but synthetic bold/oblique or
++                // unusual kerning could make outlines overlap, in which case a batched fill can
++                // differ subtly at the overlapping edges from filling them individually.
++                let mut combined = BezPath::new();
+                 for glyph in glyph_run.glyphs() {
+                     let Glyph::Outline(outline) = &**glyph else {
+                         continue;
+                     };
+ 
+-                    self.ctx.set_transform(props.transform * glyph.transform());
+-                    self.ctx.fill_path(self.cached_outline(outline).as_ref());
++                    let outline = self.cached_outline(outline);
++                    combined.extend(glyph.transform() * outline.as_ref());
++                }
++
++                if !combined.is_empty() {
++                    self.ctx.fill_path(&combined);
+                 }
+                 self.finish_run(clip_path);
+             }

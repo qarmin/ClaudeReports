@@ -1,0 +1,73 @@
+=== rustc / build info ===
+Build toolchain: RUSTUP_TOOLCHAIN=1.87.0 (cargo dev profile, overflow-checks=true, debug-assertions=true by default)
+rustc 1.87.0 (17067e9ac 2025-05-09)
+
+=== Approach 1: manual boundary-value construction (structural combinatorial matrix) ===
+576 generated JPEGs (gen/ + gen2/) via ImageMagick/libjpeg-turbo: progressive (SOF2),
+varying sampling factors (1x1..4x4 per component, symmetric and asymmetric),
+varying restart intervals (1,2,3,4,5,8,1000), varying image dims (1x1 up to 200x150,
+including many not a multiple of 8/16, extreme tiny sizes 1x1..9x9).
+LARGE DIFF gen2/g43.jpg max 55
+LARGE DIFF gen2/g44.jpg max 55
+LARGE DIFF gen2/g45.jpg max 55
+LARGE DIFF gen2/g58.jpg max 48
+LARGE DIFF gen2/g59.jpg max 48
+LARGE DIFF gen2/g60.jpg max 48
+Checked 576 files. Flagged: 6
+ - gen2/g43.jpg
+ - gen2/g44.jpg
+ - gen2/g45.jpg
+ - gen2/g58.jpg
+ - gen2/g59.jpg
+ - gen2/g60.jpg
+
+=== Approach 2: mutation fuzzing (debug-assertions + overflow-checks build) ===
+--- test_prog_restart.jpg ---
+--- v2.jpg ---
+--- v3.jpg ---
+--- v4.jpg ---
+--- v5.jpg ---
+--- test_prog_restart.jpg (30000 iters, random 1-6 byte mutations anywhere after SOI) ---
+Done. 0 crashes out of 30000 iters
+--- v2.jpg (30000 iters, random 1-6 byte mutations anywhere after SOI) ---
+Done. 0 crashes out of 30000 iters
+--- v3.jpg (30000 iters, random 1-6 byte mutations anywhere after SOI) ---
+Done. 0 crashes out of 30000 iters
+--- v5.jpg (30000 iters, random 1-6 byte mutations anywhere after SOI) ---
+Done. 0 crashes out of 30000 iters
+--- v4.jpg (5000 iters, larger 200x150 image) ---
+Done. 0 crashes out of 5000 iters
+
+=== Approach 3: root-causing the 6 flagged "LARGE DIFF" cases from Approach 1 ===
+All 6 flagged files are 3x3-pixel progressive images with one chroma-subsampled component
+(2x2 or asymmetric) - i.e. a single 16x16-pixel MCU covering a 3x3 image, heavily padded,
+with restart_interval in {1,2,4}.
+
+Isolating the variable: re-tested gen2/g43.jpg's exact parameters (3x3, comp1 h=2 v=2, DRI=1)
+against a 4:4:4 (no subsampling) variant of the same 3x3 image:
+
+  $ convert -size 3x3 gradient:red-blue -sampling-factor "1x1,1x1,1x1" -interlace Plane \
+        -define jpeg:restart-interval=1 /tmp/g43_444.jpg
+  decode_test max diff vs libjpeg-turbo reference: 0
+
+Re-tested the same 2x2-subsampled 3x3 image with restart interval removed entirely
+(no DRI marker at all):
+
+  $ convert -size 3x3 gradient:red-blue -sampling-factor "2x2,1x1,1x1" -interlace Plane \
+        /tmp/g43_norestart.jpg
+  decode_test max diff vs libjpeg-turbo reference: 55 (same magnitude as with DRI=1)
+
+This isolates the diff to chroma-subsampling upsampling on a heavily-padded tiny image,
+independent of restart interval, independent of progressive multi-scan structure (it's
+already present with just the SOF sampling factor difference). It is a chroma-upsampling
+filter difference (this crate's box/nearest-style upsampling vs. libjpeg-turbo's fancy
+upsampling algorithm producing different edge-extrapolation results on a 3-pixel-wide image
+padded out to a 16-pixel MCU), not a block-offset/index arithmetic defect - the values are
+self-consistent within a row/column (no scrambled/misplaced block, just a different filtered
+value at the same position), and it reproduces with plain SOF baseline sampling-factor
+mismatch alone.
+
+Per-pixel row dump for gen2/g43.jpg (mine vs. libjpeg-turbo reference), 3x3 RGB:
+row0: mine [(202,12,76),(202,12,76),(202,12,76)]  ref [(202,12,76),(202,12,76),(202,12,76)]
+row1: mine [(141,0,108),(141,0,108),(141,0,108)]  ref [(179,0,53),(179,0,53),(179,0,53)]
+row2: mine [(41,0,197),(41,0,197),(41,0,197)]      ref [(2,1,252),(2,1,252),(2,1,252)]

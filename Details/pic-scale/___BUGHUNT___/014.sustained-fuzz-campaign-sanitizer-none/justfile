@@ -1,0 +1,73 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate found no pic-scale source bug (Status: Not reproducible) - there is no
+# patch.diff and no repro/ crate to apply a fix to. What this justfile reproduces instead is the
+# actual finding: all 16 existing cargo-fuzz targets, built with `--sanitizer none` (see candidate
+# 001 for why plain ASan hangs in the original sandbox), run cleanly to completion with zero
+# crashes/panics/timeouts. The real session ran all 16 in parallel for 900s each (~91M executions
+# total, see RESULT.md/output.txt); this justfile runs a shorter default per-target duration so
+# `just test` finishes in a reasonable time - override with `just test 900` to reproduce the full
+# campaign, which takes about 15 minutes wall-clock (parallel) or several hours (if run serially
+# on a low-core-count machine).
+#
+# Fill in repo_url/base_commit when this candidate is created (read them once with
+# `git remote get-url origin` / `git rev-parse HEAD` in the main project).
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Default demo duration per target, in seconds. The real session used 900.
+duration := "20"
+
+# `clone` is cloned into /tmp, not a subdirectory here, and this folder only holds a symlink to
+# it. cargo-fuzz's fuzz/Cargo.toml has no `[workspace]` table of its own and relies on climbing to
+# an ancestor Cargo.toml to discover it isn't part of one; pic-scale's own root Cargo.toml
+# excludes "fuzz" from its workspace, but cargo's ancestor search does not stop at an excluding
+# workspace root - it keeps climbing past it. If this candidate folder's `clone/` lived nested
+# inside this project's own checkout (as a plain subdirectory would), that climb reaches this
+# project's own real Cargo.toml several directories up and wrongly folds the *cloned* fuzz crate
+# into *this* checkout's workspace ("current package believes it's in a workspace when it's not").
+# Cloning outside this tree entirely avoids having any such ancestor workspace to accidentally hit.
+clone_dir := "/tmp/pic_scale_bughunt_014_clone"
+
+test: clone build (run duration)
+
+clone:
+    rm -rf {{clone_dir}}
+    git clone {{repo_url}} {{clone_dir}}
+    cd {{clone_dir}} && git checkout {{base_commit}}
+    rm -f clone
+    ln -s {{clone_dir}} clone
+
+# The first build command exits non-zero (only the `colorspaces` bin fails, since it needs the
+# `colorspaces` Cargo feature this command doesn't pass) but still successfully builds the other
+# 15 target binaries - `-` tells `just` not to abort the recipe on that expected failure.
+build:
+    -cd clone/fuzz && cargo +nightly fuzz build --release --sanitizer none --features avx,sse,nightly_avx512
+    cd clone/fuzz && cargo +nightly fuzz build --release --sanitizer none --features avx,sse,nightly_avx512,colorspaces colorspaces
+
+# Runs all 16 targets in parallel for `duration` seconds each and reports crashes (there should be
+# none - a clean "Done <N> runs" line per target, no ERROR/panic/SUMMARY:/deadly-signal output).
+run duration=duration:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone/fuzz
+    targets="resize_cbcr16 resize_cbcr8 resize_cbcr_f16 resize_cbcr_f32 resize_plane resize_plane_f32 resize_plane_u16 resize_rgb resize_rgb_f16 resize_rgb_f32 resize_rgb_u16 resize_rgba resize_rgba_f16 resize_rgba_f32 resize_rgba_u16 colorspaces"
+    mkdir -p /tmp/pic_scale_bughunt_014_logs
+    for t in $targets; do
+      mkdir -p "corpus/$t"
+      ./target/x86_64-unknown-linux-gnu/release/$t \
+        -max_total_time={{duration}} -rss_limit_mb=1536 "corpus/$t" \
+        > "/tmp/pic_scale_bughunt_014_logs/$t.log" 2>&1 &
+    done
+    wait
+    echo "=== Results ==="
+    for t in $targets; do
+      echo "--- $t ---"
+      grep -E '^Done' "/tmp/pic_scale_bughunt_014_logs/$t.log" || echo "(did not print Done - check log below)"
+    done
+    echo "=== Crash/panic grep (should be empty aside from the harmless --sanitizer none boilerplate warning) ==="
+    grep -inE 'ERROR|panic|SUMMARY: |deadly signal|leaked|timeout|out-of-memory|slow-unit' /tmp/pic_scale_bughunt_014_logs/*.log | grep -v 'Failed to find function' || echo "(no matches - clean)"
+
+clean:
+    rm -rf {{clone_dir}} clone

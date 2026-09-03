@@ -1,0 +1,120 @@
+================================================================================
+Candidate 024 - _mm_clflush / _mm_clflushopt abort at run time under cg_clif
+Host: Ryzen 9 7900, rustc nightly-2026-08-24, cg_clif @ 2bc05d45 (Cranelift 0.135)
+repro/ built at opt-level 0 (see the MIR-GVN gotcha in ___BUGHUNT___/README.md)
+Captured 2026-09-03 07:26:41 UTC
+================================================================================
+
+### A. LLVM (the oracle): CARGO_TARGET_DIR=target-llvm cargo run --bin clflush_repro
+--------------------------------------------------------------------------------
+ulimit -c 0 && cd repro && CARGO_TARGET_DIR=target-llvm cargo run --bin clflush_repro
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running `target-llvm/debug/clflush_repro`
+part1 clflush 4 lines: sum=32640
+part2 clflushopt 2 lines: sum=32640
+part3 pressure: a=0x123456789abcdef b=0x5a38f28fe27f2b10 c=0xfa3 d=0x547a68415ef6f02 e=0xbfb18b501372a6cf acc=0x1d3542a911ce36d8
+part4 readback: sum=137252198848 first=0 last=4020695758
+part5 mixed: local=0xdeadbeefcafebabe buf0=165 buf4095=165
+all parts done
+
+### B. cg_clif UNPATCHED: dist/cargo-clif run --bin clflush_repro
+--------------------------------------------------------------------------------
+ulimit -c 0 && cd repro && rm -rf target-clif && CARGO_TARGET_DIR=target-clif /home/rafal/Projekty/Obce/rustc_codegen_cranelift/dist/cargo-clif run --bin clflush_repro
+   Compiling clflush_repro v0.0.0 (/home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/024.sse2_clflush_unimplemented/repro)
+warning: unsupported x86 llvm intrinsic llvm.x86.clflushopt; replacing with trap
+
+warning: unsupported x86 llvm intrinsic llvm.x86.sse2.clflush; replacing with trap
+
+warning: `clflush_repro` (bin "clflush_repro") generated 2 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.57s
+     Running `target-clif/debug/clflush_repro`
+
+thread 'main' (3768177) panicked at library/core/src/panicking.rs:225:5:
+llvm.x86.sse2.clflush is not yet supported.
+See https://github.com/rust-lang/rustc_codegen_cranelift/issues/171
+Please open an issue at https://github.com/rust-lang/rustc_codegen_cranelift/issues
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+thread caused non-unwinding panic. aborting.
+Aborted
+error: Recipe `clif` failed on line 48 with exit code 134
+
+### C. cg_clif PATCHED (patch.diff applied, ./y.sh build): same command
+--------------------------------------------------------------------------------
+ulimit -c 0 && cd repro && rm -rf target-clif && CARGO_TARGET_DIR=target-clif /home/rafal/Projekty/Obce/rustc_codegen_cranelift/tmp/wt/024.sse2_clflush_unimplemented/dist/cargo-clif run --bin clflush_repro
+   Compiling clflush_repro v0.0.0 (/home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/024.sse2_clflush_unimplemented/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.38s
+     Running `target-clif/debug/clflush_repro`
+part1 clflush 4 lines: sum=32640
+part2 clflushopt 2 lines: sum=32640
+part3 pressure: a=0x123456789abcdef b=0x5a38f28fe27f2b10 c=0xfa3 d=0x547a68415ef6f02 e=0xbfb18b501372a6cf acc=0x1d3542a911ce36d8
+part4 readback: sum=137252198848 first=0 last=4020695758
+part5 mixed: local=0xdeadbeefcafebabe buf0=165 buf4095=165
+all parts done
+
+### D. Repeatability: the same two binaries run 5 times each
+--------------------------------------------------------------------------------
+unpatched cg_clif binary (target-clif-unpatched/debug/clflush_repro):
+/bin/bash: line 8: 3779320 Aborted                    ./target-clif-unpatched/debug/clflush_repro > /dev/null 2>&1
+  run 1 -> exit 134
+/bin/bash: line 8: 3779322 Aborted                    ./target-clif-unpatched/debug/clflush_repro > /dev/null 2>&1
+  run 2 -> exit 134
+/bin/bash: line 8: 3779324 Aborted                    ./target-clif-unpatched/debug/clflush_repro > /dev/null 2>&1
+  run 3 -> exit 134
+/bin/bash: line 8: 3779326 Aborted                    ./target-clif-unpatched/debug/clflush_repro > /dev/null 2>&1
+  run 4 -> exit 134
+/bin/bash: line 8: 3779327 Aborted                    ./target-clif-unpatched/debug/clflush_repro > /dev/null 2>&1
+  run 5 -> exit 134
+patched cg_clif binary (target-clif/debug/clflush_repro), md5 of full output:
+  run 1 -> exit 0 md5 ffee85099d60dacb33e26fda647b7c41
+  run 2 -> exit 0 md5 ffee85099d60dacb33e26fda647b7c41
+  run 3 -> exit 0 md5 ffee85099d60dacb33e26fda647b7c41
+  run 4 -> exit 0 md5 ffee85099d60dacb33e26fda647b7c41
+  run 5 -> exit 0 md5 ffee85099d60dacb33e26fda647b7c41
+LLVM binary (target-llvm/debug/clflush_repro), md5 of full output:
+  run 1 -> exit 0 md5 ffee85099d60dacb33e26fda647b7c41
+
+### E. objdump: the patched lowering emits real instructions, not a dropped no-op
+--------------------------------------------------------------------------------
+$ objdump -d target-clif/debug/clflush_repro | grep -oP '\t(clflushopt|clflush)\s+\S+' | sort | uniq -c
+      1 	clflush (%rax)
+      1 	clflushopt (%rax)
+$ objdump -d target-llvm/debug/clflush_repro | grep -oP '\t(clflushopt|clflush)\s+\S+' | sort | uniq -c
+      1 	clflush (%rdi)
+      1 	clflushopt (%rdi)
+(one occurrence each: cg_clif routes inline asm through a single out-of-line asm
+ wrapper symbol that every call site calls, so the mnemonic appears once)
+
+### F. Family sweep (just sweep): every x86 cache-control intrinsic stdarch exposes
+--------------------------------------------------------------------------------
+unpatched cg_clif:
+  clflush        DIFFER llvm[0]=clflush ok sum=32640         clif[0]=thread caused non-unwinding panic. aborting.
+  clflushopt     DIFFER llvm[0]=clflushopt ok sum=32640      clif[0]=thread caused non-unwinding panic. aborting.
+  fences         DIFFER llvm[0]=fences ok                    clif[0]=thread caused non-unwinding panic. aborting.
+  pause          SAME   llvm[0]=pause ok                     clif[0]=pause ok
+  prefetch       SAME   llvm[0]=prefetch ok 7                clif[0]=prefetch ok 7
+  prefetchrs     DIFFER llvm[0]=prefetchrs ok 3              clif[0]=thread caused non-unwinding panic. aborting.
+patched cg_clif (patch.diff only covers clflush + clflushopt):
+  clflush        SAME   llvm[0]=clflush ok sum=32640         clif[0]=clflush ok sum=32640
+  clflushopt     SAME   llvm[0]=clflushopt ok sum=32640      clif[0]=clflushopt ok sum=32640
+  fences         DIFFER llvm[0]=fences ok                    clif[0]=thread caused non-unwinding panic. aborting.
+  pause          SAME   llvm[0]=pause ok                     clif[0]=pause ok
+  prefetch       SAME   llvm[0]=prefetch ok 7                clif[0]=prefetch ok 7
+  prefetchrs     DIFFER llvm[0]=prefetchrs ok 3              clif[0]=thread caused non-unwinding panic. aborting.
+  (fences = candidate 011, not covered by this patch; prefetchrs = new suspect)
+
+### G. Variation matrix on the patched backend (diffcheck.sh single-file loop)
+--------------------------------------------------------------------------------
+  t_clflush      opt-level 0             RESULT: identical (exit 0)
+  t_clflush      -O                      RESULT: identical (exit 0)
+  t_clflush      -Ctarget-cpu=native     RESULT: identical (exit 0)
+  t_clflush      -O + native             RESULT: identical (exit 0)
+  t_clflushopt   opt-level 0             RESULT: identical (exit 0)
+  t_clflushopt   -O                      RESULT: identical (exit 0)
+  t_clflushopt   -Ctarget-cpu=native     RESULT: identical (exit 0)
+  t_clflushopt   -O + native             RESULT: identical (exit 0)
+
+### H. ./y.sh test in the worktree, before and after patch.diff
+--------------------------------------------------------------------------------
+  before (pristine 2bc05d45): exit 0, 35 items
+  after  (patch.diff applied): exit 0, 35 items
+  the two runs' [AOT]/[BUILD]/[COPY]/[JIT]/[PATCH]/[TEST] item lines were diffed: identical

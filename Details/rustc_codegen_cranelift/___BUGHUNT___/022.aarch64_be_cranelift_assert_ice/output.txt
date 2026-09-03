@@ -1,0 +1,160 @@
+Real captured output. Host: Ryzen 9 7900, rustc 1.100.0-nightly (fb6531d55 2026-08-23),
+cg_clif @ 2bc05d45 (Cranelift 0.135), release build via ./y.sh build.
+
+############################################################################
+# 1) The raw ICE - one direct rustc-clif invocation, pristine main tree
+#    rustc-clif --crate-type lib --target aarch64_be-unknown-linux-gnu \
+#               --emit=obj -o c.o repro/sweep_nocore.rs        -> exit 101
+############################################################################
+
+thread 'rustc' (3670362) panicked at /home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-codegen-0.135.0/src/isa/aarch64/mod.rs:267:5:
+assertion failed: triple.architecture == Architecture::Aarch64(Aarch64Architecture::Aarch64)
+stack backtrace:
+  ... (frames 0-11: std panic machinery) ...
+  12:     0x7d0b41699688 - cranelift_codegen[20670654a7538206]::isa::lookup
+  13:     0x7d0b413ae08a - rustc_codegen_cranelift[fa8037e011ca6e71]::build_isa
+  14:     0x7d0b414b51de - rustc_codegen_cranelift[fa8037e011ca6e71]::driver::aot::make_module
+  15:     0x7d0b414b4b0c - rustc_codegen_cranelift[fa8037e011ca6e71]::driver::aot::codegen_cgu
+  16:     0x7d0b414b592f - <rustc_codegen_cranelift::driver::aot::AotDriver as rustc_codegen_ssa::traits::backend::ExtraBackendMethods>::compile_codegen_unit
+  17:     0x7d0b413b082a - rustc_codegen_ssa[e78300e6ca9435]::base::codegen_crate::<...>
+  ... (frames 18-26 elided) ...
+
+error: the compiler unexpectedly panicked. This is a bug
+
+note: using internal features is not supported and expected to cause internal compiler errors when used incorrectly
+
+note: please attach the file at `/home/rafal/Projekty/Obce/rustc_codegen_cranelift/tmp/c022/rustc-ice-2026-09-03T07_24_30-3670339.txt` to your bug report
+
+note: rustc 1.100.0-nightly (fb6531d55 2026-08-23) running on x86_64-unknown-linux-gnu
+
+note: compiler flags: -C panic=abort -Z panic-abort-tests -Z codegen-backend=/home/rafal/Projekty/Obce/rustc_codegen_cranelift/dist/lib/librustc_codegen_cranelift.so --crate-type lib
+
+query stack during panic:
+end of query stack
+
+############################################################################
+# 2) BEFORE the patch - full repro against the pristine tree
+#    cd repro && CLIF_ROOT=<pristine checkout> bash run.sh
+############################################################################
+==============================================================
+PART 1 - the realistic path: cargo build -Zbuild-std=core --target aarch64_be-unknown-linux-gnu
+         (an ordinary no_std lib crate; cargo also has to codegen a real core)
+==============================================================
+--- plain cargo (LLVM) ---
+built OK: /home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/022.aarch64_be_cranelift_assert_ice/repro/work/t_llvm/aarch64_be-unknown-linux-gnu/debug/libbe_probe.d /home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/022.aarch64_be_cranelift_assert_ice/repro/work/t_llvm/aarch64_be-unknown-linux-gnu/debug/libbe_probe.rlib 
+--- cargo-clif (cg_clif) ---
+cg_clif ICEd:
+thread 'rustc' (3492623) panicked at /home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-codegen-0.135.0/src/isa/aarch64/mod.rs:267:5:
+assertion failed: triple.architecture == Architecture::Aarch64(Aarch64Architecture::Aarch64)
+
+==============================================================
+PART 2 - build + link + RUN a real big-endian aarch64 binary (aarch64_be-unknown-none-softfloat)
+==============================================================
+  llvm: ELF 64-bit MSB executable, ARM aarch64, version 1 (SYSV), statically linked, not stripped
+  llvm: qemu-aarch64_be printed [7890598189674834828]
+  clif: ICE -> thread 'rustc' (3514572) panicked at /home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cranelift-codegen-0.135.0/src/isa/aarch64/mod.rs:267:5: assertion failed: triple.architecture == Architecture::Aarch64(Aarch64Architecture::Aarch64) 
+
+==============================================================
+PART 3 - all six aarch64_be targets, plus control targets that must keep working
+         (tiny #![no_core] crate, --emit=obj, no sysroot needed)
+==============================================================
+  aarch64_be-unknown-hermit                ICE|assertion failed: triple.architecture == Architecture::Aarch64(Aarch64Architecture::Aarch64)
+  aarch64_be-unknown-linux-gnu             ICE|assertion failed: triple.architecture == Architecture::Aarch64(Aarch64Architecture::Aarch64)
+  aarch64_be-unknown-linux-gnu_ilp32       ICE|assertion failed: triple.architecture == Architecture::Aarch64(Aarch64Architecture::Aarch64)
+  aarch64_be-unknown-linux-musl            ICE|assertion failed: triple.architecture == Architecture::Aarch64(Aarch64Architecture::Aarch64)
+  aarch64_be-unknown-netbsd                ICE|assertion failed: triple.architecture == Architecture::Aarch64(Aarch64Architecture::Aarch64)
+  aarch64_be-unknown-none-softfloat        ICE|assertion failed: triple.architecture == Architecture::Aarch64(Aarch64Architecture::Aarch64)
+  --- controls (must stay CLIF_OK) ---
+  aarch64-unknown-linux-gnu                CLIF_OK|
+  aarch64-apple-darwin                     CLIF_OK|
+  s390x-unknown-linux-gnu                  CLIF_OK|
+  x86_64-unknown-linux-gnu                 CLIF_OK|
+  riscv64gc-unknown-linux-gnu              CLIF_OK|
+
+  --- the -Ctarget-cpu=native path on aarch64_be-unknown-linux-gnu ---
+  no error
+  emitted object: ELF 64-bit LSB relocatable, x86-64, version 1 (SYSV), not stripped
+
+RESULT: BUG PRESENT (cg_clif ICEd on big-endian aarch64)
+exit status: 1
+
+############################################################################
+# 3) AFTER the patch - identical repro against the patched worktree
+#    cd repro && CLIF_ROOT=<patched worktree> bash run.sh
+############################################################################
+==============================================================
+PART 1 - the realistic path: cargo build -Zbuild-std=core --target aarch64_be-unknown-linux-gnu
+         (an ordinary no_std lib crate; cargo also has to codegen a real core)
+==============================================================
+--- plain cargo (LLVM) ---
+built OK: /home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/022.aarch64_be_cranelift_assert_ice/repro/work/t_llvm/aarch64_be-unknown-linux-gnu/debug/libbe_probe.d /home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/022.aarch64_be_cranelift_assert_ice/repro/work/t_llvm/aarch64_be-unknown-linux-gnu/debug/libbe_probe.rlib 
+--- cargo-clif (cg_clif) ---
+no ICE. Diagnostics from cargo-clif:
+error: can't compile for aarch64_be-unknown-linux-gnu: big-endian AArch64 is not supported by Cranelift
+error: could not compile `core` (lib) due to 1 previous error
+error: could not compile `compiler_builtins` (lib) due to 1 previous error
+
+==============================================================
+PART 2 - build + link + RUN a real big-endian aarch64 binary (aarch64_be-unknown-none-softfloat)
+==============================================================
+  llvm: ELF 64-bit MSB executable, ARM aarch64, version 1 (SYSV), statically linked, not stripped
+  llvm: qemu-aarch64_be printed [7890598189674834828]
+  clif: build failed -> error: can't compile for aarch64_be-unknown-none: big-endian AArch64 is not supported by Cranelift
+
+==============================================================
+PART 3 - all six aarch64_be targets, plus control targets that must keep working
+         (tiny #![no_core] crate, --emit=obj, no sysroot needed)
+==============================================================
+  aarch64_be-unknown-hermit                ERROR|error: can't compile for aarch64_be-unknown-hermit: big-endian AArch64 is not supported by Cranelift
+  aarch64_be-unknown-linux-gnu             ERROR|error: can't compile for aarch64_be-unknown-linux-gnu: big-endian AArch64 is not supported by Cranelift
+  aarch64_be-unknown-linux-gnu_ilp32       ERROR|error: can't compile for aarch64_be-unknown-linux-gnu_ilp32: big-endian AArch64 is not supported by Cranelift
+  aarch64_be-unknown-linux-musl            ERROR|error: can't compile for aarch64_be-unknown-linux-musl: big-endian AArch64 is not supported by Cranelift
+  aarch64_be-unknown-netbsd                ERROR|error: can't compile for aarch64_be-unknown-netbsd: big-endian AArch64 is not supported by Cranelift
+  aarch64_be-unknown-none-softfloat        ERROR|error: can't compile for aarch64_be-unknown-none: big-endian AArch64 is not supported by Cranelift
+  --- controls (must stay CLIF_OK) ---
+  aarch64-unknown-linux-gnu                CLIF_OK|
+  aarch64-apple-darwin                     CLIF_OK|
+  s390x-unknown-linux-gnu                  CLIF_OK|
+  x86_64-unknown-linux-gnu                 CLIF_OK|
+  riscv64gc-unknown-linux-gnu              CLIF_OK|
+
+  --- the -Ctarget-cpu=native path on aarch64_be-unknown-linux-gnu ---
+  error: can't compile for aarch64_be-unknown-linux-gnu: big-endian AArch64 is not supported by Cranelift
+  emitted object: cannot open `/home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/022.aarch64_be_cranelift_assert_ice/repro/work/cn.o' (No such file or directory)
+
+RESULT: OK (no ICE; cg_clif rejects big-endian aarch64 with a clean diagnostic)
+exit status: 0
+
+############################################################################
+# 4) Repeatability (5 direct invocations each, target aarch64_be-unknown-linux-gnu)
+############################################################################
+pristine ICE: 5/5
+patched clean-error: 5/5
+
+############################################################################
+# 5) 331-target blast-radius sweep (repro/sweep_targets.sh)
+############################################################################
+before: 90 CLIF_OK / 224 ERROR / 15 ICE / 2 LLVM_FAIL
+after : 90 CLIF_OK / 230 ERROR /  9 ICE / 2 LLVM_FAIL
+
+diff <(cut -d'|' -f1,2 target_sweep_before.txt) <(cut -d'|' -f1,2 target_sweep_after.txt):
+44,49c44,49
+< aarch64_be-unknown-hermit|ICE
+< aarch64_be-unknown-linux-gnu|ICE
+< aarch64_be-unknown-linux-gnu_ilp32|ICE
+< aarch64_be-unknown-linux-musl|ICE
+< aarch64_be-unknown-netbsd|ICE
+< aarch64_be-unknown-none-softfloat|ICE
+---
+> aarch64_be-unknown-hermit|ERROR
+> aarch64_be-unknown-linux-gnu|ERROR
+> aarch64_be-unknown-linux-gnu_ilp32|ERROR
+> aarch64_be-unknown-linux-musl|ERROR
+> aarch64_be-unknown-netbsd|ERROR
+> aarch64_be-unknown-none-softfloat|ERROR
+
+############################################################################
+# 6) ./y.sh test in the worktree, before and after the patch
+############################################################################
+before: exit 0 - test result: ok. 1200 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+after : exit 0 - test result: ok. 1200 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out

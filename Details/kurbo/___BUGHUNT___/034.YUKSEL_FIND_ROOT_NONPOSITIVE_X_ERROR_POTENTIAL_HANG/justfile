@@ -1,0 +1,42 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# This candidate is Not reproducible: `repro/` calls the fully public
+# `ParamCurveNearest::nearest(p, accuracy)` on `CubicBez` (the real end-to-end path named in the
+# candidate write-up) with several non-positive `accuracy` values. `internal_test/` additionally
+# injects a test module into the cloned `polycool` crate's own `yuksel.rs` so hand-constructed
+# adversarial `f`/`deriv` pairs can call the actual (pub(crate), not externally reachable)
+# `find_root` directly, specifically engineered to try to trigger the theorized Newton-step-
+# underflows-to-exactly-0.0 fixed point. None of it hangs. There is no patch.diff - only
+# `reproduce-before`, no `apply`/`reproduce-after`.
+
+repo_url := "https://github.com/linebender/kurbo.git"
+base_commit := "ca273499e3e48bd2de6f02aa8e99a148984e45f3"
+
+test: clone inject reproduce-before internal-test
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Append the adversarial-test module to the real, cloned yuksel.rs (the crate's own file, so this
+# is calling the real pub(crate) `find_root` from inside its own crate - not a reimplementation).
+inject:
+    cat internal_test/yuksel_bughunt_034_append.rs >> clone/polycool/src/yuksel.rs
+
+# Real public-API entry point - should demonstrate the bug (a hang) if it exists. It does not.
+reproduce-before:
+    cd repro && cargo run --release
+
+# The hand-constructed adversarial calls directly against the real pub(crate) find_root.
+internal-test:
+    cd clone && cargo test -p polycool --lib bughunt_034 -- --nocapture
+
+clean:
+    rm -rf clone

@@ -1,0 +1,62 @@
+diff --git a/pixeldata/src/lib.rs b/pixeldata/src/lib.rs
+index 6ede5847..5a7ef1f4 100644
+--- a/pixeldata/src/lib.rs
++++ b/pixeldata/src/lib.rs
+@@ -2015,13 +2015,56 @@ fn convert_colorspace_u8(i: &mut [u8]) {
+     });
+ }
+ 
++// Caches whether this process has more than one available core - on a single-core (or
++// affinity-restricted to one core) host, dispatching to rayon can never pay for its own
++// overhead regardless of input size.
++#[cfg(all(feature = "rayon", feature = "image"))]
++fn rayon_worth_it() -> bool {
++    use std::sync::OnceLock;
++    static WORTH_IT: OnceLock<bool> = OnceLock::new();
++    *WORTH_IT.get_or_init(|| {
++        std::thread::available_parallelism()
++            .map(|n| n.get() > 1)
++            .unwrap_or(false)
++    })
++}
++
++// interleave()'s per-element work is just a copy (no arithmetic), so rayon's fixed per-call
++// dispatch overhead stays dominant far further out in element count than for
++// convert_colorspace_u8/u16 (~150-200x further, empirically) - the threshold here is
++// correspondingly much higher.
++#[cfg(all(feature = "rayon", feature = "image"))]
++const INTERLEAVE_RAYON_PIXEL_THRESHOLD: usize = 3_000_000;
++
+ #[cfg(feature = "image")]
+-fn interleave<T: Copy>(data: &[T]) -> Vec<T> {
++fn interleave<T: Copy + Default + Send + Sync>(data: &[T]) -> Vec<T> {
+     debug_assert_eq!(data.len() % 3, 0);
+     let component_len = data.len() / 3;
+     let r = &data[..component_len];
+     let g = &data[component_len..2 * component_len];
+     let b = &data[2 * component_len..];
++
++    #[cfg(feature = "rayon")]
++    {
++        if rayon_worth_it() && component_len >= INTERLEAVE_RAYON_PIXEL_THRESHOLD {
++            // Collecting directly into Vec<T> via a pre-zeroed buffer (`vec![T::default(); n]`)
++            // adds a full extra write pass over the output (the zero-fill) that the sequential
++            // `.collect()` below never pays - collecting into Vec<[T; 3]> instead uses rayon's
++            // indexed collect, which writes each element exactly once, no pre-zeroing needed.
++            // `[T; 3]` has the same size/alignment as 3 consecutive `T`s with no padding, so
++            // reinterpreting the buffer as `Vec<T>` is safe for any `T: Copy`.
++            let chunks: Vec<[T; 3]> = (0..component_len)
++                .into_par_iter()
++                .map(|i| [r[i], g[i], b[i]])
++                .collect();
++            let mut chunks = std::mem::ManuallyDrop::new(chunks);
++            let ptr = chunks.as_mut_ptr() as *mut T;
++            let len = chunks.len() * 3;
++            let cap = chunks.capacity() * 3;
++            return unsafe { Vec::from_raw_parts(ptr, len, cap) };
++        }
++    }
++
+     r.iter()
+         .zip(g.iter())
+         .zip(b.iter())

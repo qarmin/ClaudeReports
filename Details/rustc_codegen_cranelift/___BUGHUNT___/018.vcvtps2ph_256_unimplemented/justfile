@@ -1,0 +1,74 @@
+# Self-contained reproduction for candidate 018 (`_mm256_cvtps_ph` /
+# llvm.x86.vcvtps2ph.256 aborts at run time under cg_clif while its 128-bit sibling works).
+#
+# Nothing here reaches outside this folder: `just clone` fetches cg_clif into ./clone (gitignored)
+# and builds it, then the repro is compiled twice from the same source - once with plain rustc
+# (LLVM = the oracle) and once with the clone's dist/cargo-clif - and the run-time output compared.
+#
+# `just test` is the full cycle: clone, build cg_clif, show LLVM's answer, show the run-time abort,
+# apply patch.diff, rebuild, show the abort is gone and the program now prints LLVM's answer.
+#
+# To point the reproduce recipes at an existing cg_clif checkout instead of ./clone:
+#   CLIF_ROOT=/path/to/rustc_codegen_cranelift just llvm clif
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+clif := env_var_or_default("CLIF_ROOT", justfile_directory() / "clone")
+
+test:
+    @test -z "${CLIF_ROOT:-}" || { echo "run 'just test' without CLIF_ROOT set - it builds ./clone"; exit 2; }
+    just clone
+    just build-clif
+    @echo "=== LLVM (the oracle) ==="
+    just llvm
+    @echo "=== cg_clif BEFORE the patch (expected: abort on llvm.x86.vcvtps2ph.256) ==="
+    -just clif
+    just apply
+    just build-clif
+    @echo "=== cg_clif AFTER the patch (expected: byte-identical to LLVM) ==="
+    just clif
+    @echo "=== diff LLVM vs patched cg_clif (expected: empty) ==="
+    just diff
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-clif:
+    cd {{clif}} && ./y.sh prepare
+    cd {{clif}} && ./y.sh build
+
+# The oracle: plain rustc/LLVM on the same source.
+llvm:
+    ulimit -c 0 && cd repro && CARGO_TARGET_DIR=target-llvm cargo run -q --bin vcvtps2ph_256_unimplemented > llvm.out
+    cat repro/llvm.out
+
+# Fresh target dir each time so a stale object file from the other backend/patch state can never
+# be reused.
+# The same source through cg_clif (writes clif.out + target-clif/, which `just disasm` reads).
+clif:
+    ulimit -c 0 && cd repro && rm -rf target-clif clif.out && CARGO_TARGET_DIR=target-clif {{clif}}/dist/cargo-clif run -q --bin vcvtps2ph_256_unimplemented > clif.out
+    cat repro/clif.out
+
+diff:
+    diff repro/llvm.out repro/clif.out && echo "identical"
+
+# F16C family sweep (single file, no cargo): only the 256-bit ps->ph direction is missing.
+family:
+    ulimit -c 0 && cd repro && rustc -Copt-level=0 -o fam_llvm family.rs && ./fam_llvm > fam_llvm.out; true
+    ulimit -c 0 && cd repro && {{clif}}/dist/rustc-clif -Copt-level=0 -o fam_clif family.rs && ./fam_clif > fam_clif.out; true
+    -diff repro/fam_llvm.out repro/fam_clif.out
+
+# Count real `vcvtps2ph` instructions in the binary `just clif` last built.
+# 3 per immediate when patched (1 from the .128 control + 2 from the .256 arm's halves), 1 unpatched.
+disasm:
+    objdump -d --no-show-raw-insn repro/target-clif/debug/vcvtps2ph_256_unimplemented | grep -oE '\bvcvtps2ph\s+\S.*' | sort | uniq -c
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+clean:
+    rm -rf clone repro/target-llvm repro/target-clif repro/target-clif-unpatched
+    rm -f repro/fam_llvm repro/fam_clif repro/fam_llvm.out repro/fam_clif.out repro/llvm.out repro/clif.out

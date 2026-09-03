@@ -1,0 +1,59 @@
+Real captured output from `repro/` (see justfile: `just test` runs this exact sequence against
+a fresh clone of https://github.com/Enet4/dicom-rs.git at df2b9e4236298efa3fa37a1f360fc4bf284d586a).
+
+=== just clone ===
+Cloning into 'clone'...
+HEAD is now at df2b9e42 Merge pull request #821 from youdie006/fix/812-json-sq-primitive-panic
+
+=== just reproduce-before (pristine clone, bug present) ===
+$ cd repro && cargo run --release
+   Compiling dicom-core v0.10.0 (.../clone/core)
+   Compiling dicom-dictionary-std v0.10.0 (.../clone/dictionary-std)
+   Compiling dicom-encoding v0.10.0 (.../clone/encoding)
+   Compiling dicom-transfer-syntax-registry v0.10.0 (.../clone/transfer-syntax-registry)
+   Compiling dicom-parser v0.10.0 (.../clone/parser)
+   Compiling dicom-object v0.10.0 (.../clone/object)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 3.45s
+     Running `target/release/repro`
+wire bytes explicitly declare VR::US for (0028,0106): true
+decoded header VR = SS
+decoded value     = Primitive(I16([-1]))
+REPRODUCED - decoder silently overrode the file's own explicit VR::US declaration to SS (value reinterpreted as Primitive(I16([-1])) instead of the wire-declared unsigned 65535)
+(process exit code: 1)
+
+=== just apply ===
+$ cd clone && git apply patch.diff
+(applied cleanly, no output)
+
+=== just reproduce-after (patched clone, bug fixed) ===
+$ cd repro && cargo run --release
+   Compiling dicom-encoding v0.10.0 (.../clone/encoding)
+   Compiling dicom-parser v0.10.0 (.../clone/parser)
+   Compiling dicom-transfer-syntax-registry v0.10.0 (.../clone/transfer-syntax-registry)
+   Compiling dicom-object v0.10.0 (.../clone/object)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 2.22s
+     Running `target/release/repro`
+wire bytes explicitly declare VR::US for (0028,0106): true
+decoded header VR = US
+decoded value     = Primitive(U16([65535]))
+did not reproduce - decoder respected the file's own explicit VR::US declaration
+(process exit code: 0)
+
+=== repeat-run confirmation (in the main project's working tree, `cargo test -p dicom-object
+    --test xs_vr_override_scratch -- --nocapture`, before the fix, 4 consecutive runs) ===
+run 1: wire VR was US; decoded header VR = SS
+run 2: wire VR was US; decoded header VR = SS
+run 3: wire VR was US; decoded header VR = SS
+run 4: wire VR was US; decoded header VR = SS
+(4/4 runs reproduced, deterministic - this is a pure logic bug, not layout/seed-dependent)
+
+=== project test suite, before vs after (cargo test --workspace --no-fail-fast) ===
+Before (pristine parser/encoding code, scratch repro test present):
+  every pre-existing test suite: unchanged pass counts, 0 failures
+  only new failures: the 2 scratch repro tests (xs_vr_override_ignores_explicit_wire_vr,
+  xs_vr_override_ignores_explicit_wire_vr_big_endian) - expected, they assert the fixed behavior
+After (patched parser/encoding code):
+  all suites pass, including the 2 scratch repro tests
+  no regressions, no new failures anywhere else in the workspace

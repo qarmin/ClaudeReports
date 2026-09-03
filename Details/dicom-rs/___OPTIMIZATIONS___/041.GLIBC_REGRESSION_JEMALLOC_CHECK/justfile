@@ -1,0 +1,46 @@
+# Self-contained reproduction for candidate 041.GLIBC_REGRESSION_JEMALLOC_CHECK.
+#
+# Re-applies candidates 005's and 016's own patches unchanged, one at a time (see RESULT.md - no
+# new library source change here; this candidate adds a diag-jemalloc harness feature and
+# re-measures both candidates' known glibc-specific regressions under it). Uses dicom-rs's own
+# bench_pipeline harness (untracked in the main repo - see SKILL.md's "shape 3" pattern),
+# self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline build-c005 build-c016 bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+    rm -rf clone/___OPTIMIZATIONS___/harness/bench_pipeline/target
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --features diag-jemalloc
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline_jemalloc
+
+build-c005:
+    cd clone && git apply "{{justfile_directory()}}/patch_candidate005.diff"
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --features diag-jemalloc
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_c005_jemalloc
+    cd clone && git checkout -- encoding/src/text.rs
+
+build-c016:
+    cd clone && git apply "{{justfile_directory()}}/patch_candidate016.diff"
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --features diag-jemalloc
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_c016_jemalloc
+    cd clone && git checkout -- object/src/tokens.rs
+
+bench:
+    @echo "=== candidate 005, write-only, seq_10k.dcm, jemalloc (expect: consistent win, not the glibc-default regression) ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline_jemalloc ./bin_c005_jemalloc -- write-only clone/___OPTIMIZATIONS___/harness/bench_pipeline/testdata/seq_10k.dcm 50
+    @echo "=== candidate 016, roundtrip, seq_10k.dcm, jemalloc (expect: no consistent change, not the glibc-default regression) ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline_jemalloc ./bin_c016_jemalloc -- roundtrip clone/___OPTIMIZATIONS___/harness/bench_pipeline/testdata/seq_10k.dcm 50
+
+clean:
+    rm -rf clone bin_baseline_jemalloc bin_c005_jemalloc bin_c016_jemalloc

@@ -1,0 +1,166 @@
+diff --git a/pixeldata/src/lib.rs b/pixeldata/src/lib.rs
+index 6ede5847..f92b801d 100644
+--- a/pixeldata/src/lib.rs
++++ b/pixeldata/src/lib.rs
+@@ -1121,7 +1121,7 @@ impl DecodedPixelData<'_> {
+                                     8,
+                                     signed,
+                                     rescale,
+-                                    data.iter().copied(),
++                                    data,
+                                 )
+                                 .context(CreateLutSnafu)?
+                             }
+@@ -1157,7 +1157,7 @@ impl DecodedPixelData<'_> {
+                                 8,
+                                 signed,
+                                 rescale,
+-                                data.iter().copied(),
++                                data,
+                             )
+                             .context(CreateLutSnafu)?,
+                         };
+@@ -1291,7 +1291,7 @@ impl DecodedPixelData<'_> {
+                                         self.bits_stored,
+                                         signed,
+                                         rescale,
+-                                        samples.iter().copied(),
++                                        &samples,
+                                     )
+                                 }
+                                 (VoiLutOption::Custom(window), _, _) => {
+@@ -1326,7 +1326,7 @@ impl DecodedPixelData<'_> {
+                                     self.bits_stored,
+                                     signed,
+                                     rescale,
+-                                    samples.iter().copied(),
++                                    &samples,
+                                 ),
+                             }
+                             .context(CreateLutSnafu)?;
+@@ -1602,7 +1602,7 @@ impl DecodedPixelData<'_> {
+                                 8,
+                                 signed,
+                                 rescale,
+-                                data.iter().copied(),
++                                data,
+                             ),
+                         }
+                         .context(CreateLutSnafu)?;
+@@ -1684,7 +1684,7 @@ impl DecodedPixelData<'_> {
+                                     self.bits_stored,
+                                     signed,
+                                     rescale,
+-                                    samples.iter().copied(),
++                                    &samples,
+                                 )
+                             }
+                             (VoiLutOption::Custom(window), _) => Lut::new_rescale_and_window(
+@@ -1717,7 +1717,7 @@ impl DecodedPixelData<'_> {
+                                 self.bits_stored,
+                                 signed,
+                                 rescale,
+-                                samples.iter().copied(),
++                                &samples,
+                             ),
+                         }
+                         .context(CreateLutSnafu)?;
+diff --git a/pixeldata/src/lut.rs b/pixeldata/src/lut.rs
+index cb39801d..239871a3 100644
+--- a/pixeldata/src/lut.rs
++++ b/pixeldata/src/lut.rs
+@@ -10,9 +10,53 @@
+ 
+ use num_traits::{NumCast, ToPrimitive};
+ #[cfg(feature = "rayon")]
+-use rayon::iter::{IntoParallelIterator, ParallelIterator};
++use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+ use snafu::{OptionExt, Snafu};
+ 
++// Below this many samples, rayon's own per-call dispatch overhead costs more than the
++// sequential min/max scan it would save - same threshold/guard pattern as
++// `LUT_RAYON_SIZE_THRESHOLD` below, kept separate since the two folds have different per-element
++// costs (a `to_f64` conversion plus two comparisons here, vs. a rescale/VOI float calculation
++// plus a `NumCast` conversion there).
++#[cfg(feature = "rayon")]
++const NORMALIZE_RAYON_SIZE_THRESHOLD: usize = 16_384;
++
++#[cfg(feature = "rayon")]
++fn rayon_worth_it_normalize() -> bool {
++    use std::sync::OnceLock;
++    static WORTH_IT: OnceLock<bool> = OnceLock::new();
++    *WORTH_IT.get_or_init(|| {
++        std::thread::available_parallelism()
++            .map(|n| n.get() > 1)
++            .unwrap_or(false)
++    })
++}
++
++// Single-pass min/max fold over the samples, converted to `f64` (candidate 018's fusion),
++// dispatched to rayon above a size threshold on multi-core hosts (candidate 012's pattern).
++fn min_max_f64<S: ToPrimitive + Copy + Sync>(samples: &[S]) -> (f64, f64) {
++    #[cfg(feature = "rayon")]
++    {
++        if rayon_worth_it_normalize() && samples.len() >= NORMALIZE_RAYON_SIZE_THRESHOLD {
++            return samples
++                .par_iter()
++                .filter_map(|v| v.to_f64())
++                .fold(
++                    || (f64::MAX, f64::MIN),
++                    |(min, max), v| (min.min(v), max.max(v)),
++                )
++                .reduce(
++                    || (f64::MAX, f64::MIN),
++                    |(min1, max1), (min2, max2)| (min1.min(min2), max1.max(max2)),
++                );
++        }
++    }
++    samples.iter().filter_map(|v| v.to_f64()).fold(
++        (f64::MAX, f64::MIN),
++        |(min, max), v| (min.min(v), max.max(v)),
++    )
++}
++
+ use crate::{Rescale, WindowLevelTransform, transform::VoiLutTransform};
+ 
+ /// The LUT could not be created:
+@@ -179,23 +223,19 @@ where
+     /// # Panics
+     ///
+     /// Panics if `bits_stored` is 0 or too large.
+-    pub(crate) fn new_rescale_and_normalize<I>(
++    pub(crate) fn new_rescale_and_normalize<S>(
+         bits_stored: u16,
+         signed: bool,
+         rescale: Rescale,
+-        samples: I,
++        samples: &[S],
+     ) -> Result<Self, CreateLutError>
+     where
+-        I: IntoIterator,
+-        I: Clone,
+-        I::IntoIter: Clone,
+-        I::Item: Clone,
+-        I::Item: NumCast,
+-        I::Item: ToPrimitive,
++        S: NumCast,
++        S: ToPrimitive,
++        S: Copy,
++        S: Sync,
+     {
+-        let samples_f64 = samples.into_iter().filter_map(|v| v.to_f64());
+-        let min: f64 = samples_f64.clone().fold(f64::MAX, |a, b| a.min(b));
+-        let max: f64 = samples_f64.fold(f64::MIN, |a, b| a.max(b));
++        let (min, max) = min_max_f64(samples);
+ 
+         // convert to f64 and swap if negative slope
+         let (min, max) = if rescale.slope < 0. {
+@@ -562,7 +602,7 @@ mod tests {
+             bits_stored,
+             false,
+             Rescale::new(1., -1024.),
+-            [0_u16, 1, 2, 500, 23].iter().copied(),
++            &[0_u16, 1, 2, 500, 23],
+         )
+         .unwrap();
+ 

@@ -1,0 +1,310 @@
+diff --git a/app/Cargo.toml b/app/Cargo.toml
+index b238f38..0df24bc 100644
+--- a/app/Cargo.toml
++++ b/app/Cargo.toml
+@@ -46,3 +46,7 @@ harness = false
+ [[bench]]
+ name = "resize_rgb_f32"
+ harness = false
++
++[[bench]]
++name = "premultiply_alpha"
++harness = false
+diff --git a/app/benches/premultiply_alpha/main.rs b/app/benches/premultiply_alpha/main.rs
+new file mode 100644
+index 0000000..4a2f030
+--- /dev/null
++++ b/app/benches/premultiply_alpha/main.rs
+@@ -0,0 +1,92 @@
++/*
++ * Copyright (c) Radzivon Bartoshyk, 10/2024. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without modification,
++ * are permitted provided that the following conditions are met:
++ *
++ * 1.  Redistributions of source code must retain the above copyright notice, this
++ * list of conditions and the following disclaimer.
++ *
++ * 2.  Redistributions in binary form must reproduce the above copyright notice,
++ * this list of conditions and the following disclaimer in the documentation
++ * and/or other materials provided with the distribution.
++ *
++ * 3.  Neither the name of the copyright holder nor the names of its
++ * contributors may be used to endorse or promote products derived from
++ * this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
++ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
++ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++use criterion::{criterion_group, criterion_main, Criterion};
++use pic_scale_safe::{premultiply_la8, premultiply_rgba16, premultiply_rgba8, unpremultiply_rgba8};
++use std::hint::black_box;
++
++pub fn criterion_benchmark(c: &mut Criterion) {
++    // 1920x1080 RGBA8, matching the size a downstream consumer (`image`) measured this at.
++    let src: Vec<u8> = (0..1920 * 1080 * 4).map(|i| (i % 256) as u8).collect();
++
++    c.bench_function("premultiply_rgba8 1920x1080", |b| {
++        b.iter_batched(
++            || src.clone(),
++            |mut buf| {
++                premultiply_rgba8(black_box(&mut buf));
++                buf
++            },
++            criterion::BatchSize::LargeInput,
++        )
++    });
++
++    let premultiplied: Vec<u8> = {
++        let mut buf = src.clone();
++        premultiply_rgba8(&mut buf);
++        buf
++    };
++
++    c.bench_function("unpremultiply_rgba8 1920x1080", |b| {
++        b.iter_batched(
++            || premultiplied.clone(),
++            |mut buf| {
++                unpremultiply_rgba8(black_box(&mut buf));
++                buf
++            },
++            criterion::BatchSize::LargeInput,
++        )
++    });
++
++    let src_la: Vec<u8> = (0..1920 * 1080 * 2).map(|i| (i % 256) as u8).collect();
++    c.bench_function("premultiply_la8 1920x1080", |b| {
++        b.iter_batched(
++            || src_la.clone(),
++            |mut buf| {
++                premultiply_la8(black_box(&mut buf));
++                buf
++            },
++            criterion::BatchSize::LargeInput,
++        )
++    });
++
++    let src16: Vec<u16> = (0..1920 * 1080 * 4).map(|i| (i % 1024) as u16).collect();
++    c.bench_function("premultiply_rgba16 1920x1080 bd10", |b| {
++        b.iter_batched(
++            || src16.clone(),
++            |mut buf| {
++                premultiply_rgba16(black_box(&mut buf), 10);
++                buf
++            },
++            criterion::BatchSize::LargeInput,
++        )
++    });
++}
++
++criterion_group!(benches, criterion_benchmark);
++criterion_main!(benches);
+diff --git a/src/alpha.rs b/src/alpha.rs
+index 13e355f..56a8249 100644
+--- a/src/alpha.rs
++++ b/src/alpha.rs
+@@ -70,7 +70,8 @@ pub fn premultiply_rgba8(in_place: &mut [u8]) {
+         chunk[0] = div_by_255(chunk[0] as u16 * a);
+         chunk[1] = div_by_255(chunk[1] as u16 * a);
+         chunk[2] = div_by_255(chunk[2] as u16 * a);
+-        chunk[3] = div_by_255(255 * a);
++        // `div_by_255(255 * a) == a` for every `a` in `0..=255` (verified exhaustively), so
++        // `chunk[3]` (already holding `a`) needs no write here.
+     }
+ }
+ 
+@@ -92,7 +93,8 @@ pub fn premultiplied_rgba8(source: &[u8]) -> Vec<u8> {
+         dst[0] = div_by_255(src[0] as u16 * a);
+         dst[1] = div_by_255(src[1] as u16 * a);
+         dst[2] = div_by_255(src[2] as u16 * a);
+-        dst[3] = div_by_255(255 * a);
++        // `div_by_255(255 * a) == a` for every `a` in `0..=255` (verified exhaustively).
++        dst[3] = src[3];
+     }
+     target
+ }
+@@ -130,7 +132,8 @@ pub fn premultiply_la8(in_place: &mut [u8]) {
+     for chunk in in_place.chunks_exact_mut(2) {
+         let a = chunk[1] as u16;
+         chunk[0] = div_by_255(chunk[0] as u16 * a);
+-        chunk[1] = div_by_255(255 * a);
++        // `div_by_255(255 * a) == a` for every `a` in `0..=255` (verified exhaustively), so
++        // `chunk[1]` (already holding `a`) needs no write here.
+     }
+ }
+ 
+@@ -150,7 +153,8 @@ pub fn premultiplied_la8(source: &[u8]) -> Vec<u8> {
+     for (dst, src) in target.chunks_exact_mut(2).zip(source.chunks_exact(2)) {
+         let a = src[1] as u16;
+         dst[0] = div_by_255(src[0] as u16 * a);
+-        dst[1] = div_by_255(255 * a);
++        // `div_by_255(255 * a) == a` for every `a` in `0..=255` (verified exhaustively).
++        dst[1] = src[1];
+     }
+     target
+ }
+@@ -210,14 +214,14 @@ pub fn premultiply_rgba16(in_place: &mut [u16], bit_depth: u32) {
+     // Almost all loops are not auto-vectorised without doing anything dirty.
+     // So everywhere is just added something beautiful.
+     assert!(bit_depth > 0 && bit_depth <= 16);
+-    let max_colors = (1 << bit_depth) - 1;
++    // In every branch below, `div_by_*(max_colors * a) == a` for every `a` in `0..=max_colors`
++    // (verified exhaustively), so `chunk[3]` (already holding `a`) needs no write.
+     if bit_depth == 10 {
+         for chunk in in_place.chunks_exact_mut(4) {
+             let a = chunk[3] as u32;
+             chunk[0] = div_by_1023(chunk[0] as u32 * a);
+             chunk[1] = div_by_1023(chunk[1] as u32 * a);
+             chunk[2] = div_by_1023(chunk[2] as u32 * a);
+-            chunk[3] = div_by_1023(1023 * a);
+         }
+     } else if bit_depth == 12 {
+         for chunk in in_place.chunks_exact_mut(4) {
+@@ -225,7 +229,6 @@ pub fn premultiply_rgba16(in_place: &mut [u16], bit_depth: u32) {
+             chunk[0] = div_by_4095(chunk[0] as u32 * a);
+             chunk[1] = div_by_4095(chunk[1] as u32 * a);
+             chunk[2] = div_by_4095(chunk[2] as u32 * a);
+-            chunk[3] = div_by_4095(4095 * a);
+         }
+     } else if bit_depth == 16 {
+         for chunk in in_place.chunks_exact_mut(4) {
+@@ -233,7 +236,6 @@ pub fn premultiply_rgba16(in_place: &mut [u16], bit_depth: u32) {
+             chunk[0] = div_by_65535(chunk[0] as u32 * a);
+             chunk[1] = div_by_65535(chunk[1] as u32 * a);
+             chunk[2] = div_by_65535(chunk[2] as u32 * a);
+-            chunk[3] = div_by_65535(65535 * a);
+         }
+     } else {
+         for chunk in in_place.chunks_exact_mut(4) {
+@@ -241,7 +243,6 @@ pub fn premultiply_rgba16(in_place: &mut [u16], bit_depth: u32) {
+             chunk[0] = div_by_2pn_m1(chunk[0] as u32 * a, bit_depth);
+             chunk[1] = div_by_2pn_m1(chunk[1] as u32 * a, bit_depth);
+             chunk[2] = div_by_2pn_m1(chunk[2] as u32 * a, bit_depth);
+-            chunk[3] = div_by_2pn_m1(max_colors * a, bit_depth);
+         }
+     }
+ }
+@@ -261,14 +262,15 @@ pub fn premultiplied_rgba16(source: &[u16], bit_depth: u32) -> Vec<u16> {
+     // Almost all loops are not auto-vectorised without doing anything dirty.
+     // So everywhere is just added something beautiful.
+     assert!(bit_depth > 0 && bit_depth <= 16);
+-    let max_colors = (1 << bit_depth) - 1;
++    // In every branch below, `div_by_*(max_colors * a) == a` for every `a` in `0..=max_colors`
++    // (verified exhaustively), so `dst[3]` is simplified to a plain copy of `src[3]`.
+     if bit_depth == 10 {
+         for (dst, src) in target.chunks_exact_mut(4).zip(source.chunks_exact(4)) {
+             let a = src[3] as u32;
+             dst[0] = div_by_1023(src[0] as u32 * a);
+             dst[1] = div_by_1023(src[1] as u32 * a);
+             dst[2] = div_by_1023(src[2] as u32 * a);
+-            dst[3] = div_by_1023(1023 * a);
++            dst[3] = src[3];
+         }
+     } else if bit_depth == 12 {
+         for (dst, src) in target.chunks_exact_mut(4).zip(source.chunks_exact(4)) {
+@@ -276,7 +278,7 @@ pub fn premultiplied_rgba16(source: &[u16], bit_depth: u32) -> Vec<u16> {
+             dst[0] = div_by_4095(src[0] as u32 * a);
+             dst[1] = div_by_4095(src[1] as u32 * a);
+             dst[2] = div_by_4095(src[2] as u32 * a);
+-            dst[3] = div_by_4095(4095 * a);
++            dst[3] = src[3];
+         }
+     } else if bit_depth == 16 {
+         for (dst, src) in target.chunks_exact_mut(4).zip(source.chunks_exact(4)) {
+@@ -284,7 +286,7 @@ pub fn premultiplied_rgba16(source: &[u16], bit_depth: u32) -> Vec<u16> {
+             dst[0] = div_by_65535(src[0] as u32 * a);
+             dst[1] = div_by_65535(src[1] as u32 * a);
+             dst[2] = div_by_65535(src[2] as u32 * a);
+-            dst[3] = div_by_65535(65535 * a);
++            dst[3] = src[3];
+         }
+     } else {
+         for (dst, src) in target.chunks_exact_mut(4).zip(source.chunks_exact(4)) {
+@@ -292,7 +294,7 @@ pub fn premultiplied_rgba16(source: &[u16], bit_depth: u32) -> Vec<u16> {
+             dst[0] = div_by_2pn_m1(src[0] as u32 * a, bit_depth);
+             dst[1] = div_by_2pn_m1(src[1] as u32 * a, bit_depth);
+             dst[2] = div_by_2pn_m1(src[2] as u32 * a, bit_depth);
+-            dst[3] = div_by_2pn_m1(max_colors * a, bit_depth);
++            dst[3] = src[3];
+         }
+     }
+     target
+@@ -311,30 +313,27 @@ pub fn premultiply_la16(in_place: &mut [u16], bit_depth: u32) {
+     // Almost all loops are not auto-vectorised without doing anything dirty.
+     // So everywhere is just added something beautiful.
+     assert!(bit_depth > 0 && bit_depth <= 16);
+-    let max_colors = (1 << bit_depth) - 1;
++    // In every branch below, `div_by_*(max_colors * a) == a` for every `a` in `0..=max_colors`
++    // (verified exhaustively), so `chunk[1]` (already holding `a`) needs no write.
+     if bit_depth == 10 {
+         for chunk in in_place.chunks_exact_mut(2) {
+             let a = chunk[1] as u32;
+             chunk[0] = div_by_1023(chunk[0] as u32 * a);
+-            chunk[1] = div_by_1023(1023 * a);
+         }
+     } else if bit_depth == 12 {
+         for chunk in in_place.chunks_exact_mut(2) {
+             let a = chunk[1] as u32;
+             chunk[0] = div_by_4095(chunk[0] as u32 * a);
+-            chunk[1] = div_by_4095(4095 * a);
+         }
+     } else if bit_depth == 16 {
+         for chunk in in_place.chunks_exact_mut(2) {
+             let a = chunk[1] as u32;
+             chunk[0] = div_by_65535(chunk[0] as u32 * a);
+-            chunk[1] = div_by_65535(65535 * a);
+         }
+     } else {
+         for chunk in in_place.chunks_exact_mut(2) {
+             let a = chunk[1] as u32;
+             chunk[0] = div_by_2pn_m1(chunk[0] as u32 * a, bit_depth);
+-            chunk[1] = div_by_2pn_m1(max_colors * a, bit_depth);
+         }
+     }
+ }
+@@ -354,30 +353,31 @@ pub fn premultiplied_la16(source: &[u16], bit_depth: u32) -> Vec<u16> {
+     // Almost all loops are not auto-vectorised without doing anything dirty.
+     // So everywhere is just added something beautiful.
+     assert!(bit_depth > 0 && bit_depth <= 16);
+-    let max_colors = (1 << bit_depth) - 1;
++    // In every branch below, `div_by_*(max_colors * a) == a` for every `a` in `0..=max_colors`
++    // (verified exhaustively), so `dst[1]` is simplified to a plain copy of `src[1]`.
+     if bit_depth == 10 {
+         for (dst, src) in target.chunks_exact_mut(2).zip(source.chunks_exact(2)) {
+             let a = src[1] as u32;
+             dst[0] = div_by_1023(src[0] as u32 * a);
+-            dst[1] = div_by_1023(1023 * a);
++            dst[1] = src[1];
+         }
+     } else if bit_depth == 12 {
+         for (dst, src) in target.chunks_exact_mut(2).zip(source.chunks_exact(2)) {
+             let a = src[1] as u32;
+             dst[0] = div_by_4095(src[0] as u32 * a);
+-            dst[1] = div_by_4095(4095 * a);
++            dst[1] = src[1];
+         }
+     } else if bit_depth == 16 {
+         for (dst, src) in target.chunks_exact_mut(2).zip(source.chunks_exact(2)) {
+             let a = src[1] as u32;
+             dst[0] = div_by_65535(src[0] as u32 * a);
+-            dst[1] = div_by_65535(65535 * a);
++            dst[1] = src[1];
+         }
+     } else {
+         for (dst, src) in target.chunks_exact_mut(2).zip(source.chunks_exact(2)) {
+             let a = src[1] as u32;
+             dst[0] = div_by_2pn_m1(src[0] as u32 * a, bit_depth);
+-            dst[1] = div_by_2pn_m1(max_colors * a, bit_depth);
++            dst[1] = src[1];
+         }
+     }
+     target

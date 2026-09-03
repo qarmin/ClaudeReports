@@ -1,0 +1,110 @@
+diff --git a/internal/core/translations.rs b/internal/core/translations.rs
+index 28fdc765a..1abfc9d33 100644
+--- a/internal/core/translations.rs
++++ b/internal/core/translations.rs
+@@ -196,9 +196,10 @@ pub fn translate(
+     let mut output = SharedString::default();
+ 
+     // Register a dependency so that language changes trigger a re-evaluation of all relevant bindings
+-    // and this function is called again.
++    // and this function is called again. The returned generation also lets the gettext-rs path
++    // below know whether a previously cached lookup is still valid.
+     #[cfg(any(feature = "tr", all(target_family = "unix", feature = "gettext-rs")))]
+-    global_translation_property();
++    let generation = global_translation_property();
+ 
+     let mut translated: Option<alloc::borrow::Cow<'_, str>> = None;
+ 
+@@ -222,9 +223,13 @@ pub fn translate(
+ 
+     #[cfg(all(target_family = "unix", feature = "gettext-rs"))]
+     if translated.is_none() {
+-        translated = Some(alloc::borrow::Cow::Owned(translate_gettext(
+-            original, contextid, domain, n, plural,
+-        )));
++        translated = Some(alloc::borrow::Cow::Owned(if plural.is_empty() {
++            // The plural form depends on `n` (via glibc's per-language plural rule), so only
++            // the plural-less lookup result is generation-cacheable independent of arguments.
++            cached_translate_gettext(original, contextid, domain, generation)
++        } else {
++            translate_gettext(original, contextid, domain, n, plural)
++        }));
+     }
+ 
+     let translated = translated
+@@ -235,6 +240,75 @@ pub fn translate(
+     output
+ }
+ 
++/// Caches the result of a plural-less `translate_gettext()` lookup per thread, keyed by the
++/// (msgid, context, domain) content and the locale generation.
++///
++/// A `tr!()` binding is re-evaluated whenever *any* of its dependencies change, including
++/// interpolation arguments that have nothing to do with the locale - each such re-evaluation
++/// otherwise reruns the full gettext catalog lookup (a C FFI call plus several heap
++/// allocations) only to end up formatting the exact same pattern string again. Entries are
++/// refreshed in place rather than evicted on a locale change, so this stays bounded by the
++/// number of distinct call sites/msgids actually seen, not by the number of locale switches.
++#[cfg(all(target_family = "unix", feature = "gettext-rs"))]
++fn cached_translate_gettext(
++    original: &str,
++    ctx: &str,
++    domain: &str,
++    generation: usize,
++) -> std::string::String {
++    use alloc::string::ToString;
++    use std::hash::{Hash, Hasher};
++    use std::rc::Rc;
++
++    struct Entry {
++        original: std::string::String,
++        ctx: std::string::String,
++        domain: std::string::String,
++        generation: usize,
++        translated: Rc<str>,
++    }
++
++    crate::thread_local! {
++        static CACHE: core::cell::RefCell<std::collections::HashMap<u64, alloc::vec::Vec<Entry>>> =
++            core::cell::RefCell::new(std::collections::HashMap::new());
++    }
++
++    let mut hasher = std::collections::hash_map::DefaultHasher::new();
++    original.hash(&mut hasher);
++    ctx.hash(&mut hasher);
++    domain.hash(&mut hasher);
++    let key = hasher.finish();
++
++    CACHE.with(|cache| {
++        let mut cache = cache.borrow_mut();
++        let bucket = cache.entry(key).or_default();
++
++        if let Some(entry) =
++            bucket.iter().find(|e| e.original == original && e.ctx == ctx && e.domain == domain)
++            && entry.generation == generation
++        {
++            return entry.translated.to_string();
++        }
++
++        let translated = translate_gettext(original, ctx, domain, 0, "");
++        let rc: Rc<str> = Rc::from(translated.as_str());
++        match bucket.iter_mut().find(|e| e.original == original && e.ctx == ctx && e.domain == domain) {
++            Some(entry) => {
++                entry.generation = generation;
++                entry.translated = rc;
++            }
++            None => bucket.push(Entry {
++                original: original.into(),
++                ctx: ctx.into(),
++                domain: domain.into(),
++                generation,
++                translated: rc,
++            }),
++        }
++        translated
++    })
++}
++
+ #[cfg(all(target_family = "unix", feature = "gettext-rs"))]
+ fn translate_gettext(
+     string: &str,

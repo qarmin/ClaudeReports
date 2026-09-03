@@ -1,0 +1,175 @@
+diff --git a/storescu/src/main.rs b/storescu/src/main.rs
+index 94e720e1..471deee2 100644
+--- a/storescu/src/main.rs
++++ b/storescu/src/main.rs
+@@ -180,6 +180,9 @@ enum Error {
+     Tls {
+         source: dicom_app_common::TlsError,
+     },
++
++    /// One or more instances failed to store (partial failure)
++    PartialFailure,
+ }
+ 
+ #[allow(clippy::too_many_arguments)]
+diff --git a/storescu/src/store_async.rs b/storescu/src/store_async.rs
+index 1bbc7b18..09c68023 100644
+--- a/storescu/src/store_async.rs
++++ b/storescu/src/store_async.rs
+@@ -16,8 +16,9 @@ use tracing::{debug, error, info, warn};
+ 
+ use crate::{
+     ConvertFieldSnafu, CreateCommandSnafu, DicomFile, Error, MissingAttributeSnafu,
+-    ReadDatasetSnafu, ReadFilePathSnafu, ScuSnafu, UnsupportedFileTransferSyntaxSnafu,
+-    WriteDatasetSnafu, check_presentation_contexts, into_ts, store_req_command,
++    PartialFailureSnafu, ReadDatasetSnafu, ReadFilePathSnafu, ScuSnafu,
++    UnsupportedFileTransferSyntaxSnafu, WriteDatasetSnafu, check_presentation_contexts, into_ts,
++    store_req_command,
+ };
+ 
+ pub(crate) async fn send_file<T>(
+@@ -27,6 +28,7 @@ pub(crate) async fn send_file<T>(
+     progress_bar: Option<&Arc<tokio::sync::Mutex<ProgressBar>>>,
+     verbose: bool,
+     fail_first: bool,
++    had_failure: &mut bool,
+ ) -> Result<AsyncClientAssociation<T>, Error>
+ where
+     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+@@ -167,6 +169,7 @@ where
+                             "Could not store instance `{}`: operation cancelled",
+                             storage_sop_instance_uid
+                         );
++                        *had_failure = true;
+                         if fail_first {
+                             let _ = scu.abort().await;
+                             std::process::exit(-2);
+@@ -177,6 +180,7 @@ where
+                             "Failed to store instance `{}` (status code {:04X}H)",
+                             storage_sop_instance_uid, status
+                         );
++                        *had_failure = true;
+                         if fail_first {
+                             let _ = scu.abort().await;
+                             std::process::exit(-2);
+@@ -217,6 +221,7 @@ where
+     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+ {
+     let mut message_id = 1;
++    let mut had_failure = false;
+     loop {
+         let file = {
+             let mut files = d_files.lock().await;
+@@ -246,15 +251,29 @@ where
+             }
+             Err(e) => {
+                 error!("{}", Report::from_error(e));
++                had_failure = true;
+                 if fail_first {
+                     let _ = scu.abort().await;
+                     std::process::exit(-2);
+                 }
+             }
+         }
+-        scu = send_file(scu, file, message_id, pbx.as_ref(), verbose, fail_first).await?;
++        scu = send_file(
++            scu,
++            file,
++            message_id,
++            pbx.as_ref(),
++            verbose,
++            fail_first,
++            &mut had_failure,
++        )
++        .await?;
+         message_id += 1;
+     }
+     let _ = scu.release().await;
+-    Ok(())
++    if had_failure {
++        PartialFailureSnafu.fail()
++    } else {
++        Ok(())
++    }
+ }
+diff --git a/storescu/src/store_sync.rs b/storescu/src/store_sync.rs
+index 29e87cc8..e3a3f70c 100644
+--- a/storescu/src/store_sync.rs
++++ b/storescu/src/store_sync.rs
+@@ -15,8 +15,9 @@ use tracing::{debug, error, info, warn};
+ 
+ use crate::{
+     ConvertFieldSnafu, CreateCommandSnafu, DicomFile, Error, MissingAttributeSnafu,
+-    ReadDatasetSnafu, ReadFilePathSnafu, ScuSnafu, UnsupportedFileTransferSyntaxSnafu,
+-    WriteDatasetSnafu, WriteIOSnafu, check_presentation_contexts, into_ts, store_req_command,
++    PartialFailureSnafu, ReadDatasetSnafu, ReadFilePathSnafu, ScuSnafu,
++    UnsupportedFileTransferSyntaxSnafu, WriteDatasetSnafu, WriteIOSnafu,
++    check_presentation_contexts, into_ts, store_req_command,
+ };
+ 
+ pub(crate) fn send_file<T>(
+@@ -26,6 +27,7 @@ pub(crate) fn send_file<T>(
+     progress_bar: Option<&ProgressBar>,
+     verbose: bool,
+     fail_first: bool,
++    had_failure: &mut bool,
+ ) -> Result<ClientAssociation<T>, Error>
+ where
+     T: std::io::Read + std::io::Write + CloseSocket,
+@@ -168,6 +170,7 @@ where
+                             "Could not store instance `{}`: operation cancelled",
+                             storage_sop_instance_uid
+                         );
++                        *had_failure = true;
+                         if fail_first {
+                             let _ = scu.abort();
+                             std::process::exit(-2);
+@@ -178,6 +181,7 @@ where
+                             "Failed to store instance `{}` (status code {:04X}H)",
+                             storage_sop_instance_uid, status
+                         );
++                        *had_failure = true;
+                         if fail_first {
+                             let _ = scu.abort();
+                             std::process::exit(-2);
+@@ -217,6 +221,7 @@ pub(crate) fn inner<T>(
+ where
+     T: std::io::Read + std::io::Write + CloseSocket,
+ {
++    let mut had_failure = false;
+     for (message_id, mut file) in (1..).zip(d_files) {
+         // identify the right transfer syntax to use
+         let r: Result<_, Error> = check_presentation_contexts(
+@@ -239,17 +244,30 @@ where
+             }
+             Err(e) => {
+                 error!("{}", Report::from_error(e));
++                had_failure = true;
+                 if fail_first {
+                     let _ = scu.abort();
+                     std::process::exit(-2);
+                 }
+             }
+         }
+-        scu = send_file(scu, file, message_id, pbx.as_ref(), verbose, fail_first)?;
++        scu = send_file(
++            scu,
++            file,
++            message_id,
++            pbx.as_ref(),
++            verbose,
++            fail_first,
++            &mut had_failure,
++        )?;
+     }
+     scu.release().map_err(Box::from).context(ScuSnafu)?;
+     if let Some(pb) = pbx {
+         pb.finish_with_message("done")
+     };
+-    Ok(())
++    if had_failure {
++        PartialFailureSnafu.fail()
++    } else {
++        Ok(())
++    }
+ }

@@ -1,0 +1,55 @@
+# Self-contained reproduction for candidate 044.LUT_NORMALIZE_SINGLE_CORE_GAP_RESOLVED.
+#
+# Re-applies candidates 018's and 023's own patches unchanged, one at a time (see RESULT.md - no
+# new source change here; this candidate re-measures both together, apples-to-apples, in one
+# session to check whether candidate 023's reported single-core gap over candidate 018 is real).
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern), self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline build-c018 build-c023 bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+    rm -rf clone/___OPTIMIZATIONS___/harness/bench_pipeline/target
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --no-default-features
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+build-c018:
+    cd clone && git apply "{{justfile_directory()}}/patch_candidate018.diff"
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --no-default-features
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_c018
+    cd clone && git checkout -- pixeldata/src/lut.rs
+
+build-c023:
+    cd clone && git apply "{{justfile_directory()}}/patch_candidate023.diff"
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --no-default-features
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_c023
+    cd clone && git checkout -- pixeldata/src/lib.rs pixeldata/src/lut.rs
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    testfile="clone/___OPTIMIZATIONS___/harness/bench_pipeline/testdata/mono_above.dcm"
+    # All three binaries are already --no-default-features (no rayon linked), matching candidate
+    # 023's own "single-core" methodology - taskset pinning is an extra noise-reduction step, not
+    # required for the comparison itself, so left out here for portability across sandboxes that
+    # may not have taskset.
+    echo "=== baseline vs candidate 018 alone (fusion, old generic-iterator signature) ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_c018 -- colorspace-normalize "$testfile" 15
+    echo "=== baseline vs candidate 023 full (fusion + slice signature + rayon guard) ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_c023 -- colorspace-normalize "$testfile" 15
+    echo "=== direct: candidate 018 alone vs candidate 023 full (expect: NOT consistent, no real difference) ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_c018 ./bin_c023 -- colorspace-normalize "$testfile" 15
+
+clean:
+    rm -rf clone bin_baseline bin_c018 bin_c023

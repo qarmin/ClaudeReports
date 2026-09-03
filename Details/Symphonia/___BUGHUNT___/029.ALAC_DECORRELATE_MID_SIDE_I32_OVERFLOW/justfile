@@ -1,0 +1,38 @@
+# Self-contained reproduction for candidate 029: i32 multiply/add/subtract overflow in
+# symphonia-codec-alac's `decorrelate_mid_side`, reached end-to-end by decoding a real .caf file
+# through symphonia's public probe -> format reader -> audio decoder path.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone reproduce-before apply reproduce-after sweep-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Should panic with "attempt to multiply with overflow" at
+# symphonia-codec-alac/src/lib.rs:668 (non-zero exit is the expected, demonstrated bug -- the
+# leading `-` keeps `just test` going so it also reaches apply/reproduce-after).
+reproduce-before:
+    -ulimit -c 0 && cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Should now print "finished: 1 packet(s) decoded, no panic".
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo run --release
+
+# Same-bug-class variation check: 17920 further CAF/ALAC streams (every mid_side_shift, six bit
+# depths, three element shifts, five weights, extreme sample pairs) through the same public path.
+# Only meaningful after the patch is applied - before it, the very first case panics.
+sweep-after:
+    ulimit -c 0 && cd repro && cargo run --release -- --sweep
+
+clean:
+    rm -rf clone repro/target

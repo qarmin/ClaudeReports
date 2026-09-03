@@ -1,0 +1,62 @@
+diff --git a/kurbo/src/cubicbez.rs b/kurbo/src/cubicbez.rs
+index 899a351..5de80bd 100644
+--- a/kurbo/src/cubicbez.rs
++++ b/kurbo/src/cubicbez.rs
+@@ -548,6 +548,15 @@ impl Iterator for CubicBezIter {
+ impl ParamCurve for CubicBez {
+     #[inline]
+     fn eval(&self, t: f64) -> Point {
++        // Special-case the endpoints: an extreme-magnitude control point can make an
++        // intermediate term overflow to infinity before it's multiplied away by a factor of
++        // `t`/`mt` that's exactly 0.0 at t == 0.0/1.0, producing 0.0 * inf == NaN even though
++        // the exact mathematical result is just the endpoint itself.
++        if t == 0.0 {
++            return self.p0;
++        } else if t == 1.0 {
++            return self.p3;
++        }
+         let mt = 1.0 - t;
+         let v = self.p0.to_vec2() * (mt * mt * mt)
+             + (self.p1.to_vec2() * (mt * mt * 3.0)
+diff --git a/kurbo/src/line.rs b/kurbo/src/line.rs
+index 8f8ee2a..83d7b52 100644
+--- a/kurbo/src/line.rs
++++ b/kurbo/src/line.rs
+@@ -107,7 +107,16 @@ impl From<(Point, Vec2)> for Line {
+ impl ParamCurve for Line {
+     #[inline]
+     fn eval(&self, t: f64) -> Point {
+-        self.p0.lerp(self.p1, t)
++        // Special-case the endpoints: lerp's `self + t * (other - self)` can produce NaN/inf
++        // at t == 0.0/1.0 when `other - self` overflows (e.g. widely separated endpoints),
++        // even though the exact mathematical result is just the endpoint itself.
++        if t == 0.0 {
++            self.p0
++        } else if t == 1.0 {
++            self.p1
++        } else {
++            self.p0.lerp(self.p1, t)
++        }
+     }
+ 
+     #[inline]
+diff --git a/kurbo/src/quadbez.rs b/kurbo/src/quadbez.rs
+index 5a68283..f94aaa5 100644
+--- a/kurbo/src/quadbez.rs
++++ b/kurbo/src/quadbez.rs
+@@ -215,6 +215,15 @@ fn approx_parabola_inv_integral(x: f64) -> f64 {
+ impl ParamCurve for QuadBez {
+     #[inline]
+     fn eval(&self, t: f64) -> Point {
++        // Special-case the endpoints: an extreme-magnitude control point can make an
++        // intermediate term overflow to infinity before it's multiplied away by a factor of
++        // `t`/`mt` that's exactly 0.0 at t == 0.0/1.0, producing 0.0 * inf == NaN even though
++        // the exact mathematical result is just the endpoint itself.
++        if t == 0.0 {
++            return self.p0;
++        } else if t == 1.0 {
++            return self.p2;
++        }
+         let mt = 1.0 - t;
+         (self.p0.to_vec2() * (mt * mt)
+             + (self.p1.to_vec2() * (mt * 2.0) + self.p2.to_vec2() * t) * t)

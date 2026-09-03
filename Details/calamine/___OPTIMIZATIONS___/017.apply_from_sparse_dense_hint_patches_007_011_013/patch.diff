@@ -1,0 +1,697 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index e869c49..2a08a92 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -158,6 +158,12 @@ impl fmt::Display for CellErrorType {
+     }
+ }
+ 
++/// Maximum number of cells [`Range::from_sparse_dense_hint()`] will pre-allocate on the strength
++/// of a file-declared size hint alone (e.g. XLSX/XLSB's `<dimension>` header) - bounds the
++/// allocation attempt an attacker-controlled or simply wrong hint could otherwise request,
++/// mirroring the cap `ods.rs` already uses for its own row/column-repeat handling.
++pub(crate) const MAX_DENSE_RANGE_CELLS: usize = 100_000_000;
++
+ /// Dimensions info
+ #[derive(Debug, Default, PartialEq, Eq, Hash, Ord, PartialOrd, Copy, Clone)]
+ pub struct Dimensions {
+@@ -975,6 +981,202 @@ impl<T: CellType> Range<T> {
+         }
+     }
+ 
++    /// Like [`Range::from_sparse()`], but streams cells directly from `next_cell` into a single
++    /// dense buffer pre-sized from `dims`, instead of collecting an intermediate sparse
++    /// `Vec<Cell<T>>` first - avoiding the two buffers (sparse + dense) being alive at once for
++    /// the common case where `dims` (normally an untrusted, file-declared hint, e.g. XLSX's
++    /// `<dimension>` header) turns out to be accurate.
++    ///
++    /// `dims` is only ever used to pre-size the buffer, never trusted for correctness: every
++    /// cell position is checked against it as it streams in. If a cell falls outside it (a
++    /// wrong/mismatched header) partway through, this reconstructs a sparse `Vec<Cell<T>>` from
++    /// what the dense buffer already holds, drops the buffer, and finishes the *same* cell
++    /// stream the [`Range::from_sparse()`] way - `next_cell` is a single, one-shot stream (it
++    /// can't be rewound to retry with a fresh reader instead), and the calling readers'
++    /// zero-copy `DataRef<'a>` values are already borrowed for exactly the caller's own
++    /// lifetime, which rules out opening a *second* reader from within this function to retry.
++    ///
++    /// `header_row = HeaderRow::Row(idx)` with `idx < dims.start.0` skips the direct-write
++    /// attempt entirely (falls straight to the sparse path from the first cell) - the "force the
++    /// range to start at `idx` even if that row has no data" behavior below would otherwise need
++    /// to report a start row outside the pre-sized buffer, which this function's crop step isn't
++    /// built to handle; this combination (a header row declared *above* the file's own declared
++    /// used range) is rare enough that skipping straight to the always-correct sparse path is
++    /// simpler and just as correct.
++    pub(crate) fn from_sparse_dense_hint<E>(
++        dims: Dimensions,
++        header_row: HeaderRow,
++        max_cells: usize,
++        mut next_cell: impl FnMut() -> Result<Option<Cell<T>>, E>,
++    ) -> Result<Range<T>, E> {
++        let header_ok = !matches!(header_row, HeaderRow::Row(idx) if idx < dims.start.0);
++        let direct = header_ok && dims.end.0 >= dims.start.0 && dims.end.1 >= dims.start.1;
++        let cols = if direct {
++            (dims.end.1 - dims.start.1) as usize + 1
++        } else {
++            0
++        };
++        let rows = if direct {
++            (dims.end.0 - dims.start.0) as usize + 1
++        } else {
++            0
++        };
++        let len = cols.saturating_mul(rows);
++        if !direct || len == 0 || len > max_cells {
++            return Range::collect_sparse(header_row, Vec::new(), next_cell);
++        }
++
++        let mut grid = vec![T::default(); len];
++        let mut any = false;
++        let mut row_lo = u32::MAX;
++        let mut row_hi = 0u32;
++        let mut col_lo = u32::MAX;
++        let mut col_hi = 0u32;
++
++        // Reconstructs every non-default (real) cell currently in `grid` back into a sparse
++        // `Vec<Cell<T>>`, for the rare case a later cell turns out to lie outside `dims`.
++        macro_rules! bail_to_sparse {
++            ($mismatched:expr) => {{
++                let mut cells = Vec::with_capacity(grid.iter().filter(|v| **v != T::default()).count() + 1);
++                for (idx, v) in grid.into_iter().enumerate() {
++                    if v != T::default() {
++                        let pos = (dims.start.0 + (idx / cols) as u32, dims.start.1 + (idx % cols) as u32);
++                        cells.push(Cell { pos, val: v });
++                    }
++                }
++                cells.push($mismatched);
++                return Range::collect_sparse(header_row, cells, next_cell);
++            }};
++        }
++
++        macro_rules! place {
++            ($cell:expr) => {{
++                let cell = $cell;
++                let (r, c) = cell.pos;
++                if r < dims.start.0 || r > dims.end.0 || c < dims.start.1 || c > dims.end.1 {
++                    bail_to_sparse!(cell);
++                }
++                let idx = (r - dims.start.0) as usize * cols + (c - dims.start.1) as usize;
++                grid[idx] = cell.val;
++                any = true;
++                row_lo = min(row_lo, r);
++                row_hi = max(row_hi, r);
++                col_lo = min(col_lo, c);
++                col_hi = max(col_hi, c);
++            }};
++        }
++
++        match header_row {
++            HeaderRow::FirstNonEmptyRow => loop {
++                match next_cell()? {
++                    Some(cell) if cell.val == T::default() => (),
++                    Some(cell) => place!(cell),
++                    None => break,
++                }
++            },
++            HeaderRow::Row(header_row_idx) => {
++                loop {
++                    match next_cell()? {
++                        Some(cell) if cell.val == T::default() => (),
++                        Some(cell) if cell.pos.0 >= header_row_idx => place!(cell),
++                        Some(_) => (),
++                        None => break,
++                    }
++                }
++                // Mirrors from_sparse()'s callers inserting a synthetic Empty cell at
++                // `(header_row_idx, <first cell's column>)`: that synthetic cell's only
++                // observable effect on the final bounding box is forcing the start row down to
++                // `header_row_idx` (its column is always already within [col_lo, col_hi], since
++                // it reuses a real cell's column) - reproduced directly here without needing to
++                // materialize the synthetic cell itself. `header_row_idx >= dims.start.0` is
++                // guaranteed by the `header_ok` check above, so this can't push row_lo out of
++                // the pre-sized grid's row range.
++                if any && row_lo != header_row_idx {
++                    row_lo = header_row_idx;
++                }
++            }
++        }
++
++        if !any {
++            return Ok(Range::empty());
++        }
++
++        if row_lo == dims.start.0 && row_hi == dims.end.0 && col_lo == dims.start.1 && col_hi == dims.end.1 {
++            return Ok(Range {
++                start: dims.start,
++                end: dims.end,
++                inner: grid,
++            });
++        }
++
++        // Declared dims were looser than the actual used range (e.g. trailing empty rows/cols
++        // within the declared box, or a HeaderRow::Row forcing the start row down) - crop into a
++        // tightly-sized buffer matching from_sparse()'s own bounding-box semantics, then drop the
++        // larger `grid`. Cells outside [dims.start, dims.end] (rows added only by the
++        // header_row_idx-forced start, when header_row_idx < the lowest real cell row) stay
++        // T::default() since `grid` never had data for them either.
++        let crop_rows = (row_hi - row_lo) as usize + 1;
++        let crop_cols = (col_hi - col_lo) as usize + 1;
++        let mut cropped = vec![T::default(); crop_rows.saturating_mul(crop_cols)];
++        for r in 0..crop_rows {
++            let abs_row = row_lo + r as u32;
++            if abs_row < dims.start.0 || abs_row > dims.end.0 {
++                continue;
++            }
++            let src_row = (abs_row - dims.start.0) as usize;
++            let src_start = src_row * cols + (col_lo - dims.start.1) as usize;
++            let dst_start = r * crop_cols;
++            cropped[dst_start..dst_start + crop_cols]
++                .clone_from_slice(&grid[src_start..src_start + crop_cols]);
++        }
++        Ok(Range {
++            start: (row_lo, col_lo),
++            end: (row_hi, col_hi),
++            inner: cropped,
++        })
++    }
++
++    /// Shared tail of [`Range::from_sparse_dense_hint()`]'s fallback path: continues consuming
++    /// `next_cell` (starting from whatever `cells` already holds, possibly non-empty if a
++    /// direct-write attempt salvaged some cells before bailing out) exactly the way every
++    /// XLSX/XLSB `worksheet_range_ref()` used to build its sparse `Vec<Cell<T>>` inline, then
++    /// finishes with the plain [`Range::from_sparse()`].
++    fn collect_sparse<E>(
++        header_row: HeaderRow,
++        mut cells: Vec<Cell<T>>,
++        mut next_cell: impl FnMut() -> Result<Option<Cell<T>>, E>,
++    ) -> Result<Range<T>, E> {
++        match header_row {
++            HeaderRow::FirstNonEmptyRow => loop {
++                match next_cell()? {
++                    Some(cell) if cell.val == T::default() => (),
++                    Some(cell) => cells.push(cell),
++                    None => break,
++                }
++            },
++            HeaderRow::Row(header_row_idx) => {
++                loop {
++                    match next_cell()? {
++                        Some(cell) if cell.val == T::default() => (),
++                        Some(cell) if cell.pos.0 >= header_row_idx => cells.push(cell),
++                        Some(_) => (),
++                        None => break,
++                    }
++                }
++                if cells.first().is_some_and(|c| c.pos.0 != header_row_idx) {
++                    cells.insert(
++                        0,
++                        Cell {
++                            pos: (header_row_idx, cells.first().expect("cells should not be empty").pos.1),
++                            val: T::default(),
++                        },
++                    );
++                }
++            }
++        }
++        Ok(Range::from_sparse(cells))
++    }
++
+     /// Set a value at an absolute position in a `Range`.
+     ///
+     /// This method sets a value in the range at the given absolute position
+@@ -1445,6 +1647,147 @@ impl<T: CellType> Range<T> {
+     }
+ }
+ 
++/// Builds a [`Range`] from cells discovered one at a time, interleaved with unrelated records in
++/// a single-pass parser (XLS's per-sheet BIFF record loop, which can't collect a dedicated
++/// `Vec<Cell<T>>` up front the way XLSX/XLSB's cell-only stream does). Writes straight into a
++/// dense buffer pre-sized from an optional file-declared dimension hint, avoiding [`Range::from_sparse()`]'s
++/// sparse-then-dense double allocation for the common case where that hint is accurate.
++///
++/// Never trusts the hint for correctness: every cell is bounds-checked as it's pushed. If a cell
++/// ever falls outside the hint (a wrong/mismatched/absent `Dimensions` record), this reconstructs
++/// a sparse `Vec<Cell<T>>` from whatever the dense buffer already holds and falls back to
++/// [`Range::from_sparse()`]'s exact behavior for the remaining pushes.
++pub(crate) struct DenseRangeBuilder<T: CellType> {
++    dense: Option<DenseRangeState<T>>,
++    sparse: Vec<Cell<T>>,
++    max_cells: usize,
++}
++
++struct DenseRangeState<T> {
++    dims: Dimensions,
++    cols: usize,
++    grid: Vec<T>,
++    any: bool,
++    row_lo: u32,
++    row_hi: u32,
++    col_lo: u32,
++    col_hi: u32,
++}
++
++impl<T: CellType> DenseRangeBuilder<T> {
++    pub(crate) fn new(max_cells: usize) -> Self {
++        DenseRangeBuilder {
++            dense: None,
++            sparse: Vec::new(),
++            max_cells,
++        }
++    }
++
++    /// Only takes effect the first time it's called, before any cell has been pushed - a real
++    /// BIFF8 `Dimensions` record always precedes cell records, so this is the only case that
++    /// matters; a hint arriving late or twice is silently ignored rather than risking dropping
++    /// already-buffered sparse cells.
++    pub(crate) fn set_dims_hint(&mut self, dims: Dimensions) {
++        if self.dense.is_some() || !self.sparse.is_empty() {
++            return;
++        }
++        if dims.end.0 < dims.start.0 || dims.end.1 < dims.start.1 {
++            return;
++        }
++        let cols = (dims.end.1 - dims.start.1) as usize + 1;
++        let rows = (dims.end.0 - dims.start.0) as usize + 1;
++        let len = cols.saturating_mul(rows);
++        if len == 0 || len > self.max_cells {
++            self.sparse.reserve(len.min(self.max_cells));
++            return;
++        }
++        self.dense = Some(DenseRangeState {
++            dims,
++            cols,
++            grid: vec![T::default(); len],
++            any: false,
++            row_lo: u32::MAX,
++            row_hi: 0,
++            col_lo: u32::MAX,
++            col_hi: 0,
++        });
++    }
++
++    pub(crate) fn push(&mut self, cell: Cell<T>) {
++        let Some(d) = self.dense.as_mut() else {
++            self.sparse.push(cell);
++            return;
++        };
++        let (r, c) = cell.pos;
++        if r < d.dims.start.0 || r > d.dims.end.0 || c < d.dims.start.1 || c > d.dims.end.1 {
++            self.bail_to_sparse(cell);
++            return;
++        }
++        let idx = (r - d.dims.start.0) as usize * d.cols + (c - d.dims.start.1) as usize;
++        d.grid[idx] = cell.val;
++        d.any = true;
++        d.row_lo = min(d.row_lo, r);
++        d.row_hi = max(d.row_hi, r);
++        d.col_lo = min(d.col_lo, c);
++        d.col_hi = max(d.col_hi, c);
++    }
++
++    fn bail_to_sparse(&mut self, mismatched: Cell<T>) {
++        let d = self.dense.take().expect("dense state present, checked by caller");
++        self.sparse
++            .reserve(d.grid.iter().filter(|v| **v != T::default()).count() + 1);
++        for (idx, v) in d.grid.into_iter().enumerate() {
++            if v != T::default() {
++                let pos = (
++                    d.dims.start.0 + (idx / d.cols) as u32,
++                    d.dims.start.1 + (idx % d.cols) as u32,
++                );
++                self.sparse.push(Cell { pos, val: v });
++            }
++        }
++        self.sparse.push(mismatched);
++    }
++
++    pub(crate) fn finish(self) -> Range<T> {
++        let Some(d) = self.dense else {
++            return Range::from_sparse(self.sparse);
++        };
++        if !d.any {
++            return Range::empty();
++        }
++        if d.row_lo == d.dims.start.0
++            && d.row_hi == d.dims.end.0
++            && d.col_lo == d.dims.start.1
++            && d.col_hi == d.dims.end.1
++        {
++            return Range {
++                start: d.dims.start,
++                end: d.dims.end,
++                inner: d.grid,
++            };
++        }
++        // Declared dims were looser than the actual used range (e.g. trailing empty rows/cols
++        // within the declared box) - crop into a tightly-sized buffer matching from_sparse()'s
++        // own bounding-box semantics, then drop the larger `grid`.
++        let crop_rows = (d.row_hi - d.row_lo) as usize + 1;
++        let crop_cols = (d.col_hi - d.col_lo) as usize + 1;
++        let mut cropped = vec![T::default(); crop_rows.saturating_mul(crop_cols)];
++        for r in 0..crop_rows {
++            let abs_row = d.row_lo + r as u32;
++            let src_row = (abs_row - d.dims.start.0) as usize;
++            let src_start = src_row * d.cols + (d.col_lo - d.dims.start.1) as usize;
++            let dst_start = r * crop_cols;
++            cropped[dst_start..dst_start + crop_cols]
++                .clone_from_slice(&d.grid[src_start..src_start + crop_cols]);
++        }
++        Range {
++            start: (d.row_lo, d.col_lo),
++            end: (d.row_hi, d.col_hi),
++            inner: cropped,
++        }
++    }
++}
++
+ impl<T: CellType + fmt::Display> Range<T> {
+     /// Get headers for a `Range`.
+     ///
+@@ -2392,3 +2735,4 @@ where
+     let data = Data::deserialize(deserializer)?;
+     Ok(data.as_datetime().ok_or_else(|| data.to_string()))
+ }
++
+diff --git a/src/xls.rs b/src/xls.rs
+index 50925c6..9e19928 100644
+--- a/src/xls.rs
++++ b/src/xls.rs
+@@ -19,8 +19,8 @@ use crate::utils::read_usize;
+ use crate::utils::{push_column, read_f64, read_i16, read_i32, read_u16, read_u32};
+ use crate::vba::VbaProject;
+ use crate::{
+-    Cell, CellErrorType, Data, Dimensions, HeaderRow, Metadata, Range, Reader, Sheet, SheetType,
+-    SheetVisible,
++    Cell, CellErrorType, Data, DenseRangeBuilder, Dimensions, HeaderRow, Metadata, Range, Reader,
++    Sheet, SheetType, SheetVisible, MAX_DENSE_RANGE_CELLS,
+ };
+ 
+ #[derive(Debug)]
+@@ -605,7 +605,7 @@ impl<RS: Read + Seek> Xls<RS> {
+         for (pos, name) in sheet_names {
+             let sh = &stream[pos..];
+             let records = RecordIter { stream: sh };
+-            let mut cells = Vec::new();
++            let mut cells = DenseRangeBuilder::new(MAX_DENSE_RANGE_CELLS);
+             let mut formulas = Vec::new();
+             let mut fmla_pos = (0, 0);
+             let mut merge_cells = Vec::new();
+@@ -634,10 +634,7 @@ impl<RS: Read + Seek> Xls<RS> {
+                     }
+                     // 512: Dimensions
+                     0x0200 => {
+-                        let Dimensions { start, end } = parse_dimensions(r.data)?;
+-                        let rows = (end.0 - start.0 + 1) as usize;
+-                        let cols = (end.1 - start.1 + 1) as usize;
+-                        cells.reserve(rows.saturating_mul(cols));
++                        cells.set_dims_hint(parse_dimensions(r.data)?);
+                     }
+                     //0x0201 => cells.push(parse_blank(r.data)?), // 513: Blank
+                     0x0203 => cells.push(parse_number(r.data, &self.formats, self.is_1904)?), // 515: Number
+@@ -650,8 +647,16 @@ impl<RS: Read + Seek> Xls<RS> {
+                         cells.push(Cell::new(fmla_pos, val));
+                     }
+                     0x027E => cells.push(parse_rk(r.data, &self.formats, self.is_1904)?), // 638: Rk
+-                    0x00FD => cells.extend(parse_label_sst(r.data, &strings)?), // LabelSst
+-                    0x00BD => parse_mul_rk(r.data, &mut cells, &self.formats, self.is_1904)?, // 189: MulRk
++                    0x00FD => {
++                        if let Some(c) = parse_label_sst(r.data, &strings)? {
++                            cells.push(c);
++                        }
++                    } // LabelSst
++                    0x00BD => {
++                        for c in parse_mul_rk(r.data, &self.formats, self.is_1904)? {
++                            cells.push(c);
++                        }
++                    } // 189: MulRk
+                     0x00E5 => parse_merge_cells(r.data, &mut merge_cells)?, // 229: Merge Cells
+                     0x000A => break,                                        // 10: EOF,
+                     0x0006 => {
+@@ -694,7 +699,7 @@ impl<RS: Read + Seek> Xls<RS> {
+                     _ => (),
+                 }
+             }
+-            let range = Range::from_sparse(cells);
++            let range = cells.finish();
+             let formula = Range::from_sparse(formulas);
+             sheets.insert(
+                 name,
+@@ -939,10 +944,9 @@ fn parse_merge_cells(r: &[u8], merge_cells: &mut Vec<Dimensions>) -> Result<(),
+ 
+ fn parse_mul_rk(
+     r: &[u8],
+-    cells: &mut Vec<Cell<Data>>,
+     formats: &[CellFormat],
+     is_1904: bool,
+-) -> Result<(), XlsError> {
++) -> Result<Vec<Cell<Data>>, XlsError> {
+     if r.len() < 6 {
+         return Err(XlsError::Len {
+             typ: "rk",
+@@ -963,10 +967,10 @@ fn parse_mul_rk(
+         });
+     }
+ 
+-    for (col, rk) in (col_first as u32..).zip(r[4..r.len() - 2].chunks(6)) {
+-        cells.push(Cell::new((row as u32, col), rk_num(rk, formats, is_1904)));
+-    }
+-    Ok(())
++    Ok((col_first as u32..)
++        .zip(r[4..r.len() - 2].chunks(6))
++        .map(|(col, rk)| Cell::new((row as u32, col), rk_num(rk, formats, is_1904)))
++        .collect())
+ }
+ 
+ fn rk_num(rk: &[u8], formats: &[CellFormat], is_1904: bool) -> Data {
+diff --git a/src/xlsb/mod.rs b/src/xlsb/mod.rs
+index cab7ab5..30d2d4c 100644
+--- a/src/xlsb/mod.rs
++++ b/src/xlsb/mod.rs
+@@ -28,7 +28,8 @@ use crate::utils::{
+ };
+ use crate::vba::VbaProject;
+ use crate::{
+-    Cell, Data, HeaderRow, Metadata, Range, Reader, ReaderRef, Sheet, SheetType, SheetVisible,
++    Data, HeaderRow, Metadata, Range, Reader, ReaderRef, Sheet, SheetType, SheetVisible,
++    MAX_DENSE_RANGE_CELLS,
+ };
+ 
+ /// A Xlsb specific error
+@@ -530,13 +531,17 @@ impl<RS: Read + Seek> Reader<RS> for Xlsb<RS> {
+     /// MS-XLSB 2.1.7.62
+     fn worksheet_formula(&mut self, name: &str) -> Result<Range<String>, XlsbError> {
+         let mut cells_reader = self.worksheet_cells_reader(name)?;
+-        let mut cells = Vec::with_capacity(cells_reader.dimensions().len().min(1_000_000) as _);
+-        while let Some(cell) = cells_reader.next_formula()? {
+-            if !cell.val.is_empty() {
+-                cells.push(cell);
+-            }
+-        }
+-        Ok(Range::from_sparse(cells))
++        let dims = cells_reader.dimensions();
++
++        // Streams formula strings straight into a single dense buffer pre-sized from the
++        // sheet's own declared dimensions, skipping the intermediate sparse `Vec<Cell>` entirely
++        // for the common case where that header is accurate - the same `from_sparse_dense_hint()`
++        // helper `worksheet_range_ref()` uses for cell values. `HeaderRow::FirstNonEmptyRow`
++        // reproduces this function's previous behavior exactly (skip empty-formula cells, no
++        // other header filtering).
++        Range::from_sparse_dense_hint(dims, HeaderRow::FirstNonEmptyRow, MAX_DENSE_RANGE_CELLS, || {
++            cells_reader.next_formula()
++        })
+     }
+ 
+     /// MS-XLSB 2.1.7.62
+@@ -565,63 +570,17 @@ impl<RS: Read + Seek> ReaderRef<RS> for Xlsb<RS> {
+     fn worksheet_range_ref<'a>(&'a mut self, name: &str) -> Result<Range<DataRef<'a>>, XlsbError> {
+         let header_row = self.options.header_row;
+         let mut cell_reader = self.worksheet_cells_reader(name)?;
+-        let len = cell_reader.dimensions().len();
+-        let mut cells = Vec::new();
+-        if len < 100_000 {
+-            cells.reserve(len as usize);
+-        }
+-
+-        match header_row {
+-            HeaderRow::FirstNonEmptyRow => {
+-                // the header row is the row of the first non-empty cell
+-                loop {
+-                    match cell_reader.next_cell() {
+-                        Ok(Some(Cell {
+-                            val: DataRef::Empty,
+-                            ..
+-                        })) => (),
+-                        Ok(Some(cell)) => cells.push(cell),
+-                        Ok(None) => break,
+-                        Err(e) => return Err(e),
+-                    }
+-                }
+-            }
+-            HeaderRow::Row(header_row_idx) => {
+-                // If `header_row` is a row index, we only add non-empty cells after this index.
+-                loop {
+-                    match cell_reader.next_cell() {
+-                        Ok(Some(Cell {
+-                            val: DataRef::Empty,
+-                            ..
+-                        })) => (),
+-                        Ok(Some(cell)) => {
+-                            if cell.pos.0 >= header_row_idx {
+-                                cells.push(cell);
+-                            }
+-                        }
+-                        Ok(None) => break,
+-                        Err(e) => return Err(e),
+-                    }
+-                }
+-
+-                // If `header_row` is set and the first non-empty cell is not at the `header_row`, we add
+-                // an empty cell at the beginning with row `header_row` and same column as the first non-empty cell.
+-                if cells.first().is_some_and(|c| c.pos.0 != header_row_idx) {
+-                    cells.insert(
+-                        0,
+-                        Cell {
+-                            pos: (
+-                                header_row_idx,
+-                                cells.first().expect("cells should not be empty").pos.1,
+-                            ),
+-                            val: DataRef::Empty,
+-                        },
+-                    );
+-                }
+-            }
+-        }
+-
+-        Ok(Range::from_sparse(cells))
++        let dims = cell_reader.dimensions();
++
++        // Streams cells straight into a single dense buffer pre-sized from the sheet's own
++        // declared dimensions, skipping the intermediate sparse `Vec<Cell>` entirely for the
++        // common case where that header is accurate. Falls back to the sparse
++        // collect-then-`from_sparse` behavior (byte-for-byte the same as before this candidate)
++        // on the same cell stream if the header turns out to be wrong/mismatched or absent - see
++        // `Range::from_sparse_dense_hint()`'s own doc comment.
++        Range::from_sparse_dense_hint(dims, header_row, MAX_DENSE_RANGE_CELLS, || {
++            cell_reader.next_cell()
++        })
+     }
+ }
+ 
+diff --git a/src/xlsx/mod.rs b/src/xlsx/mod.rs
+index 9d12ede..0d7e843 100644
+--- a/src/xlsx/mod.rs
++++ b/src/xlsx/mod.rs
+@@ -31,8 +31,8 @@ use crate::vba::VbaProject;
+ #[cfg(feature = "picture")]
+ use crate::Picture;
+ use crate::{
+-    Cell, CellErrorType, Data, Dimensions, HeaderRow, Metadata, Range, Reader, ReaderRef, Sheet,
+-    SheetType, SheetVisible, Table,
++    CellErrorType, Data, Dimensions, HeaderRow, Metadata, Range, Reader, ReaderRef, Sheet,
++    SheetType, SheetVisible, Table, MAX_DENSE_RANGE_CELLS,
+ };
+ pub use cells_reader::{
+     XlsxCellFormula, XlsxCellFormulaMetadataRecord, XlsxCellReader, XlsxFormulaMetadata,
+@@ -2609,17 +2609,17 @@ impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
+             }
+             Err(e) => return Err(e),
+         };
+-        let len = cell_reader.dimensions().len();
+-        let mut cells = Vec::new();
+-        if len < 100_000 {
+-            cells.reserve(len as usize);
+-        }
+-        while let Some(cell) = cell_reader.next_formula()? {
+-            if !cell.val.is_empty() {
+-                cells.push(cell);
+-            }
+-        }
+-        Ok(Range::from_sparse(cells))
++        let dims = cell_reader.dimensions();
++
++        // Streams formula strings straight into a single dense buffer pre-sized from the
++        // sheet's own declared `<dimension>`, skipping the intermediate sparse `Vec<Cell>`
++        // entirely for the common case where that header is accurate - the same
++        // `from_sparse_dense_hint()` helper `worksheet_range_ref()` uses for cell values.
++        // `HeaderRow::FirstNonEmptyRow` reproduces this function's previous behavior exactly
++        // (skip empty-formula cells, no other header filtering).
++        Range::from_sparse_dense_hint(dims, HeaderRow::FirstNonEmptyRow, MAX_DENSE_RANGE_CELLS, || {
++            cell_reader.next_formula()
++        })
+     }
+ 
+     fn worksheets(&mut self) -> Vec<(String, Range<Data>)> {
+@@ -2663,63 +2663,17 @@ impl<RS: Read + Seek> ReaderRef<RS> for Xlsx<RS> {
+             }
+             Err(e) => return Err(e),
+         };
+-        let len = cell_reader.dimensions().len();
+-        let mut cells = Vec::new();
+-        if len < 100_000 {
+-            cells.reserve(len as usize);
+-        }
+-
+-        match header_row {
+-            HeaderRow::FirstNonEmptyRow => {
+-                // the header row is the row of the first non-empty cell
+-                loop {
+-                    match cell_reader.next_cell() {
+-                        Ok(Some(Cell {
+-                            val: DataRef::Empty,
+-                            ..
+-                        })) => (),
+-                        Ok(Some(cell)) => cells.push(cell),
+-                        Ok(None) => break,
+-                        Err(e) => return Err(e),
+-                    }
+-                }
+-            }
+-            HeaderRow::Row(header_row_idx) => {
+-                // If `header_row` is a row index, we only add non-empty cells after this index.
+-                loop {
+-                    match cell_reader.next_cell() {
+-                        Ok(Some(Cell {
+-                            val: DataRef::Empty,
+-                            ..
+-                        })) => (),
+-                        Ok(Some(cell)) => {
+-                            if cell.pos.0 >= header_row_idx {
+-                                cells.push(cell);
+-                            }
+-                        }
+-                        Ok(None) => break,
+-                        Err(e) => return Err(e),
+-                    }
+-                }
+-
+-                // If `header_row` is set and the first non-empty cell is not at the `header_row`, we add
+-                // an empty cell at the beginning with row `header_row` and same column as the first non-empty cell.
+-                if cells.first().is_some_and(|c| c.pos.0 != header_row_idx) {
+-                    cells.insert(
+-                        0,
+-                        Cell {
+-                            pos: (
+-                                header_row_idx,
+-                                cells.first().expect("cells should not be empty").pos.1,
+-                            ),
+-                            val: DataRef::Empty,
+-                        },
+-                    );
+-                }
+-            }
+-        }
+-
+-        Ok(Range::from_sparse(cells))
++        let dims = cell_reader.dimensions();
++
++        // Streams cells straight into a single dense buffer pre-sized from the sheet's own
++        // declared `<dimension>`, skipping the intermediate sparse `Vec<Cell>` entirely for the
++        // common case where that header is accurate. Falls back to the sparse
++        // collect-then-`from_sparse` behavior (byte-for-byte the same as before this candidate)
++        // on the same cell stream if the header turns out to be wrong/mismatched or absent - see
++        // `Range::from_sparse_dense_hint()`'s own doc comment.
++        Range::from_sparse_dense_hint(dims, header_row, MAX_DENSE_RANGE_CELLS, || {
++            cell_reader.next_cell()
++        })
+     }
+ }
+ 

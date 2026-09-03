@@ -1,0 +1,158 @@
+Real captured output of repro/ (`cargo run --release` inside repro/, exactly what `just test`
+runs), first against a pristine clone of Symphonia at ee35874, then against the same clone with
+patch.diff applied. Nothing here is reconstructed - it is the verbatim stdout of the two runs.
+ffmpeg version on this machine: see the bottom of this file.
+
+########################################################################################
+# BEFORE - pristine clone at ee35874
+#   $ cd repro && cargo run --release
+########################################################################################
+
+wrote /home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/032.MP3_ANTIALIAS_CLAMPS_RZERO_MIXED_BLOCK/repro/out/{mixed_full,mixed_lowonly,short_full}.mp3
+
+symphonia, 44100 Hz mono, 8 frames:
+  A  mixed_block_flag=1, coefficients 0..576 : 9216 samples, rms 0.020005477
+  B  mixed_block_flag=1, coefficients 0..36  : 9216 samples, rms 0.020005477
+  C  mixed_block_flag=0, coefficients 0..576 : 9216 samples, rms 0.052071472
+
+  max |A - B| = 0.000000000   (A and B carry different spectral data: MUST be > 0)
+  max |A - C| = 0.554981709   (sanity: a mixed and a short block do differ)
+
+ffmpeg (reference decoder), same three files:
+  A  mixed_block_flag=1, coefficients 0..576 : 9216 samples, rms 0.054573452
+  B  mixed_block_flag=1, coefficients 0..36  : 9216 samples, rms 0.020005486
+  C  mixed_block_flag=0, coefficients 0..576 : 9216 samples, rms 0.052071485
+
+  max |symphonia(A) - ffmpeg(A)| = 0.524741888
+  max |symphonia(B) - ffmpeg(B)| = 0.000000060
+  max |symphonia(C) - ffmpeg(C)| = 0.000000194
+
+sweep vs ffmpeg (tolerance 0.00001, symphonia-check's own):
+  rate     block            coefs      max delta  
+  44100    long                36    0.000000060  ok
+  44100    long                80    0.000000175  ok
+  44100    long               180    0.000000313  ok
+  44100    long               576    0.000000808  ok
+  44100    short               36    0.000000030  ok
+  44100    short               80    0.000000052  ok
+  44100    short              180    0.000000109  ok
+  44100    short              576    0.000000194  ok
+  44100    short mixed         36    0.000000060  ok
+  44100    short mixed         80    0.059550077  MISMATCH
+  44100    short mixed        180    0.174269930  MISMATCH
+  44100    short mixed        576    0.524741888  MISMATCH
+  48000    long                36    0.000000060  ok
+  48000    long                80    0.000000175  ok
+  48000    long               180    0.000000313  ok
+  48000    long               576    0.000000808  ok
+  48000    short               36    0.000000030  ok
+  48000    short               80    0.000000045  ok
+  48000    short              180    0.000000111  ok
+  48000    short              576    0.000000194  ok
+  48000    short mixed         36    0.000000060  ok
+  48000    short mixed         80    0.055414386  MISMATCH
+  48000    short mixed        180    0.168686062  MISMATCH
+  48000    short mixed        576    0.524741888  MISMATCH
+  32000    long                36    0.000000060  ok
+  32000    long                80    0.000000175  ok
+  32000    long               180    0.000000313  ok
+  32000    long               576    0.000000808  ok
+  32000    short               36    0.000000030  ok
+  32000    short               80    0.000000052  ok
+  32000    short              180    0.000000108  ok
+  32000    short              576    0.000000194  ok
+  32000    short mixed         36    0.000000060  ok
+  32000    short mixed         80    0.059550077  MISMATCH
+  32000    short mixed        180    0.166962981  MISMATCH
+  32000    short mixed        576    0.524741888  MISMATCH
+
+  9 of 36 sweep cases exceed the tolerance
+
+BUG REPRODUCED: zeroing every spectral coefficient above index 36 changed
+  nothing at all. Mixed blocks are decoded as if only sub-bands 0..2 existed
+  (0 - 1378 Hz at 44100 Hz); sub-bands 2..32 are overwritten with zeros.
+exit=1
+
+########################################################################################
+# AFTER - same clone with patch.diff applied
+#   $ cd clone && git apply ../patch.diff
+#   $ cd repro && cargo run --release
+########################################################################################
+
+wrote /home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/032.MP3_ANTIALIAS_CLAMPS_RZERO_MIXED_BLOCK/repro/out/{mixed_full,mixed_lowonly,short_full}.mp3
+
+symphonia, 44100 Hz mono, 8 frames:
+  A  mixed_block_flag=1, coefficients 0..576 : 9216 samples, rms 0.054573437
+  B  mixed_block_flag=1, coefficients 0..36  : 9216 samples, rms 0.020005477
+  C  mixed_block_flag=0, coefficients 0..576 : 9216 samples, rms 0.052071472
+
+  max |A - B| = 0.524741888   (A and B carry different spectral data: MUST be > 0)
+  max |A - C| = 0.057240095   (sanity: a mixed and a short block do differ)
+
+ffmpeg (reference decoder), same three files:
+  A  mixed_block_flag=1, coefficients 0..576 : 9216 samples, rms 0.054573452
+  B  mixed_block_flag=1, coefficients 0..36  : 9216 samples, rms 0.020005486
+  C  mixed_block_flag=0, coefficients 0..576 : 9216 samples, rms 0.052071485
+
+  max |symphonia(A) - ffmpeg(A)| = 0.000000261
+  max |symphonia(B) - ffmpeg(B)| = 0.000000060
+  max |symphonia(C) - ffmpeg(C)| = 0.000000194
+
+sweep vs ffmpeg (tolerance 0.00001, symphonia-check's own):
+  rate     block            coefs      max delta  
+  44100    long                36    0.000000060  ok
+  44100    long                80    0.000000175  ok
+  44100    long               180    0.000000313  ok
+  44100    long               576    0.000000808  ok
+  44100    short               36    0.000000030  ok
+  44100    short               80    0.000000052  ok
+  44100    short              180    0.000000109  ok
+  44100    short              576    0.000000194  ok
+  44100    short mixed         36    0.000000060  ok
+  44100    short mixed         80    0.000000071  ok
+  44100    short mixed        180    0.000000134  ok
+  44100    short mixed        576    0.000000261  ok
+  48000    long                36    0.000000060  ok
+  48000    long                80    0.000000175  ok
+  48000    long               180    0.000000313  ok
+  48000    long               576    0.000000808  ok
+  48000    short               36    0.000000030  ok
+  48000    short               80    0.000000045  ok
+  48000    short              180    0.000000111  ok
+  48000    short              576    0.000000194  ok
+  48000    short mixed         36    0.000000060  ok
+  48000    short mixed         80    0.000000089  ok
+  48000    short mixed        180    0.000000132  ok
+  48000    short mixed        576    0.000000261  ok
+  32000    long                36    0.000000060  ok
+  32000    long                80    0.000000175  ok
+  32000    long               180    0.000000313  ok
+  32000    long               576    0.000000808  ok
+  32000    short               36    0.000000030  ok
+  32000    short               80    0.000000052  ok
+  32000    short              180    0.000000108  ok
+  32000    short              576    0.000000194  ok
+  32000    short mixed         36    0.000000060  ok
+  32000    short mixed         80    0.000000071  ok
+  32000    short mixed        180    0.000000105  ok
+  32000    short mixed        576    0.000000261  ok
+
+  0 of 36 sweep cases exceed the tolerance
+
+OK: spectral coefficients above sub-band 2 do affect the decoded output.
+exit=0
+
+########################################################################################
+# Reference decoder used for the cross-check
+########################################################################################
+
+ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025 the FFmpeg developers
+built with gcc 15 (Ubuntu 15.2.0-13ubuntu3)
+
+########################################################################################
+# Project test suite (in a git worktree of the main checkout)
+#   $ cargo test --workspace --all-features
+########################################################################################
+
+Before patch: 106 passed, 0 failed (across 39 test binaries + doc-test targets)
+After  patch: 106 passed, 0 failed - byte-identical `test result:` summary lines

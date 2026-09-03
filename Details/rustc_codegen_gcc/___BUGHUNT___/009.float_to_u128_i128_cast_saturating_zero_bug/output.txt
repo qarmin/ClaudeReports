@@ -1,0 +1,95 @@
+=== Approach 1: exact original repro from issue #690 (u128 cast of computed +inf), through the real cg_gcc backend ===
+$ CHANNEL=release ./y.sh rustc -O repro_orig.rs -o /tmp/repro_orig_gcc
+warning: unused variable: `RET`
+ --> repro_orig.rs:5:9
+  |
+5 |     let RET = 0.0;
+  |         ^^^ help: if this is intentional, prefix it with an underscore: `_RET`
+  |
+  = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable `RET` should have a snake case name
+ --> repro_orig.rs:5:9
+  |
+5 |     let RET = 0.0;
+  |         ^^^ help: convert the identifier to snake case: `ret`
+  |
+  = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: 2 warnings emitted
+
+$ /tmp/repro_orig_gcc
+340282366920938463463374607431768211455
+Expected (correct saturating value, u128::MAX): 340282366920938463463374607431768211455
+
+=== Approach 1b: same source compiled with real host rustc/LLVM for comparison ===
+5 |     let RET = 0.0;
+5 |     let RET = 0.0;
+340282366920938463463374607431768211455
+
+=== Approach 2: FractalFir's minimized reduction (separate noinline cast() fn), through cg_gcc ===
+9 |     _4 = _4;
+340282366920938463463374607431768211455
+Expected (correct saturating value, u128::MAX): 340282366920938463463374607431768211455
+
+=== Approach 3: differential boundary-value sweep, cg_gcc vs. host rustc/LLVM, 12 seeds (incl. NaN, +-inf, and the exact issue-690 magnitudes) ===
+--- cg_gcc output ---
+seed=1e30 val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+seed=1e35 val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+seed=1e38 val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+seed=3.4028235e38 val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+seed=-1e30 val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+seed=-3.4028235e38 val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+seed=2623078700.0 val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+seed=51216.0 val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+seed=1.0 val=1.0 bits=3f800000 u128=1 i128=1 u64=1 i64=1 u32=1
+seed=0.0 val=0.0 bits=00000000 u128=0 i128=0 u64=0 i64=0 u32=0
+seed=NaN val=NaN bits=7fc00000 u128=0 i128=0 u64=0 i64=0 u32=0
+seed=inf val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+--- host rustc/LLVM output ---
+seed=1e30 val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+seed=1e35 val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+seed=1e38 val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+seed=3.4028235e38 val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+seed=-1e30 val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+seed=-3.4028235e38 val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+seed=2623078700.0 val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+seed=51216.0 val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+seed=1.0 val=1.0 bits=3f800000 u128=1 i128=1 u64=1 i64=1 u32=1
+seed=0.0 val=0.0 bits=00000000 u128=0 i128=0 u64=0 i64=0 u32=0
+seed=NaN val=NaN bits=7fc00000 u128=0 i128=0 u64=0 i64=0 u32=0
+seed=inf val=inf bits=7f800000 u128=340282366920938463463374607431768211455 i128=170141183460469231731687303715884105727 u64=18446744073709551615 i64=9223372036854775807 u32=4294967295
+--- diff (empty = identical) ---
+NO DIFFERENCE
+
+=== Supplementary: the underlying GCC VRP bug class IS still live in a generic, unrelated system GCC (15.2.0), demonstrating this is a real GCC compiler bug, just not one that currently manifests through this project's pinned libgccjit (commit badf78d0, an Aug-2026 rust-lang/gcc fork snapshot) ===
+gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+-O0 (correct):
+inf 7f800000
+1
+-O2 (miscompiled by system GCC's VRP):
+inf 7f800000
+0
+
+=== Approach 4 (resumed session): exact candidate-010 code shape - two consecutive black_box-guarded casts compared via an inline assert_eq! macro argument, applied to the float-to-u128/i128 saturating-cast bug class ===
+--- assert_eq_black_box_consecutive_u128.rs: two identical black_box(f32::INFINITY) as u128 == u128::MAX assert_eq! calls back to back ---
+$ CHANNEL=release ./y.sh rustc -O assert_eq_black_box_consecutive_u128.rs -o /tmp/bh009_final_1
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `/home/rafal/Projekty/Obce/rustc_codegen_gcc/build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+ok
+exit: 0
+
+--- assert_eq_black_box_boundary_i128.rs: first assert_eq! on a finite boundary value (1e38f32 as i128, non-saturating), second on black_box(f32::INFINITY) as i128 == i128::MAX (mirrors the exact f32::MAX/f32::INFINITY pairing that triggered candidate 010) ---
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `/home/rafal/Projekty/Obce/rustc_codegen_gcc/build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+ok
+exit: 0
+
+--- assert_eq_black_box_all_int_types.rs: chain of 7 consecutive inline assert_eq! black_box(..inf..) as {i128,u64,i64,u32,f64->u128,f64->i128} saturating casts ---
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `/home/rafal/Projekty/Obce/rustc_codegen_gcc/build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+ok
+exit: 0

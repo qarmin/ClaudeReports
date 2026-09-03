@@ -1,0 +1,56 @@
+$ just test   (fresh clone of https://github.com/pdeljanov/Symphonia.git @ ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee)
+
+=== reproduce-before (pristine tree) ===
+opened evil.mp4 successfully, seeking track 1 to t=0.0s ...
+
+thread 'main' (75493) panicked at /home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/015.ISOMP4_STTS_SAMPLE_COUNT_ACCUMULATOR_OVERFLOW/clone/symphonia-format-isomp4/src/atoms/stts.rs:68:13:
+attempt to add with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+=== reproduce-before, repeated (RUST_BACKTRACE=1, direct worktree run, not the ./clone path) ===
+thread 'main' (65751) panicked at /home/rafal/Projekty/Obce/Symphonia/tmp/wt-015/symphonia-format-isomp4/src/atoms/stts.rs:68:13:
+attempt to add with overflow
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:80:14
+   2: core::panicking::panic_const::panic_const_add_overflow
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:175:17
+   3: <symphonia_format_isomp4::atoms::stts::SttsAtom>::find_sample_for_timestamp
+             at /home/rafal/Projekty/Obce/Symphonia/tmp/wt-015/symphonia-format-isomp4/src/atoms/stts.rs:68:13
+   4: <symphonia_format_isomp4::stream::MoovSegment as symphonia_format_isomp4::stream::StreamSegment>::ts_sample
+             at /home/rafal/Projekty/Obce/Symphonia/tmp/wt-015/symphonia-format-isomp4/src/stream.rs:384:37
+   5: <symphonia_format_isomp4::demuxer::IsoMp4Reader>::seek_track_by_ts
+             at /home/rafal/Projekty/Obce/Symphonia/tmp/wt-015/symphonia-format-isomp4/src/demuxer.rs:531:47
+   6: <symphonia_format_isomp4::demuxer::IsoMp4Reader>::seek_track_by_time
+             at /home/rafal/Projekty/Obce/Symphonia/tmp/wt-015/symphonia-format-isomp4/src/demuxer.rs:505:18
+   7: <symphonia_format_isomp4::demuxer::IsoMp4Reader as symphonia_core::formats::FormatReader>::seek
+             at /home/rafal/Projekty/Obce/Symphonia/tmp/wt-015/symphonia-format-isomp4/src/demuxer.rs:726:22
+   8: repro::main
+             at ./src/main.rs:36:25
+   9: <fn() as core::ops::function::FnOnce<()>>::call_once
+             at /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+(reproduced 3/3 runs in a debug build with overflow-checks=true, identical panic location and
+message every time - fully deterministic, no seed/layout dependency, since the trigger is pure
+integer arithmetic on fixed input bytes.)
+
+=== reproduce-before, release build (no panic - silent wraparound instead) ===
+opened evil.mp4 successfully, seeking track 1 to t=0.0s ...
+seek returned without panicking: Err(SeekError(OutOfRange))
+
+=== apply patch.diff, then reproduce-after (debug build) ===
+opened evil.mp4 successfully, seeking track 1 to t=0.0s ...
+seek returned without panicking: Err(SeekError(OutOfRange))
+BUG NOT REPRODUCED
+
+(re-verified 3/3 runs after the fix - no panic, and confirmed with a second, differently-crafted
+input in the same class: entries {sample_count: 0xFFFFFFFE, sample_delta: 0},
+{sample_count: 5, sample_delta: 0} - panics on the pristine tree, does not panic after the fix.)
+
+=== full workspace test suite (cargo test --workspace) ===
+Before patch: 106 passed, 0 failed (across all workspace crates; symphonia-format-isomp4 itself
+has 0 unit tests).
+After patch:  106 passed, 0 failed (identical).

@@ -1,0 +1,87 @@
+diff --git a/vello_shaders/shader/flatten.wgsl b/vello_shaders/shader/flatten.wgsl
+index aa0389d0..0cbaf6ae 100644
+--- a/vello_shaders/shader/flatten.wgsl
++++ b/vello_shaders/shader/flatten.wgsl
+@@ -546,6 +546,37 @@ fn draw_cap(
+     write_line_with_transform(line_ix, path_ix, start, end, transform);
+ }
+ 
++// Draws the "inner" (concave) side of a join.
++//
++// A plain straight connector between `inner0` and `inner1` can self-intersect with the offset
++// curves of the two adjoining segments (this is the "weak correctness" stroke model - see
++// https://github.com/linebender/vello/issues/1063 and the never-merged "Add inner joins" commits
++// on the `paper-revisions` branch, which this is adapted from). Filling that self-intersecting
++// outline with the nonzero winding rule can then locally cancel out to zero exactly where the
++// inner join's own geometry overlaps the interior of an adjoining segment, punching an
++// unintended hole in the stroke. Drawing the two straight edges *twice* contributes zero net
++// winding on their own (each edge's contribution cancels against its own duplicate), and the
++// additional arc wound in the opposite direction exactly cancels whatever spurious coverage the
++// straight connector would otherwise have produced, without needing to compute the actual
++// self-intersection point.
++fn draw_inner_join(
++    path_ix: u32, p0: vec2f, inner0: vec2f, inner1: vec2f, cr: f32, d: f32, transform: Transform,
++) {
++    if abs(cr) < TANGENT_THRESH {
++        // Smooth (near-collinear) join: the inner offset lines already meet almost exactly.
++        if any(inner0 != inner1) {
++            output_line_with_transform(path_ix, inner0, inner1, transform);
++        }
++    } else {
++        let line_ix = atomicAdd(&bump.lines, 4u);
++        write_line_with_transform(line_ix, path_ix, inner0, p0, transform);
++        write_line_with_transform(line_ix + 1u, path_ix, p0, inner1, transform);
++        write_line_with_transform(line_ix + 2u, path_ix, inner0, p0, transform);
++        write_line_with_transform(line_ix + 3u, path_ix, p0, inner1, transform);
++        flatten_arc(path_ix, inner1, inner0, p0, -abs(atan2(cr, d)), transform);
++    }
++}
++
+ fn draw_join(
+     path_ix: u32, style_flags: u32, p0: vec2f,
+     tan_prev: vec2f, tan_next: vec2f,
+@@ -580,10 +611,10 @@ fn draw_join(
+             // Also avoid the miter computation when `cr` is very small; the intersection
+             // math divides by `cr` and becomes numerically unstable for near-collinear
+             // tangents.
++            let is_backside = cr > 0.;
+             if 2. * hypot < (hypot + d) * miter_limit * miter_limit
+                 && abs(cr) > TANGENT_THRESH * TANGENT_THRESH
+             {
+-                let is_backside = cr > 0.;
+                 let fp_last = select(front0, back1, is_backside);
+                 let fp_this = select(front1, back0, is_backside);
+                 let p = select(front0, back0, is_backside);
+@@ -592,7 +623,7 @@ fn draw_join(
+                 let h = (tan_prev.x * v.y - tan_prev.y * v.x) / cr;
+                 let miter_pt = fp_this - tan_next * h;
+ 
+-                line_ix = atomicAdd(&bump.lines, 3u);
++                line_ix = atomicAdd(&bump.lines, 2u);
+                 write_line_with_transform(line_ix, path_ix, p, miter_pt, transform);
+                 line_ix += 1u;
+ 
+@@ -602,10 +633,20 @@ fn draw_join(
+                     front0 = miter_pt;
+                 }
+             } else {
+-                line_ix = atomicAdd(&bump.lines, 2u);
++                line_ix = atomicAdd(&bump.lines, 1u);
++            }
++            // Outer (convex) side: the (possibly miter-extended) offset edge.
++            if is_backside {
++                write_line_with_transform(line_ix, path_ix, back0, back1, transform);
++            } else {
++                write_line_with_transform(line_ix, path_ix, front0, front1, transform);
+             }
+-            write_line_with_transform(line_ix, path_ix, front0, front1, transform);
+-            write_line_with_transform(line_ix + 1u, path_ix, back0, back1, transform);
++            // Inner (concave) side: drawn via the self-intersection-safe path (see
++            // `draw_inner_join`) instead of a single plain connector, to avoid the
++            // nonzero-winding cancellation bug from vello issue #1063.
++            let inner0 = select(back0, front0, is_backside);
++            let inner1 = select(back1, front1, is_backside);
++            draw_inner_join(path_ix, p0, inner0, inner1, cr, d, transform);
+         }
+         case STYLE_FLAGS_JOIN_ROUND: {
+             var arc0: vec2f;

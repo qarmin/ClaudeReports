@@ -1,0 +1,108 @@
+=== Approach 1: temporary in-crate #[test] probe calling the real, private `S()` directly ===
+=== (added to a scratch worktree's mindist.rs `mod tests`, reverted before writing this
+=== candidate folder - `mod tests` already has access to `S`/`D_rk` since it's a sibling module
+=== inside mindist.rs itself, same file the real min_dist_param lives in)
+=== Debug build (dev profile, debug-assertions=true) - single fixed input (n scanning 4..40) ===
+
+$ cargo test --lib mindist::tests::scratch_s_corner_nan_probe -- --nocapture
+   Compiling kurbo v0.13.1 (/tmp/kurbo-worktree-043/kurbo)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
+     Running unittests src/lib.rs (/tmp/kurbo-worktree-043/target/debug/deps/kurbo-baec33bc9ddc27ed)
+
+running 1 test
+
+thread 'mindist::tests::scratch_s_corner_nan_probe' (297832) panicked at kurbo/src/mindist.rs:252:9:
+attempt to multiply with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test mindist::tests::scratch_s_corner_nan_probe ... FAILED
+
+failures:
+    mindist::tests::scratch_s_corner_nan_probe
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 187 filtered out; finished in 0.00s
+
+(Confirms candidate 019's already-known choose() u32 overflow panics first in debug builds,
+before any NaN can even be observed - matches the same threshold candidate 019 found, n~=16.)
+
+=== Same probe, --release build (single fixed shape, n scanning 4..40 in steps) ===
+
+$ cargo test --release --lib mindist::tests::scratch_s_corner_nan_probe -- --nocapture
+    Finished `release` profile [optimized] target(s) in 5.95s / 7.06s
+     Running unittests src/lib.rs (/tmp/kurbo-worktree-043/target/release/deps/kurbo-14230efcdf18ded6)
+
+running 1 test
+n=4: S(0,0)=12500 S(0,1)=13418 S(1,0)=10372 S(1,1)=11170 S(.5,.5)=12062.5 nan_count=0
+n=8: S(0,0)=12500 S(0,1)=13418 S(1,0)=8660 S(1,1)=9146 S(.5,.5)=10628.5 nan_count=0
+n=12: S(0,0)=12500 S(0,1)=13418 S(1,0)=16580 S(1,1)=16562 S(.5,.5)=9276.5 nan_count=0
+n=16: S(0,0)=NaN S(0,1)=NaN S(1,0)=NaN S(1,1)=NaN S(.5,.5)=NaN nan_count=4
+n=18: S(0,0)=NaN S(0,1)=NaN S(1,0)=NaN S(1,1)=NaN S(.5,.5)=NaN nan_count=4
+n=24: S(0,0)=NaN S(0,1)=NaN S(1,0)=NaN S(1,1)=NaN S(.5,.5)=NaN nan_count=4
+n=32: S(0,0)=NaN S(0,1)=NaN S(1,0)=NaN S(1,1)=NaN S(.5,.5)=NaN nan_count=4
+n=40: S(0,0)=NaN S(0,1)=NaN S(1,0)=NaN S(1,1)=NaN S(.5,.5)=NaN nan_count=4
+test mindist::tests::scratch_s_corner_nan_probe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 187 filtered out; finished in 0.03s
+
+Result: every corner NaN-or-not together, at every n - never a mix.
+
+=== Approach 2: same real, private `S()`, broad randomized sweep (480 cases: degree 1..40 on ===
+=== bez1, degree in {1,3,5,40} on bez2, 3 different (u,v) subdivision-rectangle shapes ===
+=== including post-subdivision interior corners, not just the initial 0/1 domain corners) ===
+
+$ cargo test --release --lib mindist::tests::scratch_s_corner_nan_probe -- --nocapture
+running 1 test
+total_checked=480 any_mixed=false
+test mindist::tests::scratch_s_corner_nan_probe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 187 filtered out; finished in 17.31s
+
+(any_mixed=false: across all 480 cases, the 4 svalues corners were never a mix of NaN and
+finite - always uniformly all-NaN or all-finite. See the probe's own source, reproduced in
+RESULT.md's "Root cause" section, for the exact sweep parameters.)
+
+=== Approach 3 (the standalone repro/, `just test`): real, unmodified, end-to-end min_dist_param ===
+=== (pub(crate), the one real reachable entry point) via #[path]-vendored mindist.rs from a ===
+=== pristine clone at base_commit ca273499e3e48bd2de6f02aa8e99a148984e45f3 ===
+
+$ just test
+[clone step: clones https://github.com/linebender/kurbo.git, checks out ca27349, omitted here]
+
+cd repro && cargo run
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.02s
+     Running `target/debug/mindist-s-corner-nan-repro`
+n=  4: min_dist_param -> alpha=1226272 t1=0.5 t2=0.5 is_nan=false
+n=  8: min_dist_param -> alpha=1174160 t1=0.5 t2=0.5 is_nan=false
+n= 12: min_dist_param -> alpha=1102880 t1=0.5 t2=0.5 is_nan=false
+n= 15: min_dist_param -> alpha=1045850 t1=0.5 t2=0.5 is_nan=false
+
+thread 'main' panicked at src/../../clone/kurbo/src/mindist.rs:252:9:
+attempt to multiply with overflow
+n= 16: panicked (expected in a debug build past the overflow threshold): attempt to multiply with overflow
+n= 17: panicked (expected in a debug build past the overflow threshold): attempt to multiply with overflow
+n= 18: panicked (expected in a debug build past the overflow threshold): attempt to multiply with overflow
+n= 20: panicked (expected in a debug build past the overflow threshold): attempt to multiply with overflow
+n= 24: panicked (expected in a debug build past the overflow threshold): attempt to multiply with overflow
+n= 32: panicked (expected in a debug build past the overflow threshold): attempt to multiply with overflow
+n= 40: panicked (expected in a debug build past the overflow threshold): attempt to multiply with overflow
+n= 64: panicked (expected in a debug build past the overflow threshold): attempt to multiply with overflow
+NOT REPRODUCED: every past-threshold run either panicked (debug build) or returned NaN (release build) - never a silently-corrupted finite result.
+
+cd repro && cargo run --release
+    Finished `release` profile [optimized] target(s) in 0.92s
+     Running `target/release/mindist-s-corner-nan-repro`
+n=  4: min_dist_param -> alpha=1226272 t1=0.5 t2=0.5 is_nan=false
+n=  8: min_dist_param -> alpha=1174160 t1=0.5 t2=0.5 is_nan=false
+n= 12: min_dist_param -> alpha=1102880 t1=0.5 t2=0.5 is_nan=false
+n= 15: min_dist_param -> alpha=1045850 t1=0.5 t2=0.5 is_nan=false
+n= 16: min_dist_param -> alpha=NaN t1=0.5 t2=0.5 is_nan=true
+n= 17: min_dist_param -> alpha=NaN t1=0.5 t2=0.5 is_nan=true
+n= 18: min_dist_param -> alpha=NaN t1=0.5 t2=0.5 is_nan=true
+n= 20: min_dist_param -> alpha=NaN t1=0.5 t2=0.5 is_nan=true
+n= 24: min_dist_param -> alpha=NaN t1=0.5 t2=0.5 is_nan=true
+n= 32: min_dist_param -> alpha=NaN t1=0.5 t2=0.5 is_nan=true
+n= 40: min_dist_param -> alpha=NaN t1=0.5 t2=0.5 is_nan=true
+n= 64: min_dist_param -> alpha=NaN t1=0.5 t2=0.5 is_nan=true
+NOT REPRODUCED: every past-threshold run either panicked (debug build) or returned NaN (release build) - never a silently-corrupted finite result.
+
+`just test` re-run twice (3/3 total counting the original run): identical output every time -
+deterministic (pure computation, no randomness/threading/layout dependence).

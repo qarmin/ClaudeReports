@@ -1,0 +1,35 @@
+diff --git a/json/src/ser/value.rs b/json/src/ser/value.rs
+index c8f9cd0b..038dd539 100644
+--- a/json/src/ser/value.rs
++++ b/json/src/ser/value.rs
+@@ -29,8 +29,28 @@ impl Serialize for AsStrings<'_> {
+     where
+         S: serde::Serializer,
+     {
+-        let strings = self.0.to_multi_str();
+-        serializer.collect_seq(&*strings)
++        match self.0 {
++            // DICOM only ever pads the *last* item of a multi-valued string
++            // with a trailing space/NUL, to make the whole joined wire
++            // representation even-length - trimming every item (as
++            // `to_multi_str()` does, which this type must not use here: it
++            // needs that behavior for turning space-padded numeric strings
++            // into numbers in `AsNumbers`, a different concern) would wrongly
++            // erase real content from any earlier item, including turning a
++            // middle item that legitimately consists only of whitespace into
++            // an empty string.
++            PrimitiveValue::Strs(values) => {
++                let last = values.len().saturating_sub(1);
++                serializer.collect_seq(values.iter().enumerate().map(|(i, s)| {
++                    if i == last {
++                        s.trim_end_matches([' ', '\u{0}'])
++                    } else {
++                        s.as_str()
++                    }
++                }))
++            }
++            _ => serializer.collect_seq(&*self.0.to_multi_str()),
++        }
+     }
+ }
+

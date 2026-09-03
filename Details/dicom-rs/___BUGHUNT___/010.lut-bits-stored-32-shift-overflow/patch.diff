@@ -1,0 +1,54 @@
+diff --git a/pixeldata/src/attribute.rs b/pixeldata/src/attribute.rs
+index dc3aed5d..dd2c90bf 100644
+--- a/pixeldata/src/attribute.rs
++++ b/pixeldata/src/attribute.rs
+@@ -156,7 +156,22 @@ pub fn bits_allocated<D: DataDictionary + Clone>(
+ pub fn bits_stored<D: DataDictionary + Clone>(
+     obj: &FileDicomObject<InMemDicomObject<D>>,
+ ) -> Result<u16> {
+-    retrieve_required_u16(obj, tags::BITS_STORED, AttributeName::BitsStored)
++    let value = retrieve_required_u16(obj, tags::BITS_STORED, AttributeName::BitsStored)?;
++    // `Lut::new_with_fn` builds a table of `2^bits_stored` entries directly off this value, so
++    // it must stay within a range that's both safe to shift (bits_stored == 32 overflows a
++    // 32-bit shift, see lut.rs) and reasonable to allocate (even 24-28 bits would try to build
++    // a many-million-entry table). 1..=16 covers every value this LUT-table-based renderer is
++    // ever legitimately used for (BitsAllocated of 8 or 16 - not the floating-point pixel data
++    // path, which doesn't go through this accessor at all) while eliminating both failure modes
++    // outright, rather than only rejecting the narrower `bits_stored == 0` case.
++    ensure!(
++        (1..=16).contains(&value),
++        InvalidValueSnafu {
++            name: AttributeName::BitsStored,
++            value: value.to_string(),
++        }
++    );
++    Ok(value)
+ }
+ 
+ /// Get the HighBit from the DICOM object
+diff --git a/pixeldata/src/lut.rs b/pixeldata/src/lut.rs
+index cb39801d..1c6d0dfd 100644
+--- a/pixeldata/src/lut.rs
++++ b/pixeldata/src/lut.rs
+@@ -104,14 +104,18 @@ where
+     ///
+     /// # Panics
+     ///
+-    /// Panics if `bits_stored` is 0 or too large.
++    /// Panics if `bits_stored` is 0 or greater than 16 - a real DICOM image never legitimately
++    /// needs more (this is a lookup-table-based transform, not a general bit-depth handler; the
++    /// previous bound of 32 both overflowed the table-size shift computation for `bits_stored ==
++    /// 32` specifically, and would have tried to allocate a many-million-entry table for any
++    /// value approaching it).
+     pub fn new_with_fn(
+         bits_stored: u16,
+         signed: bool,
+         f: impl Fn(f64) -> f64 + Sync,
+     ) -> Result<Self, CreateLutError> {
+-        assert!(bits_stored != 0 && bits_stored <= 32);
+-        let size = (1 << bits_stored as u32) as usize;
++        assert!(bits_stored != 0 && bits_stored <= 16);
++        let size = 1usize << bits_stored;
+         debug_assert!(size.is_power_of_two());
+ 
+         #[cfg(feature = "rayon")]

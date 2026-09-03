@@ -1,0 +1,87 @@
+Environment: no real GPU available; used wgpu's GL backend with Mesa's llvmpipe software
+rasterizer (WGPU_BACKEND=gl, LIBGL_ALWAYS_SOFTWARE=1). Any real GPU backend (Vulkan/Metal/DX12)
+exercises the exact same GPU compute-shader coarse-rasterization code path in vello_shaders.
+
+=== BEFORE (pristine checkout at base_commit 75168314) - 3 runs ===
+
+$ WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1 ./repro
+N_SMALL=1000: render_to_texture() = Ok(()), center pixel = [1, 254, 3, 255]
+N_OVERFLOW=200000: render_to_texture() = Ok(()), center pixel = [0, 0, 0, 0]
+REPRODUCED: the N_OVERFLOW scene's coarse rasterization overflowed a fixed-size GPU buffer (the marker rectangle is missing from the output - pixel=[0, 0, 0, 0], expected [1, 254, 3, 255]), yet render_to_texture() reported Ok(()) - the caller has no way to know the scene was not fully drawn.
+exit code: 1
+
+(run 2, identical output)
+N_SMALL=1000: render_to_texture() = Ok(()), center pixel = [1, 254, 3, 255]
+N_OVERFLOW=200000: render_to_texture() = Ok(()), center pixel = [0, 0, 0, 0]
+REPRODUCED: the N_OVERFLOW scene's coarse rasterization overflowed a fixed-size GPU buffer (the marker rectangle is missing from the output - pixel=[0, 0, 0, 0], expected [1, 254, 3, 255]), yet render_to_texture() reported Ok(()) - the caller has no way to know the scene was not fully drawn.
+exit code: 1
+
+(run 3, identical output)
+N_SMALL=1000: render_to_texture() = Ok(()), center pixel = [1, 254, 3, 255]
+N_OVERFLOW=200000: render_to_texture() = Ok(()), center pixel = [0, 0, 0, 0]
+REPRODUCED: the N_OVERFLOW scene's coarse rasterization overflowed a fixed-size GPU buffer (the marker rectangle is missing from the output - pixel=[0, 0, 0, 0], expected [1, 254, 3, 255]), yet render_to_texture() reported Ok(()) - the caller has no way to know the scene was not fully drawn.
+exit code: 1
+
+=== AFTER (patch.diff applied) - 3 runs ===
+
+$ WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1 ./repro
+N_SMALL=1000: render_to_texture() = Ok(()), center pixel = [1, 254, 3, 255]
+N_OVERFLOW=200000: render_to_texture() = Err(GpuBufferOverflow(1)), center pixel = [0, 0, 0, 0]
+did not reproduce: the overflow happened (marker missing) but was properly reported as Err(GpuBufferOverflow(1)) instead of being silently swallowed as Ok(()).
+exit code: 0
+
+(run 2, identical output)
+N_SMALL=1000: render_to_texture() = Ok(()), center pixel = [1, 254, 3, 255]
+N_OVERFLOW=200000: render_to_texture() = Err(GpuBufferOverflow(1)), center pixel = [0, 0, 0, 0]
+did not reproduce: the overflow happened (marker missing) but was properly reported as Err(GpuBufferOverflow(1)) instead of being silently swallowed as Ok(()).
+exit code: 0
+
+(run 3, identical output)
+N_SMALL=1000: render_to_texture() = Ok(()), center pixel = [1, 254, 3, 255]
+N_OVERFLOW=200000: render_to_texture() = Err(GpuBufferOverflow(1)), center pixel = [0, 0, 0, 0]
+did not reproduce: the overflow happened (marker missing) but was properly reported as Err(GpuBufferOverflow(1)) instead of being silently swallowed as Ok(()).
+exit code: 0
+
+=== Threshold measurement (boundary-value sweep against pristine code, separate probe using the
+same scene shape at CANVAS=64) - center-pixel marker present/absent and BumpAllocators.failed
+(read via the deprecated but public render_to_texture_async debug API, `debug_layers` feature) ===
+
+n=100000  canvas=64  failed_bits=0x0  binning=100001  ptcl=4878336  tile=1600016  lines=400004   center pixel = [1, 254, 3, 255] (present)
+n=130000  canvas=64  failed_bits=0x0  binning=130001  ptcl=6340608  tile=2080016  lines=520004   center pixel = [1, 254, 3, 255] (present)
+n=135000  canvas=64  failed_bits=0x1  binning=135001  ptcl=0        tile=0        lines=540004   center pixel = [0, 0, 0, 0] (missing)
+n=150000  canvas=64  failed_bits=0x1  binning=150001  ptcl=0        tile=0        lines=600004   center pixel = [0, 0, 0, 0] (missing)
+n=200000  canvas=64  failed_bits=0x1  binning=200001  ptcl=0        tile=0        lines=800004   center pixel = [0, 0, 0, 0] (missing)
+n=300000  canvas=64  failed_bits=0x2  binning=300001  ptcl=0        tile=4800016  lines=1200004  center pixel = [0, 0, 0, 0] (missing)
+  (n=300000 additionally exercises this workspace's own already-recorded
+  007.MANY_IMAGES_BINNING_SIZE_UNDERFLOW bug - a *different* failure bit (0x2, STAGE_TILE_ALLOC)
+  and a wrapped `binning_size` - so this candidate's repro deliberately stays at n=200000, safely
+  clear of that regime.)
+
+failed_bits legend (vello_shaders/shader/shared/bump.wgsl): 0x1 = STAGE_BINNING, 0x2 = STAGE_TILE_ALLOC.
+
+=== Separate observed crash, same root class, via the deprecated `--async-pipeline`-equivalent
+debug API (DebugLayers download path), n=600000 canvas=64, pristine code ===
+
+thread 'main' panicked at vello/src/lib.rs:803:31:
+slice offset 0 size 57600096 is out of range for buffer of size 50331648
+
+This is the same failure mode independently reported in issue #720's own comment thread when the
+reporter ran their stress-test example with `--async_pipeline`:
+  [ERROR wgpu_core::device::global] Buffer::map_async error: Buffer access out of bounds: last index 50583552 would overrun the buffer (limit: 50331648)
+  thread 'main' panicked ... wgpu error: Validation Error ... Buffer access out of bounds
+
+=== Project test suite (vello_tests + other non-sparse-strips workspace crates), before/after ===
+
+Command: VELLO_SKIP_LFS_SNAPSHOTS=all WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1 cargo test --workspace \
+  --exclude vello_sparse_tests --exclude vello_cpu --exclude vello_hybrid --exclude vello_common --exclude vello_bench
+
+Before (pristine): 134 passed, 0 failed (across all test binaries; counts per binary: 24, 1, 31,
+14, 9 [+1 ignored], 6, 4, 2, 6, 10, 8, 19 - remaining binaries had 0 tests).
+
+After (patched): 134 passed, 0 failed - identical counts, same binaries, same ignored count.
+
+(Note: an earlier attempt at this fix - unconditionally downloading the bump buffer regardless of
+CPU vs GPU dispatch mode - caused 9 new failures in vello_tests/tests/compare_gpu_cpu.rs, root-
+caused to CPU-shader-dispatched buffers never being materialized as a real wgpu::Buffer in the
+engine's bind map. The final patch conditions the new behavior on `!RendererOptions::use_cpu`,
+which is what the "after" run above reflects - 0 regressions.)

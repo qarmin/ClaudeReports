@@ -1,0 +1,103 @@
+diff --git a/internal/core/model/adapters.rs b/internal/core/model/adapters.rs
+index a72990253..eacc72237 100644
+--- a/internal/core/model/adapters.rs
++++ b/internal/core/model/adapters.rs
+@@ -640,6 +640,10 @@ struct SortModelInner<M, S>
+     sort_helper: RefCell<S>,
+     // This vector saves the indices of the elements in sorted order.
+     mapping: RefCell<Vec<usize>>,
++    // Inverse of `mapping`: reverse_mapping[row] is row's position within `mapping`. Kept in
++    // sync so `row_changed` can locate a row in O(1) instead of scanning `mapping` (which is
++    // sorted by value, not by original row index).
++    reverse_mapping: RefCell<Vec<usize>>,
+     notify: ModelNotify,
+     sorted_rows_dirty: Cell<bool>,
+ }
+@@ -668,10 +672,22 @@ fn build_mapping_vec(&self) {
+             self.sort_helper.borrow_mut().cmp(&lhs, &rhs)
+         });
+ 
++        rebuild_reverse_mapping(&mapping, &mut self.reverse_mapping.borrow_mut());
++
+         self.sorted_rows_dirty.set(false);
+     }
+ }
+ 
++// Rebuilds `reverse_mapping` (row -> position in `mapping`) from scratch. O(n), same order as
++// the sort / bulk-splice operations that already dominate the callers of this function.
++fn rebuild_reverse_mapping(mapping: &[usize], reverse_mapping: &mut Vec<usize>) {
++    reverse_mapping.clear();
++    reverse_mapping.resize(mapping.len(), 0);
++    for (position, &row) in mapping.iter().enumerate() {
++        reverse_mapping[row] = position;
++    }
++}
++
+ impl<M, S> ModelChangeListener for SortModelInner<M, S>
+ where
+     M: Model + 'static,
+@@ -684,7 +700,8 @@ fn row_changed(self: Pin<&Self>, row: usize) {
+         }
+ 
+         let mut mapping = self.mapping.borrow_mut();
+-        let removed_index = mapping.iter().position(|r| *r == row).unwrap();
++        let mut reverse_mapping = self.reverse_mapping.borrow_mut();
++        let removed_index = reverse_mapping[row];
+         mapping.remove(removed_index);
+ 
+         let insertion_index = if let Some(changed_data) = self.wrapped_model.row_data(row) {
+@@ -700,7 +717,20 @@ fn row_changed(self: Pin<&Self>, row: usize) {
+ 
+         mapping.insert(insertion_index, row);
+ 
++        // Only the positions between the old and new spot actually moved within `mapping`;
++        // fixing up just that span keeps this bounded by the same memmove cost `remove`/
++        // `insert` above already pay, instead of a full O(n) rebuild.
++        let (lo, hi) = if removed_index <= insertion_index {
++            (removed_index, insertion_index)
++        } else {
++            (insertion_index, removed_index)
++        };
++        for position in lo..=hi {
++            reverse_mapping[mapping[position]] = position;
++        }
++
+         drop(mapping);
++        drop(reverse_mapping);
+ 
+         if insertion_index == removed_index {
+             self.notify.row_changed(removed_index);
+@@ -741,6 +771,8 @@ fn row_added(self: Pin<&Self>, index: usize, count: usize) {
+             self.mapping.borrow_mut().insert(insertion_index, row);
+             self.notify.row_added(insertion_index, 1)
+         }
++
++        rebuild_reverse_mapping(&self.mapping.borrow(), &mut self.reverse_mapping.borrow_mut());
+     }
+ 
+     fn row_removed(self: Pin<&Self>, index: usize, count: usize) {
+@@ -777,6 +809,8 @@ fn row_removed(self: Pin<&Self>, index: usize, count: usize) {
+             i += 1;
+         }
+ 
++        rebuild_reverse_mapping(&self.mapping.borrow(), &mut self.reverse_mapping.borrow_mut());
++
+         for removed_row in removed_rows {
+             self.notify.row_removed(removed_row, 1);
+         }
+@@ -901,6 +935,7 @@ pub fn new(wrapped_model: M, sort_function: F) -> Self
+             wrapped_model,
+             sort_helper: RefCell::new(sort_function),
+             mapping: RefCell::new(Vec::new()),
++            reverse_mapping: RefCell::new(Vec::new()),
+             notify: Default::default(),
+             sorted_rows_dirty: Cell::new(true),
+         };
+@@ -928,6 +963,7 @@ pub fn new_ascending(wrapped_model: M) -> Self
+             wrapped_model,
+             sort_helper: RefCell::new(AscendingSortHelper),
+             mapping: RefCell::new(Vec::new()),
++            reverse_mapping: RefCell::new(Vec::new()),
+             notify: Default::default(),
+             sorted_rows_dirty: Cell::new(true),
+         };

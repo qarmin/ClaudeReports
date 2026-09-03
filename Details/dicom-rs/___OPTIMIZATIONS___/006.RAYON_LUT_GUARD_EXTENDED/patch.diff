@@ -1,0 +1,156 @@
+diff --git a/pixeldata/src/lib.rs b/pixeldata/src/lib.rs
+index 6ede5847..0fa1215e 100644
+--- a/pixeldata/src/lib.rs
++++ b/pixeldata/src/lib.rs
+@@ -1164,8 +1164,13 @@ impl DecodedPixelData<'_> {
+ 
+                         #[cfg(feature = "rayon")]
+                         {
+-                            let pixel_values = lut.map_par_iter(data.par_iter().copied());
+-                            self.mono_image_with_extend_par(pixel_values, *bit_depth)?
++                            if rayon_worth_it() && data.len() >= LUT_RAYON_PIXEL_THRESHOLD {
++                                let pixel_values = lut.map_par_iter(data.par_iter().copied());
++                                self.mono_image_with_extend_par(pixel_values, *bit_depth)?
++                            } else {
++                                let pixel_values = lut.map_iter(data.iter().copied());
++                                self.mono_image_with_extend(pixel_values, *bit_depth)?
++                            }
+                         }
+                         #[cfg(not(feature = "rayon"))]
+                         {
+@@ -1333,8 +1338,13 @@ impl DecodedPixelData<'_> {
+ 
+                         #[cfg(feature = "rayon")]
+                         {
+-                            let pixel_values = lut.map_par_iter(samples.par_iter().copied());
+-                            self.mono_image_with_narrow_par(pixel_values, *bit_depth)?
++                            if rayon_worth_it() && samples.len() >= LUT_RAYON_PIXEL_THRESHOLD {
++                                let pixel_values = lut.map_par_iter(samples.par_iter().copied());
++                                self.mono_image_with_narrow_par(pixel_values, *bit_depth)?
++                            } else {
++                                let pixel_values = lut.map_iter(samples.iter().copied());
++                                self.mono_image_with_narrow(pixel_values, *bit_depth)?
++                            }
+                         }
+                         #[cfg(not(feature = "rayon"))]
+                         {
+@@ -1608,7 +1618,11 @@ impl DecodedPixelData<'_> {
+                         .context(CreateLutSnafu)?;
+ 
+                         #[cfg(feature = "rayon")]
+-                        let out = lut.map_par_iter(data.par_iter().copied()).collect();
++                        let out = if rayon_worth_it() && data.len() >= LUT_RAYON_PIXEL_THRESHOLD {
++                            lut.map_par_iter(data.par_iter().copied()).collect()
++                        } else {
++                            lut.map_iter(data.iter().copied()).collect()
++                        };
+ 
+                         #[cfg(not(feature = "rayon"))]
+                         let out = lut.map_iter(data.iter().copied()).collect();
+@@ -1618,10 +1632,16 @@ impl DecodedPixelData<'_> {
+                     _ => {
+                         #[cfg(feature = "rayon")]
+                         // 1-channel Grayscale image
+-                        let converted: Result<Vec<T>, _> = data
+-                            .par_iter()
+-                            .map(|v| T::from(*v).ok_or(snafu::NoneError))
+-                            .collect();
++                        let converted: Result<Vec<T>, _> =
++                            if rayon_worth_it() && data.len() >= LUT_RAYON_PIXEL_THRESHOLD {
++                                data.par_iter()
++                                    .map(|v| T::from(*v).ok_or(snafu::NoneError))
++                                    .collect()
++                            } else {
++                                data.iter()
++                                    .map(|v| T::from(*v).ok_or(snafu::NoneError))
++                                    .collect()
++                            };
+                         #[cfg(not(feature = "rayon"))]
+                         // 1-channel Grayscale image
+                         let converted: Result<Vec<T>, _> = data
+@@ -1724,7 +1744,11 @@ impl DecodedPixelData<'_> {
+ 
+                         #[cfg(feature = "rayon")]
+                         {
+-                            Ok(lut.map_par_iter(samples.into_par_iter()).collect())
++                            if rayon_worth_it() && samples.len() >= LUT_RAYON_PIXEL_THRESHOLD {
++                                Ok(lut.map_par_iter(samples.into_par_iter()).collect())
++                            } else {
++                                Ok(lut.map_iter(samples.into_iter()).collect())
++                            }
+                         }
+ 
+                         #[cfg(not(feature = "rayon"))]
+@@ -1740,10 +1764,16 @@ impl DecodedPixelData<'_> {
+                                 let dest = bytes_to_vec_u16(data);
+ 
+                                 #[cfg(feature = "rayon")]
+-                                let converted: Result<Vec<T>, _> = dest
+-                                    .par_iter()
+-                                    .map(|v| T::from(*v).ok_or(snafu::NoneError))
+-                                    .collect();
++                                let converted: Result<Vec<T>, _> =
++                                    if rayon_worth_it() && dest.len() >= LUT_RAYON_PIXEL_THRESHOLD {
++                                        dest.par_iter()
++                                            .map(|v| T::from(*v).ok_or(snafu::NoneError))
++                                            .collect()
++                                    } else {
++                                        dest.iter()
++                                            .map(|v| T::from(*v).ok_or(snafu::NoneError))
++                                            .collect()
++                                    };
+                                 #[cfg(not(feature = "rayon"))]
+                                 let converted: Result<Vec<T>, _> = dest
+                                     .iter()
+@@ -1757,10 +1787,19 @@ impl DecodedPixelData<'_> {
+                                 NativeEndian::read_i16_into(data, &mut signed_buffer);
+ 
+                                 #[cfg(feature = "rayon")]
+-                                let converted: Result<Vec<T>, _> = signed_buffer
+-                                    .par_iter()
+-                                    .map(|v| T::from(*v).ok_or(snafu::NoneError))
+-                                    .collect();
++                                let converted: Result<Vec<T>, _> = if rayon_worth_it()
++                                    && signed_buffer.len() >= LUT_RAYON_PIXEL_THRESHOLD
++                                {
++                                    signed_buffer
++                                        .par_iter()
++                                        .map(|v| T::from(*v).ok_or(snafu::NoneError))
++                                        .collect()
++                                } else {
++                                    signed_buffer
++                                        .iter()
++                                        .map(|v| T::from(*v).ok_or(snafu::NoneError))
++                                        .collect()
++                                };
+                                 #[cfg(not(feature = "rayon"))]
+                                 let converted: Result<Vec<T>, _> = signed_buffer
+                                     .iter()
+@@ -1983,6 +2022,27 @@ fn bytes_to_vec_u16(data: &[u8]) -> Vec<u16> {
+     pixel_array
+ }
+ 
++// Below this many samples, rayon's own per-call dispatch overhead costs more than the
++// sequential LUT-mapped/numeric-conversion work it would save - reusing the same order-of-
++// magnitude threshold measured for convert_colorspace_u8/u16, since these sites do comparably
++// cheap per-element work (a LUT lookup or a numeric cast).
++#[cfg(feature = "rayon")]
++const LUT_RAYON_PIXEL_THRESHOLD: usize = 16_384;
++
++// Caches whether this process has more than one available core - on a single-core (or
++// affinity-restricted to one core) host, dispatching to rayon can never pay for its own
++// overhead regardless of input size.
++#[cfg(feature = "rayon")]
++fn rayon_worth_it() -> bool {
++    use std::sync::OnceLock;
++    static WORTH_IT: OnceLock<bool> = OnceLock::new();
++    *WORTH_IT.get_or_init(|| {
++        std::thread::available_parallelism()
++            .map(|n| n.get() > 1)
++            .unwrap_or(false)
++    })
++}
++
+ // Convert u8 pixel array from YBR_FULL or YBR_FULL_422 to RGB
+ // Every pixel is replaced with an RGB value
+ #[cfg(feature = "image")]

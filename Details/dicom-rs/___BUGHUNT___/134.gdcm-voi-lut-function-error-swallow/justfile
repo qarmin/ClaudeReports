@@ -1,0 +1,52 @@
+# Self-contained reproduction for candidate 134
+# (pixeldata: VOILUTFunction conversion error handled differently by the two PixelDecoder impls).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into ./clone
+# (gitignored) - nothing here reaches outside the folder it lives in, so this folder can be copied
+# anywhere (e.g. attached to a GitHub issue) and `just test` still works.
+#
+# The repro binary is run TWICE per phase: once without the `gdcm` Cargo feature (exercising
+# pixeldata/src/lib.rs's PixelDecoder impl) and once with it (exercising pixeldata/src/gdcm.rs's).
+# Before the patch the two runs disagree - each one fails a different case. After the patch both
+# runs pass.
+#
+# NOTE: the `--features gdcm` runs build the vendored GDCM C++ library through gdcm-rs's
+# cmake-driven build.rs. On a cold cache that is minutes of C++ compilation, not seconds.
+#
+# repo_url is the upstream HTTPS remote rather than this checkout's own `origin`
+# (git@github.com:qarmin/dicom-rs.git), because that one is an SSH fork URL that is not usable
+# without credentials; base_commit below is the exact same commit on both.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+# Full cycle: clone pristine, show the two decode paths disagreeing, apply the fix, show them agreeing.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git fetch origin {{base_commit}} && git checkout {{base_commit}}
+
+# Against the pristine clone. Expected (both runs exit non-zero, for DIFFERENT reasons):
+#   - gdcm OFF: case A fails - a legal zero-length VOILUTFunction makes decode_pixel_data() error out
+#   - gdcm ON : case B fails - a malformed (VR=US) VOILUTFunction is silently ignored
+reproduce-before:
+    @echo "===== BEFORE: gdcm feature OFF (pixeldata/src/lib.rs decode path) ====="
+    cd repro && cargo run --release -q; echo "(exit code $?; non-zero is expected here)"
+    @echo "===== BEFORE: gdcm feature ON (pixeldata/src/gdcm.rs decode path) ====="
+    cd repro && cargo run --release -q --features gdcm; echo "(exit code $?; non-zero is expected here)"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Against the patched clone. Expected: both runs print
+# "RESULT: both cases behave correctly on this decode path" and exit 0.
+reproduce-after:
+    @echo "===== AFTER: gdcm feature OFF (pixeldata/src/lib.rs decode path) ====="
+    cd repro && cargo run --release -q
+    @echo "===== AFTER: gdcm feature ON (pixeldata/src/gdcm.rs decode path) ====="
+    cd repro && cargo run --release -q --features gdcm
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

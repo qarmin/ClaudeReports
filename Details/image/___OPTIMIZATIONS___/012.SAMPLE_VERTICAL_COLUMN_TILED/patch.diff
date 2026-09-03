@@ -1,0 +1,140 @@
+diff --git a/src/imageops/sample.rs b/src/imageops/sample.rs
+index 25864cac..21cb165c 100644
+--- a/src/imageops/sample.rs
++++ b/src/imageops/sample.rs
+@@ -515,6 +515,135 @@ where
+     let sratio = if ratio < 1.0 { 1.0 } else { ratio };
+     let src_support = filter.support * sratio;
+ 
++    // Fast path: if the source exposes a canonical packed-pixel view (true for the common
++    // `ImageBuffer<P, Vec<S>>` case), process the output in column tiles rather than one
++    // output row at a time. Row filter windows/weights are precomputed once (they don't depend
++    // on x), then for each narrow column tile a small `band_rows * tile_width`-sized `f32x4`
++    // accumulator (kept L1-sized regardless of image width) is filled by scanning each
++    // contributing source row's tile-slice once per row band and fanning it out to every output
++    // row in the band that needs it, instead of re-reading that slice once per output row.
++    let pix_stride = <P as Pixel>::CHANNEL_COUNT as usize;
++    if let Some(view) = image.to_pixel_view() {
++        let (sw, row_stride) = view.strides_wh();
++        if sw == pix_stride {
++            const BAND_ROWS: usize = 16;
++            const TILE_WIDTH: usize = 64;
++
++            let samples: &[S] = view.samples();
++            let out_stride = width as usize * MAX_CHANNEL;
++            let out_raw = out.subpixels_mut();
++            let width = width as usize;
++
++            struct RowInfo {
++                left: u32,
++                right: u32,
++                ws_start: usize,
++            }
++
++            // Filter windows/weights depend only on `outy`, not `x` - compute them once up
++            // front and reuse across every column tile below.
++            let mut row_infos: Vec<RowInfo> = Vec::with_capacity(new_height as usize);
++            let mut all_ws: Vec<f32> = Vec::new();
++
++            for outy in 0..new_height {
++                let inputy = (outy as f32 + 0.5) * ratio;
++
++                let left = (inputy - src_support).floor() as i64;
++                let left = clamp(left, 0, <i64 as From<_>>::from(height) - 1) as u32;
++
++                let right = (inputy + src_support).ceil() as i64;
++                let right = clamp(
++                    right,
++                    <i64 as From<_>>::from(left) + 1,
++                    <i64 as From<_>>::from(height),
++                ) as u32;
++
++                let inputy = inputy - 0.5;
++
++                let ws_start = all_ws.len();
++                let mut sum = 0.0;
++                for i in left..right {
++                    let w = (filter.kernel)((i as f32 - inputy) / sratio);
++                    all_ws.push(w);
++                    sum += w;
++                }
++                for w in all_ws[ws_start..].iter_mut() {
++                    *w /= sum;
++                }
++
++                row_infos.push(RowInfo {
++                    left,
++                    right,
++                    ws_start,
++                });
++            }
++
++            let mut acc: Vec<[f32; MAX_CHANNEL]> = Vec::new();
++
++            let mut x_start = 0usize;
++            while x_start < width {
++                let x_end = (x_start + TILE_WIDTH).min(width);
++                let tile_w = x_end - x_start;
++
++                let mut band_start = 0u32;
++                while band_start < new_height {
++                    let band_end = band_start.saturating_add(BAND_ROWS as u32).min(new_height);
++                    let band_len = (band_end - band_start) as usize;
++
++                    let mut min_left = u32::MAX;
++                    let mut max_right = 0u32;
++                    for outy in band_start..band_end {
++                        let info = &row_infos[outy as usize];
++                        min_left = min_left.min(info.left);
++                        max_right = max_right.max(info.right);
++                    }
++
++                    acc.clear();
++                    acc.resize(band_len * tile_w, [1.0f32; MAX_CHANNEL]);
++
++                    for src_y in min_left..max_right {
++                        let src_row_start = src_y as usize * row_stride + x_start * pix_stride;
++                        let src_row = &samples[src_row_start..src_row_start + tile_w * pix_stride];
++
++                        for b in 0..band_len {
++                            let outy = band_start + b as u32;
++                            let info = &row_infos[outy as usize];
++                            if src_y < info.left || src_y >= info.right {
++                                continue;
++                            }
++                            let w = all_ws[info.ws_start + (src_y - info.left) as usize];
++                            let acc_row = &mut acc[b * tile_w..(b + 1) * tile_w];
++
++                            for (a, px) in acc_row.iter_mut().zip(src_row.chunks_exact(pix_stride))
++                            {
++                                for (ac, &c) in a.iter_mut().zip(px) {
++                                    *ac += <f32 as NumCast>::from(c).unwrap() * w;
++                                }
++                            }
++                        }
++                    }
++
++                    for b in 0..band_len {
++                        let outy = band_start + b as u32;
++                        let row_start = outy as usize * out_stride + x_start * MAX_CHANNEL;
++                        let out_row = &mut out_raw[row_start..row_start + tile_w * MAX_CHANNEL];
++                        let acc_row = &acc[b * tile_w..(b + 1) * tile_w];
++
++                        for (dst, a) in out_row.chunks_exact_mut(MAX_CHANNEL).zip(acc_row.iter()) {
++                            dst.copy_from_slice(a);
++                        }
++                    }
++
++                    band_start = band_end;
++                }
++
++                x_start = x_end;
++            }
++
++            return out;
++        }
++    }
++
+     for outy in 0..new_height {
+         // For an explanation of this algorithm, see the comments
+         // in horizontal_sample.

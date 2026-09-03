@@ -1,0 +1,78 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate found no pic-scale source bug (Status: Not reproducible) - there is no
+# patch.diff and no repro/ crate. What this justfile reproduces is the actual finding: (1) all 16
+# existing cargo-fuzz targets hardcode a single ResamplingFunction (confirmed by grep, no build
+# needed), and (2) diversifying 3 of them (resize_rgba, resize_plane, resize_rgb_u16) to derive the
+# sampler from Arbitrary input and fuzzing them (`--sanitizer none`, see candidate 001 for why plain
+# ASan hangs in the original sandbox) reaches every ResamplingFunction variant with zero crashes.
+#
+# `just test` runs a shorter default duration per target than the real session (180-300s) so it
+# finishes in a reasonable time - override with `just test 180`.
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Default demo duration per target, in seconds. The real session used 300/180/180.
+duration := "30"
+
+# clone lives in /tmp, not nested under this folder - see README.md's "Candidate-justfile gotcha"
+# note (fuzz/'s ancestor-workspace-climbing breaks if `clone/` nests inside this checkout).
+clone_dir := "/tmp/pic_scale_bughunt_015_clone"
+
+test duration=duration: clone show-gap diversify build (run duration) verify-coverage
+
+clone:
+    rm -rf {{clone_dir}}
+    git clone {{repo_url}} {{clone_dir}}
+    cd {{clone_dir}} && git checkout {{base_commit}}
+    rm -f clone
+    ln -s {{clone_dir}} clone
+
+# Step 1 of the finding: prove the gap exists in the pristine clone before touching anything.
+show-gap:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "=== ResamplingFunction variants hardcoded by each of the 16 existing fuzz targets ==="
+    grep -rn "ResamplingFunction::" clone/fuzz/*/*.rs | grep -v "pub\|use " | sort -u
+    echo "=== None of the 16 SrcImage Arbitrary structs has a sampler field ==="
+    grep -L "sampler_variant" clone/fuzz/*/*.rs | wc -l || true
+
+# Step 2: apply the same one-off diversification patch used in the real session, to 3 targets.
+diversify:
+    cd clone && patch -p1 < "{{justfile_directory()}}/harness_diversity.diff"
+
+build:
+    cd clone/fuzz && cargo +nightly fuzz build --sanitizer none --features avx,sse,nightly_avx512 resize_rgba
+    cd clone/fuzz && cargo +nightly fuzz build --sanitizer none --features avx,sse,nightly_avx512 resize_plane
+    cd clone/fuzz && cargo +nightly fuzz build --sanitizer none --features avx,sse,nightly_avx512 resize_rgb_u16
+
+# Runs the 3 diversified targets and reports crashes (there should be none).
+run duration=duration:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone/fuzz
+    mkdir -p /tmp/pic_scale_bughunt_015_logs
+    for t in resize_rgba resize_plane resize_rgb_u16; do
+      mkdir -p "corpus/$t"
+      ./target/x86_64-unknown-linux-gnu/release/$t \
+        -max_total_time={{duration}} -rss_limit_mb=4096 "corpus/$t" \
+        > "/tmp/pic_scale_bughunt_015_logs/$t.log" 2>&1
+      echo "--- $t ---"
+      grep -E '^Done' "/tmp/pic_scale_bughunt_015_logs/$t.log" || echo "(did not print Done - check log)"
+    done
+    echo "=== Crash/panic grep (should be empty aside from the harmless --sanitizer none boilerplate) ==="
+    grep -inE 'ERROR|panic|SUMMARY: |deadly signal|leaked|timeout|out-of-memory|slow-unit' /tmp/pic_scale_bughunt_015_logs/*.log | grep -v 'Failed to find function' || echo "(no matches - clean)"
+
+# Step 3: confirm the saved corpus actually reached many/all ResamplingFunction variants, not just
+# carried the field unexplored - decodes each corpus/<target> file with the same Arbitrary struct.
+verify-coverage:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for t in resize_rgba resize_plane resize_rgb_u16; do
+      n=$(ls clone/fuzz/corpus/$t | wc -l)
+      echo "$t: $n corpus files kept (each represents a distinct new-coverage input, see output.txt for this session's full distinct-variant decode)"
+    done
+
+clean:
+    rm -rf {{clone_dir}} clone

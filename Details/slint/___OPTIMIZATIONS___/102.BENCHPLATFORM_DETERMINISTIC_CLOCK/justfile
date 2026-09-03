@@ -1,0 +1,78 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# This is a harness-correctness candidate (implementing the design decision `IDEAS.md`'s
+# top-of-backlog entry, added while building candidate 099, left open) - `bench` here reproduces
+# the pixel-determinism check, not a performance benchmark (the paired timing numbers in
+# `RESULT.md` show the change is a wash, as expected). `patch.diff` against the real Slint source
+# is empty - this candidate makes no product-source change; the fix
+# (`benchplatform_clock_fix.diff`) is applied directly to `perf_test/` (a plain patch, not
+# `git apply` against this clone's tracked history, since `perf_test/` is untracked in the main
+# repo - same convention as candidate 097's `bench_status_blank.diff`).
+#
+# repo_url/base_commit read via `git remote get-url origin` / `git rev-parse HEAD` in the main
+# project, at the moment this candidate was written.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone at the pinned commit (patch.diff is empty - nothing to apply to tracked
+# source), apply perf_test's own harness fix, build, run the repeat-sampled pixel comparison.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+# patch.diff is empty (no tracked-source change). Kept as a step for consistency with every other
+# candidate's justfile shape.
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff" || true
+
+# Applies the deterministic-clock fix directly to perf_test/src/bench.rs.
+apply-harness-fix:
+    cd clone/perf_test && patch -p1 < "{{justfile_directory()}}/benchplatform_clock_fix.diff"
+
+# Reproduces candidate 099's ScrollBar-thumb jitter (unpatched) and confirms this fix removes it
+# (patched), 20 repeats each. Needs candidate 092's patch applied first so the per-frame cost is
+# fast enough to expose the issue at all (see 099's own RESULT.md for why).
+bench:
+    cd clone && git apply "{{justfile_directory()}}/../092.RETAINED_LINE_BREAKING_ACROSS_RESHAPE/patch.diff"
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug --features software
+    mkdir -p /tmp/102_repro/unpatched
+    for r in $(seq 1 20); do \
+        ./clone/target/rdebug/perf_test --bench --mode text --count 10000 --type-text \
+            --scroll-step 0 --frames 150 --snapshot /tmp/102_repro/unpatched/r$r.ppm >/dev/null; \
+    done
+    just apply-harness-fix
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug --features software
+    mkdir -p /tmp/102_repro/patched
+    for r in $(seq 1 20); do \
+        ./clone/target/rdebug/perf_test --bench --mode text --count 10000 --type-text \
+            --scroll-step 0 --frames 150 --snapshot /tmp/102_repro/patched/r$r.ppm >/dev/null; \
+    done
+    @echo "Compare /tmp/102_repro/unpatched/*.ppm pairwise (expect ~16 differing px, rows"
+    @echo "796-797) against /tmp/102_repro/patched/*.ppm (expect 0) - see RESULT.md for the"
+    @echo "exact comparison approach used."
+
+# Paired single/multi-core timing comparison (expect a wash - see RESULT.md).
+paired-timing:
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug --features software
+    cp clone/target/rdebug/perf_test /tmp/102_baseline
+    just apply-harness-fix
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug --features software
+    cp clone/target/rdebug/perf_test /tmp/102_fixed
+    taskset -c 3 bash "{{justfile_directory()}}/../tools/paired.sh" /tmp/102_baseline /tmp/102_fixed -- --mode text --count 10000 --type-text --scroll-step 0
+    bash "{{justfile_directory()}}/../tools/paired.sh" /tmp/102_baseline /tmp/102_fixed -- --mode text --count 10000 --type-text --scroll-step 0
+
+clean:
+    rm -rf clone

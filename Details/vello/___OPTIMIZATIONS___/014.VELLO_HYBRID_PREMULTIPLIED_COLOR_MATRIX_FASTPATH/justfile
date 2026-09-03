@@ -1,0 +1,73 @@
+# Self-contained reproduction for candidate 014 (vello_hybrid: premultiplied-space fast path
+# for RGB-only, alpha-preserving ColorMatrix filters - grayscale, sepia, etc. - per open PR
+# #1625).
+#
+# At base_commit, vello_hybrid (and vello_cpu/vello_common) have NO ColorMatrix filter support
+# at all yet - PR #1625's premul fast path is built on top of an earlier, separate PR
+# (vello_cpu/vello_hybrid: support color matrix filters) that also hadn't landed at base_commit.
+# patch.diff therefore bundles three things, since the fast path can't be isolated or measured
+# without them: (1) the prerequisite general ColorMatrix support in vello_common/vello_cpu/
+# vello_hybrid (unpremultiply -> apply matrix -> premultiply, in both the CPU pixel loop and the
+# GPU filter.wesl shader), (2) the actual fix: the premultiplied-space fast path (`is_premul_compatible`
+# check + `apply_premul_compatible_color_matrix` in the shader, skipping the unpremultiply/
+# premultiply round trip for RGB-only, alpha-preserving matrices), and (3) a new Criterion bench
+# group (`hybrid_color_matrix`, in a new `vello_bench::hybrid_color_matrix` module gated behind a
+# new `hybrid` feature on vello_bench, since it needs a real or software-fallback wgpu adapter)
+# that renders a filtered scene through vello_hybrid's real GPU pipeline.
+#
+# This needs a wgpu adapter - a real GPU, or a software fallback (this candidate was measured
+# against Mesa llvmpipe via the GL backend; confirm with `WGPU_BACKEND=gl` if auto-detection
+# picks something else in your environment).
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git -c filter.lfs.required=false -c filter.lfs.smudge= -c filter.lfs.process= clone --no-checkout {{repo_url}} clone
+    cd clone && git config filter.lfs.required false && git config filter.lfs.smudge "" && git config filter.lfs.process "" && git config filter.lfs.clean "" && git checkout {{base_commit}}
+
+# There is no meaningful pre-patch build for this candidate's own bench (the `hybrid_color_matrix`
+# bench group, and ColorMatrix support itself, don't exist before the patch) - this just makes
+# `test`'s recipe list read naturally; the real baseline/patched comparison binaries are both
+# derived from the *patched* tree in `bench:` below (patched = premul fast path enabled, baseline
+# = the same tree with just the fast-path flag forced off, i.e. always the general path).
+build-baseline:
+    @true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone && cargo build --release -p vello_bench --benches --features vello_bench/hybrid,vello_bench/extended
+    cp "$(find clone/target/release/deps -maxdepth 1 -iname 'main-*' ! -name '*.d' | head -1)" ./bin_patched
+
+# Derives a "general path forced" comparison binary by disabling just the one line that sets the
+# premul-compatible header bit (`vello_hybrid/src/filter.rs`'s `pack_color_matrix_header`),
+# rebuilding, then restoring it - so both binaries share the exact same bench harness and only
+# differ in whether the shader's fast-path branch can ever be selected.
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "=== patched (premul fast path enabled) ==="
+    ./bin_patched --bench 'hybrid_color_matrix' --warm-up-time 1 --measurement-time 3
+    echo ""
+    echo "=== deriving a general-path-forced baseline binary (same tree, fast path disabled) ==="
+    cd clone
+    sed -i 's/if color_matrix.is_premul_compatible() {/if color_matrix.is_premul_compatible() \&\& false {/' sparse_strips/vello_hybrid/src/filter.rs
+    cargo build --release -p vello_bench --benches --features vello_bench/hybrid,vello_bench/extended
+    cp "$(find target/release/deps -maxdepth 1 -iname 'main-*' ! -name '*.d' | head -1)" ../bin_baseline
+    git checkout -- sparse_strips/vello_hybrid/src/filter.rs
+    cd ..
+    echo "=== baseline (general path forced, same bench harness) ==="
+    ./bin_baseline --bench 'hybrid_color_matrix' --warm-up-time 1 --measurement-time 3
+    echo ""
+    echo "Compare 'premul_compatible_grayscale'/'premul_compatible_sepia' 'time:' lines above -"
+    echo "'general_alpha_to_black' is a control that should NOT move (both binaries always use"
+    echo "the general path for that matrix) - see RESULT.md for this candidate's own"
+    echo "single-core/multi-core, repeated measurements at 2048x2048."
+
+clean:
+    rm -rf clone bin_baseline bin_patched

@@ -1,0 +1,41 @@
+$ cd repro && cargo run --release   # against pristine ee35874 (Packet::new(..., Duration::ZERO, ...))
+
+block-decode loop entered = false, output frames = 0, decode err = None
+REPRODUCED: symphonia_fuzz::fuzz_audio_decoder::<AdpcmDecoder> never entered the real ADPCM block-decode loop (decode_mono/decode_stereo) for this packet_data - it constructs every Packet with Duration::ZERO, so Packet::block_dur() is always 0 and `block_count = packet.block_dur().get() as usize / frames_per_block` is always 0, for any packet_data whatsoever.
+exit=1
+
+(re-run twice more, same build, same input: identical output both times, 3/3 total)
+
+---
+
+$ cd repro && cargo run --release   # after applying patch.diff to symphonia/fuzz/src/lib.rs
+
+block-decode loop entered = true, output frames = 0, decode err = Some("unsupported feature: adpcm: block predictor exceeds range")
+did not reproduce - the real block-decode loop actually ran (err = Some("unsupported feature: adpcm: block predictor exceeds range"))
+exit=0
+
+(re-run twice more, same build, same input: identical output both times, 3/3 total)
+
+---
+
+Varied-input check (CONFIRMATION.md section 7): re-ran the patched harness with packet_data =
+vec![0x11; 50] (50 bytes instead of 3) instead of the original 3-byte input - same result, block-
+decode loop entered = true, decode err = Some("unsupported feature: adpcm: block predictor exceeds
+range") - the fix is not narrow to the exact original input length.
+
+---
+
+$ cd symphonia/fuzz && cargo check   # both before and after patch.diff
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.77s   (before)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s   (after)
+
+---
+
+$ cargo test --workspace   # main Symphonia workspace (symphonia/fuzz is its own separate
+                            # [workspace], not a member, so this suite never touches the patched
+                            # file either way - included for completeness per the candidate loop's
+                            # mandatory before/after test-suite step)
+
+Before (pristine ee35874):    passed total: 106  failed total: 0
+After (patch.diff applied):   passed total: 106  failed total: 0

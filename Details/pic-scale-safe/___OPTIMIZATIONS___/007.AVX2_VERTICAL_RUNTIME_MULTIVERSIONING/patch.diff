@@ -1,0 +1,306 @@
+diff --git a/src/fixed_point_vertical.rs b/src/fixed_point_vertical.rs
+index a946626..fe4fb2b 100644
+--- a/src/fixed_point_vertical.rs
++++ b/src/fixed_point_vertical.rs
+@@ -32,11 +32,15 @@ use crate::saturate_narrow::SaturateNarrow;
+ use num_traits::AsPrimitive;
+ use std::ops::{AddAssign, Mul};
+ 
+-#[inline(never)]
++#[inline(always)]
+ /// # Generics
+ /// `T` - template buffer type
+ /// `J` - accumulator type
+-pub(crate) fn convolve_column_handler_fixed_point_direct_buffer<
++///
++/// Shared body for the scalar and AVX2-multiversioned wrappers below - kept `#[inline(always)]`
++/// (no target-feature attribute of its own) so it inlines cleanly into either, inheriting
++/// whichever target features the caller was compiled with.
++fn convolve_column_fixed_point_direct_buffer_impl<
+     T: Copy + 'static + AsPrimitive<J> + Default,
+     J: Copy + 'static + AsPrimitive<T> + Mul<Output = J> + AddAssign + SaturateNarrow<T> + Default,
+     const BUFFER_SIZE: usize,
+@@ -87,7 +91,61 @@ pub(crate) fn convolve_column_handler_fixed_point_direct_buffer<
+ }
+ 
+ #[inline(never)]
+-pub(crate) fn convolve_column_handler_fixed_point_direct_buffer16<
++/// # Generics
++/// `T` - template buffer type
++/// `J` - accumulator type
++pub(crate) fn convolve_column_handler_fixed_point_direct_buffer<
++    T: Copy + 'static + AsPrimitive<J> + Default,
++    J: Copy + 'static + AsPrimitive<T> + Mul<Output = J> + AddAssign + SaturateNarrow<T> + Default,
++    const BUFFER_SIZE: usize,
++>(
++    src: &[T],
++    src_stride: usize,
++    dst: &mut [T],
++    filter: &[i16],
++    bounds: &FilterBounds,
++    bit_depth: u32,
++    x: usize,
++) where
++    i32: AsPrimitive<J>,
++    i16: AsPrimitive<J>,
++{
++    convolve_column_fixed_point_direct_buffer_impl::<T, J, BUFFER_SIZE>(
++        src, src_stride, dst, filter, bounds, bit_depth, x,
++    );
++}
++
++/// Runtime-multiversioned AVX2 variant of [`convolve_column_handler_fixed_point_direct_buffer`].
++///
++/// # Safety
++/// Caller must have verified `is_x86_feature_detected!("avx2")` before calling - see the
++/// dispatch in [`column_handler_fixed_point`], the only caller.
++#[cfg(target_arch = "x86_64")]
++#[allow(unsafe_code)]
++#[target_feature(enable = "avx2")]
++unsafe fn convolve_column_handler_fixed_point_direct_buffer_avx2<
++    T: Copy + 'static + AsPrimitive<J> + Default,
++    J: Copy + 'static + AsPrimitive<T> + Mul<Output = J> + AddAssign + SaturateNarrow<T> + Default,
++    const BUFFER_SIZE: usize,
++>(
++    src: &[T],
++    src_stride: usize,
++    dst: &mut [T],
++    filter: &[i16],
++    bounds: &FilterBounds,
++    bit_depth: u32,
++    x: usize,
++) where
++    i32: AsPrimitive<J>,
++    i16: AsPrimitive<J>,
++{
++    convolve_column_fixed_point_direct_buffer_impl::<T, J, BUFFER_SIZE>(
++        src, src_stride, dst, filter, bounds, bit_depth, x,
++    );
++}
++
++#[inline(always)]
++fn convolve_column_fixed_point_direct_buffer16_impl<
+     T: Copy + 'static + AsPrimitive<J> + Default,
+     J: Copy + 'static + AsPrimitive<T> + Mul<Output = J> + AddAssign + SaturateNarrow<T> + Default,
+     const BUFFER_SIZE: usize,
+@@ -157,10 +215,59 @@ pub(crate) fn convolve_column_handler_fixed_point_direct_buffer16<
+     }
+ }
+ 
+-/// # Generics
+-/// `T` - template buffer type
+-/// `J` - accumulator type
+-pub(crate) fn convolve_column_handler_fixed_point_direct_buffer_double<
++#[inline(never)]
++pub(crate) fn convolve_column_handler_fixed_point_direct_buffer16<
++    T: Copy + 'static + AsPrimitive<J> + Default,
++    J: Copy + 'static + AsPrimitive<T> + Mul<Output = J> + AddAssign + SaturateNarrow<T> + Default,
++    const BUFFER_SIZE: usize,
++>(
++    src: &[T],
++    src_stride: usize,
++    dst: &mut [T],
++    filter: &[i16],
++    bounds: &FilterBounds,
++    bit_depth: u32,
++    x: usize,
++) where
++    i32: AsPrimitive<J>,
++    i16: AsPrimitive<J>,
++{
++    convolve_column_fixed_point_direct_buffer16_impl::<T, J, BUFFER_SIZE>(
++        src, src_stride, dst, filter, bounds, bit_depth, x,
++    );
++}
++
++/// Runtime-multiversioned AVX2 variant of [`convolve_column_handler_fixed_point_direct_buffer16`].
++///
++/// # Safety
++/// Caller must have verified `is_x86_feature_detected!("avx2")` before calling - see the
++/// dispatch in [`column_handler_fixed_point`], the only caller.
++#[cfg(target_arch = "x86_64")]
++#[allow(unsafe_code)]
++#[target_feature(enable = "avx2")]
++unsafe fn convolve_column_handler_fixed_point_direct_buffer16_avx2<
++    T: Copy + 'static + AsPrimitive<J> + Default,
++    J: Copy + 'static + AsPrimitive<T> + Mul<Output = J> + AddAssign + SaturateNarrow<T> + Default,
++    const BUFFER_SIZE: usize,
++>(
++    src: &[T],
++    src_stride: usize,
++    dst: &mut [T],
++    filter: &[i16],
++    bounds: &FilterBounds,
++    bit_depth: u32,
++    x: usize,
++) where
++    i32: AsPrimitive<J>,
++    i16: AsPrimitive<J>,
++{
++    convolve_column_fixed_point_direct_buffer16_impl::<T, J, BUFFER_SIZE>(
++        src, src_stride, dst, filter, bounds, bit_depth, x,
++    );
++}
++
++#[inline(always)]
++fn convolve_column_fixed_point_direct_buffer_double_impl<
+     T: Copy + 'static + AsPrimitive<J> + Default,
+     J: Copy + 'static + AsPrimitive<T> + Mul<Output = J> + AddAssign + SaturateNarrow<T> + Default,
+     const BUFFER_SIZE: usize,
+@@ -272,6 +379,60 @@ pub(crate) fn convolve_column_handler_fixed_point_direct_buffer_double<
+     }
+ }
+ 
++/// # Generics
++/// `T` - template buffer type
++/// `J` - accumulator type
++pub(crate) fn convolve_column_handler_fixed_point_direct_buffer_double<
++    T: Copy + 'static + AsPrimitive<J> + Default,
++    J: Copy + 'static + AsPrimitive<T> + Mul<Output = J> + AddAssign + SaturateNarrow<T> + Default,
++    const BUFFER_SIZE: usize,
++>(
++    src: &[T],
++    src_stride: usize,
++    dst: &mut [T],
++    filter: &[i16],
++    bounds: &FilterBounds,
++    bit_depth: u32,
++    x: usize,
++) where
++    i32: AsPrimitive<J>,
++    i16: AsPrimitive<J>,
++{
++    convolve_column_fixed_point_direct_buffer_double_impl::<T, J, BUFFER_SIZE>(
++        src, src_stride, dst, filter, bounds, bit_depth, x,
++    );
++}
++
++/// Runtime-multiversioned AVX2 variant of
++/// [`convolve_column_handler_fixed_point_direct_buffer_double`].
++///
++/// # Safety
++/// Caller must have verified `is_x86_feature_detected!("avx2")` before calling - see the
++/// dispatch in [`column_handler_fixed_point`], the only caller.
++#[cfg(target_arch = "x86_64")]
++#[allow(unsafe_code)]
++#[target_feature(enable = "avx2")]
++unsafe fn convolve_column_handler_fixed_point_direct_buffer_double_avx2<
++    T: Copy + 'static + AsPrimitive<J> + Default,
++    J: Copy + 'static + AsPrimitive<T> + Mul<Output = J> + AddAssign + SaturateNarrow<T> + Default,
++    const BUFFER_SIZE: usize,
++>(
++    src: &[T],
++    src_stride: usize,
++    dst: &mut [T],
++    filter: &[i16],
++    bounds: &FilterBounds,
++    bit_depth: u32,
++    x: usize,
++) where
++    i32: AsPrimitive<J>,
++    i16: AsPrimitive<J>,
++{
++    convolve_column_fixed_point_direct_buffer_double_impl::<T, J, BUFFER_SIZE>(
++        src, src_stride, dst, filter, bounds, bit_depth, x,
++    );
++}
++
+ #[cfg(target_arch = "aarch64")]
+ /// # Generics
+ /// `T` - template buffer type
+@@ -392,6 +553,12 @@ pub(crate) fn column_handler_fixed_point<
+ 
+     let total_width = dst.len();
+ 
++    // Runtime CPU-feature detection (function multiversioning): `is_x86_feature_detected!`
++    // caches its cpuid result internally, so checking it once here is cheap, but hoisting it out
++    // of the tap-size loops below avoids re-checking per 8/16/32-column chunk regardless.
++    #[cfg(target_arch = "x86_64")]
++    let has_avx2 = std::is_x86_feature_detected!("avx2");
++
+     #[cfg(target_arch = "aarch64")]
+     while cx + 64 <= total_width {
+         convolve_column_handler_fixed_point_direct_buffer_four::<T, J, 16>(
+@@ -402,6 +569,20 @@ pub(crate) fn column_handler_fixed_point<
+     }
+ 
+     while cx + 32 <= total_width {
++        #[cfg(target_arch = "x86_64")]
++        {
++            if has_avx2 {
++                // SAFETY: has_avx2 was just checked via is_x86_feature_detected!("avx2") above.
++                #[allow(unsafe_code)]
++                unsafe {
++                    convolve_column_handler_fixed_point_direct_buffer_double_avx2::<T, J, 16>(
++                        src, src_stride, dst, weight, bounds, bit_depth, cx,
++                    );
++                }
++                cx += 32;
++                continue;
++            }
++        }
+         convolve_column_handler_fixed_point_direct_buffer_double::<T, J, 16>(
+             src, src_stride, dst, weight, bounds, bit_depth, cx,
+         );
+@@ -410,6 +591,20 @@ pub(crate) fn column_handler_fixed_point<
+     }
+ 
+     while cx + 16 <= total_width {
++        #[cfg(target_arch = "x86_64")]
++        {
++            if has_avx2 {
++                // SAFETY: has_avx2 was just checked via is_x86_feature_detected!("avx2") above.
++                #[allow(unsafe_code)]
++                unsafe {
++                    convolve_column_handler_fixed_point_direct_buffer16_avx2::<T, J, 16>(
++                        src, src_stride, dst, weight, bounds, bit_depth, cx,
++                    );
++                }
++                cx += 16;
++                continue;
++            }
++        }
+         convolve_column_handler_fixed_point_direct_buffer16::<T, J, 16>(
+             src, src_stride, dst, weight, bounds, bit_depth, cx,
+         );
+@@ -418,6 +613,20 @@ pub(crate) fn column_handler_fixed_point<
+     }
+ 
+     while cx + 8 <= total_width {
++        #[cfg(target_arch = "x86_64")]
++        {
++            if has_avx2 {
++                // SAFETY: has_avx2 was just checked via is_x86_feature_detected!("avx2") above.
++                #[allow(unsafe_code)]
++                unsafe {
++                    convolve_column_handler_fixed_point_direct_buffer_avx2::<T, J, 8>(
++                        src, src_stride, dst, weight, bounds, bit_depth, cx,
++                    );
++                }
++                cx += 8;
++                continue;
++            }
++        }
+         convolve_column_handler_fixed_point_direct_buffer::<T, J, 8>(
+             src, src_stride, dst, weight, bounds, bit_depth, cx,
+         );
+diff --git a/src/lib.rs b/src/lib.rs
+index b245e45..1bde75a 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -27,7 +27,14 @@
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+-#![forbid(unsafe_code)]
++// ___OPTIMIZATIONS___/048.PIC_SCALE_SAFE_AVX2_RUNTIME_MULTIVERSIONING: relaxed from `forbid` to
++// `deny` (which item-level `#[allow(unsafe_code)]` can override, unlike `forbid`) so the vertical
++// convolution tap loop's AVX2 multiversioning (fixed_point_vertical.rs) can use
++// `#[target_feature(enable = "avx2")] unsafe fn` - the only unsafe code in the whole crate, gated
++// locally, not a blanket policy change. Every other module remains exactly as unsafe-free as
++// before; see that candidate's RESULT.md for why this crate's own "no unsafe" design goal is
++// unavoidably in tension with runtime SIMD multiversioning.
++#![deny(unsafe_code)]
+ #![allow(clippy::manual_clamp, clippy::chunks_exact_to_as_chunks)]
+ #![deny(dead_code, unreachable_pub)]
+ 

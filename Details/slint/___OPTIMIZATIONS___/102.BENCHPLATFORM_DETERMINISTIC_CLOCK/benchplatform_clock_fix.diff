@@ -1,0 +1,59 @@
+--- a/perf_test/src/bench.rs	2026-08-24 22:52:11.442396956 +0000
++++ b/perf_test/src/bench.rs	2026-08-24 22:52:11.443387593 +0000
+@@ -1,3 +1,4 @@
++use std::cell::Cell;
+ use std::rc::Rc;
+ use std::time::{Duration, Instant};
+ 
+@@ -270,12 +271,25 @@
+ 
+ struct BenchPlatform {
+     window: Rc<MinimalSoftwareWindow>,
++    // A synthetic clock, advanced by a fixed amount per frame (see its use in `run`'s frame loop)
++    // instead of tracking real elapsed wall-clock time. Without this, `Platform`'s default
++    // `duration_since_start` reads the real system clock, so any `animate` binding (e.g.
++    // std-widgets' `ScrollBar` thumb) or `animation-tick()` use (`--animate`) is sampled against
++    // however much real time happened to elapse between frames on the host - which varies run to
++    // run with ordinary OS scheduling jitter and breaks `--bench`'s byte-identical-snapshot
++    // guarantee once a scene's own per-frame cost drops below such an animation's duration. See
++    // `___OPTIMIZATIONS___/099.SCROLLBAR_THUMB_ANIMATION_REALTIME_JITTER/RESULT.md`.
++    virtual_now: Rc<Cell<Duration>>,
+ }
+ 
+ impl Platform for BenchPlatform {
+     fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
+         Ok(self.window.clone())
+     }
++
++    fn duration_since_start(&self) -> Duration {
++        self.virtual_now.get()
++    }
+ }
+ 
+ struct Phase {
+@@ -379,8 +393,12 @@
+ /// Needs no display, so it also runs over ssh and in CI.
+ pub fn run(options: &BenchOptions) -> Result<(), PlatformError> {
+     let window = MinimalSoftwareWindow::new(options.repaint_buffer);
+-    slint::platform::set_platform(Box::new(BenchPlatform { window: window.clone() }))
+-        .map_err(|error| format!("cannot install the benchmark platform: {error}"))?;
++    let virtual_now = Rc::new(Cell::new(Duration::ZERO));
++    slint::platform::set_platform(Box::new(BenchPlatform {
++        window: window.clone(),
++        virtual_now: virtual_now.clone(),
++    }))
++    .map_err(|error| format!("cannot install the benchmark platform: {error}"))?;
+     window.set_size(PhysicalSize::new(options.width, options.height));
+ 
+     if options.scale_factor != 1.0 {
+@@ -669,6 +687,10 @@
+                 ),
+             });
+         }
++        // Advance the synthetic clock by a fixed per-frame amount (a nominal 60fps tick) instead
++        // of letting `update_timers_and_animations` sample the real elapsed wall-clock time - see
++        // `BenchPlatform::virtual_now`'s doc comment for why.
++        virtual_now.set(virtual_now.get() + Duration::from_millis(16));
+         slint::platform::update_timers_and_animations();
+         window.request_redraw();
+ 

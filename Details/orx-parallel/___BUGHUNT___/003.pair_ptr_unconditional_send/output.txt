@@ -1,0 +1,120 @@
+=== just clone ===
+rm -rf clone
+git clone https://github.com/orxfun/orx-parallel.git clone
+Cloning into 'clone'...
+cd clone && git checkout b9214fbeb714e4bb8f8858676a818cef2f21b097
+Note: switching to 'b9214fbeb714e4bb8f8858676a818cef2f21b097'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at b9214fbe iter of iter uses fixed chunk heuristic (#198)
+
+=== just reproduce-before (run 1/1 from a fresh clone, via candidate justfile) ===
+cd repro && cargo run --release
+    Updating crates.io index
+     Locking 25 packages to latest compatible versions
+   Compiling orx-self-or v1.2.0
+   Compiling orx-pseudo-default v2.1.0
+   Compiling orx-priority-queue v1.9.0
+   Compiling orx-iterable v1.3.0
+   Compiling orx-pinned-vec v4.0.0
+   Compiling orx-concurrent-iter v4.3.0
+   Compiling orx-split-vec v4.0.2
+   Compiling orx-fixed-vec v4.0.0
+   Compiling orx-pinned-concurrent-col v3.0.1
+   Compiling orx-concurrent-ordered-bag v4.0.1
+   Compiling orx-concurrent-bag v4.0.1
+   Compiling orx-parallel v3.4.0 (/tmp/candidate-003-verify/clone)
+   Compiling pair-ptr-send-repro v0.1.0 (/tmp/candidate-003-verify/repro)
+    Finished `release` profile [optimized] target(s) in 2.15s
+     Running `target/release/pair-ptr-send-repro`
+REPRODUCED: orx_parallel::ParUse::fold() compiled and ran to completion
+with a Sync-but-!Send Use::Item (GuardLike), via the real public
+Par::use_slice(...).fold(...) API, across 8 real OS worker threads
+(observed 8 distinct OS ThreadIds exclusively mutating GuardLike slots).
+This program should not even compile: `.fold()`'s `Self::Use` (here `GuardLike`) is not Send, and per-thread state passed across a real OS thread boundary must be.
+
+=== repeat run 1/5 (native, pristine worktree, 8 real OS worker threads) ===
+REPRODUCED: orx_parallel::ParUse::fold() compiled and ran to completion
+with a Sync-but-!Send Use::Item (GuardLike), via the real public
+Par::use_slice(...).fold(...) API, across 8 real OS worker threads
+(observed 8 distinct OS ThreadIds exclusively mutating GuardLike slots).
+This program should not even compile: `.fold()`'s `Self::Use` (here `GuardLike`) is not Send, and per-thread state passed across a real OS thread boundary must be.
+
+=== repeat run 2/5 (native, pristine worktree, 8 real OS worker threads) ===
+REPRODUCED: orx_parallel::ParUse::fold() compiled and ran to completion
+with a Sync-but-!Send Use::Item (GuardLike), via the real public
+Par::use_slice(...).fold(...) API, across 8 real OS worker threads
+(observed 8 distinct OS ThreadIds exclusively mutating GuardLike slots).
+This program should not even compile: `.fold()`'s `Self::Use` (here `GuardLike`) is not Send, and per-thread state passed across a real OS thread boundary must be.
+
+=== repeat run 3/5 (native, pristine worktree, 8 real OS worker threads) ===
+REPRODUCED: orx_parallel::ParUse::fold() compiled and ran to completion
+with a Sync-but-!Send Use::Item (GuardLike), via the real public
+Par::use_slice(...).fold(...) API, across 8 real OS worker threads
+(observed 8 distinct OS ThreadIds exclusively mutating GuardLike slots).
+This program should not even compile: `.fold()`'s `Self::Use` (here `GuardLike`) is not Send, and per-thread state passed across a real OS thread boundary must be.
+
+=== repeat run 4/5 (native, pristine worktree, 8 real OS worker threads) ===
+REPRODUCED: orx_parallel::ParUse::fold() compiled and ran to completion
+with a Sync-but-!Send Use::Item (GuardLike), via the real public
+Par::use_slice(...).fold(...) API, across 8 real OS worker threads
+(observed 8 distinct OS ThreadIds exclusively mutating GuardLike slots).
+This program should not even compile: `.fold()`'s `Self::Use` (here `GuardLike`) is not Send, and per-thread state passed across a real OS thread boundary must be.
+
+=== repeat run 5/5 (native, pristine worktree, 8 real OS worker threads) ===
+REPRODUCED: orx_parallel::ParUse::fold() compiled and ran to completion
+with a Sync-but-!Send Use::Item (GuardLike), via the real public
+Par::use_slice(...).fold(...) API, across 8 real OS worker threads
+(observed 8 distinct OS ThreadIds exclusively mutating GuardLike slots).
+This program should not even compile: `.fold()`'s `Self::Use` (here `GuardLike`) is not Send, and per-thread state passed across a real OS thread boundary must be.
+
+=== just apply ===
+cd clone && git apply "/tmp/candidate-003-verify/patch.diff"
+
+=== just reproduce-after (against the patched clone) ===
+   Compiling orx-parallel v3.4.0 (/tmp/candidate-003-verify/clone)
+   Compiling pair-ptr-send-repro v0.1.0 (/tmp/candidate-003-verify/repro)
+error[E0277]: `*const ()` cannot be sent between threads safely
+   --> src/main.rs:75:10
+    |
+ 75 |         .fold(
+    |          ^^^^ `*const ()` cannot be sent between threads safely
+    |
+    = help: within `GuardLike`, the trait `Send` is not implemented for `*const ()`
+note: required because it appears within the type `PhantomData<*const ()>`
+   --> /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/marker.rs:811:12
+    |
+811 | pub struct PhantomData<T: PointeeSized>;
+    |            ^^^^^^^^^^^
+note: required because it appears within the type `GuardLike`
+   --> src/main.rs:35:8
+    |
+ 35 | struct GuardLike {
+    |        ^^^^^^^^^
+note: required by a bound in `orx_parallel::ParUse::fold`
+   --> /tmp/candidate-003-verify/clone/src/infallible_use/par.rs:684:20
+    |
+682 |     fn fold<B, I, F>(self, init: I, f: F) -> Vec<B>
+    |        ---- required by a bound in this associated function
+683 |     where
+684 |         Self::Use: Send,
+    |                    ^^^^ required by this bound in `ParUse::fold`
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `pair-ptr-send-repro` (bin "pair-ptr-send-repro") due to 1 previous error
+
+FIX VERIFIED: repro now correctly fails to compile (Self::Use: Send bound enforced).

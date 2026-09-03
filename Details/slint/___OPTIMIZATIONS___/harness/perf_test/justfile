@@ -1,0 +1,122 @@
+set export := true
+
+bin := "perf_test"
+# The repository .cargo/config.toml redirects all workspaces to <repo>/target.
+target_dir := justfile_directory() + "/../target"
+
+# Renderer/backend to build and run: femtovg (default) | skia | software | qt
+# Override per invocation, e.g. `RENDERER=software just samplyrd`
+RENDERER := env_var_or_default("RENDERER", "femtovg")
+
+# femtovg is in the default features; everything else needs its own feature.
+features := if RENDERER == "femtovg" { "" } else { "--features " + RENDERER }
+run_args := if RENDERER == "qt" { "--backend qt" } else { "--renderer " + RENDERER }
+
+## run
+
+# Debug build - only to check that it compiles and starts
+run *args:
+    cargo run --bin {{ bin }} {{ features }} -- {{ run_args }} {{ args }}
+
+# Release build - for eyeballing real performance
+runr *args:
+    cargo run --release --bin {{ bin }} {{ features }} -- {{ run_args }} {{ args }}
+
+# Optimized + full debug info, the same binary the profiler uses
+runrd *args:
+    cargo run --profile rdebug --bin {{ bin }} {{ features }} -- {{ run_args }} {{ args }}
+
+# Every renderer in one binary, picked at runtime
+runr-all *args:
+    cargo run --release --bin {{ bin }} --features all-renderers -- {{ args }}
+
+## benchmarks
+
+# Headless benchmark, no display needed: fill a mode, render N frames while scrolling
+bench *args:
+    cargo build --bin {{ bin }} --profile rdebug {{ features }}
+    {{ target_dir }}/rdebug/{{ bin }} --bench --mode scroll --count 100000 --frames 6 {{ args }}
+
+# The whole table from FINDINGS.md
+bench-all:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --bin {{ bin }} --profile rdebug {{ features }}
+    bin="{{ target_dir }}/rdebug/{{ bin }}"
+    for args in "--mode list --count 100000" \
+                "--mode scroll --count 100000" \
+                "--mode scroll --count 100000 --flat-rows" \
+                "--mode text --count 100000"; do
+        echo "=== $args ==="
+        $bin --bench $args --frames 6 | tail -7
+    done
+
+# Same workload in a real window with the selected renderer, then quit
+frames count="100000" frames="60":
+    cargo build --bin {{ bin }} --profile rdebug {{ features }}
+    {{ target_dir }}/rdebug/{{ bin }} {{ run_args }} --mode scroll --count {{ count }} --frames {{ frames }}
+
+# Same, but in a virtual X server - works over ssh and in CI.
+# Needs: xvfb libxkbcommon-x11-0 libxcb-xkb1 libgl1-mesa-dri libglx-mesa0
+frames-xvfb count="100000" frames="8":
+    cargo build --bin {{ bin }} --profile rdebug {{ features }}
+    LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -s "-screen 0 1280x900x24" \
+        {{ target_dir }}/rdebug/{{ bin }} {{ run_args }} --mode scroll --count {{ count }} --frames {{ frames }}
+
+# Any mode in a real window: just frames-mode rects 3000 8
+frames-mode mode count frames="8":
+    cargo build --bin {{ bin }} --profile rdebug {{ features }}
+    {{ target_dir }}/rdebug/{{ bin }} {{ run_args }} --mode {{ mode }} --count {{ count }} --frames {{ frames }}
+
+# Same in a virtual X server: just frames-xvfb-mode rects 3000 8
+frames-xvfb-mode mode count frames="8":
+    cargo build --bin {{ bin }} --profile rdebug {{ features }}
+    LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -s "-screen 0 1280x900x24" \
+        {{ target_dir }}/rdebug/{{ bin }} {{ run_args }} --mode {{ mode }} --count {{ count }} --frames {{ frames }}
+
+# Cost of one malloc+free pair of a DependencyNode sized box, for interpreting the
+# allocations/frame column
+allocbench n="700000":
+    rustc -O -o {{ target_dir }}/allocbench tools/allocbench.rs
+    {{ target_dir }}/allocbench {{ n }}
+
+## profiling
+
+# echo '-1' | sudo tee /proc/sys/kernel/perf_event_paranoid
+# // Or permanently
+# echo "kernel.perf_event_paranoid = -1" | sudo tee /etc/sysctl.d/99-perf.conf
+# sudo sysctl --system
+
+samply *args:
+    cargo build --bin {{ bin }} {{ features }}
+    samply record -- {{ target_dir }}/debug/{{ bin }} {{ run_args }} {{ args }}
+
+# Main profiling target: optimized code with full symbols.
+# Add RUSTFLAGS="-C force-frame-pointers=yes" if the stacks look truncated.
+samplyrd *args:
+    cargo build --bin {{ bin }} --profile rdebug {{ features }}
+    samply record -- {{ target_dir }}/rdebug/{{ bin }} {{ run_args }} {{ args }}
+
+# The benchmark workload under samply - this is what to look at for renderer work
+samplyrd-bench *args:
+    cargo build --bin {{ bin }} --profile rdebug {{ features }}
+    samply record -- {{ target_dir }}/rdebug/{{ bin }} --bench --mode scroll --count 100000 --frames 20 {{ args }}
+
+heaptrack *args:
+    cargo build --bin {{ bin }} --profile rdebug {{ features }}
+    heaptrack {{ target_dir }}/rdebug/{{ bin }} {{ run_args }} {{ args }}
+    heaptrack_gui --appimage-extract-and-run "$(ls -t heaptrack.*.zst | head -n1)"
+
+## checks
+
+fmt:
+    cargo +nightly fmt
+
+clip:
+    cargo clippy --all-targets
+
+check-all:
+    cargo check --bin {{ bin }} --features all-renderers
+
+bloat:
+    cargo bloat --release --bin {{ bin }} -n 30

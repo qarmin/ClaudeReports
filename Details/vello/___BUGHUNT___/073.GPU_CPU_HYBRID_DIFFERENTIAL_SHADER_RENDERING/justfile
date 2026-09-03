@@ -1,0 +1,42 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# Needs a real (possibly software) OpenGL/GLES driver reachable by wgpu's GL backend - e.g. Mesa's
+# llvmpipe software rasterizer (`LIBGL_ALWAYS_SOFTWARE=1`, typically already available wherever
+# Mesa is installed) if there is no real GPU available. The bug is specific to wgpu's GL/GLES
+# backend (`wgpu::Backends::GL`), which this repro requests explicitly in code - it does not
+# depend on the `WGPU_BACKEND` environment variable.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - a real (software) wgpu GL/GLES
+# device, driven through vello_hybrid's real public `Renderer::upload_image`/`Scene`/`render`
+# entry points with a real solid-red test image - should print "BUG REPRODUCED" and exit 1: the
+# uploaded image comes out fully transparent/black instead of solid red.
+reproduce-before:
+    cd repro && LIBGL_ALWAYS_SOFTWARE=1 cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should print "OK" and exit 0: the uploaded
+# image now renders correctly, matching vello_cpu's reference render.
+reproduce-after:
+    cd repro && LIBGL_ALWAYS_SOFTWARE=1 cargo run --release
+
+clean:
+    rm -rf clone

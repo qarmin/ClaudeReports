@@ -1,0 +1,51 @@
+=== reproduce-before (unpatched, HEAD b9214fbeb714e4bb8f8858676a818cef2f21b097) ===
+$ cd repro && cargo run --release
+   Compiling orx-parallel v3.4.0 (/home/rafal/Projekty/Obce/orx-parallel)
+error[E0425]: cannot find value `build_default_rayon_thread_pool` in this scope
+  --> /home/rafal/Projekty/Obce/orx-parallel/src/pool/global_pool.rs:22:19
+   |
+22 |     LazyLock::new(build_default_rayon_thread_pool);
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+warning: unused import: `crate::pool::pool_impl::*`
+ --> /home/rafal/Projekty/Obce/orx-parallel/src/pool/global_pool.rs:1:5
+  |
+1 | use crate::pool::pool_impl::*;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0425`.
+warning: `orx-parallel` (lib) generated 1 warning
+error: could not compile `orx-parallel` (lib) due to 1 previous error; 1 warning emitted
+
+=== reproduce-after (patch.diff applied) ===
+$ cd repro && cargo run --release
+   Compiling orx-parallel v3.4.0 (.../clone)
+   Compiling repro-013 v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 1.34s
+     Running `target/release/repro-013`
+did not reproduce - crate compiled and get_global_pool() returned a pool with 24 threads
+
+=== also observed directly with cargo check (same error, native x86_64-unknown-linux-gnu target) ===
+$ cargo check --no-default-features --features std,wasm,persistent-pool-rayon
+error[E0425]: cannot find value `build_default_rayon_thread_pool` in this scope
+  --> src/pool/global_pool.rs:22:19
+
+$ cargo check --all-features
+error[E0425]: cannot find value `build_default_rayon_thread_pool` in this scope
+  --> src/pool/global_pool.rs:22:19
+(plus one unrelated, pre-existing error[E0308] in src/infallible/par_runner.rs:216 - not part of
+this candidate, noted as a new suspect)
+
+=== project test suite, before vs after patch (native default-features build) ===
+before: cargo test --no-default-features --features std
+  test result: ok. 260 passed; 0 failed; 16 ignored; 0 measured; 0 filtered out
+after:  cargo test --no-default-features --features std
+  test result: ok. 260 passed; 0 failed; 16 ignored; 0 measured; 0 filtered out
+
+=== project test suite, the specific failing feature combo (fails to even compile before) ===
+before: cargo test --no-default-features --features std,wasm,persistent-pool-rayon
+  error[E0425]: cannot find value `build_default_rayon_thread_pool` in this scope (lib and lib test both fail to build)
+after:  cargo test --no-default-features --features std,wasm,persistent-pool-rayon
+  test result: ok. 260 passed; 0 failed; 17 ignored; 0 measured; 0 filtered out

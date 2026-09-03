@@ -1,0 +1,57 @@
+diff --git a/src/idct.rs b/src/idct.rs
+index 20b5707..0ac743f 100644
+--- a/src/idct.rs
++++ b/src/idct.rs
+@@ -11,6 +11,14 @@
+ use crate::parser::Dimensions;
+ use core::num::Wrapping;
+ 
++// CANDIDATE010 scratch probe: accumulates wall time spent inside dequantize_and_idct_block
++// (all scales) to measure IDCT's share of total decode time at various requested scales.
++// Reverted before this candidate's patch.diff (if any) is captured.
++#[doc(hidden)]
++pub static CANDIDATE010_IDCT_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++#[doc(hidden)]
++pub static CANDIDATE010_IDCT_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
+ pub(crate) fn choose_idct_size(full_size: Dimensions, requested_size: Dimensions) -> usize {
+     fn scaled(len: u16, scale: usize) -> u16 {
+         ((len as u32 * scale as u32 - 1) / 8 + 1) as u16
+@@ -209,6 +217,7 @@ pub(crate) fn dequantize_and_idct_block(
+     output_linestride: usize,
+     output: &mut [u8],
+ ) {
++    let _t0 = std::time::Instant::now();
+     match scale {
+         8 => dequantize_and_idct_block_8x8(
+             coefficients,
+@@ -236,6 +245,8 @@ pub(crate) fn dequantize_and_idct_block(
+         ),
+         _ => panic!("Unsupported IDCT scale {scale}/8"),
+     }
++    CANDIDATE010_IDCT_NANOS.fetch_add(_t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
++    CANDIDATE010_IDCT_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+ }
+ 
+ pub fn dequantize_and_idct_block_8x8(
+diff --git a/src/lib.rs b/src/lib.rs
+index ff1ceb1..cac88eb 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -53,6 +53,16 @@ mod parser;
+ mod upsampler;
+ mod worker;
+ 
++// CANDIDATE010 scratch probe, reverted before patch.diff is captured - see idct.rs.
++#[doc(hidden)]
++pub fn _candidate010_idct_nanos() -> u64 {
++    idct::CANDIDATE010_IDCT_NANOS.load(std::sync::atomic::Ordering::Relaxed)
++}
++#[doc(hidden)]
++pub fn _candidate010_idct_calls() -> u64 {
++    idct::CANDIDATE010_IDCT_CALLS.load(std::sync::atomic::Ordering::Relaxed)
++}
++
+ fn read_u8<R: io::Read>(reader: &mut R) -> io::Result<u8> {
+     let mut buf = [0];
+     reader.read_exact(&mut buf)?;

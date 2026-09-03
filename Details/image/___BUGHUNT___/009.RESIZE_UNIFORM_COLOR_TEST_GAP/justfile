@@ -1,0 +1,51 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# This candidate is about a *test-suite gap*, not a source crash: the crate's own `cargo test
+# --lib` suite passes 331/331 on the pristine tree even though candidate 003's confirmed +1.0
+# `vertical_sample` accumulator bias is present, because no test asserts that resizing a
+# uniform-color image preserves that color. `patch.diff` adds that test *and* carries candidate
+# 003's already-independently-verified one-line fix, so applying it produces a fully green
+# 332-test suite (see `test-only-gap` below for proof the added test alone, without the fix,
+# reliably fails on the buggy tree).
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+test: clone reproduce-before test-only-gap apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r repro repro_clone
+    sed -i 's#\.\./clone#../clone#' repro_clone/Cargo.toml
+
+# Real public-API check (mirrors the added regression test) against the pristine clone, plus the
+# crate's own `cargo test --lib` - both should show the gap: the manual check fails, but the full
+# suite still reports all-green because no test catches it.
+reproduce-before:
+    cd repro_clone && cargo run --release || true
+    cd clone && cargo test --lib --quiet 2>&1 | tail -5
+
+# Apply only the new regression test (no accumulator fix) to a scratch copy of the clone and show
+# it fails deterministically - proof the test is sensitive to this exact bug class.
+test-only-gap:
+    rm -rf clone_test_only
+    cp -r clone clone_test_only
+    cd clone_test_only && git apply "{{justfile_directory()}}/test_only.diff"
+    cd clone_test_only && cargo test --lib test_resize_uniform_color_preserved --quiet 2>&1 | tail -10 || true
+    rm -rf clone_test_only
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same checks again, now against the patched clone (test + fix) - both should pass.
+reproduce-after:
+    cd repro_clone && cargo run --release
+    cd clone && cargo test --lib --quiet 2>&1 | tail -5
+
+clean:
+    rm -rf clone clone_test_only repro_clone repro/target

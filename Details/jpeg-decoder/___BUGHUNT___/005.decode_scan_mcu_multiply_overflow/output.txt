@@ -1,0 +1,50 @@
+Captured by actually running `just test` (clone -> reproduce-before -> apply -> reproduce-after)
+from a fresh copy of this candidate folder in a scratch directory, against a fresh
+`git clone` of https://github.com/image-rs/jpeg-decoder.git at eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c.
+Compiler warning noise (unrelated `cfg(target_arch = "asmjs")` lint spam from src/worker/mod.rs,
+unrelated to this bug) trimmed for readability; panic messages and repro output kept verbatim.
+
+===== BEFORE PATCH (just reproduce-before) =====
+cd repro && cargo run --release
+thread 'main' (45077) panicked at /tmp/verify005b/candidate/clone/src/decoder.rs:1025:28:
+attempt to multiply with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+panic_1025_overflow.jpg (decoder.rs:1025, MCU-row-send bound check): PANICKED (attempt to multiply with overflow)
+thread 'main' (45077) panicked at /tmp/verify005b/candidate/clone/src/decoder.rs:911:16:
+attempt to multiply with overflow
+panic_911_overflow.jpg (decoder.rs:911, mcu_y * 8 bound check): PANICKED (attempt to multiply with overflow)
+thread 'main' (45077) panicked at /tmp/verify005b/candidate/clone/src/decoder.rs:916:20:
+attempt to multiply with overflow
+panic_916_overflow.jpg (decoder.rs:916, mcu_x * 8 bound check): PANICKED (attempt to multiply with overflow)
+error: Recipe `reproduce-before` failed on line 23 with exit code 101
+
+===== apply (just apply) =====
+cd clone && git apply ".../patch.diff"
+(applied cleanly, no output)
+
+===== AFTER PATCH (just reproduce-after) =====
+cd repro && cargo run --release
+panic_1025_overflow.jpg (decoder.rs:1025, MCU-row-send bound check): decoded OK (no panic)
+panic_911_overflow.jpg (decoder.rs:911, mcu_y * 8 bound check): decode error, no panic: Io(Error { kind: UnexpectedEof, message: "failed to fill whole buffer" })
+panic_916_overflow.jpg (decoder.rs:916, mcu_x * 8 bound check): decode error, no panic: Unsupported(Hierarchical)
+(process exits 0 - no panic)
+
+===== Repeatability (3/3 runs each, against the original in-tree worktree, +1.87.0, before the fix) =====
+$ for i in 1 2 3; do cargo run --example repro283 -- inputs/panic_1025_overflow.jpg; done
+thread 'main' panicked at src/decoder.rs:1025:28:
+thread 'main' panicked at src/decoder.rs:1025:28:
+thread 'main' panicked at src/decoder.rs:1025:28:
+
+$ for i in 1 2 3; do cargo run --example repro283 -- inputs/panic_911_overflow.jpg; done
+thread 'main' panicked at src/decoder.rs:911:16:
+thread 'main' panicked at src/decoder.rs:911:16:
+thread 'main' panicked at src/decoder.rs:911:16:
+
+$ for i in 1 2 3; do cargo run --example repro283 -- inputs/panic_916_overflow.jpg; done
+thread 'main' panicked at src/decoder.rs:916:20:
+thread 'main' panicked at src/decoder.rs:916:20:
+thread 'main' panicked at src/decoder.rs:916:20:
+
+===== Project test suite (cargo +1.87.0 test --all-features), main worktree =====
+Before patch: 5+12+1+1+1+1+2 = 23 passed, 0 failed (7 test binaries, all "test result: ok")
+After patch:  5+12+1+1+1+1+2 = 23 passed, 0 failed (identical breakdown)

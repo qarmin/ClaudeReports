@@ -1,0 +1,154 @@
+All commands run from the pic-scale checkout at commit 7eec7cfde2aed58a1606a48b5c7bd084536f9624,
+rustc 1.100.0-nightly (c656540d6 2026-08-21), cargo-fuzz 0.12.0, x86_64 host with real AVX2/AVX-512.
+
+=====================================================================
+1. Default cargo-fuzz (ASAN) run of resize_rgba - hangs, max_total_time not honored
+=====================================================================
+
+$ cd fuzz && cargo +nightly fuzz build --features avx,sse,nightly_avx512 resize_rgba
+   Finished `release` profile [optimized + debuginfo] target(s) in 18.05s
+
+$ ./target/x86_64-unknown-linux-gnu/release/resize_rgba -max_total_time=5 -rss_limit_mb=1536 /tmp/corpus &
+PID=<launcher>
+$ sleep 2; ps -o pid,ppid,stat,%cpu,etimes,cmd -p <launcher>,<worker>
+    PID    PPID STAT %CPU ELAPSED CMD
+   5103    5087 Sl    0.5       2 .../resize_rgba -max_total_time=5 -rss_limit_mb=1536 ...
+   5106    5103 R    99.4       1 .../resize_rgba -max_total_time=5 -rss_limit_mb=1536 ...
+$ sleep 2; ps ... (repeated every 2s up to etimes=10)
+   5103 ... Sl    0.1      10 ...
+   5106 ... R    99.9      10 ...   <- still pegged at ~100% CPU well past -max_total_time=5
+
+Full run log (captured via `timeout 30 ./resize_rgba -max_total_time=5 ...`):
+
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 2070837583
+INFO: Loaded 1 modules   (132517 inline 8-bit counters)
+INFO: Loaded 1 PC tables (132517 PCs)
+INFO:        0 files found in corpus
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: A corpus is not provided, starting from an empty corpus
+#2	INITED exec/s: 0 rss: 37Mb
+WARNING: no interesting inputs were found so far. Is the code instrumented for coverage?
+This may also happen if the target rejected all inputs we tried so far
+	NEW_FUNC[1/14]: <process still running here, CPU pinned at ~100%, no further output,
+	                 until killed externally 30s later by the outer `timeout` wrapper>
+
+Per-process state during the hang (no ptrace available in this sandbox to get a backtrace -
+yama ptrace_scope=1 and gdb could not attach as a non-ancestor; a `gdb --args ./resize_rgba ...`
+launch does trace the immediate child, but that child immediately forks again for the actual
+fuzzing loop and libFuzzer's default `set detach-on-fork on` releases the inner worker
+untraced, so gdb's own trace never covers the process that's actually spinning):
+  /proc/<worker-pid>/wchan -> "0"        (pure userspace, not blocked in a syscall)
+  /proc/<worker-pid>/syscall -> empty    (not inside a syscall)
+  state R, ~95-99% CPU sustained for the full observation window (up to several minutes in
+  earlier trials before being force-killed)
+
+Repeated single-process trials (`env ASAN_OPTIONS=... ./resize_rgba -max_total_time=5 ...`),
+no other load on the host at the time (system-wide idle >99% per /proc/stat delta over the
+same window, ruling out noisy-neighbor CPU steal as an explanation):
+  plain ASAN (no ASAN_OPTIONS):      hung on every one of ~5 separate trials
+  ASAN_OPTIONS=detect_leaks=0:       1/1 succeeded on the very first trial run right after the
+                                      build (Done 8131 runs in 6 second(s)), then hung on all
+                                      of the next 10/10 trials run back-to-back afterward
+                                      (same binary, no rebuild in between)
+  All 16 fuzz targets run in parallel for -max_total_time=150 (colorspaces, resize_cbcr16,
+  resize_cbcr8, resize_cbcr_f16, resize_cbcr_f32, resize_plane, resize_plane_f32,
+  resize_plane_u16, resize_rgb, resize_rgb_f16, resize_rgb_f32, resize_rgb_u16, resize_rgba,
+  resize_rgba_f16, resize_rgba_f32, resize_rgba_u16): every single one hung the same way,
+  stuck at "NEW_FUNC[1/N]:" with 0 corpus files ever written, still running minutes past their
+  requested -max_total_time when force-killed.
+
+=====================================================================
+2. Isolating the cause: is it pic-scale's own resize code, or a generic "ASAN hangs here"
+   sandbox issue, or something specific to the libFuzzer/ASAN combination?
+=====================================================================
+
+2a. Trivial ASAN binary, no libFuzzer, no pic-scale (rules out "any ASAN binary hangs here"):
+
+$ RUSTFLAGS="-Zsanitizer=address" rustc +nightly --edition 2021 -O \
+    --target x86_64-unknown-linux-gnu main.rs -o asanhello
+$ for i in 1 2 3; do timeout 10 ./asanhello; echo "exit=$?"; done
+hello
+[1, 2, 3, 4, 5]
+bye
+exit=0
+hello
+[1, 2, 3, 4, 5]
+bye
+exit=0
+hello
+[1, 2, 3, 4, 5]
+bye
+exit=0
+  -> 3/3 instant success. A plain ASAN binary works fine in this sandbox.
+
+2b. pic-scale's resize_rgba() logic called directly (verbatim copy of the fuzz harness body,
+    including the padded stride and double-resample pattern), across a grid of 50,176 cases
+    (all combinations of src/dst in {1,2,3,5,7,50,500,2500}x{1,2,3,5,7,50,500}, all 16
+    combinations of quality/threading/supersampling/multi_stage flags), NO ASAN, NO libFuzzer:
+
+$ timeout 60 ./target/release/hang_probe > grid.log
+exit=0   (ran to completion, all 50176 cases)
+$ grep "done in" grid.log | sort -t' ' -k... | head -1   # slowest case
+case src=2500x2500 dst=1x1 q=false th=false ss=false ms=true ... done in 10.728804ms
+  -> every one of the 50176 cases finished in single-digit milliseconds. No hang, no case
+     anywhere close to a second, let alone forever.
+
+2c. Same 50,176-case grid, same resize_rgba() logic, now built directly against ASAN
+    (`RUSTFLAGS="-Zsanitizer=address" cargo +nightly build --release --target
+    x86_64-unknown-linux-gnu`), bypassing cargo-fuzz/libFuzzer entirely:
+
+$ timeout 60 ./target/x86_64-unknown-linux-gnu/release/hang_probe > asan_grid.log
+  -> full 50176-case grid completed within the 60s window (each case ~10-35ms, roughly
+     3x slower than without ASAN, as expected from ASAN's allocation overhead - not a hang).
+[50176] case src=2500x2500 dst=500x500 q=true th=true ss=true ms=true ... done in 35.335419ms
+
+Conclusion: pic-scale's own resize code is not the source of the hang - it runs to completion,
+fast, both with and without ASAN, across the same extreme parameter space the fuzz harness
+explores. The hang is specific to the combination of {cargo-fuzz's libFuzzer driver} +
+{AddressSanitizer} in this sandboxed environment - most likely something in libFuzzer's own
+ASAN-instrumented execution/RSS-watchdog loop interacting badly with this container (LeakSanitizer
+was ruled out as the sole cause, since ASAN_OPTIONS=detect_leaks=0 only prevented the hang on
+1 of 11 trials, not reliably).
+
+=====================================================================
+3. Actual fuzzing coverage obtained instead, via `--sanitizer none`
+   (keeps libFuzzer's SanitizerCoverage instrumentation for guided fuzzing and cargo-fuzz's
+   default -Cdebug-assertions, drops AddressSanitizer)
+=====================================================================
+
+$ for t in <all 16 targets>; do
+    cargo +nightly fuzz build --sanitizer none --features avx,sse,nightly_avx512,colorspaces "$t"
+  done
+  -> all 16 built cleanly.
+
+$ for t in <all 16 targets>; do   # run in parallel, one per target
+    cargo +nightly fuzz run --sanitizer none --features avx,sse,nightly_avx512,colorspaces \
+      "$t" corpus_$t -- -max_total_time=150 -rss_limit_mb=2048
+  done
+
+Per-target totals (all exited 0, all printed a clean "Done"):
+  colorspaces          Done    35,564 runs in 151 second(s)
+  resize_cbcr16        Done   160,572 runs in 151 second(s)
+  resize_cbcr8         Done   638,801 runs in 151 second(s)
+  resize_cbcr_f16      Done   422,470 runs in 151 second(s)
+  resize_cbcr_f32      Done 1,400,650 runs in 151 second(s)
+  resize_plane         Done   210,916 runs in 151 second(s)
+  resize_plane_f32     Done 1,466,709 runs in 151 second(s)
+  resize_plane_u16     Done   108,182 runs in 151 second(s)
+  resize_rgb           Done   645,746 runs in 151 second(s)
+  resize_rgb_f16       Done   384,811 runs in 151 second(s)
+  resize_rgb_f32       Done   348,259 runs in 151 second(s)
+  resize_rgb_u16       Done   147,957 runs in 151 second(s)
+  resize_rgba          Done   213,869 runs in 151 second(s)
+  resize_rgba_f16      Done   311,665 runs in 151 second(s)
+  resize_rgba_f32      Done   138,984 runs in 151 second(s)
+  resize_rgba_u16      Done   116,872 runs in 151 second(s)
+  TOTAL: 6,752,027 executions across all 16 targets, 0 crashes/panics/timeouts/sanitizer
+  warnings. (The only "WARNING"-grade lines in any log are the expected, harmless
+  `Failed to find function "__sanitizer_..."` notices that --sanitizer none always prints
+  since no sanitizer runtime is linked.)
+
+grep -liE "ERROR|SUMMARY: |panic|crash|Sanitizer|SEGV|abort|deadly signal" log_*.txt
+  -> matched only the 3 harmless "__sanitizer_acquire_crash_state" / "__sanitizer_print_stack_trace"
+     / "__sanitizer_set_death_callback" WARNING lines in every log, not an actual finding.

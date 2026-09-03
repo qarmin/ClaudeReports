@@ -1,0 +1,104 @@
+=== Approach 1+2: manual boundary-value construction + exhaustive differential property check ===
+(standalone copy of lookup1_values/naive_lookup1_values, no crate dependency, run with overflow-checks=on)
+$ cargo run --release --bin boundary_probe
+
+Approach A (real caller domain: entries 0..=131072, dimensions 1..=32): 4194336 calls, no panic, all match naive reference
+POW-OVERFLOW PANIC at entries=4294967287 dimensions=2: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967291 dimensions=2: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967294 dimensions=2: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967295 dimensions=2: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967287 dimensions=4: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967291 dimensions=4: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967294 dimensions=4: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967295 dimensions=4: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967287 dimensions=8: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967291 dimensions=8: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967294 dimensions=8: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967295 dimensions=8: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967287 dimensions=16: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967291 dimensions=16: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967294 dimensions=16: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967295 dimensions=16: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967287 dimensions=32: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967291 dimensions=32: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967294 dimensions=32: attempt to exponentiate with overflow
+POW-OVERFLOW PANIC at entries=4294967295 dimensions=32: attempt to exponentiate with overflow
+Approach B (targeted boundary probes, full u32/u16 domain): 448 calls, 20 pow-overflow-inside-assert panics, 3 plain assert-rejection panics (expected/harmless - the assert doing its job)
+
+=== Approach 3: real end-to-end repro via the actual public VorbisDecoder::try_new entry point ===
+(debug build, overflow-checks on)
+$ cargo run --bin repro (run 1 of 3)
+
+== Candidate 021: VORBIS_CODEBOOK_LOOKUP1_VALUES_POW_OVERFLOW ==
+Build: debug (overflow-checks on)
+
+[max-allowed boundary] dimensions=32 entries=131072: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook overspecified) -- no panic
+[one-past-entries-cap (should be rejected pre-lookup1_values)] dimensions=32 entries=131073: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook entries too large (report this)) -- no panic
+[one-past-dimensions-cap (should be rejected pre-lookup1_values)] dimensions=33 entries=131072: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook dimension is too large (report this)) -- no panic
+[small dims, max entries] dimensions=1 entries=131072: VorbisDecoder::try_new -> Err(unexpected end of bitstream) -- no panic
+[mid dims, max entries] dimensions=17 entries=131072: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook overspecified) -- no panic
+[max dims, small entries] dimensions=32 entries=2: VorbisDecoder::try_new -> Err(unexpected end of bitstream) -- no panic
+
+Done - see output.txt for the captured run. No panic anywhere above means the 
+suspected pow-overflow-inside-assert never fires within the real, caller-enforced 
+domain reachable through the actual public VorbisDecoder::try_new entry point.
+
+--- run 2 of 3 (debug) ---
+== Candidate 021: VORBIS_CODEBOOK_LOOKUP1_VALUES_POW_OVERFLOW ==
+Build: debug (overflow-checks on)
+
+[max-allowed boundary] dimensions=32 entries=131072: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook overspecified) -- no panic
+[one-past-entries-cap (should be rejected pre-lookup1_values)] dimensions=32 entries=131073: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook entries too large (report this)) -- no panic
+[one-past-dimensions-cap (should be rejected pre-lookup1_values)] dimensions=33 entries=131072: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook dimension is too large (report this)) -- no panic
+[small dims, max entries] dimensions=1 entries=131072: VorbisDecoder::try_new -> Err(unexpected end of bitstream) -- no panic
+[mid dims, max entries] dimensions=17 entries=131072: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook overspecified) -- no panic
+[max dims, small entries] dimensions=32 entries=2: VorbisDecoder::try_new -> Err(unexpected end of bitstream) -- no panic
+
+Done - see output.txt for the captured run. No panic anywhere above means the 
+suspected pow-overflow-inside-assert never fires within the real, caller-enforced 
+domain reachable through the actual public VorbisDecoder::try_new entry point.
+
+=== release build, overflow-checks on via profile (run 1 of 3) ===
+== Candidate 021: VORBIS_CODEBOOK_LOOKUP1_VALUES_POW_OVERFLOW ==
+Build: release (overflow-checks on via profile)
+
+[max-allowed boundary] dimensions=32 entries=131072: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook overspecified) -- no panic
+[one-past-entries-cap (should be rejected pre-lookup1_values)] dimensions=32 entries=131073: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook entries too large (report this)) -- no panic
+[one-past-dimensions-cap (should be rejected pre-lookup1_values)] dimensions=33 entries=131072: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook dimension is too large (report this)) -- no panic
+[small dims, max entries] dimensions=1 entries=131072: VorbisDecoder::try_new -> Err(unexpected end of bitstream) -- no panic
+[mid dims, max entries] dimensions=17 entries=131072: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook overspecified) -- no panic
+[max dims, small entries] dimensions=32 entries=2: VorbisDecoder::try_new -> Err(unexpected end of bitstream) -- no panic
+
+Done - see output.txt for the captured run. No panic anywhere above means the 
+suspected pow-overflow-inside-assert never fires within the real, caller-enforced 
+domain reachable through the actual public VorbisDecoder::try_new entry point.
+
+--- run 2 of 3 (release) ---
+== Candidate 021: VORBIS_CODEBOOK_LOOKUP1_VALUES_POW_OVERFLOW ==
+Build: release (overflow-checks on via profile)
+
+[max-allowed boundary] dimensions=32 entries=131072: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook overspecified) -- no panic
+[one-past-entries-cap (should be rejected pre-lookup1_values)] dimensions=32 entries=131073: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook entries too large (report this)) -- no panic
+[one-past-dimensions-cap (should be rejected pre-lookup1_values)] dimensions=33 entries=131072: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook dimension is too large (report this)) -- no panic
+[small dims, max entries] dimensions=1 entries=131072: VorbisDecoder::try_new -> Err(unexpected end of bitstream) -- no panic
+[mid dims, max entries] dimensions=17 entries=131072: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook overspecified) -- no panic
+[max dims, small entries] dimensions=32 entries=2: VorbisDecoder::try_new -> Err(unexpected end of bitstream) -- no panic
+
+Done - see output.txt for the captured run. No panic anywhere above means the 
+suspected pow-overflow-inside-assert never fires within the real, caller-enforced 
+domain reachable through the actual public VorbisDecoder::try_new entry point.
+
+--- run 3 of 3 (release) ---
+== Candidate 021: VORBIS_CODEBOOK_LOOKUP1_VALUES_POW_OVERFLOW ==
+Build: release (overflow-checks on via profile)
+
+[max-allowed boundary] dimensions=32 entries=131072: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook overspecified) -- no panic
+[one-past-entries-cap (should be rejected pre-lookup1_values)] dimensions=32 entries=131073: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook entries too large (report this)) -- no panic
+[one-past-dimensions-cap (should be rejected pre-lookup1_values)] dimensions=33 entries=131072: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook dimension is too large (report this)) -- no panic
+[small dims, max entries] dimensions=1 entries=131072: VorbisDecoder::try_new -> Err(unexpected end of bitstream) -- no panic
+[mid dims, max entries] dimensions=17 entries=131072: VorbisDecoder::try_new -> Err(malformed stream: vorbis: codebook overspecified) -- no panic
+[max dims, small entries] dimensions=32 entries=2: VorbisDecoder::try_new -> Err(unexpected end of bitstream) -- no panic
+
+Done - see output.txt for the captured run. No panic anywhere above means the 
+suspected pow-overflow-inside-assert never fires within the real, caller-enforced 
+domain reachable through the actual public VorbisDecoder::try_new entry point.

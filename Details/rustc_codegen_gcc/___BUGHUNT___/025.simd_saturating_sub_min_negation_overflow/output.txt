@@ -1,0 +1,69 @@
+=== BEFORE (unpatched src/intrinsic/simd.rs, base commit 4cd7da5f9a5d9509b34ac0a766424ccdae706d33) ===
+
+$ CHANNEL=release ./y.sh rustc repro/simd_saturating_sub.rs -o /tmp/satsub_before
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `.../build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+
+$ /tmp/satsub_before   (run 3/3 times, identical result each time)
+thread 'main' (377317) panicked at .../025.simd_saturating_sub_min_negation_overflow/repro/simd_saturating_sub.rs:43:5:
+assertion `left == right` failed: i8 saturating_sub mismatch (rhs includes MIN)
+  left: [-1, -128, -128, -2]
+ right: [127, 127, 0, -2]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit=101
+
+(Also reproduced with the original minimal repro used during investigation, before the final
+repro/simd_saturating_sub.rs file was written, via a standalone `cargo build`-based crate using
+`std::simd::i8x2`:
+
+$ i8x2::from_array([127, 0]).saturating_sub(i8x2::from_array([-128, -128]))
+[-1, -128]              # wrong - correct saturating_sub is [127, 127]
+[127, 127]               # expected (computed independently via scalar i8::saturating_sub)
+
+Cross-checked with the identical source compiled by the host's normal rustc (LLVM backend, no
+-Zcodegen-backend): prints [127, 127] / [127, 127] and "OK" - confirms the GCC backend's output is
+the anomaly, the expected values are correct.
+)
+
+=== AFTER (patch.diff applied to src/intrinsic/simd.rs, then `CHANNEL=release ./y.sh build --release`) ===
+
+$ CHANNEL=release ./y.sh rustc repro/simd_saturating_sub.rs -o /tmp/satsub_after
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `.../build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+
+$ /tmp/satsub_after   (run 3/3 times, identical result each time)
+exit=0
+exit=0
+exit=0
+
+(No output on success - all assertions pass: the MIN-operand i8 case, the non-MIN i8 control case,
+signed saturating_add as a sanity control, the i16 width case, and the unsigned u8 control case.)
+
+=== Project test suite ===
+
+CHANNEL=release ./y.sh test --release --mini-tests: passes identically before and after (smoke
+test only, prints the same "abc/bcd/Hello printf/Hello World!/..." sequence both times, no
+assertions related to this bug).
+
+CHANNEL=release ./y.sh test --release --cargo-tests, before (unpatched):
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 41 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out    (debug lang_tests)
+test result: ok. 41 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out    (release lang_tests)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+CHANNEL=release ./y.sh test --release --cargo-tests, after (patched):
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 41 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out    (debug lang_tests)
+test result: ok. 41 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out    (release lang_tests)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Identical pass/fail counts before and after - no regressions. The existing suite does not happen
+to exercise `simd_saturating_sub` at all, which is consistent with this bug (and its own FIXME
+comment) having gone unnoticed since it entered this repository's history in 2023.
+
+CHANNEL=release ./y.sh test --release --test-libcore, after (patched) only:
+test result: ok. 578 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s

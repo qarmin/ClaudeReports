@@ -1,0 +1,39 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# NOTE: case_kx/case_ky each allocate a ~4 GiB `Vec<u8>` (a single-row/column image with one
+# dimension == 2^32). Make sure the machine running this has that much free RAM (swap is not a
+# substitute - it will be extremely slow). No special build flags are required; this reproduces
+# identically in debug and release builds (silent `u64` shift truncation, not an overflow panic).
+
+repo_url := "https://github.com/awxkee/pic-scale-safe.git"
+base_commit := "83c4801428c436678d7c6b6bea74af800924a469"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should print REPRODUCED and exit
+# non-zero (case_kx/case_ky sample source index 0 for both destination pixels instead of two
+# distinct indices).
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should print "did not reproduce" and exit 0.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target

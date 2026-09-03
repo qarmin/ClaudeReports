@@ -1,0 +1,88 @@
+diff --git a/internal/renderers/femtovg/images.rs b/internal/renderers/femtovg/images.rs
+index 67cc08569..a1c219f49 100644
+--- a/internal/renderers/femtovg/images.rs
++++ b/internal/renderers/femtovg/images.rs
+@@ -251,13 +251,35 @@ pub fn new(
+ 
+ // Cache used to avoid repeatedly decoding images from disk. Entries with a count
+ // of 1 are drained after flushing the renderer commands to the screen.
+-pub struct TextureCache<R: femtovg::Renderer + TextureImporter>(
+-    HashMap<TextureCacheKey, Rc<Texture<R>>>,
+-);
++pub struct TextureCache<R: femtovg::Renderer + TextureImporter> {
++    entries: HashMap<TextureCacheKey, Rc<Texture<R>>>,
++    // Whether a new key was inserted since the last `drain()`. Nothing outside this cache tells
++    // it when an external `Rc<Texture<R>>` held elsewhere (e.g. an `ItemGraphicsCache` entry) gets
++    // dropped, so a full walk can't be skipped purely based on "nothing changed" - but a frame
++    // with no insertion is still a good, cheap heuristic for "very likely nothing new became
++    // collectible either", which is the common case for a mostly-static scene. Not sound on its
++    // own (see `frames_since_last_drain` below).
++    inserted_since_last_drain: bool,
++    // Frames since the last full walk. Bounds how stale the cache can get when
++    // `inserted_since_last_drain` stays false for a long time (e.g. a scene that only ever
++    // removes images after its initial load, never adding new ones again) - without this, such a
++    // scene would stop reclaiming evicted textures' GPU memory entirely rather than just later.
++    frames_since_last_drain: u32,
++}
++
++// A skipped `drain()` only delays reclaiming GPU memory for entries whose external strong
++// reference already dropped, never changes what gets drawn - so this is a latency/throughput
++// trade-off, not a correctness one. Kept short (about a third of a second at 60 FPS) so that
++// trade-off stays small relative to a real frame budget.
++const FORCE_DRAIN_EVERY_N_FRAMES: u32 = 20;
+ 
+ impl<R: femtovg::Renderer + TextureImporter> Default for TextureCache<R> {
+     fn default() -> Self {
+-        Self(Default::default())
++        Self {
++            entries: Default::default(),
++            inserted_since_last_drain: false,
++            frames_since_last_drain: 0,
++        }
+     }
+ }
+ 
+@@ -269,20 +291,27 @@ pub(crate) fn lookup_image_in_cache_or_create(
+         cache_key: TextureCacheKey,
+         image_create_fn: impl Fn() -> Option<Rc<Texture<R>>>,
+     ) -> Option<Rc<Texture<R>>> {
+-        Some(match self.0.entry(cache_key) {
++        Some(match self.entries.entry(cache_key) {
+             std::collections::hash_map::Entry::Occupied(existing_entry) => {
+                 existing_entry.get().clone()
+             }
+             std::collections::hash_map::Entry::Vacant(vacant_entry) => {
+                 let new_image = image_create_fn()?;
+                 vacant_entry.insert(new_image.clone());
++                self.inserted_since_last_drain = true;
+                 new_image
+             }
+         })
+     }
+ 
+     pub(crate) fn drain(&mut self) {
+-        self.0.retain(|_, cached_image| {
++        if !self.inserted_since_last_drain && self.frames_since_last_drain < FORCE_DRAIN_EVERY_N_FRAMES
++        {
++            self.frames_since_last_drain += 1;
++            return;
++        }
++
++        self.entries.retain(|_, cached_image| {
+             // * Retain images that are used by elements, so that they can be effectively
+             // shared (one image element refers to foo.png, another element is created
+             // and refers to the same -> share).
+@@ -293,10 +322,12 @@ pub(crate) fn drain(&mut self) {
+             // image again, etc.
+             Rc::strong_count(cached_image) > 1 || cached_image.size().is_none()
+         });
++        self.inserted_since_last_drain = false;
++        self.frames_since_last_drain = 0;
+     }
+ 
+     pub(crate) fn clear(&mut self) {
+-        self.0.clear();
++        self.entries.clear();
+     }
+ }
+ 

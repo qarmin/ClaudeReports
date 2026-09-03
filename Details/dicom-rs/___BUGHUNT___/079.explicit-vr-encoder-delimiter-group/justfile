@@ -1,0 +1,36 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should print "BUG REPRODUCED"
+# and exit 1: writing an ordinary DataElementHeader for a group-0xFFFE tag through this crate's
+# own public Explicit VR LE/BE Encode implementations produces bytes its own matching Decode
+# implementation cannot read back correctly.
+reproduce-before:
+    cd repro && cargo run; test "$?" -eq 1 && echo "(exit 1 expected here: bug reproduced)"; true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - every group-0xFFFE header should now
+# round-trip correctly (a bare 8-byte tag+length shape, matching what the decoder expects) and
+# the program should exit 0.
+reproduce-after:
+    cd repro && cargo run
+
+clean:
+    rm -rf clone

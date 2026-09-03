@@ -1,0 +1,40 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# NOTE: requires the `gdcm` feature (native GDCM library bindings via the `gdcm-rs` crate),
+# which builds its own vendored C++ dependency from source via CMake - first build can take a
+# while (cmake + a C++ compiler are required).
+#
+# NOTE: this candidate has NO patch.diff - the root cause lives entirely inside vendored,
+# third-party GDCM 3.1 C++ source bundled by the `gdcm-rs` crate (outside this project's own
+# git tree), and a safe fix from the Rust side would require independently re-implementing
+# correct JPEG 2000/JPEG-LS codestream header parsing before the FFI call - see RESULT.md's
+# "The fix" section for why that was judged out of scope for a bounded single-session patch.
+# So there is only a `reproduce` step here, no `apply`/`reproduce-after`.
+#
+# Both variants crash the whole process (SIGSEGV, or a glibc heap-corruption SIGABRT, or -
+# only in a Debug/assertions-enabled GDCM build - a clean assertion-failure SIGABRT); which
+# exact symptom shows up varies run to run (heap layout dependent), by design of what a real
+# heap-buffer-overflow looks like - see RESULT.md and output.txt for repeated real runs.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone reproduce
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone for both variants - each should
+# crash the process (non-zero exit, killed by a signal). `cargo run` exiting non-zero here
+# means the bug reproduced; a clean `exit 0` with "did not crash" printed means it didn't.
+reproduce:
+    cd repro && cargo run --quiet -- jpeg2000; echo "jpeg2000 variant exit code: $?"
+    cd repro && cargo run --quiet -- jpegls; echo "jpegls variant exit code: $?"
+
+clean:
+    rm -rf clone repro/target repro/core.*

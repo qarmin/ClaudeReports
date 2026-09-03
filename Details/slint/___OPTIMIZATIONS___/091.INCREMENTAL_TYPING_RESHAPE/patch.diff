@@ -1,0 +1,425 @@
+diff --git a/internal/core/item_rendering.rs b/internal/core/item_rendering.rs
+index 7d181113c..9f86189f4 100644
+--- a/internal/core/item_rendering.rs
++++ b/internal/core/item_rendering.rs
+@@ -139,6 +139,27 @@ pub fn release(&self, item_rc: &ItemRc) {
+         }
+     }
+ 
++    /// If `item_rc`'s entry exists and its dependency tracker is currently dirty -- meaning the
++    /// next [`Self::get_or_update_cache_entry_ref`] call is about to discard it and recompute from
++    /// scratch -- removes it and hands back its data, instead of letting it be dropped unseen.
++    /// Lets a caller that can partially reuse a stale value (e.g. diffing an edited document
++    /// against its previous shape) get the chance to. Returns `None` for a vacant entry or one
++    /// that is still valid: neither has anything worth salvaging.
++    pub fn take_dirty_entry(&self, item_rc: &ItemRc) -> Option<T> {
++        let component = &(**item_rc.item_tree()) as *const _;
++        let mut borrowed = self.map.borrow_mut();
++        let sub = borrowed.get_mut(&component)?;
++        let is_dirty = sub
++            .get(&item_rc.index())?
++            .dependency_tracker
++            .as_ref()
++            .is_some_and(|tracker| tracker.is_dirty());
++        if !is_dirty {
++            return None;
++        }
++        sub.remove(&item_rc.index()).map(|entry| entry.data)
++    }
++
+     /// Returns true if there are no entries in the cache; false otherwise.
+     pub fn is_empty(&self) -> bool {
+         self.map.borrow().is_empty()
+diff --git a/internal/core/textlayout/sharedparley.rs b/internal/core/textlayout/sharedparley.rs
+index 8ba43d5f3..30aafcb74 100644
+--- a/internal/core/textlayout/sharedparley.rs
++++ b/internal/core/textlayout/sharedparley.rs
+@@ -78,7 +78,7 @@ pub fn clear_registered_static_fonts(&mut self) {
+ use layout::{Layout, LayoutOptions, layout};
+ use selection::{SelectionRendering, SelectionSpans};
+ use shaping::{
+-    Brush, LayoutWithoutLineBreaksBuilder, create_text_paragraphs, shape_paragraphs,
++    Brush, LayoutWithoutLineBreaksBuilder, create_text_paragraphs, shape_paragraphs_incremental,
+     shaping_builder,
+ };
+ 
+@@ -108,10 +108,23 @@ fn with_text_layout<R>(
+ 
+     let text_wrap = layout_builder.text_wrap;
+     let scale_factor = layout_builder.scale_factor;
+-    let mut guard =
+-        cached_paragraphs(cache, item_rc, text_wrap, window, &mut font_ctx, &|font_context| {
+-            shape_paragraphs(text, item_rc, text_wrap, scale_factor, font_context)
+-        });
++    let mut guard = cached_paragraphs(
++        cache,
++        item_rc,
++        text_wrap,
++        window,
++        &mut font_ctx,
++        &|font_context, previous| {
++            shape_paragraphs_incremental(
++                text,
++                item_rc,
++                text_wrap,
++                scale_factor,
++                font_context,
++                previous,
++            )
++        },
++    );
+ 
+     let line_breaking = guard.take_line_breaking();
+     let layout =
+diff --git a/internal/core/textlayout/sharedparley/cache.rs b/internal/core/textlayout/sharedparley/cache.rs
+index 33a486cd0..288abcfa7 100644
+--- a/internal/core/textlayout/sharedparley/cache.rs
++++ b/internal/core/textlayout/sharedparley/cache.rs
+@@ -11,7 +11,7 @@
+ //! with the one shaping function every path must share.
+ 
+ use super::layout::RetainedLineBreaking;
+-use super::shaping::TextParagraph;
++use super::shaping::{ShapeFingerprint, TextParagraph};
+ use super::*;
+ 
+ /// Shaped paragraphs together with the wrap mode they were shaped with.
+@@ -33,6 +33,11 @@ struct CachedParagraphs {
+     /// them back when it drops. Finding `None` here therefore means the previous caller returned
+     /// without handing them back, and the entry has to be reshaped rather than served empty.
+     paragraphs: Option<Vec<TextParagraph>>,
++    /// What the paragraphs above were last shaped from, so a subsequent edit can diff against it
++    /// and reshape only the paragraph(s) that actually changed instead of the whole document. See
++    /// [`super::shaping::shape_paragraphs_incremental`]. `None` after shaping styled text, which
++    /// an incremental diff can't safely reuse.
++    shape_fingerprint: Option<ShapeFingerprint>,
+ }
+ 
+ type InnerTextLayoutCache = crate::item_rendering::ItemCache<CachedParagraphs>;
+@@ -152,11 +157,14 @@ pub(super) fn cached_paragraphs<'a>(
+     wrap: TextWrap,
+     window: &crate::api::Window,
+     font_context: &mut parley::FontContext,
+-    shape: &dyn Fn(&mut parley::FontContext) -> Vec<TextParagraph>,
++    shape: &dyn Fn(
++        &mut parley::FontContext,
++        Option<(Vec<TextParagraph>, ShapeFingerprint)>,
++    ) -> (Vec<TextParagraph>, Option<ShapeFingerprint>),
+ ) -> CachedParagraphsGuard<'a> {
+     let Some((cache, item_rc)) = cache.zip(item_rc) else {
+         return CachedParagraphsGuard {
+-            paragraphs: Some(shape(font_context)),
++            paragraphs: Some(shape(font_context, None).0),
+             line_breaking: None,
+             container: None,
+         };
+@@ -179,10 +187,24 @@ pub(super) fn cached_paragraphs<'a>(
+         cache.inner.release(item_rc);
+     }
+ 
++    // Grabs the entry's previous shape *before* it would otherwise be silently discarded, so
++    // `shape` gets the chance to reuse whatever an edit didn't actually touch. A vacant entry (new
++    // item, or just released above) or one that's still valid (not dirty, nothing to reshape at
++    // all) yields `None` here, same as before this existed.
++    let previous = cache.inner.take_dirty_entry(item_rc).and_then(|entry| {
++        Some((entry.paragraphs?, entry.shape_fingerprint?))
++    });
++
+     let mut entry = cache.inner.get_or_update_cache_entry_ref(item_rc, || {
+         #[cfg(feature = "testing")]
+         cache.cache_miss_count.set(cache.cache_miss_count.get() + 1);
+-        CachedParagraphs { wrap, paragraphs: Some(shape(font_context)), line_breaking: None }
++        let (paragraphs, shape_fingerprint) = shape(font_context, previous);
++        CachedParagraphs {
++            wrap,
++            paragraphs: Some(paragraphs),
++            line_breaking: None,
++            shape_fingerprint,
++        }
+     });
+     let paragraphs = entry.paragraphs.take().unwrap_or_default();
+     CachedParagraphsGuard {
+diff --git a/internal/core/textlayout/sharedparley/shaping.rs b/internal/core/textlayout/sharedparley/shaping.rs
+index 45374e6bf..dc3c4491e 100644
+--- a/internal/core/textlayout/sharedparley/shaping.rs
++++ b/internal/core/textlayout/sharedparley/shaping.rs
+@@ -5,8 +5,8 @@
+ 
+ //! From text to shaped paragraphs.
+ //!
+-//! Everything that ends up in a cache entry is produced here, and [`shape_paragraphs`] is the
+-//! one function it happens through: measuring and drawing must register identical cache
++//! Everything that ends up in a cache entry is produced here, and [`shape_paragraphs_incremental`]
++//! is the one function it happens through: measuring and drawing must register identical cache
+ //! dependencies, so neither may shape through anything narrower.
+ 
+ use super::*;
+@@ -268,51 +268,61 @@ pub(super) fn paragraph_ranges(text: &str) -> impl Iterator<Item = Range<usize>>
+     })
+ }
+ 
++/// Shapes one paragraph's text into a [`TextParagraph`]. Shared by [`create_text_paragraphs`]
++/// (every paragraph, from scratch) and [`reshape_diff`] (only the paragraph(s) an edit actually
++/// touched), so the two can never disagree about what "shaping a paragraph" means.
++fn shape_one_paragraph(
++    layout_builder: &LayoutWithoutLineBreaksBuilder,
++    font_context: &mut parley::FontContext,
++    text: &str,
++    range: Range<usize>,
++    formatting: Vec<i_slint_common::styled_text::FormattedSpan>,
++    links: Vec<(Range<usize>, std::string::String)>,
++    link_color: Color,
++) -> TextParagraph {
++    let code_ranges: alloc::vec::Vec<Range<usize>> = formatting
++        .iter()
++        .filter(|s| matches!(s.style, i_slint_common::styled_text::Style::Code))
++        .map(|s| s.range.clone())
++        .collect();
++
++    let layout = layout_builder.build(font_context, text, formatting, Some(link_color));
++
++    TextParagraph { range, y: PhysicalLength::default(), layout, links, code_ranges }
++}
++
+ pub(super) fn create_text_paragraphs(
+     layout_builder: &LayoutWithoutLineBreaksBuilder,
+     font_context: &mut parley::FontContext,
+     text: PlainOrStyledText,
+     link_color: Color,
+ ) -> Vec<TextParagraph> {
+-    let paragraph_from_text =
+-        |font_context: &mut parley::FontContext,
+-         text: &str,
+-         range: std::ops::Range<usize>,
+-         formatting: Vec<i_slint_common::styled_text::FormattedSpan>,
+-         links: Vec<(std::ops::Range<usize>, std::string::String)>| {
+-            let code_ranges: alloc::vec::Vec<Range<usize>> = formatting
+-                .iter()
+-                .filter(|s| matches!(s.style, i_slint_common::styled_text::Style::Code))
+-                .map(|s| s.range.clone())
+-                .collect();
+-
+-            let layout = layout_builder.build(font_context, text, formatting, Some(link_color));
+-
+-            TextParagraph { range, y: PhysicalLength::default(), layout, links, code_ranges }
+-        };
+-
+     let mut paragraphs = Vec::with_capacity(1);
+ 
+     match text {
+         PlainOrStyledText::Plain(ref text) => {
+             for range in paragraph_ranges(text) {
+-                paragraphs.push(paragraph_from_text(
++                paragraphs.push(shape_one_paragraph(
++                    layout_builder,
+                     font_context,
+                     &text[range.clone()],
+                     range,
+                     Default::default(),
+                     Default::default(),
++                    link_color,
+                 ));
+             }
+         }
+         PlainOrStyledText::Styled(rich_text) => {
+             for paragraph in rich_text.paragraphs {
+-                paragraphs.push(paragraph_from_text(
++                paragraphs.push(shape_one_paragraph(
++                    layout_builder,
+                     font_context,
+                     &paragraph.text,
+                     0..0,
+                     paragraph.formatting,
+                     paragraph.links,
++                    link_color,
+                 ));
+             }
+         }
+@@ -321,6 +331,166 @@ pub(super) fn create_text_paragraphs(
+     paragraphs
+ }
+ 
++/// What has to stay unchanged, other than the text itself, for [`reshape_diff`] to reuse any of a
++/// previous shape's paragraphs. Anything that can change the *bytes* of a shaped
++/// [`parley::Layout`] belongs here. Scale factor and wrap mode are deliberately excluded: the
++/// cache entry is evicted whole whenever either changes (see `cache.rs`), so
++/// [`shape_paragraphs_incremental`] never even runs with stale ones of those.
++#[derive(Clone, PartialEq)]
++pub(super) struct ShapeFingerprint {
++    text: crate::SharedString,
++    font_request: Option<FontRequest>,
++    stroke: Option<TextStrokeStyle>,
++}
++
++/// Reuses every paragraph whose bytes provably match between `old_text` and `new_text` -- because
++/// it lies entirely within their common byte prefix or suffix -- and reshapes only what's left in
++/// between. A single-character edit therefore reshapes exactly one paragraph instead of the whole
++/// document, no matter how large the document is.
++///
++/// Byte offsets only, never `str` slicing at the prefix/suffix boundary itself: every slice this
++/// function actually takes is bounded by a `paragraph_ranges` result, which is always aligned to a
++/// `'\n'` (so always a valid UTF-8 boundary) regardless of where the raw byte diff landed.
++fn reshape_diff(
++    layout_builder: &LayoutWithoutLineBreaksBuilder,
++    font_context: &mut parley::FontContext,
++    new_text: &crate::SharedString,
++    old_text: &crate::SharedString,
++    old_paragraphs: Vec<TextParagraph>,
++    link_color: Color,
++) -> Vec<TextParagraph> {
++    let old_bytes = old_text.as_bytes();
++    let new_bytes = new_text.as_bytes();
++
++    let prefix = old_bytes.iter().zip(new_bytes.iter()).take_while(|(a, b)| a == b).count();
++    let suffix = old_bytes[prefix..]
++        .iter()
++        .rev()
++        .zip(new_bytes[prefix..].iter().rev())
++        .take_while(|(a, b)| a == b)
++        .count();
++
++    let new_ranges: alloc::vec::Vec<Range<usize>> = paragraph_ranges(new_text).collect();
++
++    let delta = new_bytes.len() as isize - old_bytes.len() as isize;
++    let shift = |range: Range<usize>| -> Range<usize> {
++        let apply = |x: usize| (x as isize + delta) as usize;
++        apply(range.start)..apply(range.end)
++    };
++
++    // Leading paragraphs entirely within the common prefix: same index, same range, in both old
++    // and new text, so their shaped layout is still exactly right. `range.end <= prefix` alone
++    // isn't enough -- a *shorter* new paragraph at the same index can still end inside the common
++    // prefix while its old counterpart (whose own content actually changed) extended past it, so
++    // the ranges have to agree too, not just the new one's end.
++    let mut lead = 0usize;
++    while lead < old_paragraphs.len()
++        && lead < new_ranges.len()
++        && new_ranges[lead] == old_paragraphs[lead].range
++        && new_ranges[lead].end <= prefix
++    {
++        lead += 1;
++    }
++
++    // Trailing paragraphs entirely within the common suffix: same content, shifted by however
++    // much the edit changed the document's total length. Symmetric caveat to `lead`: the very
++    // first paragraph has no real delimiting `'\n'` before it (just the start of the document),
++    // so an edit at the very start can make its bytes look like a "common suffix" of themselves
++    // while actually belonging to a differently-bounded paragraph in the new text (the inserted
++    // text merges into it, with no newline of its own) -- the shifted range has to still match
++    // the new paragraph at that position, not just have content-identical bytes.
++    let suffix_start = old_bytes.len() - suffix;
++    let mut tail = 0usize;
++    while tail < old_paragraphs.len() - lead
++        && tail < new_ranges.len() - lead
++        && old_paragraphs[old_paragraphs.len() - 1 - tail].range.start >= suffix_start
++        && shift(old_paragraphs[old_paragraphs.len() - 1 - tail].range.clone())
++            == new_ranges[new_ranges.len() - 1 - tail]
++    {
++        tail += 1;
++    }
++
++    let mut old_iter = old_paragraphs.into_iter();
++    let mut result = Vec::with_capacity(new_ranges.len());
++    result.extend((&mut old_iter).take(lead));
++
++    // The middle paragraphs the diff determined actually changed: drop their stale old shapes...
++    for _ in 0..(old_iter.len() - tail) {
++        old_iter.next();
++    }
++    // ...and reshape the corresponding new ranges in their place.
++    for range in &new_ranges[lead..new_ranges.len() - tail] {
++        let text_slice = &new_text[range.clone()];
++        result.push(shape_one_paragraph(
++            layout_builder,
++            font_context,
++            text_slice,
++            range.clone(),
++            Default::default(),
++            Default::default(),
++            link_color,
++        ));
++    }
++
++    result.extend(old_iter.map(|mut p| {
++        p.range = shift(p.range);
++        p
++    }));
++
++    result
++}
++
++/// Shapes `text` the way [`shape_paragraphs`] does, but reuses as much of `previous` as an edit
++/// allows -- see [`reshape_diff`]. Falls back to a full reshape whenever incremental reuse isn't
++/// safe: styled text (paragraphs carry formatting that isn't representable as a byte diff), no
++/// previous shape to diff against, or anything other than the text itself changed since (the
++/// previous shape's [`ShapeFingerprint`] no longer matches).
++pub(super) fn shape_paragraphs_incremental(
++    text: Pin<&dyn crate::item_rendering::RenderString>,
++    item_rc: Option<&crate::item_tree::ItemRc>,
++    text_wrap: TextWrap,
++    scale_factor: ScaleFactor,
++    font_context: &mut parley::FontContext,
++    previous: Option<(Vec<TextParagraph>, ShapeFingerprint)>,
++) -> (Vec<TextParagraph>, Option<ShapeFingerprint>) {
++    let builder = shaping_builder(text, item_rc, text_wrap, scale_factor);
++    let link_color = text.link_color();
++    let new_text = text.text();
++
++    let PlainOrStyledText::Plain(new_plain) = &new_text else {
++        return (create_text_paragraphs(&builder, font_context, new_text, link_color), None);
++    };
++
++    let fingerprint = ShapeFingerprint {
++        text: new_plain.clone(),
++        font_request: builder.font_request.clone(),
++        stroke: builder.stroke,
++    };
++
++    let reusable = previous.filter(|(_, old_fp)| {
++        old_fp.font_request == fingerprint.font_request && old_fp.stroke == fingerprint.stroke
++    });
++
++    let paragraphs = match reusable {
++        Some((old_paragraphs, old_fp)) => reshape_diff(
++            &builder,
++            font_context,
++            new_plain,
++            &old_fp.text,
++            old_paragraphs,
++            link_color,
++        ),
++        None => create_text_paragraphs(
++            &builder,
++            font_context,
++            PlainOrStyledText::Plain(new_plain.clone()),
++            link_color,
++        ),
++    };
++
++    (paragraphs, Some(fingerprint))
++}
++
+ /// The builder the shaped paragraphs of `text` must be produced with. Measuring and drawing share
+ /// cache entries, so they have to agree on every input baked into the shaping -- which is why this
+ /// lives in one place rather than at each call site.
+@@ -373,20 +543,6 @@ pub(super) fn wrap_builder_for_tests() -> LayoutWithoutLineBreaksBuilder {
+     LayoutWithoutLineBreaksBuilder::new(None, TextWrap::WordWrap, None, ScaleFactor::new(1.0))
+ }
+ 
+-/// Shapes `text` the way both the drawing and the measuring paths need it, so that they can share
+-/// one cache entry. `text_wrap` is passed separately because `text_size` measures the unwrapped
+-/// width of items that are otherwise wrapped.
+-pub(super) fn shape_paragraphs(
+-    text: Pin<&dyn crate::item_rendering::RenderString>,
+-    item_rc: Option<&crate::item_tree::ItemRc>,
+-    text_wrap: TextWrap,
+-    scale_factor: ScaleFactor,
+-    font_context: &mut parley::FontContext,
+-) -> Vec<TextParagraph> {
+-    let builder = shaping_builder(text, item_rc, text_wrap, scale_factor);
+-    create_text_paragraphs(&builder, font_context, text.text(), text.link_color())
+-}
+-
+ pub(super) struct TextParagraph {
+     pub(super) range: Range<usize>,
+     pub(super) y: PhysicalLength,

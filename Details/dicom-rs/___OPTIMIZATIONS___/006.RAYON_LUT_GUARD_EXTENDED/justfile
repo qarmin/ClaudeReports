@@ -1,0 +1,49 @@
+# Self-contained reproduction for candidate 006.RAYON_LUT_GUARD_EXTENDED.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern). Self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cp "{{justfile_directory()}}/testdata/mono_below.dcm" clone/
+    cp "{{justfile_directory()}}/testdata/mono_above.dcm" clone/
+    echo "=== bit-exactness check ==="
+    for f in mono_below mono_above; do
+        ./bin_baseline dump-image "clone/$f.dcm" > "/tmp/candidate006_${f}_baseline.raw"
+        ./bin_patched dump-image "clone/$f.dcm" > "/tmp/candidate006_${f}_patched.raw"
+        cmp "/tmp/candidate006_${f}_baseline.raw" "/tmp/candidate006_${f}_patched.raw" && echo "$f: bit-exact" || echo "$f: DIFFERS (unexpected)"
+    done
+    echo "=== below-threshold (4,096px, 16-bit LUT site) - expect a ~13-14% REGRESSION ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- tovec clone/mono_below.dcm 3000
+    echo "=== above-threshold (1,048,576px) - expect NOT consistent (no change) ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- tovec clone/mono_above.dcm 50
+
+clean:
+    rm -rf clone bin_baseline bin_patched

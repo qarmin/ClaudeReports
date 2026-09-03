@@ -1,0 +1,35 @@
+# Self-contained reproduction for candidate 133.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing here reaches outside the folder it lives in.
+
+# The local checkout's own `origin` is git@github.com:qarmin/dicom-rs.git (a fork), but that fork
+# does not carry base_commit df2b9e42 - the upstream repository below does, and df2b9e42 is its
+# master at the time this candidate was written.
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e42"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone.
+# Expected: the repro exits 1, reporting colliding presentation context IDs on the wire.
+# The non-zero exit is expected here, so it is reported rather than aborting `just test`.
+reproduce-before:
+    cd repro && cargo run --release; echo "repro exit code: $? (non-zero = bug reproduced, which is what this step expects)"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro against the patched clone.
+# Expected: exits 0 - over-limit proposals are refused, the legal 128-context case still works.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target

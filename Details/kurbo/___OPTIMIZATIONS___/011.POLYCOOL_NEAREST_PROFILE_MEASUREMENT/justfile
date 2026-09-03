@@ -1,0 +1,43 @@
+# Reproduction for candidate 011.
+#
+# This candidate is a MEASUREMENT, not a patch - there is no patch.diff and nothing to apply.
+# `just test` therefore builds the harness at the pinned commit and re-runs the profiling that
+# produced the attribution in RESULT.md.
+#
+# Self-contained given the whole ___OPTIMIZATIONS___ folder kept together: the harness is
+# untracked in the kurbo repo, so `clone` copies it in from ../harness/kurbo_bench.
+
+repo_url := "https://github.com/linebender/kurbo.git"
+base_commit := "ca273499e3e48bd2de6f02aa8e99a148984e45f3"
+harness_dir := "../harness/kurbo_bench"
+
+test: clone build profile
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout --quiet {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/kurbo_bench
+    rm -rf clone/kurbo_bench/target
+    sed -i 's|path = "../../../kurbo"|path = "../kurbo"|' clone/kurbo_bench/Cargo.toml
+
+build:
+    cd clone/kurbo_bench && cargo build --release
+    cp clone/kurbo_bench/target/release/kurbo_bench ./bin_base
+
+profile:
+    @echo "=== scene cost and allocation count ==="
+    ulimit -c 0 && ./bin_base nearest 60
+    @echo ""
+    @echo "=== perf: self time (expect ~90% inside polycool) ==="
+    -DEBUGINFOD_URLS= taskset -c 2 perf record -F 999 -g -o pn.data -- ./bin_base nearest 60 >/dev/null 2>&1
+    -DEBUGINFOD_URLS= perf report -i pn.data --stdio --no-children --percent-limit 2 2>/dev/null | grep -E "^ +[0-9]+\.[0-9]+%" | head -8
+    @echo ""
+    @echo "=== callgrind: deterministic attribution ==="
+    bash -c 'ulimit -n 4096; DEBUGINFOD_URLS= valgrind --tool=callgrind --callgrind-out-file=cgn.out ./bin_base nearest 10' 2>&1 | grep -E "refs:"
+    -callgrind_annotate --auto=no cgn.out 2>/dev/null | grep -E "PROGRAM TOTALS|polycool|nearest" | head -8
+    @echo ""
+    @echo "NOTE: no patch.diff exists for this candidate - it is measurement-only. See RESULT.md."
+
+clean:
+    rm -rf clone bin_base pn.data cgn.out

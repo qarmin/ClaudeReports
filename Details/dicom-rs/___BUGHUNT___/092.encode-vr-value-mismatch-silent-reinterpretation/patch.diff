@@ -1,0 +1,76 @@
+diff --git a/parser/src/stateful/encode.rs b/parser/src/stateful/encode.rs
+index addfea46..26e9af19 100644
+--- a/parser/src/stateful/encode.rs
++++ b/parser/src/stateful/encode.rs
+@@ -46,6 +46,17 @@ pub enum Error {
+         source: std::io::Error,
+         backtrace: Backtrace,
+     },
++
++    #[snafu(display(
++        "Value representation {:?} requires a textual value, but the given value is {:?}",
++        vr,
++        value_type
++    ))]
++    VrValueMismatch {
++        vr: VR,
++        value_type: dicom_core::value::ValueType,
++        backtrace: Backtrace,
++    },
+ }
+ 
+ pub type Result<T> = std::result::Result<T, Error>;
+@@ -232,6 +243,53 @@ where
+                     return self.encode_element_as_text(value, de);
+                 }
+ 
++                // `Date`/`Time`/`DateTime` are excluded here: `self.encoder.encode_primitive`
++                // (below) already renders those as backslash-delimited text unconditionally,
++                // which is the correct, intended representation for VR DA/TM/DT - that path
++                // isn't a mismatch to reject.
++                //
++                // What's left (`U8`/`I16`/`U16`/`I32`/`U32`/`I64`/`U64`/`F32`/`F64`/`Tags`) is
++                // genuinely binary: `self.encoder.encode_primitive` writes it as native-endian
++                // bytes or raw tag words with no textual conversion. Pairing one of those with
++                // a VR whose value is always textual per PS3.5 Table 6.2-1 (DS/IS handled
++                // above) means the caller built a `DataElement` whose declared VR and stored
++                // value disagree (e.g. via `DataElement::new`, `put`, or `update_value` with a
++                // hand-picked VR/value pair) - encoding it would silently write the value's raw
++                // binary representation under a text-only VR's header instead of erroring.
++                let value_is_binary = !matches!(
++                    value,
++                    PrimitiveValue::Empty
++                        | PrimitiveValue::Date(_)
++                        | PrimitiveValue::Time(_)
++                        | PrimitiveValue::DateTime(_)
++                );
++                if value_is_binary
++                    && matches!(
++                        de.vr,
++                        VR::AE
++                            | VR::AS
++                            | VR::CS
++                            | VR::DA
++                            | VR::DT
++                            | VR::LO
++                            | VR::LT
++                            | VR::PN
++                            | VR::SH
++                            | VR::ST
++                            | VR::TM
++                            | VR::UC
++                            | VR::UI
++                            | VR::UR
++                            | VR::UT
++                    )
++                {
++                    return VrValueMismatchSnafu {
++                        vr: de.vr,
++                        value_type: dicom_core::value::DicomValueType::value_type(value),
++                    }
++                    .fail();
++                }
++
+                 let byte_len = value.calculate_byte_len();
+                 self.encode_element_header(DataElementHeader {
+                     tag: de.tag,

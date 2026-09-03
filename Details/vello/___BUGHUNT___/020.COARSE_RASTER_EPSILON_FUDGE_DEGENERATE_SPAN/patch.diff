@@ -1,0 +1,66 @@
+diff --git a/vello_shaders/shader/fine.wgsl b/vello_shaders/shader/fine.wgsl
+index 55f615de..7881ffb5 100644
+--- a/vello_shaders/shader/fine.wgsl
++++ b/vello_shaders/shader/fine.wgsl
+@@ -1029,12 +1029,25 @@ fn fill_path(fill: CmdFill, xy: vec2<f32>, result: ptr<function, array<f32, PIXE
+             let xmax0 = max(x0, x1);
+             for (var i = 0u; i < PIXELS_PER_THREAD; i += 1u) {
+                 let i_f = f32(i);
+-                let xmin = min(xmin0 - i_f, 1.0) - 1.0e-6;
++                let xmin = min(xmin0 - i_f, 1.0);
+                 let xmax = xmax0 - i_f;
+-                let b = min(xmax, 1.0);
+-                let c = max(b, 0.0);
+-                let d = max(xmin, 0.0);
+-                let a = (b + 0.5 * (d * d - c * c) - xmin) / (xmax - xmin);
++                let denom = xmax - xmin;
++                var a: f32;
++                if abs(denom) < 1.0e-4 {
++                    // `xmax - xmin` is (near-)degenerate: an exactly vertical edge divides
++                    // by zero, and a near-vertical edge with a tiny nonzero span is unstable
++                    // in f32 (the `d * d - c * c` cancellation below, plus a fixed epsilon
++                    // fudge on `xmin`, used to blow up to several percent of error here even
++                    // though the correct value is continuous). Both are the average of the
++                    // same near-constant integrand over a vanishingly small interval, which
++                    // is just the integrand's value at the interval's midpoint.
++                    a = 1.0 - clamp(0.5 * (xmin + xmax), 0.0, 1.0);
++                } else {
++                    let b = min(xmax, 1.0);
++                    let c = max(b, 0.0);
++                    let d = max(xmin, 0.0);
++                    a = (b + 0.5 * (d * d - c * c) - xmin) / denom;
++                }
+                 area[i] += a * dy;
+             }
+         }
+diff --git a/vello_shaders/src/cpu/fine.rs b/vello_shaders/src/cpu/fine.rs
+index 85f78c0b..a636d1cc 100644
+--- a/vello_shaders/src/cpu/fine.rs
++++ b/vello_shaders/src/cpu/fine.rs
+@@ -78,12 +78,21 @@ fn fill_path(area: &mut [f32], segments: &[PathSegment], fill: &CmdFill, x_tile:
+                 let xmax0 = x0.max(x1);
+                 for i in 0..TILE_WIDTH {
+                     let i_f = i as f32;
+-                    let xmin = (xmin0 - i_f).min(1.0) - 1.0e-6;
++                    let xmin = (xmin0 - i_f).min(1.0);
+                     let xmax = xmax0 - i_f;
+-                    let b = xmax.min(1.0);
+-                    let c = b.max(0.0);
+-                    let d = xmin.max(0.0);
+-                    let a = (b + 0.5 * (d * d - c * c) - xmin) / (xmax - xmin);
++                    let denom = xmax - xmin;
++                    // See the identical branch in fine.wgsl's fill_path for why: `xmax - xmin`
++                    // is (near-)degenerate for a (near-)vertical edge, and dividing through a
++                    // fixed epsilon fudge there is numerically fragile in f32. The midpoint
++                    // value is the correct limit of the average for a vanishingly small span.
++                    let a = if denom.abs() < 1.0e-4 {
++                        1.0 - (0.5 * (xmin + xmax)).clamp(0.0, 1.0)
++                    } else {
++                        let b = xmax.min(1.0);
++                        let c = b.max(0.0);
++                        let d = xmin.max(0.0);
++                        (b + 0.5 * (d * d - c * c) - xmin) / denom
++                    };
+                     area[yi * TILE_WIDTH + i] += y_edge + a * dy;
+                 }
+             } else if y_edge != 0.0 {

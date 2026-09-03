@@ -1,0 +1,53 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+#
+# Note: patch.diff bundles TWO things against pristine master: candidate 002's SSE4.1 kernel
+# (src/sse/cbcr_u16_lb.rs - a prerequisite, not yet merged upstream as of base_commit) and this
+# candidate's own AVX2 kernel (src/avx2/cbcr_u16_lb.rs) + factory wiring for both. The measured
+# comparison in RESULT.md is "SSE4.1-only" vs. "SSE4.1+AVX2" (isolating this candidate's own
+# contribution), not "vs. pristine scalar fallback" - see RESULT.md's "What was tried" section
+# for how the two compared binaries were built from this same patch.
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench, check bit-exactness.
+test: clone apply bench correctness
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    # The app crate's default pic-scale features don't include avx/sse - flip both on so the
+    # bench actually reaches the AVX2 tier this patch adds (see ../README.md).
+    sed -i 's/"colorspaces", "rdm", "nightly_i8mm", "nightly_f16"/"colorspaces", "rdm", "nightly_i8mm", "nightly_f16", "avx", "sse"/' clone/app/Cargo.toml
+
+# Runs the existing "Pic scale CbCr10: Lanczos 3" criterion case (harness = false, bit_depth=10,
+# which is <= 12 and so exercises the low-bit-depth fixed-point path this patch touches). It's
+# single-threaded by construction (ThreadingPolicy::Single) - pin with `taskset -c N` yourself
+# for a single-core-ranking run; unpinned is the realistic multi-core wall-clock run. Must be run
+# with `clone/app` as the working directory - the bench opens `../assets/...` relative to cwd.
+# Note: the compiled criterion binary needs `--bench` as its first argument to actually measure
+# (without it, it just runs a quick smoke-test pass and prints "Success").
+bench:
+    cd clone && cargo bench -p app --bench resize_cbcr -- --bench "Pic scale CbCr10: Lanczos 3"
+
+# Bit-exactness check: builds bit_exact_check/ against ./clone once as-is (patched, since
+# `apply` already ran, with both avx+sse active) and prints a hash. To get the pre-AVX2
+# (SSE4.1-only) hash to diff against by eye, temporarily drop "avx" from
+# bit_exact_check/Cargo.toml's feature list, rebuild, and compare `FINAL_HASH=...` lines - both
+# must match.
+correctness:
+    cd bit_exact_check && cargo build --release
+    ./bit_exact_check/target/release/correctness_check
+
+clean:
+    rm -rf clone

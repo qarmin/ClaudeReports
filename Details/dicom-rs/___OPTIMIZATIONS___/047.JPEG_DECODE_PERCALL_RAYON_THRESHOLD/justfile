@@ -1,0 +1,52 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate uses the shared bench_pipeline harness, which is untracked in the main dicom-rs
+# repo (built up across many ___OPTIMIZATIONS___ candidates - see SKILL.md's "Bench harnesses:
+# grow a few, don't multiply"). This folder is self-contained given the whole
+# ___OPTIMIZATIONS___ folder kept together (harness copied in from ../harness/bench_pipeline),
+# not as a fully isolated single subfolder - see README.md for what the harness contains.
+#
+# `just test` clones dicom-rs at base_commit, copies the harness in, builds a baseline binary,
+# applies patch.diff, builds a patched binary, then runs both decode-frame-raw (few-frame path,
+# the guard's target) and decode-raw (bulk path, should be unaffected) so the reader sees the
+# real before/after for both without reproducing it by hand.
+
+repo_url := "git@github.com:qarmin/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/bench_pipeline_047
+    cp -r "{{justfile_directory()}}/{{harness_dir}}"/* clone/bench_pipeline_047/
+    rm -rf clone/bench_pipeline_047/target
+    sed -i -E 's#path = "(\.\./)+([a-z-]+)"#path = "../\2"#' clone/bench_pipeline_047/Cargo.toml
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/bench_pipeline_047 && cargo build --release
+    cp clone/bench_pipeline_047/target/release/bench ./bin_baseline
+
+build-patched:
+    cd clone/bench_pipeline_047 && cargo build --release
+    cp clone/bench_pipeline_047/target/release/bench ./bin_patched
+
+bench:
+    @echo "=== baseline (before patch) - decode-frame-raw (few-frame path, the guard's target) ==="
+    ./bin_baseline decode-frame-raw clone/bench_pipeline_047/testdata/color3d_jpeg_baseline.dcm 200
+    @echo "=== patched (after patch) - decode-frame-raw ==="
+    ./bin_patched decode-frame-raw clone/bench_pipeline_047/testdata/color3d_jpeg_baseline.dcm 200
+    @echo "=== baseline - decode-raw (bulk path, should be unaffected by the guard) ==="
+    ./bin_baseline decode-raw clone/bench_pipeline_047/testdata/color3d_jpeg_baseline.dcm 8
+    @echo "=== patched - decode-raw ==="
+    ./bin_patched decode-raw clone/bench_pipeline_047/testdata/color3d_jpeg_baseline.dcm 8
+    @echo "For a real single-core-vs-multi-core comparison, use tools/paired.sh with taskset -c 0 wrapper scripts around bin_baseline/bin_patched (see this candidate's RESULT.md for the exact methodology and numbers already measured)."
+
+clean:
+    rm -rf clone bin_baseline bin_patched

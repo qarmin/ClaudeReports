@@ -1,0 +1,50 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./repro/clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g. attached
+# to a GitHub issue) and `just test` still works, with no dependency on the main project checkout
+# this candidate was originally found in.
+#
+# The bug lives in a `pub(crate)`-only function (`avx_unpremultiply_alpha_rgba`, only reachable
+# externally through the full resize pipeline - see RESULT.md for why an end-to-end trigger
+# through the public `Scaler` resize API specifically was attempted extensively but not found
+# within the time available). `expose.diff` is therefore applied on top of the pristine clone
+# before `patch.diff`: it is a zero-behavior-change visibility shim (a `#[doc(hidden)] pub fn`
+# wrapper around the exact same internal function) that lets this standalone external repro crate
+# call it directly - not a reimplementation, not hand-authored SIMD.
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Full cycle: clone pristine, expose the internal function, prove the bug exists, apply the fix,
+# prove it's gone.
+test: clone
+    -just reproduce-before
+    just apply
+    just reproduce-after
+
+clone:
+    rm -rf repro/clone
+    git clone {{repo_url}} repro/clone
+    cd repro/clone && git checkout {{base_commit}}
+    cd repro/clone && git apply "{{justfile_directory()}}/repro/expose.diff"
+    cargo build --release --manifest-path repro/simd/Cargo.toml
+
+# Build+run the standalone repro against the pristine (but visibility-shimmed) clone - should
+# demonstrate the bug (nonzero exit, "DIVERGES from scalar reference" printed).
+reproduce-before:
+    cargo build --release --manifest-path repro/simd/Cargo.toml
+    ./repro/simd/target/release/repro_simd
+
+apply:
+    cd repro/clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer demonstrate the bug (exit 0,
+# "matches scalar reference" printed).
+reproduce-after:
+    cargo build --release --manifest-path repro/simd/Cargo.toml
+    ./repro/simd/target/release/repro_simd
+
+clean:
+    rm -rf repro/clone repro/simd/target

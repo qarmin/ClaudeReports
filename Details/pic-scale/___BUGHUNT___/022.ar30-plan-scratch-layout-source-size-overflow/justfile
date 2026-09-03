@@ -1,0 +1,45 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# `repro/` builds pic-scale with `avx`/`sse` disabled (see repro/Cargo.toml) so the AR30/RA30
+# planning in `Scaler::plan_resize_ar30` (src/scaler.rs) falls through to the scalar `Ar30Plan`
+# path (src/plan/ar30_plan.rs) instead of the AVX2-specialized branch, which never constructs
+# `Ar30Plan` at all.
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone
+    -just reproduce-before
+    just apply
+    just reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should panic with
+# "attempt to multiply with overflow" at src/plan/ar30_plan.rs:129 and exit non-zero
+# (overflow-checks = true is set explicitly in repro/Cargo.toml, matching Cargo's
+# default `dev` profile behavior).
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - `plan_ar30_resampling` should cleanly
+# return `Err(PicScaleError::Generic("Source width or height overflows isize"))` instead of
+# panicking, print "did not reproduce", and exit 0.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target

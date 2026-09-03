@@ -1,0 +1,118 @@
+rm -rf clone
+git clone https://github.com/linebender/kurbo.git clone
+Cloning into 'clone'...
+cd clone && git checkout ca273499e3e48bd2de6f02aa8e99a148984e45f3
+Note: switching to 'ca273499e3e48bd2de6f02aa8e99a148984e45f3'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at ca27349 ci: Update to stable Rust 1.97.1, typos 1.48.0 (#596)
+cd repro && cargo run --release
+    Updating crates.io index
+     Locking 7 packages to latest compatible versions
+   Compiling arrayvec v0.7.8
+   Compiling smallvec v1.16.0
+   Compiling polycool v0.4.0 (/tmp/candidate021_test/clone/polycool)
+   Compiling kurbo v0.13.1 (/tmp/candidate021_test/clone/kurbo)
+   Compiling repro v0.1.0 (/tmp/candidate021_test/repro)
+    Finished `release` profile [optimized] target(s) in 1.28s
+     Running `target/release/repro`
+--- baseline (valid accuracy): perimeter(accuracy=0.000001) ---
+did not reproduce - perimeter() returned 9.688448219995387 within 8s
+--- candidate accuracy: perimeter(accuracy=-1) ---
+REPRODUCED - perimeter(accuracy=-1) did not return within 8s (infinite loop in agm_elliptic_perimeter)
+cd clone && git apply "/tmp/candidate021_test/patch.diff"
+cd repro && cargo run --release
+   Compiling kurbo v0.13.1 (/tmp/candidate021_test/clone/kurbo)
+   Compiling repro v0.1.0 (/tmp/candidate021_test/repro)
+    Finished `release` profile [optimized] target(s) in 0.87s
+     Running `target/release/repro`
+--- baseline (valid accuracy): perimeter(accuracy=0.000001) ---
+did not reproduce - perimeter() returned 9.688448219995387 within 8s
+--- candidate accuracy: perimeter(accuracy=-1) ---
+did not reproduce - perimeter() returned 9.688448220547675 within 8s
+
+===============================================================================
+Additional confirmation runs captured earlier during investigation, against a
+scratch crate depending on the pristine worktree (`cargo build --release`),
+using `Ellipse::new(Point::new(0.0, 0.0), Vec2::new(2.0, 1.0), 0.0).perimeter(accuracy)`
+directly, each wrapped in `timeout 5`. Exit code 124 = killed by timeout (hung).
+===============================================================================
+
+--- accuracy = -1.0 (release), 3 repeat runs ---
+$ timeout 5 ./target/release/repro -1.0
+calling perimeter(-1) ...
+exit=124
+$ timeout 5 ./target/release/repro -1.0
+calling perimeter(-1) ...
+exit=124
+$ timeout 5 ./target/release/repro -1.0
+calling perimeter(-1) ...
+exit=124
+
+--- accuracy = -1.0 (debug build) ---
+$ timeout 5 ./target/debug/repro -1.0
+calling perimeter(-1) ...
+exit=124
+
+--- accuracy = 0.0 (release) - does NOT hang (matches root-cause analysis: term==0.0 <= accuracy*g==0.0 is true, loop exits normally) ---
+$ timeout 5 ./target/release/repro 0.0
+calling perimeter(0) ...
+perimeter = 9.688448220547675
+exit=0
+
+--- accuracy = -0.0 (release) - also hangs is NOT the case; -0.0 compares equal to 0.0, does NOT hang ---
+$ timeout 5 ./target/release/repro -0.0
+calling perimeter(-0) ...
+perimeter = 9.688448220547675
+exit=0
+
+--- accuracy = NaN (release) - hangs (NaN comparisons are always false) ---
+$ timeout 5 ./target/release/repro NaN
+calling perimeter(NaN) ...
+exit=124
+
+--- accuracy = -1e-300 (release) - hangs (any negative accuracy hangs, not just -1.0) ---
+$ timeout 5 ./target/release/repro -1e-300
+calling perimeter(-0.000...0001) ...
+exit=124
+
+--- accuracy = -inf (release) - hangs ---
+$ timeout 5 ./target/release/repro -inf
+calling perimeter(-inf) ...
+exit=124
+
+===============================================================================
+Root-cause instrumentation: temporary eprintln! added inside agm_elliptic_perimeter's
+loop (kurbo/src/ellipse.rs, reverted afterward, not part of the shipped patch), run
+against accuracy=-1.0 on the same ellipse. Shows `c` (and therefore `term`) reaching
+exactly 0.0 at iteration 6 (`a` and `g` become bit-identical in f64 after 5 AGM steps -
+quadratic convergence), after which `term` stays 0.0 forever while `accuracy * g` stays
+negative, so `term <= accuracy * g` is never true; `mul` keeps doubling every iteration
+until it overflows to `inf` around iteration ~1024-2000, at which point `term = mul * 0.0`
+becomes NaN and the comparison is (still) always false:
+===============================================================================
+
+iter=1 term=3.7499999999999994e-1 accuracy*g=-3.9788735772973836e-2 c=8.660254037844386e-1 mul=5e-1 a=1e0 g=5e-1
+iter=2 term=6.25e-2 accuracy*g=-5.6269769759819135e-2 c=2.5e-1 mul=1e0 a=7.5e-1 g=7.071067811865476e-1
+iter=3 term=9.199141100893546e-4 accuracy*g=-5.795131147324688e-2 c=2.1446609406726214e-2 mul=2e0 a=7.285533905932737e-1 g=7.282376575609851e-1
+iter=4 term=9.968734767815473e-8 accuracy*g=-5.79638727300836e-2 c=1.5786651614430047e-4 mul=4e0 a=7.283955240771294e-1 g=7.283955069697775e-1
+iter=5 term=5.853229759011995e-16 accuracy*g=-5.79638734107635e-2 c=8.55367593421974e-9 mul=8e0 a=7.283955155234534e-1 g=7.283955155234534e-1
+iter=6 term=0e0 accuracy*g=-5.79638734107635e-2 c=0e0 mul=1.6e1 a=7.283955155234534e-1 g=7.283955155234534e-1
+... (term=0e0, c=0e0 unchanged; mul doubles every iteration) ...
+iter=1000 term=0e0 accuracy*g=-5.79638734107635e-2 c=0e0 mul=2.6787715179656683e300 a=7.283955155234534e-1 g=7.283955155234534e-1
+iter=1200 term=NaN accuracy*g=-5.79638734107635e-2 c=0e0 mul=inf a=7.283955155234534e-1 g=7.283955155234534e-1
+... (term=NaN forever after) ...

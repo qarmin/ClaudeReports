@@ -1,0 +1,42 @@
+# Self-contained reproduction for candidate 077 (vello_common::transforms::RootTransforms::pop_root's
+# unguarded `self.transforms.pop()`, transforms.rs:126). Status: Not reproducible - see RESULT.md.
+# This candidate found no live bug: the unguarded pop is fully gated behind
+# CommandRecorder::pop_layer's own already-panicking layer-stack check (record.rs:307) and the
+# multi-threaded dispatcher's own layer_depth underflow check (multi_threaded.rs:584) - both
+# separate, already-confirmed candidate 031 - so no bounded fix was attempted here and there is no
+# patch.diff - this justfile only has a `reproduce-before` step, per the template's own instructions
+# for that case.
+#
+# `repo_url`/`base_commit` were read via `git remote get-url origin` / `git rev-parse HEAD` in the
+# main project at investigation time.
+#
+# Note: this environment's git-lfs binary may be missing, which makes a plain `git clone`/`git
+# checkout` of this repo fail on its LFS-tracked PNG test snapshots. The repro below never touches
+# those files, so the clone step disables the LFS filter outright (`-c filter.lfs.*`) to stay
+# robust regardless of whether git-lfs is installed on the machine running this.
+
+# https (not the ssh form `git remote get-url origin` actually returns) so `just clone` works
+# without an ssh key/agent configured.
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false clone {{repo_url}} clone
+    cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone. The repro binary is a driver: with no
+# arguments it spawns itself once per unbalanced-pop_layer() case (via `--case N`), each in its own
+# subprocess (needed because the multi-threaded dispatcher case is known to sometimes abort the
+# whole process via candidate 031's own bug), and reports where each subprocess actually panicked.
+# Exercises vello_cpu::RenderContext (single- and multi-threaded dispatcher, regular and filter
+# layers) and vello_hybrid::Scene. Every case panics at record.rs:307 or multi_threaded.rs:584,
+# never inside transforms.rs (RootTransforms' own stack) - demonstrating the suspected spot is
+# unreachable given the current call graph.
+reproduce-before:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

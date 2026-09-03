@@ -1,0 +1,42 @@
+=== Before fix (pristine tree, commit 5c6565e36d35b9ea7de049daa67acc0be0fd3b01) ===
+$ cargo run --release   (repro/, lofty pointed directly at the unpatched checkout)
+
+    Finished `release` profile [optimized] target(s) in 0.01s
+     Running `target/release/repro015`
+base WAV file: 76 bytes
+after writing small tag:  1130 bytes
+
+thread 'main' (119695) panicked at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/id3/v2/write/chunk_file.rs:105:6:
+attempt to subtract with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - panicked: Any { .. }
+
+(reproduced deterministically 4/4 runs, release profile with overflow-checks = true, no fixed seed
+- the input is fully deterministic, not randomized)
+
+=== After fix (`updated_stream_len -= ...` changed to `updated_stream_len += ...`) ===
+$ cargo run --release
+
+   Compiling lofty v0.25.1 (/home/rafal/Projekty/Obce/lofty-rs/lofty)
+   Compiling repro015 v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 2.88s
+     Running `target/release/repro015`
+base WAV file: 76 bytes
+after writing small tag:  1130 bytes
+after writing large tag:  201134 bytes
+RIFF header declares total size = 201134 bytes; actual physical file = 201134 bytes
+did not reproduce - RIFF header size matches the real file size
+
+=== For reference: release build WITHOUT overflow-checks, pristine tree (separate scratch run) ===
+Confirms the bug is not merely a debug-assertions artifact - a normal release build silently
+corrupts the file instead of panicking:
+
+base wav len: 14744
+len after small tag write: 15798
+about to write large tag...
+len after large tag write: 215802
+RIFF header declares size = 4294783082 (=> total 4294783090 bytes); actual physical file = 215802 bytes
+
+=== Project test suite (lofty crate), run both before and after the fix ===
+`cargo test -p lofty --lib`:            256 passed; 0 failed  (identical before and after)
+`cargo test -p lofty --test taglib`:    191 passed; 0 failed; 73 ignored  (identical before and after)

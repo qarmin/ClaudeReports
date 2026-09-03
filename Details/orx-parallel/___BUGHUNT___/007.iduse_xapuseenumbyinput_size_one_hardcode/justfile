@@ -1,0 +1,40 @@
+# Self-contained reproduction attempt for this candidate.
+#
+# Status: Not reproducible (see RESULT.md) - there is no patch.diff. This justfile runs the "before"
+# side (against pristine base_commit) - both scenario binaries are *expected* to fail to compile,
+# that is the observed behavior this candidate documents, not a script bug. It also demonstrates
+# (as `reproduce-with-suggested-fix`) that applying the finding's own suggested bound relaxation to
+# id.rs in the clone does not change that outcome.
+
+repo_url := "git@github.com:orxfun/orx-parallel.git"
+base_commit := "b9214fbeb714e4bb8f8858676a818cef2f21b097"
+
+# Full cycle: clone pristine, attempt both scenarios (both are expected to fail to compile).
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    mkdir -p clone
+    git clone {{repo_url}} clone/orx-parallel
+    cd clone/orx-parallel && git checkout {{base_commit}}
+
+# Attempts both scenario binaries against the pristine clone. Both are EXPECTED to fail to
+# compile (that is the point being demonstrated - see RESULT.md) - `|| true` on each keeps the
+# recipe going so both real compiler errors get printed, matching output.txt.
+reproduce-before:
+    cd repro && cargo build --bin use_new_scenario 2>&1 | grep -A3 "^error\[" || true
+    cd repro && cargo build --bin plain_scenario 2>&1 | grep -A3 "^error\[" || true
+
+# Control experiment: apply the finding's own suggested bound relaxation directly to the clone
+# (no patch.diff shipped, since this never became a verified "fix" - relaxing the bound is not
+# observed to unlock anything), then rebuild both scenarios again. Both are still expected to
+# fail identically, demonstrating the described Size=One bound is not the actual blocker.
+reproduce-with-suggested-fix:
+    cd clone/orx-parallel && sed -i '/^use crate::sizes::One;$/d' src/infallible_use/xap_variants/id.rs
+    cd clone/orx-parallel && sed -i 's/impl<X: XapEnumByInput<Size = One>, U> XapUseEnumByInput for IdUse<X, U> {/impl<X: XapEnumByInput, U> XapUseEnumByInput for IdUse<X, U> {/' src/infallible_use/xap_variants/id.rs
+    cd repro && cargo build --bin use_new_scenario 2>&1 | grep -A3 "^error\[" || true
+    cd repro && cargo build --bin plain_scenario 2>&1 | grep -A3 "^error\[" || true
+    cd clone/orx-parallel && git checkout -- src/infallible_use/xap_variants/id.rs
+
+clean:
+    rm -rf clone

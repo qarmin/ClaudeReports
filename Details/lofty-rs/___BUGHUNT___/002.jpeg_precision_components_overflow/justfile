@@ -1,0 +1,40 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+
+repo_url := "https://github.com/Serial-ATA/lofty-rs.git"
+base_commit := "5c6565e36d35b9ea7de049daa67acc0be0fd3b01"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+# reproduce-before is EXPECTED to exit non-zero (a panic from the u8 multiplication overflow,
+# with the default cargo dev profile's overflow-checks = true), so this runs the steps in one
+# recipe body instead of chaining dependencies (which `just` would otherwise abort on the first
+# non-zero step).
+test:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    just clone
+    echo "--- reproduce-before (pristine clone, dev build, panic expected) ---"
+    (cd repro && cargo run)
+    before=$?
+    just apply
+    echo "--- reproduce-after (patched clone, dev build, panic expected to be gone) ---"
+    (cd repro && cargo run)
+    after=$?
+    echo
+    echo "before: exit=$before (non-zero = reproduced), after: exit=$after (0 = fixed)"
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+clean:
+    rm -rf clone

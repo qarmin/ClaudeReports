@@ -1,0 +1,114 @@
+# Captured output of repro/run.sh, verbatim.
+#
+# Machine: Ryzen 9 7900 (Zen 4, AVX-512), rustc nightly-2026-08-24,
+# cg_clif @ 2bc05d45 (Cranelift 0.135), opt-level 0 on both sides.
+
+################################################################################
+# BEFORE - unpatched cg_clif (main checkout)
+#   bash repro/run.sh <cg_clif checkout @ 2bc05d45>
+################################################################################
+=== LLVM (plain cargo) ===
+extern "C" __m128 by value:  [1.5, 2.5, 3.5, 4.5]
+extern "C" __m128i by value: [11, 12, 13, 14]
+Rust-ABI __m256 by value:    [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5]
+control exit 0
+extern "C" __m256 by value: [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5]
+wide exit 0
+
+=== cg_clif (/home/rafal/Projekty/Obce/rustc_codegen_cranelift) ===
+extern "C" __m128 by value:  [1.5, 2.5, 3.5, 4.5]
+extern "C" __m128i by value: [11, 12, 13, 14]
+Rust-ABI __m256 by value:    [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5]
+control exit 0
+
+wide: cg_clif ICEd:
+thread 'opt 46vj3iohcvz5bayfalmasy833' (1622534) panicked at src/base.rs:222:17:
+src/base.rs:222:17: Error while defining _RNvCshRwprbQMobT_4wide3run: Compilation(Unsupported("Unexpected SSA-value type: f32x8"))
+error: the compiler unexpectedly panicked. This is a bug
+error: the compiler unexpectedly panicked. This is a bug
+
+control: matches LLVM
+wide:    ICE
+RESULT: BUG PRESENT
+(run.sh exit 1)
+
+################################################################################
+# AFTER - the same cg_clif checkout with patch.diff applied and ./y.sh build re-run
+#   bash repro/run.sh <patched cg_clif checkout>
+################################################################################
+=== LLVM (plain cargo) ===
+extern "C" __m128 by value:  [1.5, 2.5, 3.5, 4.5]
+extern "C" __m128i by value: [11, 12, 13, 14]
+Rust-ABI __m256 by value:    [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5]
+control exit 0
+extern "C" __m256 by value: [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5]
+wide exit 0
+
+=== cg_clif (/home/rafal/Projekty/Obce/rustc_codegen_cranelift/tmp/wt/012.per_function_target_feature) ===
+extern "C" __m128 by value:  [1.5, 2.5, 3.5, 4.5]
+extern "C" __m128i by value: [11, 12, 13, 14]
+Rust-ABI __m256 by value:    [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5]
+control exit 0
+
+wide: cg_clif rejected the crate with a diagnostic (no ICE):
+error: passing SIMD vector type `std::arch::x86_64::__m256` by value is not yet supported by rustc_codegen_cranelift: the chosen ABI requires it to be passed in a 256-bit vector register, but the widest vector type Cranelift has is 128 bits. Pass it behind a pointer or reference, or use the default Rust ABI (which passes it indirectly) instead of an explicit `extern` ABI.
+error: could not compile `tf_wide_vector_abi` (bin "wide") due to 1 previous error
+
+control: matches LLVM
+wide:    CLEAN ERROR
+RESULT: no ICE
+(run.sh exit 0)
+
+################################################################################
+# The 18-case sweep (___BUGHUNT___/tools/tf_abi_sweep.sh), unpatched then patched
+################################################################################
+--- unpatched ---
+ICE   arg_m256_f32                 Unexpected SSA-value type: f32x8"))
+ICE   arg_m256_f32_struct          Unexpected SSA-value type: i8x32"))
+ICE   arg_m256d_f64                Unexpected SSA-value type: f64x4"))
+ICE   arg_m256d_f64_struct         Unexpected SSA-value type: i8x32"))
+ICE   arg_m256i_i32                Unexpected SSA-value type: i64x4"))
+ICE   arg_m256i_i32_struct         Unexpected SSA-value type: i8x32"))
+ICE   arg_m512_f32                 Unexpected SSA-value type: f32x16"))
+ICE   arg_m512_f32_struct          Unexpected SSA-value type: i8x64"))
+ICE   arg_m512d_f64                Unexpected SSA-value type: f64x8"))
+ICE   arg_m512d_f64_struct         Unexpected SSA-value type: i8x64"))
+ICE   arg_m512i_i64                Unexpected SSA-value type: i64x8"))
+ICE   arg_m512i_i64_struct         Unexpected SSA-value type: i8x64"))
+PASS  ctl_m128                     (matches LLVM)
+PASS  ctl_m128i                    (matches LLVM)
+PASS  ctl_rustabi_m256             (matches LLVM)
+ICE   shape_fnptr                  Unexpected SSA-value type: f32x8"))
+ICE   shape_mixed_args             Unexpected SSA-value type: f32x8"))
+ICE   shape_sysv64                 Unexpected SSA-value type: f32x8"))
+
+summary: 3 match LLVM, 15 ICE, 0 clean cg_clif error
+(sweep exit 1)
+--- patched ---
+ERR   arg_m256_f32                 error: passing SIMD vector type `std::arch::x86_64::__m256` by value is not yet supporte
+ERR   arg_m256_f32_struct          error: passing a SIMD vector by value is not yet supported by rustc_codegen_cranelift: t
+ERR   arg_m256d_f64                error: passing SIMD vector type `std::arch::x86_64::__m256d` by value is not yet support
+ERR   arg_m256d_f64_struct         error: passing a SIMD vector by value is not yet supported by rustc_codegen_cranelift: t
+ERR   arg_m256i_i32                error: passing SIMD vector type `std::arch::x86_64::__m256i` by value is not yet support
+ERR   arg_m256i_i32_struct         error: passing a SIMD vector by value is not yet supported by rustc_codegen_cranelift: t
+ERR   arg_m512_f32                 error: passing SIMD vector type `std::arch::x86_64::__m512` by value is not yet supporte
+ERR   arg_m512_f32_struct          error: passing a SIMD vector by value is not yet supported by rustc_codegen_cranelift: t
+ERR   arg_m512d_f64                error: passing SIMD vector type `std::arch::x86_64::__m512d` by value is not yet support
+ERR   arg_m512d_f64_struct         error: passing a SIMD vector by value is not yet supported by rustc_codegen_cranelift: t
+ERR   arg_m512i_i64                error: passing SIMD vector type `std::arch::x86_64::__m512i` by value is not yet support
+ERR   arg_m512i_i64_struct         error: passing a SIMD vector by value is not yet supported by rustc_codegen_cranelift: t
+PASS  ctl_m128                     (matches LLVM)
+PASS  ctl_m128i                    (matches LLVM)
+PASS  ctl_rustabi_m256             (matches LLVM)
+ERR   shape_fnptr                  error: passing SIMD vector type `std::arch::x86_64::__m256` by value is not yet supporte
+ERR   shape_mixed_args             error: passing SIMD vector type `std::arch::x86_64::__m256` by value is not yet supporte
+ERR   shape_sysv64                 error: passing SIMD vector type `std::arch::x86_64::__m256` by value is not yet supporte
+
+summary: 3 match LLVM, 0 ICE, 15 clean cg_clif error
+(sweep exit 0)
+
+################################################################################
+# ./y.sh test in the isolated worktree, before and after patch.diff
+################################################################################
+before: exit 0, 61 'test result: ok.' lines, 0 FAILED
+after:  exit 0, 61 'test result: ok.' lines, 0 FAILED

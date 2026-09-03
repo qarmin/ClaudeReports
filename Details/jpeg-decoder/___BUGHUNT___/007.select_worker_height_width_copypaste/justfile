@@ -1,0 +1,48 @@
+# Self-contained reproduction for this candidate.
+#
+# Unlike a typical candidate here, the buggy function (`Decoder::select_worker`) is private and
+# has no externally-visible effect through the public API (see repro/README.md for why) - so
+# instead of a separate repro crate depending on the target crate's public API, this justfile
+# clones the real crate and (a) applies a small test-only patch that adds two #[test]s calling
+# the private function directly, and (b) runs a real end-to-end decode of a real JPEG fixture
+# through the actual public API to prove those test dimensions are exactly what a real decode
+# produces. Nothing here reaches outside this folder except the clone.
+
+repo_url := "https://github.com/image-rs/jpeg-decoder.git"
+base_commit := "eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/examples
+    cp repro/verify_dims.rs clone/examples/verify_dims.rs
+    mkdir -p clone/fixtures
+    cp repro/fixtures/test_wide.jpg clone/fixtures/test_wide.jpg
+
+# Uses `+stable` explicitly (not the project's own pinned `rust-toolchain` = 1.61.0) because a
+# fresh `cargo test` resolves dev-dependencies (wasm-bindgen-test -> ... -> zmij) that require a
+# newer rustc than the project's own MSRV pin; `+stable` sidesteps that without needing an exact
+# version. Requires a `stable` rustup toolchain to be installed.
+#
+# Against pristine (unpatched) code: the two select_worker unit tests should FAIL, and the real
+# end-to-end decode should still succeed (proving the bug has no correctness impact, only picks
+# the wrong worker backend internally).
+reproduce-before:
+    cd clone && git apply "{{justfile_directory()}}/repro/test_patch.diff"
+    cd clone && cargo +stable test --lib bug007 -- --nocapture || true
+    cd clone && cargo +stable run --example verify_dims
+
+apply:
+    cd clone && git checkout -- src/decoder.rs
+    cd clone && git apply "{{justfile_directory()}}/repro/test_patch.diff"
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Against the patched code: both select_worker unit tests should now PASS.
+reproduce-after:
+    cd clone && cargo +stable test --lib bug007 -- --nocapture
+
+clean:
+    rm -rf clone

@@ -1,0 +1,63 @@
+diff --git a/symphonia-bundle-flac/src/demuxer.rs b/symphonia-bundle-flac/src/demuxer.rs
+index ff3ea22..ccd23c1 100644
+--- a/symphonia-bundle-flac/src/demuxer.rs
++++ b/symphonia-bundle-flac/src/demuxer.rs
+@@ -290,24 +290,42 @@ impl FormatReader for FlacReader<'_> {
+             // lower bound is set to the byte offset of the first frame, while the upper bound is
+             // set to the length of the stream.
+             let mut start_byte_offset = self.first_frame_offset;
+-            let mut end_byte_offset = self.reader.seek(SeekFrom::End(0))?;
+-
+-            // If there is an index, use it to refine the binary search range.
++            let stream_end_offset = self.reader.seek(SeekFrom::End(0))?;
++            let mut end_byte_offset = stream_end_offset;
++
++            // If there is an index, use it to refine the binary search range. A `SeekIndex` entry's
++            // `byte_offset` is untrusted (parsed directly from the stream's seek table, if any), so
++            // it is saturated and clamped to the known valid byte range before use. This avoids both
++            // an arithmetic overflow when adding `first_frame_offset` and a `start_byte_offset` that
++            // ends up greater than `end_byte_offset`, either of which would otherwise reach the
++            // bisection loop below with an out-of-range or nonsensical byte range.
+             if let Some(ref index) = self.index {
+                 // Search the index for the timestamp. Adjust the search based on the result.
+                 match index.search(ts) {
+                     // Search from the start of stream up-to an ending point.
+                     SeekSearchResult::Upper(upper) => {
+-                        end_byte_offset = self.first_frame_offset + upper.byte_offset;
++                        end_byte_offset = self
++                            .first_frame_offset
++                            .saturating_add(upper.byte_offset)
++                            .min(stream_end_offset);
+                     }
+                     // Search from a starting point up-to the end of the stream.
+                     SeekSearchResult::Lower(lower) => {
+-                        start_byte_offset = self.first_frame_offset + lower.byte_offset;
++                        start_byte_offset = self
++                            .first_frame_offset
++                            .saturating_add(lower.byte_offset)
++                            .min(stream_end_offset);
+                     }
+                     // Search between two points of the stream.
+                     SeekSearchResult::Range(lower, upper) => {
+-                        start_byte_offset = self.first_frame_offset + lower.byte_offset;
+-                        end_byte_offset = self.first_frame_offset + upper.byte_offset;
++                        start_byte_offset = self
++                            .first_frame_offset
++                            .saturating_add(lower.byte_offset)
++                            .min(stream_end_offset);
++                        end_byte_offset = self
++                            .first_frame_offset
++                            .saturating_add(upper.byte_offset)
++                            .min(stream_end_offset);
+                     }
+                     // Search the entire stream (default behaviour, so do nothing).
+                     SeekSearchResult::Stream => (),
+@@ -319,7 +337,7 @@ impl FormatReader for FlacReader<'_> {
+             // frame size, exit the loop and search from the start_byte_offset linearly. The binary
+             // search becomes inefficient when the range is small.
+             while end_byte_offset - start_byte_offset > 2 * 8096 {
+-                let mid_byte_offset = (start_byte_offset + end_byte_offset) / 2;
++                let mid_byte_offset = start_byte_offset + (end_byte_offset - start_byte_offset) / 2;
+                 self.reader.seek(SeekFrom::Start(mid_byte_offset))?;
+ 
+                 let sync = self.parser.resync(&mut self.reader)?;

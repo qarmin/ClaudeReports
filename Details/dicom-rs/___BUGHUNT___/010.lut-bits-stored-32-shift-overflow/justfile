@@ -1,0 +1,46 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# Fill in repo_url/base_commit when this candidate is created (read them once with
+# `git remote get-url origin` / `git rev-parse HEAD` in the main project, at the moment
+# patch.diff is captured) - patch.diff is a diff against that exact commit and may stop applying
+# cleanly once the main branch moves on.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+# If this candidate has no patch.diff (Confirmed with no bounded fix, or Not reproducible /
+# Inconclusive), delete the `apply`/`reproduce-after` steps and keep only `reproduce-before`.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug.
+# Adapt: repro/ depends on `{ path = "../clone/<crate_dir>" }`, so it always tracks whatever
+# state ./clone is currently in. Non-zero exit here is the EXPECTED outcome (repro's own
+# convention: 0 = did not reproduce, non-zero = reproduced) - don't let it abort `just test`.
+reproduce-before:
+    cd repro && cargo run --release; test "$?" -ne 0 && echo "(non-zero exit expected here: bug reproduced)"; true
+
+# patch.diff includes candidate 009's fix too (bits_stored()'s range check) since this
+# candidate's own fix builds on top of it - bundled whole here to keep this folder
+# self-contained rather than referencing 009's folder.
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer demonstrate the bug. Exit
+# code must be 0 here.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

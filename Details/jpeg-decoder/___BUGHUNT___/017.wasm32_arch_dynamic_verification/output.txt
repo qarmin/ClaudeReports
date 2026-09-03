@@ -1,0 +1,95 @@
+Captured by actually running the repro steps (`just clone`, `just wasm-bindgen-cli`,
+`just reproduce-before`, `just apply`, `just reproduce-after`) from a fresh copy of this candidate
+folder in a scratch directory, against a fresh `git clone` of
+https://github.com/image-rs/jpeg-decoder.git at eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c, run on
+the real wasm32-unknown-unknown target under wasm-bindgen-test-runner 0.2.127 + Node v22.23.2 (the
+same mechanism .github/workflows/rust.yml's cross_compile_wasm CI job uses). `just test`'s own
+one-shot chain necessarily stops (non-zero exit) right after reproduce-before, since `just`
+aborts a prerequisite chain on the first failing step and reproduce-before's whole purpose is to
+demonstrate the still-present bug - this is the same shape every other Confirmed candidate's
+justfile in this workspace has; run reproduce-before/apply/reproduce-after as separate `just`
+invocations (as done here) to see both sides. Repeated 3 times total across this session (this
+capture, plus two earlier runs against a working wasm32 crate/wasm-bindgen-test setup in a scratch
+git worktree before this repro/ folder existed) with identical results each time. Compiler warning
+noise (unrelated `cfg(target_arch = "asmjs")` lint spam from src/worker/mod.rs, and dependency
+`Compiling ...` lines) trimmed for readability; panic messages and test-runner output kept verbatim.
+
+===== BEFORE PATCH (just reproduce-before) =====
+$ cd repro && CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=".../bin/wasm-bindgen-test-runner" cargo test --target wasm32-unknown-unknown
+     Running tests/repro.rs (target/wasm32-unknown-unknown/debug/deps/repro-3c6d02bb8369b37d.wasm)
+running 3 tests
+test rect_variant ... FAIL
+test max_size ... FAIL
+test capacity_variant ... FAIL
+
+failures:
+
+---- rect_variant output ----
+    error output:
+        panicked at /tmp/scratch_017/clone/src/worker/immediate.rs:34:41:
+        attempt to multiply with overflow
+    JS exception that was thrown:
+        RuntimeError: unreachable
+            ...
+            at repro-....wasm.core[...]::panicking::panic_const::panic_const_mul_overflow (...)
+            at repro-....wasm.<jpeg_decoder[...]::worker::immediate::ImmediateWorker>::start_immediate (...)
+
+---- max_size output ----
+    error output:
+        panicked at /tmp/scratch_017/clone/src/worker/immediate.rs:34:41:
+        attempt to multiply with overflow
+    JS exception that was thrown:
+        RuntimeError: unreachable
+            ...
+            at repro-....wasm.<jpeg_decoder[...]::worker::immediate::ImmediateWorker>::start_immediate (...)
+
+---- capacity_variant output ----
+    error output:
+        panicked at /rustc/.../library/alloc/src/raw_vec/mod.rs:28:5:
+        capacity overflow
+    JS exception that was thrown:
+        RuntimeError: unreachable
+            ...
+            at repro-....wasm.alloc[...]::raw_vec::capacity_overflow (...)
+            at repro-....wasm.alloc[...]::raw_vec::handle_error (...)
+
+failures:
+    rect_variant
+    max_size
+    capacity_variant
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 filtered out; finished in 0.01s
+error: test failed, to rerun pass `--test repro`
+error: Recipe `reproduce-before` failed on line 47 with exit code 1
+
+===== apply (just apply) =====
+$ cd clone && git apply ".../patch.diff"
+(applied cleanly, no output)
+
+===== AFTER PATCH (just reproduce-after) =====
+$ cd repro && CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=".../bin/wasm-bindgen-test-runner" cargo test --target wasm32-unknown-unknown
+     Running tests/repro.rs (target/wasm32-unknown-unknown/debug/deps/repro-3c6d02bb8369b37d.wasm)
+running 3 tests
+test rect_variant ... ok
+test max_size ... ok
+test capacity_variant ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 filtered out; finished in 0.01s
+(process exits 0 - no panic, no trap)
+
+===== Earlier in-session confirmation, ad hoc crashtest-corpus harness (before repro/ existed) =====
+Same crate checkout, same target/runner, cargo +1.87.0 test --target wasm32-unknown-unknown
+--test wasm_crashtest (111 fixtures from the project's own tests/crashtest/images/, plus the two
+overflow-variant fixtures added this session):
+
+Before fix: "test ct_max_size_jpg ... FAILED" (only failure among 112 tests: panicked at
+src/worker/immediate.rs:34:41: attempt to multiply with overflow)
+After fix (3 repeat runs): "test result: ok. 113 passed; 0 failed; 0 ignored; 0 filtered out"
+(all 3 runs identical)
+
+===== Project's own existing test suite, native x86_64, +1.87.0 (never exercises this bug at all -
+usize is 64 bits there, so the exact same multiplication never overflows) =====
+Before fix, default features (rayon): 21 passed, 0 failed (5 lib unit + 12 tests/lib.rs + 4 rayon-*)
+Before fix, --no-default-features:   17 passed, 0 failed (5 lib unit + 12 tests/lib.rs)
+After fix,  default features (rayon): 21 passed, 0 failed (identical)
+After fix,  --no-default-features:    17 passed, 0 failed (identical)

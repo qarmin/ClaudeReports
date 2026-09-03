@@ -1,0 +1,280 @@
+import { Button, CheckBox, Palette } from "std-widgets.slint";
+import { DragProbe, Logic, PerfMode, RecordItem, Settings } from "shared.slint";
+import { TextModePage } from "text-mode.slint";
+import { ListModePage } from "list-mode.slint";
+import { ScrollModePage } from "scroll-mode.slint";
+import { RectModePage } from "rect-mode.slint";
+import { ImageModePage } from "image-mode.slint";
+import { NestModePage } from "nest-mode.slint";
+import { LayoutModePage } from "layout-mode.slint";
+
+export { DragProbe, Logic, PerfMode, RecordItem, Settings }
+
+export component MainWindow inherits Window {
+    in-out property <PerfMode> mode: PerfMode.text;
+    in-out property <string> text-content;
+    in property <[RecordItem]> records;
+    in-out property <length> scroll-y;
+    /// `text` mode: lay the document out with `wrap: word-wrap` instead of `no-wrap`.
+    in-out property <bool> word-wrap;
+    in property <int> rect-count: 1000;
+    in property <int> rect-gradient-kind;
+    in property <image> image-source;
+    in property <[image]> image-sources;
+    in property <bool> image-distinct;
+    in property <length> image-cell: 68px;
+    in property <int> layout-children: 4;
+    in property <int> layout-kind;
+    in property <bool> rect-use-path;
+    in property <bool> layout-stretch;
+    in property <bool> image-rescale;
+    in property <bool> image-tiling;
+    in property <ImageFit> image-fit: ImageFit.fill;
+    in property <int> nest-depth: 1;
+    in property <bool> nest-use-layout: true;
+    in property <float> rect-opacity: 1.0;
+    in property <length> rect-radius: 3px;
+    in property <length> rect-border: 1px;
+    in property <bool> rect-show-extra;
+    in property <int> rect-extra-count;
+    in property <bool> rect-animate;
+    in property <bool> rect-animate-color;
+    in property <float> rect-item-alpha: -1.0;
+    in property <int> rect-animate-count: 1000000;
+    in property <bool> rect-shadow;
+    in property <string> status;
+    in property <string> backend-info;
+    // `probe-count` leaf items (no children, no `visible:` binding, no drop-shadow sibling),
+    // absolutely positioned outside any layout, always rendered regardless of `mode` - for
+    // testing an `Opacity` wrapper's *direct* alpha-multiply path (`ItemRenderer::apply_opacity`)
+    // at scale, as opposed to the offscreen-layer path (`render_and_blend_layer`/
+    // `save_layer_alpha`) that `Opacity::need_layer` picks whenever the wrapped item has any
+    // sibling or child of its own - which every other opacity-capable element in this harness
+    // (`rect-mode.slint`'s Rectangle has a drop-shadow sibling; its Path has a `visible:` binding
+    // that lowers to an injected Clip wrapper) triggers unconditionally, regardless of mode.
+    // `probe-animate`: mirrors the reported bug pattern (a Spinner's Path `commands` driven by
+    // `animation-tick()` behind `opacity: 0`) but on a plain Rectangle's `background`, so a
+    // renderer with no alpha-gate before reading `background()` keeps evaluating
+    // `animation-tick()` forever even at `probe-opacity: 0`.
+    in property <int> probe-count: 0;
+    in property <float> probe-opacity: 1.0;
+    in property <bool> probe-animate: false;
+    // Same idea as `probe-count`, but each item has a statically-declared nested child of its
+    // own, so `Opacity::need_layer` returns true (offscreen `save_layer_alpha`/
+    // `render_and_blend_layer` path on Skia) instead of the direct alpha-multiply path
+    // `probe-count` exercises - candidate 068 found its per-draw-method alpha gate is a no-op on
+    // this path, since the layer's content must still be evaluated to populate it. Positioned in
+    // its own on-screen region so it can run independently of (or alongside) `probe-count`.
+    in property <int> probe-layer-count: 0;
+    in property <float> probe-layer-opacity: 1.0;
+    in property <bool> probe-layer-animate: false;
+
+    // Drag probe: exercises `ItemRenderer::draw_image_direct` (the `DragArea.drag-image` overlay),
+    // which - unlike every other image draw path - has no per-item cache at all, so it re-runs on
+    // every single rendered frame for as long as a drag stays in flight (started once below, never
+    // released, for the harness's whole `--frames` run). See candidate
+    // TEXTURE_CACHE_DRAIN_FULL_WALK's follow-up entry in `___OPTIMIZATIONS___/IDEAS.md`.
+    in property <image> drag-probe-image;
+    in property <bool> drag-probe-enabled: false;
+    out property <bool> drag-probe-dragging: drag-probe.dragging;
+
+    title: "Slint perf test - " + root.backend-info;
+    preferred-width: 1280px;
+    preferred-height: 860px;
+    background: Palette.background;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 8px;
+
+        HorizontalLayout {
+            spacing: 8px;
+
+            Button {
+                text: "1 - TextArea";
+                primary: root.mode == PerfMode.text;
+                clicked => {
+                    root.mode = PerfMode.text;
+                }
+            }
+
+            Button {
+                text: "2 - ListView";
+                primary: root.mode == PerfMode.list;
+                clicked => {
+                    root.mode = PerfMode.list;
+                }
+            }
+
+            Button {
+                text: "4 - Rects";
+                primary: root.mode == PerfMode.rects;
+                clicked => {
+                    root.mode = PerfMode.rects;
+                }
+            }
+
+            Button {
+                text: "3 - ScrollView";
+                primary: root.mode == PerfMode.scroll;
+                clicked => {
+                    root.mode = PerfMode.scroll;
+                }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            Text {
+                text: "renderer: " + root.backend-info;
+                color: Palette.foreground;
+                vertical-alignment: center;
+            }
+
+            repaint-check := CheckBox {
+                text: "force repaint";
+            }
+
+            // Reading animation-tick() keeps the animation driver alive, so the
+            // whole window is re-rendered every frame - that is what makes the
+            // renderer show up in a profile instead of an idle event loop.
+            Rectangle {
+                width: 16px;
+                height: 16px;
+                border-radius: 8px;
+                background: Palette.accent-background;
+                opacity: repaint-check.checked ? 0.25 + 0.75 * abs(sin(360deg * animation-tick() / 1s)) : 1.0;
+            }
+        }
+
+        if root.mode == PerfMode.text: TextModePage {
+            vertical-stretch: 1;
+            text <=> root.text-content;
+            scroll-y <=> root.scroll-y;
+            word-wrap <=> root.word-wrap;
+        }
+
+        if root.mode == PerfMode.list: ListModePage {
+            vertical-stretch: 1;
+            records: root.records;
+            scroll-y <=> root.scroll-y;
+        }
+
+        if root.mode == PerfMode.scroll: ScrollModePage {
+            vertical-stretch: 1;
+            records: root.records;
+            scroll-y <=> root.scroll-y;
+        }
+
+        if root.mode == PerfMode.nest: NestModePage {
+            vertical-stretch: 1;
+            count: root.rect-count;
+            depth: root.nest-depth;
+            use-layout: root.nest-use-layout;
+            scroll-y <=> root.scroll-y;
+        }
+
+        if root.mode == PerfMode.layouts: LayoutModePage {
+            vertical-stretch: 1;
+            count: root.rect-count;
+            children-count: root.layout-children;
+            kind: root.layout-kind;
+            stretch: root.layout-stretch;
+            scroll-y <=> root.scroll-y;
+        }
+
+        if root.mode == PerfMode.images: ImageModePage {
+            vertical-stretch: 1;
+            count: root.rect-count;
+            shared-source: root.image-source;
+            sources: root.image-sources;
+            distinct: root.image-distinct;
+            rescale: root.image-rescale;
+            tiling: root.image-tiling;
+            cell-width: root.image-cell;
+            cell-height: root.image-cell;
+            fit: root.image-fit;
+            scroll-y <=> root.scroll-y;
+        }
+
+        if root.mode == PerfMode.rects: RectModePage {
+            vertical-stretch: 1;
+            item-opacity: root.rect-opacity;
+            item-radius: root.rect-radius;
+            item-border: root.rect-border;
+            show-extra: root.rect-show-extra;
+            extra-count: root.rect-extra-count;
+            animate: root.rect-animate;
+            animate-color: root.rect-animate-color;
+            item-alpha: root.rect-item-alpha;
+            use-path: root.rect-use-path;
+            animate-count: root.rect-animate-count;
+            count: root.rect-count;
+            gradient-kind: root.rect-gradient-kind;
+            item-shadow: root.rect-shadow;
+            scroll-y <=> root.scroll-y;
+        }
+
+        Text {
+            text: root.status;
+            color: Palette.foreground;
+        }
+    }
+
+    // See `probe-count`'s doc comment above. Outside the `VerticalLayout` (plain x/y, not part of
+    // any layout) so this scales to thousands of items with no layout-engine cost of its own.
+    for i in root.probe-count: Rectangle {
+        x: mod(i, 64) * 18px;
+        y: 32px + floor(i / 64) * 18px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: root.probe-animate
+            ? Palette.accent-background.mix(Palette.alternate-background, abs(sin(360deg * animation-tick() / 1s + i * 1deg)))
+            : Palette.accent-background;
+        opacity: root.probe-opacity;
+    }
+
+    // See `probe-layer-count`'s doc comment above. Placed in the right-hand margin so it doesn't
+    // overlap `probe-count`'s grid when both are non-zero, and stays within the 1280x860 default
+    // window (32 columns x up to ~46 rows fit on-screen, avoiding any off-viewport subtree-bounds
+    // pruning as a confound).
+    for i in root.probe-layer-count: Rectangle {
+        x: 700px + mod(i, 32) * 18px;
+        y: 32px + floor(i / 32) * 18px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: root.probe-layer-animate
+            ? Palette.accent-background.mix(Palette.alternate-background, abs(sin(360deg * animation-tick() / 1s + i * 1deg)))
+            : Palette.accent-background;
+        opacity: root.probe-layer-opacity;
+
+        Rectangle {
+            x: 4px;
+            y: 4px;
+            width: 8px;
+            height: 8px;
+        }
+    }
+
+    // See `drag-probe-enabled`'s doc comment above. Always in the tree (not `if`-conditional, so
+    // its id stays reachable for `drag-probe-dragging` above) but only allowed to start a drag
+    // when explicitly enabled.
+    drag-probe := DragArea {
+        x: 0px;
+        y: 0px;
+        width: 40px;
+        height: 40px;
+        enabled: root.drag-probe-enabled;
+        data: DragProbe.make-transfer();
+        allow-copy: true;
+        drag-image: root.drag-probe-image;
+
+        Rectangle {
+            background: Palette.accent-background;
+            visible: root.drag-probe-enabled;
+        }
+    }
+}

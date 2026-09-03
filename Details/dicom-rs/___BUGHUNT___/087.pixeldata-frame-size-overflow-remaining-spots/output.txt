@@ -1,0 +1,29 @@
+=== BEFORE fix (pristine df2b9e42), `cargo run` inside repro/ (via `just test`, fresh clone) ===
+exit code: 1
+
+thread 'main' (106341) panicked at .../clone/pixeldata/src/lib.rs:2370:42:
+attempt to multiply with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+decode_pixel_data() on BitsAllocated=1, Rows=Cols=SamplesPerPixel=65535, NumberOfFrames=600000: REPRODUCED - panicked: attempt to multiply with overflow
+
+thread 'main' (106341) panicked at .../clone/pixeldata/src/lib.rs:2526:36:
+attempt to multiply with overflow
+decode_pixel_data_frame(3_000_000_000) on Rows=Cols=65535, BitsAllocated=16: REPRODUCED - panicked: attempt to multiply with overflow
+(non-zero exit expected here: bug reproduced)
+
+(repeated 3 more times against the main project's own working tree via a temporary
+`pixeldata/examples/repro_check.rs`, same panic message/location every run: 3/3 debug builds;
+`--release` against the same two inputs did not panic - the wrapped post-overflow value happened
+to still exceed the tiny real `data.len()`, same "coincidence of the exact values chosen" caveat
+already documented for candidate 037/086, not a guarantee for every overflowing input)
+
+=== AFTER fix (patch.diff applied), `cargo run` inside repro/ ===
+exit code: 0
+
+decode_pixel_data() on BitsAllocated=1, Rows=Cols=SamplesPerPixel=65535, NumberOfFrames=600000: did not reproduce - returned a graceful error: Frame #4294967295 is out of range
+decode_pixel_data_frame(3_000_000_000) on Rows=Cols=65535, BitsAllocated=16: did not reproduce - returned a graceful error: Frame #3000000000 is out of range
+
+=== Project test suite (cargo test -p dicom-pixeldata --lib --features image), run in the main
+     project's own working tree ===
+Before fix: test result: ok. 58 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out
+After fix:  test result: ok. 58 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out

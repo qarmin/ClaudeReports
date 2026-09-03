@@ -1,0 +1,49 @@
+=== BEFORE (pristine tree, base_commit ac975f5d) - debug build ===
+wrote ImageWidth=0 DNG to "/tmp/bughunt_004_zerowidth.dng"
+
+thread 'main' (45015) panicked at /home/rafal/Projekty/Obce/dnglab/rawler/src/decompressors/mod.rs:151:6:
+chunk_size must not be zero
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:80:14
+   2: <[u16] as rayon::slice::ParallelSliceMut<u16>>::par_chunks_mut
+             at /home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rayon-1.12.0/src/slice/mod.rs:289:9
+   3: rawler::decompressors::decompress_lines_fn::<u16, rawler::decoders::decode_strips<u16, rawler::decompressors::packed::PackedDecompressor>::{closure#1}>
+             at /home/rafal/Projekty/Obce/dnglab/rawler/src/decompressors/mod.rs:151:6
+   4: rawler::decoders::decode_strips::<u16, rawler::decompressors::packed::PackedDecompressor>
+             at /home/rafal/Projekty/Obce/dnglab/rawler/src/decoders/mod.rs:745:8
+   5: rawler::decoders::plain_image_from_ifd
+             at /home/rafal/Projekty/Obce/dnglab/rawler/src/decoders/mod.rs:632:56
+   6: <rawler::decoders::dng::DngDecoder as rawler::decoders::Decoder>::raw_image
+             at /home/rafal/Projekty/Obce/dnglab/rawler/src/decoders/dng.rs:69:20
+   7: rawler::analyze::raw_to_srgb::<&std::path::PathBuf>
+             at /home/rafal/Projekty/Obce/dnglab/rawler/src/analyze.rs:254:26
+   8: repro::main
+             at ./src/main.rs:55:11
+(reproduced identically 3/3 debug runs)
+
+=== BEFORE, release build (same input) ===
+wrote ImageWidth=0 DNG to "/tmp/bughunt_004_zerowidth.dng"
+
+thread 'main' (47794) panicked at /home/rafal/Projekty/Obce/dnglab/rawler/src/decompressors/mod.rs:151:6:
+chunk_size must not be zero
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+(not gated by overflow-checks/build profile - reproduces identically in release)
+
+=== AFTER (patch.diff applied) - same ImageWidth=0 DNG, run twice ===
+wrote ImageWidth=0 DNG to "/tmp/bughunt_004_zerowidth.dng"
+returned an error, no panic (bug not present): Failed to decode image, possibly corrupt image: decompress_lines_fn: width must not be zero
+wrote ImageWidth=0 DNG to "/tmp/bughunt_004_zerowidth.dng"
+returned an error, no panic (bug not present): Failed to decode image, possibly corrupt image: decompress_lines_fn: width must not be zero
+
+=== Boundary-value sweep with the fix applied (width height, via a variant of this repro - see RESULT.md) ===
+width=0 height=5: Err("decompress_lines_fn: width must not be zero") - no panic (fixed)
+width=0 height=0: Err("decompress_lines_fn: width must not be zero") - no panic (fixed)
+width=5 height=0: panics at rawimage.rs:287 "assertion failed: !image.is_empty()" - a SEPARATE,
+  unfixed bug (an empty-decoded-image invariant in RawImage's own constructor), not this
+  candidate's bug - see RESULT.md "What's not done"
+width=1 height=1, width=5 height=5: panic at ppg.rs:120 "attempt to subtract with overflow" -
+  the SEPARATE, already-fixed-and-reverted candidate 001 bug (this candidate's patch alone does
+  not touch ppg.rs) - expected, not a regression

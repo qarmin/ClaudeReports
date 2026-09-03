@@ -1,0 +1,74 @@
+=== Approach 1: differential release-build sweep (probe/simd vs probe/scalar, public API) ===
+Ran against the working tree at commit 7eec7cfde2aed58a1606a48b5c7bd084536f9624 (same base commit
+as candidate 013). `probe/simd` = default features (AVX2/SSE dispatch on this host); `probe/scalar`
+= default-features=false, features=["threading"] (scalar fixed_point_horizontal/vertical +
+floating_point_horizontal/vertical reference only). Both run identical deterministic content
+through Scaler::plan_planar_resampling / plan_cbcr_resampling / plan_planar_resampling16 /
+plan_cbcr_resampling16 / plan_planar_resampling_s16, across 11 ResamplingFunction variants x 16
+sizes (including widths/heights not a multiple of any SIMD lane width, and heights >= 2 to
+exercise the vertical convolution pass) x bit depths 8/10/12/16 for the u16/i16 paths, plus 4
+adversarial extreme-downscale (up to 200,000:1) cases per type to probe accumulator overflow.
+
+--- u8 Plane (1-channel) block: bit-exact ---
+line length 641050 chars, IDENTICAL between simd_out.txt and scalar_out.txt (0 diffs)
+
+--- u8 CbCr (2-channel) block: bit-exact ---
+line length 1301019 chars, IDENTICAL between simd_out.txt and scalar_out.txt (0 diffs)
+
+--- u16 Plane, bit_depth in {8,10,12} (i16-fixed-point AVX2 convolution path,
+    convolve_horizontal_plane_avx_u16lp_row / convolve_column_lb_avx2_u16): bit-exact ---
+0 / 528 rows differ (176 size/func combos x 3 bit depths)
+
+--- u16 CbCr, bit_depth in {8,10,12}: bit-exact ---
+0 / 528 rows differ (by code reading, CbCr u16 horizontal has no AVX2/SSE dispatch at all on
+x86_64 for either bit_depth range - see RESULT.md; vertical bit_depth<=12 does dispatch to
+convolve_column_lb_avx2_u16 and also shows 0 diffs)
+
+--- i16 signed planar, bit_depth in {8,10,12,16} (convolve_horizontal_plane_avx_i16lp_row /
+    convolve_column_lb_avx2_s16 for bit_depth<=12; scalar floating-point fallback for bit_depth=16
+    on x86_64, per code reading of src/factory/plane_s16.rs): bit-exact ---
+0 / 704 rows differ (176 size/func combos x 4 bit depths, full i16 value range incl. i16::MIN/MAX)
+
+--- u16 Plane, bit_depth=16 (f32-accumulator convolution path,
+    OneRowExecutionHandler-equivalent AVX2 tree-accumulation vs scalar sequential mul_add): NOT
+    bit-exact, same class as candidate 013's already-documented RGB/RGBA finding ---
+32 / 704 rows differ, max |diff| = 2 (candidate 013's RGB/RGBA sweep saw max |diff| = 1; this
+sweep's larger sample count for Plane16 shows an occasional +/-2 as well, still consistent with
+floating-point summation-order noise landing on/near an integer rounding boundary, not a distinct
+bug class - see RESULT.md root-cause section) - broken down by ResamplingFunction:
+     5 func=BSpline
+     2 func=Bilinear
+     2 func=Box
+     3 func=CatmullRom
+     4 func=Cubic
+     3 func=Hann
+     2 func=Lanczos3
+     3 func=Lanczos4Jinc
+     5 func=MitchellNetravalli
+     5 func=Spline36
+     0 func=Nearest   (kernel_size always 1 -> no summation-order freedom, consistent with 013)
+
+--- u16 CbCr, bit_depth=16: same class, much rarer here (see RESULT.md for why) ---
+2 / 704 rows differ, 3 sample values total, max |diff| = 1
+
+--- Extreme accumulator-overflow probe (12 EXTREME_* lines: 200,000:1 / 150,000:1 downscale
+    ratios, alternating min/max or i16::MIN/i16::MAX pixel content, Lanczos3) ---
+No panic, no crash, in either binary. simd and scalar EXTREME_* output lines are byte-identical
+(diffed separately, 0 mismatches) for all of EXTREME_PLANE16 / EXTREME_CBCR16 / EXTREME_PLANES16.
+
+Re-ran the full sweep 3x (both binaries): byte-for-byte identical output across all 3 runs each -
+deterministic, not flaky.
+
+=== Approach 2: debug-assertions=on + overflow-checks=on rebuild (both probe/simd and
+    probe/scalar), full sweep re-run ===
+`RUSTFLAGS="-C overflow-checks=on -C debug-assertions=on" cargo build --release`, both binaries.
+No panic in either binary (including the EXTREME_* cases). Output byte-for-byte identical to the
+plain-release-build output for both binaries (0 diffs) - confirms no integer overflow silently
+wrapping and no arithmetic panic under checked arithmetic, for any of the swept Plane/CbCr/i16
+paths at any tested bit depth or size.
+
+=== Approach 3: manual code reading of tap-index arithmetic ===
+`grep -rn 'bounds\.start' src/avx2/plane_u16.rs src/avx2/plane_s16_lb.rs src/sse/plane_u8.rs
+src/sse/cbcr8.rs` confirms every Plane/CbCr AVX2/SSE kernel checked uses the identical
+`bounds.start + jx`/`bounds_start` addressing scheme as the scalar reference and as the RGB/RGBA
+kernels candidate 013 already found clean - no per-channel-count-specific indexing variant found.

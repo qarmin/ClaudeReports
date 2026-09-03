@@ -1,0 +1,33 @@
+=== BEFORE FIX (pristine upstream df2b9e42, unmodified pixeldata/src/gdcm.rs) ===
+calling decode_pixel_data() via the gdcm feature's native/uncompressed path...
+decode_pixel_data() returned Ok: cols=8 rows=8 number_of_frames=2 data.len()=16 (expected 128)
+BUG: data buffer is 8x smaller than implied by bits_allocated/cols/rows/number_of_frames
+calling frame_data(1) (second frame) on the decoded result...
+REPRODUCED - frame_data(1) failed: Frame #1 is out of range
+
+(reproduced deterministically 3/3 runs)
+
+=== AFTER FIX (patch.diff applied to pixeldata/src/gdcm.rs) ===
+calling decode_pixel_data() via the gdcm feature's native/uncompressed path...
+decode_pixel_data() returned Ok: cols=8 rows=8 number_of_frames=2 data.len()=128 (expected 128)
+calling frame_data(1) (second frame) on the decoded result...
+frame_data(1) succeeded (no bug observed)
+
+(correct behavior reproduced deterministically 3/3 runs)
+
+=== Real project test suite (before fix), cargo test -p dicom-pixeldata --features "gdcm image" --lib ===
+thread 'tests::test_1bit_image_decoding_data_frame' panicked at pixeldata/src/gdcm.rs:293:22:
+chunk size must be non-zero
+thread 'tests::test_1bit_image_decoding_data' panicked at pixeldata/src/lib.rs:3227:58:
+called `Result::unwrap()` on an `Err` value: Error(FrameOutOfRange { frame_number: 0, ... })
+test result: FAILED. 81 passed; 2 failed; 3 ignored; 0 measured; 0 filtered out
+
+=== Real project test suite (after fix), cargo test -p dicom-pixeldata --features "gdcm image" --lib ===
+thread 'tests::test_1bit_image_decoding_data_frame' panicked at pixeldata/src/gdcm.rs:312:22:
+chunk size must be non-zero
+test tests::test_1bit_image_decoding_data ... ok
+test result: FAILED. 82 passed; 1 failed; 3 ignored; 0 measured; 0 filtered out
+(the remaining failure, tests::test_1bit_image_decoding_data_frame, is the pre-existing,
+unrelated bug in decode_pixel_data_frame already fixed separately by candidate 097 - not
+touched by this candidate's patch, and not present here since 097's own fix was reverted
+per this workspace's "always revert" rule before this candidate was investigated)

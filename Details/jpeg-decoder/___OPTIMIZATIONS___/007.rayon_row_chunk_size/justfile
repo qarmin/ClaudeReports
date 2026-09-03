@@ -1,0 +1,59 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in,
+# except for the one canonical `bench_decode` harness copy at ___OPTIMIZATIONS___/harness/
+# (see README.md's "Instrumentation added for this workspace" - kept as a single copy reused by
+# every candidate rather than duplicated per-candidate). That relaxes "postable as a single
+# folder with zero other setup" to "self-contained given the whole ___OPTIMIZATIONS___ folder",
+# per README.md.
+
+repo_url := "https://github.com/image-rs/jpeg-decoder.git"
+base_commit := "eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c"
+harness_dir := "../harness/bench_decode"
+
+# Full cycle: clone at the pinned commit, build a BASELINE binary before touching anything,
+# apply the patch (ROW_CHUNK=4, the value this candidate settled on), build a PATCHED binary,
+# then run both on all three workload images so the reader doesn't have to reproduce the
+# comparison by hand.
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/bench_decode
+    sed -i 's#path = "\.\./\.\./\.\."#path = ".."#' clone/bench_decode/Cargo.toml
+
+build-baseline:
+    cd clone/bench_decode && cargo +stable build --release
+    cp clone/bench_decode/target/release/bench_decode ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    find clone/src -name '*.rs' -exec touch {} +
+    cd clone/bench_decode && cargo +stable build --release
+    cp clone/bench_decode/target/release/bench_decode ./bin_patched
+
+# Prints min/p50/... for baseline then patched on all three images this candidate measured:
+# the small baseline image (regression risk case), the progressive image, and the mid-size
+# realistic photo. RESULT.md has the full paired.sh numbers (multiple repeats per image); this
+# just demonstrates the harness is reproducible end-to-end, not a substitute for those.
+bench:
+    @echo "=== baseline (before patch): tower.jpg (512x512, small-image regression check) ==="
+    ./bin_baseline clone/benches/tower.jpg 30
+    @echo "=== patched (after patch): tower.jpg ==="
+    ./bin_patched  clone/benches/tower.jpg 30
+    @echo "=== baseline: tower_progressive.jpg (512x512, progressive) ==="
+    ./bin_baseline clone/benches/tower_progressive.jpg 30
+    @echo "=== patched: tower_progressive.jpg ==="
+    ./bin_patched  clone/benches/tower_progressive.jpg 30
+    @echo "=== baseline: large_image.jpg (2268x1512, mid-size) ==="
+    ./bin_baseline clone/benches/large_image.jpg 30
+    @echo "=== patched: large_image.jpg ==="
+    ./bin_patched  clone/benches/large_image.jpg 30
+
+clean:
+    rm -rf clone bin_baseline bin_patched

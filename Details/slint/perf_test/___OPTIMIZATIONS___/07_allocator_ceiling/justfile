@@ -1,0 +1,31 @@
+harness := justfile_directory() + "/../.."
+glibc := justfile_directory() + "/../../../target/rdebug/perf_test"
+
+# glibc vs mimalloc across the scenes (medians of 3). Software renderer, no display needed.
+run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{ harness }}
+    cargo build --profile rdebug --bin perf_test
+    cargo build --profile rdebug --bin perf_test --no-default-features \
+        --features femtovg,software,mimalloc
+    cp ../target/rdebug/perf_test /tmp/perf_test_mimalloc
+    cargo build --profile rdebug --bin perf_test    # restore the counting-allocator build
+    med() { python3 -c "import sys;v=sorted(float(x) for x in sys.argv[1:]);print(f'{v[len(v)//2]:.2f}')" "$@"; }
+    for bin in {{ glibc }} /tmp/perf_test_mimalloc; do
+        name=$([ "$bin" = "/tmp/perf_test_mimalloc" ] && echo mimalloc || echo glibc)
+        for scene in "scroll 100000" "rects 3000"; do
+            set -- $scene
+            vals=""
+            for i in 1 2 3; do
+                v=$($bin --bench --mode $1 --count $2 --frames 6 | awk '/^later frames/{gsub("ms","",$3); print $3}')
+                vals="$vals $v"
+            done
+            printf "%-9s %-14s runs:%s median=%s ms\n" "$name" "$1 $2" "$vals" "$(med $vals)"
+        done
+    done
+
+# The control: is mimalloc actually faster for this allocation pattern?
+run-control:
+    cd {{ justfile_directory() }}/allocbench_mimalloc && cargo run --release -- 700000
+    cd {{ harness }} && just allocbench

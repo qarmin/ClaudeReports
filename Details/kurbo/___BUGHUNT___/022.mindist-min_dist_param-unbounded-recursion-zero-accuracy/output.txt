@@ -1,0 +1,93 @@
+=== `just test` (fresh clone at ca273499e3e48bd2de6f02aa8e99a148984e45f3, real captured run) ===
+
+rm -rf clone
+git clone https://github.com/linebender/kurbo.git clone
+Cloning into 'clone'...
+cd clone && git checkout ca273499e3e48bd2de6f02aa8e99a148984e45f3
+HEAD is now at ca27349 ci: Update to stable Rust 1.97.1, typos 1.48.0 (#596)
+
+--- reproduce-before (pristine clone, release build) ---
+cd repro && cargo run --release
+    Finished `release` profile [optimized] target(s) in 0.90s
+     Running `target/release/mindist-unbounded-recursion-repro`
+calling PathSeg::min_dist(other, accuracy = 0.0) on two plain Line segments...
+(a stack overflow here - process aborts, no panic to catch - IS the reproduction)
+
+thread 'main' (170181) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+Aborted (core dumped)
+
+--- apply patch.diff ---
+cd clone && git apply ".../patch.diff"
+
+--- reproduce-after (patched clone, release build) ---
+cd repro && cargo run --release
+    Finished `release` profile [optimized] target(s) in 0.64s
+     Running `target/release/mindist-unbounded-recursion-repro`
+calling PathSeg::min_dist(other, accuracy = 0.0) on two plain Line segments...
+(a stack overflow here - process aborts, no panic to catch - IS the reproduction)
+did not reproduce - min_dist returned normally: distance=5, t1=0.0001220703125, t2=0.0001220703125
+
+`just test` exit code: 0
+
+
+=== Repeat-run confirmation (before fix, working tree, release build, 4/4 runs) ===
+
+$ for i in 1 2 3; do timeout 30 ./target/release/examples/mindist_repro; echo exit $?; done
+thread 'main' (161200) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+exit 134
+thread 'main' (161207) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+exit 134
+thread 'main' (161237) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+exit 134
+
+(plus the original first run, also stack overflow - 4/4 total, both release and debug profiles.)
+
+
+=== Evidence that flooring `epsilon` alone (without a depth cap) is insufficient ===
+
+A first fix attempt only clamped `epsilon` to a small positive floor (e.g. `epsilon.max(1e-9)`).
+This does stop the literal crash for `accuracy = 0.0` on the two axis-aligned parallel Lines used
+above (bounded recursion depth ~30, terminates fast: prints `result: 5.0`). But probing the same
+`min_dist_param` termination check directly with a *slightly skewed* pair of Lines and a range of
+small-but-positive `epsilon` values shows the underlying subdivision search itself does very
+little effective pruning for near-parallel/near-symmetric input - total work scales close to
+O(1/epsilon), not O(log(1/epsilon)):
+
+    eps=0.1     result: 4.7909419741842      in 183.808µs
+    eps=0.01    result: 4.789234550335262    in 1.654344ms
+    eps=0.001   result: 4.789131500095557    in 13.293628ms
+    eps=0.0001  result: 4.789131430476778    in 208.723885ms
+    eps=0.00001 result: 4.789131426228914    in 1.964530676s
+    eps=0.000001 result: 4.789131426107847   in 14.275514552s
+
+And with the exact original repro (accuracy = 0.0, epsilon floored to 1e-9 only, no depth cap):
+still did not return within 180s (`timeout 180 ./mindist_repro` exited 124 - timed out, not
+crashed). This is why the shipped fix (`patch.diff`) adds a hard recursion-depth backstop
+(`MAX_DEPTH = 12`, independent of `epsilon`'s value) rather than only flooring `epsilon`.
+
+
+=== After the real fix (depth cap), same probe re-run - now flat/bounded regardless of epsilon ===
+
+    eps=0.1      result: 4.7909419741842     in 215.709µs
+    eps=0.01     result: 4.789234550335262   in 1.946218ms
+    eps=0.001    result: 4.789131500095557   in 15.863458ms
+    eps=0.0001   result: 4.789131500095557   in 63.634976ms
+    eps=0.00001  result: 4.789131500095557   in 63.292507ms
+    eps=0.000001 result: 4.789131500095557   in 63.606251ms
+
+    $ (original repro, accuracy = 0.0) -> result: 5.0, exit 0, < 100ms
+    $ (skewed-line repro, accuracy = 0.0) -> result: 4.789131500095557 in 64.556261ms, exit 0
+
+
+=== Project test suite (release, `cargo test --release -p kurbo`) ===
+
+Before patch: 185 passed; 2 failed; 0 ignored (bezpath::tests::test_elements_to_segments_starts_on_closepath,
+bezpath::tests::test_must_not_start_on_quad - both pre-existing, unrelated to mindist.rs).
+After patch: 185 passed; 2 failed; 0 ignored - identical failing tests, no new failures.
+
+mindist module tests specifically, after patch: 6 passed; 0 failed
+(test_choose, test_d_rk, test_overflow, test_out_of_order, test_line_curve, test_mindist)

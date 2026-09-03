@@ -1,0 +1,104 @@
+diff --git a/object/src/lib.rs b/object/src/lib.rs
+index 29dc7c0b..e61b6505 100644
+--- a/object/src/lib.rs
++++ b/object/src/lib.rs
+@@ -732,6 +732,8 @@ pub enum ReadError {
+     },
+     #[snafu(display("Premature data set end"))]
+     PrematureEnd { backtrace: Backtrace },
++    #[snafu(display("Data set sequences are nested too deeply (limit is {max_depth})"))]
++    NestingTooDeep { max_depth: u32, backtrace: Backtrace },
+ }
+ 
+ /// An error which may occur when writing a DICOM object
+diff --git a/object/src/mem.rs b/object/src/mem.rs
+index f403b109..747feec2 100644
+--- a/object/src/mem.rs
++++ b/object/src/mem.rs
+@@ -60,8 +60,9 @@ use crate::{
+     AccessByNameError, AccessError, AtAccessError, BuildMetaTableSnafu, CreateParserSnafu,
+     CreatePrinterSnafu, DicomObject, ElementNotFoundSnafu, FileDicomObject, InvalidGroupSnafu,
+     MissingElementValueSnafu, MissingLeafElementSnafu, NoSpaceSnafu, NoSuchAttributeNameSnafu,
+-    NoSuchDataElementAliasSnafu, NoSuchDataElementTagSnafu, NotASequenceSnafu, OpenFileSnafu,
+-    ParseMetaDataSetSnafu, ParseSopAttributeSnafu, PrematureEndSnafu, PrepareMetaTableSnafu,
++    NoSuchDataElementAliasSnafu, NoSuchDataElementTagSnafu, NestingTooDeepSnafu, NotASequenceSnafu,
++    OpenFileSnafu, ParseMetaDataSetSnafu, ParseSopAttributeSnafu, PrematureEndSnafu,
++    PrepareMetaTableSnafu,
+     PrintDataSetSnafu, PrivateCreatorNotFoundSnafu, PrivateElementError, ReadError, ReadFileSnafu,
+     ReadPreambleBytesSnafu, ReadTokenSnafu, ReadUnrecognizedTransferSyntaxSnafu,
+     ReadUnsupportedTransferSyntaxSnafu, ReadUnsupportedTransferSyntaxWithSuggestionSnafu,
+@@ -2150,6 +2151,13 @@ where
+ 
+     // private methods
+ 
++    /// Maximum supported nesting depth of data set sequences.
++    ///
++    /// `build_object`/`build_sequence` recurse once per sequence level, so an
++    /// unbounded depth (from a maliciously crafted, deeply nested data set)
++    /// would otherwise overflow the call stack.
++    const MAX_SEQUENCE_DEPTH: u32 = 1024;
++
+     /// Build an object by consuming a data set parser.
+     fn build_object<I>(
+         dataset: &mut I,
+@@ -2162,6 +2170,27 @@ where
+     where
+         I: ?Sized + Iterator<Item = ParserResult<DataToken>>,
+     {
++        Self::build_object_impl(dataset, dict, in_item, len, read_until, read_to, 0)
++    }
++
++    fn build_object_impl<I>(
++        dataset: &mut I,
++        dict: D,
++        in_item: bool,
++        len: Length,
++        read_until: Option<Tag>,
++        read_to: Option<Tag>,
++        depth: u32,
++    ) -> Result<Self, ReadError>
++    where
++        I: ?Sized + Iterator<Item = ParserResult<DataToken>>,
++    {
++        ensure!(
++            depth <= Self::MAX_SEQUENCE_DEPTH,
++            NestingTooDeepSnafu {
++                max_depth: Self::MAX_SEQUENCE_DEPTH
++            }
++        );
+         let mut entries: BTreeMap<Tag, InMemElement<D>> = BTreeMap::new();
+         // perform a structured parsing of incoming tokens
+         while let Some(token) = dataset.next() {
+@@ -2214,7 +2243,7 @@ where
+                     }
+ 
+                     // delegate sequence building to another function
+-                    let items = Self::build_sequence(tag, len, &mut *dataset, &dict)?;
++                    let items = Self::build_sequence(tag, len, &mut *dataset, &dict, depth + 1)?;
+                     DataElement::new_with_len(
+                         tag,
+                         VR::SQ,
+@@ -2303,6 +2332,7 @@ where
+         _len: Length,
+         dataset: &mut I,
+         dict: &D,
++        depth: u32,
+     ) -> Result<C<InMemDicomObject<D>>, ReadError>
+     where
+         I: ?Sized + Iterator<Item = ParserResult<DataToken>>,
+@@ -2311,13 +2341,14 @@ where
+         while let Some(token) = dataset.next() {
+             match token.context(ReadTokenSnafu)? {
+                 DataToken::ItemStart { len } => {
+-                    items.push(Self::build_object(
++                    items.push(Self::build_object_impl(
+                         &mut *dataset,
+                         dict.clone(),
+                         true,
+                         len,
+                         None,
+                         None,
++                        depth,
+                     )?);
+                 }
+                 DataToken::SequenceEnd => {

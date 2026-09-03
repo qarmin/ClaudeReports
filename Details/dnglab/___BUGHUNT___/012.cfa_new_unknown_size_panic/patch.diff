@@ -1,0 +1,38 @@
+diff --git a/rawler/src/cfa.rs b/rawler/src/cfa.rs
+index 1629410c..96ad15fe 100644
+--- a/rawler/src/cfa.rs
++++ b/rawler/src/cfa.rs
+@@ -121,7 +121,13 @@ impl CFA {
+       36 => (6, 6),
+       16 => (2, 8),
+       144 => (12, 12),
+-      _ => panic!("Unknown CFA size \"{}\"", patname),
++      _ => {
++        // Unexpected pattern length can come directly from file-provided tag data (e.g. a
++        // malformed CFAPattern/XTransLayout tag) - treat it the same as an empty/unknown
++        // pattern instead of panicking, so a crafted or corrupted file can't crash the decoder.
++        log::warn!("Unknown CFA size \"{}\" ({} bytes), falling back to an empty pattern", patname, patname.len());
++        (0, 0)
++      }
+     };
+     let mut pattern: [[u8; 48]; 48] = [[0; 48]; 48];
+ 
+diff --git a/rawler/src/decoders/dng.rs b/rawler/src/decoders/dng.rs
+index 00033141..1a162b54 100644
+--- a/rawler/src/decoders/dng.rs
++++ b/rawler/src/decoders/dng.rs
+@@ -355,7 +355,13 @@ impl<'a> DngDecoder<'a> {
+     if let Some(active_area) = self.get_active_area_borders(raw) {
+       let top = active_area[0];
+       let left = active_area[1];
+-      Ok(cfa.shift(left % cfa.width, top % cfa.height))
++      if cfa.is_valid() {
++        Ok(cfa.shift(left % cfa.width, top % cfa.height))
++      } else {
++        // cfa.width/height are 0 for an invalid/unrecognized pattern - shifting by a
++        // modulus of 0 would panic, so just pass the (already invalid) CFA through unchanged.
++        Ok(cfa)
++      }
+     } else {
+       Ok(cfa)
+     }

@@ -1,0 +1,79 @@
+############################################################
+# candidate 008 aarch64_neon_tbl1_oob_load - captured output
+# host x86_64, qemu-aarch64 8.x, rustc 1.100.0-nightly (fb6531d55 2026-08-23)
+# cg_clif worktree = 2bc05d45 + repro/128bit_atomics_measurement.diff ONLY
+#   (git diff --numstat in that worktree:)
+#   2	2	src/intrinsics/mod.rs
+############################################################
+
+== 1. boundary-value program (repro/tbl1.rs): 8 hand-picked index vectors per variant ==
+$ WORKDIR=... CLIF_ROOT=$WT bash ___BUGHUNT___/tools/aarch64_diffcheck.sh repro/tbl1.rs
+[build] core (LLVM)
+[build] core (cg_clif @ /home/rafal/Projekty/Obce/rustc_codegen_cranelift/tmp/wt/008.aarch64_neon_tbl1_oob_load)
+llvm exit=0
+clif exit=0
+IDENTICAL (16 lines)
+(exit 0)
+
+-- cg_clif run-time output (identical to LLVM's, byte for byte) --
+vqtbl1_u8 (v8i8)
+16 17 18 19 20 21 22 23 
+24 25 26 27 28 29 30 31 
+31 0 0 24 23 16 0 0 
+0 0 0 0 0 0 0 0 
+0 0 0 0 0 0 0 0 
+0 0 0 0 0 0 0 0 
+23 24 31 0 0 0 0 0 
+17 18 19 20 0 0 0 0 
+vqtbl1q_u8 (v16i8)
+16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 
+31 30 29 28 27 26 25 24 23 22 21 20 19 18 17 16 
+0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 
+16 0 17 0 24 0 31 0 23 0 0 19 0 0 21 0 
+0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 
+0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 
+
+== 2. exhaustive sweep (repro/tbl1_sweep.rs): every index byte 0..=255 in every lane
+==    position, for vqtbl1_u8 (8 lanes) and vqtbl1q_u8 (16 lanes), plus all-lanes-equal ==
+$ WORKDIR=... CLIF_ROOT=$WT bash ___BUGHUNT___/tools/aarch64_diffcheck.sh repro/tbl1_sweep.rs
+llvm exit=0
+clif exit=0
+IDENTICAL (6400 lines)
+(exit 0)
+
+-- a few sample lines from the (identical) sweep output --
+0:0:16,16,16,16,16,16,16,16,
+0q0:16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+0all:16,16,16,16,16,16,16,16,|16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,
+5q2:16,16,101,16,16,16,16,16,16,16,16,16,16,16,16,16,
+59all:0,0,0,0,0,0,0,0,|0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+255all:0,0,0,0,0,0,0,0,|0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+
+== 3. the emitted aarch64 machine code (cg_clif, opt-level 0) for core::arch::aarch64::vqtbl1 ==
+$ rustc-clif --target aarch64-unknown-linux-gnu --emit obj oneshot.rs
+$ llvm-objdump -d --disassemble-symbols=_RNvNtNtNtNtCsibPcsyoQQ7T_4core9core_arch7aarch644neon9generated6vqtbl1Cs8CmbJh2Ulwu_7oneshot oneshot.o
+   x0 = pointer to the 16-byte table, x1 = pointer to the index vector.
+   Note 'ldrb w4, [x0, x4]' with x4 = the *unmasked* index byte (0..=255): the load runs
+   unconditionally and only afterwards does 'cmp #0x10' + 'csel' throw the value away.
+
+
+0000000000000000 <_RNvNtNtNtNtCsibPcsyoQQ7T_4core9core_arch7aarch644neon9generated6vqtbl1Cs8CmbJh2Ulwu_7oneshot>:
+       0: a9bf7bfd     	stp	x29, x30, [sp, #-0x10]!
+       4: 910003fd     	mov	x29, sp
+       8: 52800002     	mov	w2, #0x0                // =0
+       c: 39400023     	ldrb	w3, [x1]
+      10: 53001c64     	uxtb	w4, w3
+      14: d2800025     	mov	x5, #0x1                // =1
+      18: 9b057c84     	mul	x4, x4, x5
+      1c: 38646804     	ldrb	w4, [x0, x4]
+      20: 53001c63     	uxtb	w3, w3
+      24: 7100407f     	cmp	w3, #0x10
+      28: 9a842043     	csel	x3, x2, x4, hs
+      2c: 39000103     	strb	w3, [x8]
+      30: 39400423     	ldrb	w3, [x1, #0x1]
+      34: 53001c64     	uxtb	w4, w3
+      38: d2800025     	mov	x5, #0x1                // =1
+      3c: 9b057c84     	mul	x4, x4, x5
+      40: 38646804     	ldrb	w4, [x0, x4]
+      44: 53001c63     	uxtb	w3, w3
+      48: 7100407f     	cmp	w3, #0x10

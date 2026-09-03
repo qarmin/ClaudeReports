@@ -1,0 +1,36 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate is a MEASUREMENT/characterization, not a source-code performance fix (same
+# shape as candidates 011/017): patch.diff only adds temporary Instant+AtomicU64 instrumentation
+# (candidates 007/010/011's existing bucket instrumentation from ../_reference/, verbatim, plus
+# one new atomic/timer added by this candidate to isolate the `sh`-operator's own
+# `fill_path_impl` call from the rest of the `xobject_misc` bucket) plus one example
+# (`hayro/examples/bench_ops_reference.rs`, copied in below since it's a new file, not a diff
+# against a tracked one) that prints the decomposed breakdown. No permanent source change is
+# being proposed here - see RESULT.md.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone at the pinned commit, apply the instrumentation, drop in the bench example,
+# build, run the breakdown against the test PDF in this folder's testdata/.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cp "{{justfile_directory()}}/bench_ops_reference.rs" clone/hayro/examples/bench_ops_reference.rs
+
+# Prints the full operator-bucket time breakdown (see RESULT.md for how to read it, in
+# particular the "candidate 028" section at the bottom) against the test PDF, taskset-pinned
+# for low noise. Override iteration count with `just bench 200`.
+bench iterations="40":
+    cd clone && cargo build --release --example bench_ops_reference -p hayro
+    taskset -c 2 ./clone/target/release/examples/bench_ops_reference "{{justfile_directory()}}/testdata/shading_operator_1.pdf" {{iterations}}
+
+clean:
+    rm -rf clone

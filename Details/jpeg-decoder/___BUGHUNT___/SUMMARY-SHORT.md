@@ -1,0 +1,17 @@
+# Confirmed bugs (Status: Confirmed only)
+
+Filtered from `SUMMARY.md` - see that file for every candidate investigated (including
+Not-reproducible and Inconclusive ones) and the full methodology behind each finding.
+
+| # | Class | Candidate | Fix lines | Root cause | Introduced by |
+|---|---|---|---|---|---|
+| 001 | logic | lossless.rs decode_scan_lossless generic predict() branch frozen restart flag | +10/-4 | Restart-boundary flag for `predict()` is computed once after the entropy-decode loop instead of per pixel, so every prediction call after the first restart uses a stale value. | 770a5a2 |
+| 002 | logic | lossless.rs decode_scan_lossless Predictor::Ra fast path missing restart reset | +22/-6 | The Ra predictor's hand-unrolled fast path never resets to the frame default at restart-marker boundaries, always carrying the previous pixel's value forward instead. | 770a5a2 |
+| 003 | logic | lossless.rs predict() default-prediction guard off-by-one | +1/-1 | Guard threshold is one notch stricter than the precision/point_transform invariant SOS parsing now enforces, so the legal boundary case falls into the else branch and yields 0 instead of the spec-correct 1. | 3179243 |
+| 005 | crash | decoder.rs decode_scan MCU-grid bounds check u16 multiply overflow | +3/-3 | MCU-grid bounds checks multiply u16 mcu_x/mcu_y by 8 with no widening; non-interleaved block_size can exceed 8192, overflowing the multiply before the bounds check can break the loop. | 6d9fd3e |
+| 006 | crash | decoder.rs color_no_convert unbounded output_iter.next().unwrap() | +15/-3 | color_no_convert writes each component's full oversized line-scratch buffer instead of just output_width valid samples, so any chroma-subsampled image exhausts the output iterator and panics. | 21a7a3b |
+| 007 | logic | decoder.rs select_worker Multithreaded-branch height/width copy-paste | +1/-1 | select_worker computes height from frame.output_size.width instead of .height, squaring width instead of width*height when comparing against PARALLELISM_THRESHOLD. | cfa7b49 |
+| 010 | logic | lossless.rs predict() upstream PR #287 Predictor::Ra fast-path prediction_baseline guard | +7/-5 | PR #287's unified prediction_baseline computation imports candidate 003's too-strict precision guard into the Ra fast path, which previously computed the value unconditionally and correctly. | not determined |
+| 011 | logic | decoder.rs HuffmanDecoder::read_bits / decode_internal truncated-scan hard EOF | +23/-6 | A truncated entropy-coded scan's UnexpectedEof is propagated as a hard Error::Io instead of zero-filling like a found marker, rejecting real-world truncated JPEGs other decoders still decode. | 1333a77 |
+| 014 | crash | decoder.rs decode_scan batch_this_scan dry-run u16 multiply overflow (unmerged ___OPTIMIZATIONS___ 009/016 patches) | +7/-2 | 009/016's new pre-scan batch_this_scan dry-run loop recomputes (mcu_y + 1) * 8 in u16 with no early-exit tied to decode failure, so a malformed SOF with height=0xFFFF overflows u16 and panics under debug-assertions. | not determined |
+| 017 | crash | worker/immediate.rs and worker/rayon.rs per-component decode buffer size usize multiply overflow | +14/-0 | Buffer-size computation (block_size.width * height * dct_scale * dct_scale) is an unchecked usize product; on a 32-bit target (wasm32) a legal 65535x65535 JPEG wraps/exceeds isize::MAX, panicking instead of returning an error. | 3123fc57 |

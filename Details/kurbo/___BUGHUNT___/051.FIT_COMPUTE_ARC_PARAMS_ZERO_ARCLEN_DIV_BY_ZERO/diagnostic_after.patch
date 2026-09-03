@@ -1,0 +1,38 @@
+diff --git a/kurbo/src/fit.rs b/kurbo/src/fit.rs
+index 1f739cb..6b0158d 100644
+--- a/kurbo/src/fit.rs
++++ b/kurbo/src/fit.rs
+@@ -273,9 +273,23 @@ impl CurveDist {
+             }
+         }
+         let arclen_inv = arclen.recip();
+-        for x in &mut self.arcparams {
+-            *x *= arclen_inv;
++        eprintln!(
++            "[bughunt-051 diagnostic] compute_arc_params: range={:?} arclen={arclen} arclen_inv={arclen_inv}",
++            self.range
++        );
++        // If the source curve reports a zero derivative everywhere in this range (e.g.
++        // a degenerate `ParamCurveFit` implementor), `arclen` is exactly 0.0 and
++        // `arclen_inv` is infinite; multiplying the (all-zero) partial sums by it
++        // would produce NaN. Leave the raw (already all-zero) values in place instead.
++        if arclen_inv.is_finite() {
++            for x in &mut self.arcparams {
++                *x *= arclen_inv;
++            }
+         }
++        eprintln!(
++            "[bughunt-051 diagnostic] compute_arc_params: arcparams after scaling = {:?}",
++            self.arcparams
++        );
+     }
+ 
+     /// Evaluate distance based on arc length parametrization
+@@ -286,6 +300,7 @@ impl CurveDist {
+         let mut max_err2 = 0.0;
+         for (sample, s) in self.samples.iter().zip(&self.arcparams) {
+             let t = c.inv_arclen(c_arclen * s, EPS);
++            eprintln!("[bughunt-051 diagnostic] eval_arc: s={s} c_arclen={c_arclen} -> t={t}");
+             let err = sample.p.distance_squared(c.eval(t));
+             max_err2 = err.max(max_err2);
+             if max_err2 > acc2 {

@@ -1,0 +1,45 @@
+diff --git a/hayro-interpret/src/interpret/mod.rs b/hayro-interpret/src/interpret/mod.rs
+index 8bb5ae73..9ad17cc2 100644
+--- a/hayro-interpret/src/interpret/mod.rs
++++ b/hayro-interpret/src/interpret/mod.rs
+@@ -230,6 +230,12 @@ pub fn interpret<'a>(
+ ) {
+     let num_states = context.num_states();
+     let mut font_dict_cache = FxHashMap::<Name<'a>, Dict<'a>>::default();
++    // Caches the fully-resolved font per resource name, scoped to this content stream (like
++    // `font_dict_cache` above) rather than persisted on `context` - a `Tf` operator referencing
++    // the same name almost always means the same font throughout one content stream, but the
++    // same name can point at a different font in a nested Form XObject's own `Resources` dict
++    // (which gets its own fresh `interpret()` call/cache), so this must not survive across calls.
++    let mut resolved_font_cache = FxHashMap::<Name<'a>, Option<TextStateFont<'a>>>::default();
+ 
+     context.save_state();
+ 
+@@ -564,14 +570,20 @@ pub fn interpret<'a>(
+                 // 2) In case it's `None` because we were unable to resolve the font
+                 // (for whatever reason), leave it as `None`. Better showing no
+                 // text at all than garbage text.
+-                let font = if let Some(font_dict) = font_dict_cache.get(name).cloned() {
+-                    context.resolve_font(&font_dict)
+-                } else if let Some(font_dict) = resources.get_font(name) {
+-                    font_dict_cache.insert(name.clone(), font_dict.clone());
+-                    context.resolve_font(&font_dict)
++                let font = if let Some(resolved) = resolved_font_cache.get(name) {
++                    resolved.clone()
+                 } else {
+-                    Font::new_standard(StandardFont::Helvetica, &context.settings.font_resolver)
+-                        .map(TextStateFont::Fallback)
++                    let resolved = if let Some(font_dict) = font_dict_cache.get(name).cloned() {
++                        context.resolve_font(&font_dict)
++                    } else if let Some(font_dict) = resources.get_font(name) {
++                        font_dict_cache.insert(name.clone(), font_dict.clone());
++                        context.resolve_font(&font_dict)
++                    } else {
++                        Font::new_standard(StandardFont::Helvetica, &context.settings.font_resolver)
++                            .map(TextStateFont::Fallback)
++                    };
++                    resolved_font_cache.insert(name.clone(), resolved.clone());
++                    resolved
+                 };
+ 
+                 context.get_mut().text_state.font_size = t.1.as_f32();

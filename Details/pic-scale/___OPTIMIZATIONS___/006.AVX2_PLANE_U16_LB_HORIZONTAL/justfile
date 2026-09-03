@@ -1,0 +1,41 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench, check bit-exactness.
+test: clone apply bench correctness
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    # Measurement-only: app/Cargo.toml's default pic-scale feature list has no "avx"/"sse", so
+    # the bench never reaches src/avx2/ at all otherwise. Not part of patch.diff - reverted with
+    # the rest of the working tree at the end of every session (see ../README.md).
+    cd clone && sed -i 's/"colorspaces", "rdm", "nightly_i8mm", "nightly_f16"/"colorspaces", "rdm", "nightly_i8mm", "nightly_f16", "avx", "sse"/' app/Cargo.toml
+
+# The compiled criterion binary needs `--bench` as its first argument to actually measure and
+# print `time:   [...]` (otherwise it just lists available cases) - run from `clone/app` as the
+# working directory, since the bench opens `../assets/...` relative to cwd.
+bench:
+    cd clone && cargo bench -p app --bench resize_plane -- --bench "Pic scale Plane10: Lanczos 3"
+
+# Bit-exact correctness check: resamples several synthetic planar u16 sources (sweeping tap
+# counts, bit depths, PreferSpeed/PreferQuality) and hashes the output. Compare the printed
+# FINAL_HASH between a build of ./clone at base_commit (pristine) and one with patch.diff applied
+# - both should print the identical hash (see RESULT.md).
+correctness:
+    cd bit_exact_check && cargo run --release
+
+clean:
+    rm -rf clone bit_exact_check/target

@@ -1,0 +1,99 @@
+diff --git a/src/infallible/recursive/utils.rs b/src/infallible/recursive/utils.rs
+index acb3a51c..937f0a1d 100644
+--- a/src/infallible/recursive/utils.rs
++++ b/src/infallible/recursive/utils.rs
+@@ -66,9 +66,94 @@ pub fn into_outer_par<'a, T, M, F, R>(
+ 
+     let par = ops.into_par().runner(runner);
+     par.for_each(|op: Cpy<T>| {
++        #[cfg(test)]
++        std::eprintln!("bughunt023-thread {:?}", std::thread::current().id());
+         let Cpy { src, dst, len } = op;
+         unsafe { src.copy_to_nonoverlapping(dst, len) };
+     });
+ 
+     unsafe { outer.set_len(outer.len() + total_len) };
+ }
++
++// --- BUGHUNT candidate 023 investigation probe ---
++// Drives a genuinely !Send/!Sync witness type (Rc<Cell<i64>>, non-atomic refcount) through
++// `into_outer_par`'s real dispatch (`Cpy<T>`'s unconditional `unsafe impl Send/Sync`), via the
++// crate's real thread pool spawning genuine OS worker threads, to check whether the missing
++// `T: Send` bound is actually exploitable (see 023.cpy_into_outer_par_unconditional_send_sync's
++// RESULT.md for the full writeup). Not part of the crate's normal test suite - added only to
++// reproduce this candidate's investigation; not a permanent addition.
++#[cfg(test)]
++mod bughunt_023_investigation {
++    use super::into_outer_par;
++    use crate::runner::default_runner;
++    use alloc::rc::Rc;
++    use alloc::vec::Vec;
++    use core::cell::Cell;
++    use std::collections::HashSet;
++    use std::thread::ThreadId;
++
++    // Confirms `into_outer_par`'s dispatch genuinely spans more than one real OS worker thread
++    // for a workload this size (not silently falling back to sequential execution), so a
++    // negative result from the witness test below isn't explained by "it never actually ran in
++    // parallel". Reads the `bughunt023-thread` lines this run's `Cpy` closures print (see above).
++    #[test]
++    fn confirms_real_worker_thread_concurrency() {
++        let n_locals = 32usize;
++        let per_local = 5000usize;
++
++        let mut locals: Vec<Vec<usize>> = (0..n_locals)
++            .map(|_| (0..per_local).collect())
++            .collect();
++        let mut outer: Vec<usize> = Vec::new();
++        let mut runner = default_runner();
++
++        into_outer_par(&mut outer, &mut locals, |x| x, &mut runner);
++        assert_eq!(outer.len(), n_locals * per_local);
++    }
++
++    // Witness type: genuinely !Send / !Sync (Rc's non-atomic refcount). `into_outer_par`'s local
++    // `Cpy<T>` asserts `unsafe impl Send/Sync` with no `T: Send` bound, so this compiles and runs
++    // even though `Rc<Cell<i64>>` is neither Send nor Sync.
++    #[test]
++    fn drives_non_send_non_sync_witness_through_real_worker_threads() {
++        let mut seen_threads: HashSet<ThreadId> = HashSet::new();
++        seen_threads.insert(std::thread::current().id());
++
++        for iteration in 0..50 {
++            let n_locals = 8usize;
++            let per_local = 200usize;
++
++            // Each local simulates a per-thread accumulator filled with distinct Rc clones of a
++            // shared counter, exactly like `data: Vec<Local<I, O>>` in collect.rs/fold.rs/etc.
++            let shared = Rc::new(Cell::new(0i64));
++            let mut locals: Vec<Vec<Rc<Cell<i64>>>> = (0..n_locals)
++                .map(|_| (0..per_local).map(|_| shared.clone()).collect())
++                .collect();
++
++            let expected_total: usize = locals.iter().map(|l| l.len()).sum();
++            let expected_strong_count = Rc::strong_count(&shared);
++
++            let mut outer: Vec<Rc<Cell<i64>>> = Vec::new();
++            let mut runner = default_runner();
++
++            into_outer_par(&mut outer, &mut locals, |x| x, &mut runner);
++
++            assert_eq!(outer.len(), expected_total, "iteration {iteration}: length mismatch");
++            assert_eq!(
++                Rc::strong_count(&shared),
++                expected_strong_count,
++                "iteration {iteration}: strong count corrupted (relocation touched refcount)"
++            );
++            for (idx, rc) in outer.iter().enumerate() {
++                assert!(
++                    Rc::ptr_eq(rc, &shared),
++                    "iteration {iteration}: outer[{idx}] does not point at the shared allocation"
++                );
++                assert_eq!(rc.get(), 0, "iteration {iteration}: outer[{idx}] value corrupted");
++            }
++            for (idx, l) in locals.iter().enumerate() {
++                assert_eq!(l.len(), 0, "iteration {iteration}: local[{idx}] not drained");
++            }
++        }
++    }
++}

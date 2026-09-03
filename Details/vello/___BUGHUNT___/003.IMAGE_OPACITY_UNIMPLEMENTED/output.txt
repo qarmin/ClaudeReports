@@ -1,0 +1,81 @@
+=== BEFORE (pristine HEAD 75168314, cargo run --release, repeated 5x) ===
+
+$ cargo run --release
+   Compiling repro v0.1.0 (.../003.IMAGE_OPACITY_UNIMPLEMENTED/repro)
+    Finished `release` profile [optimized] target(s) in 20.58s
+     Running `target/release/repro`
+
+thread 'main' (16874) panicked at /tmp/vello-bughunt-003/sparse_strips/vello_common/src/encode.rs:492:13:
+not implemented: Applying opacity to image commands
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+(exit code 101; repeated with RUST_BACKTRACE=1, runs 1-4, all identical panics)
+
+$ RUST_BACKTRACE=1 cargo run --release   (run 1 of 4)
+thread 'main' (17967) panicked at /tmp/vello-bughunt-003/sparse_strips/vello_common/src/encode.rs:492:13:
+not implemented: Applying opacity to image commands
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: <peniko::image::ImageBrush<vello_common::paint::ImageSource> as vello_common::encode::EncodeExt>::encode_into
+   3: <vello_cpu::render::RenderContext>::encode_current_paint
+   4: <vello_cpu::render::RenderContext>::fill_rect::{closure#0}
+   5: repro::main
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+exit code: 101
+
+(runs 2, 3, 4: byte-for-byte identical panic location/message/backtrace, only the PID in
+"thread 'main' (PID)" differs between runs, as expected)
+
+Reproduction rate: 5/5 runs, release build (this is a plain `unimplemented!()` panic, not a
+debug_assertions-only condition, so it also panics identically in a debug build - verified once
+via `cargo run` without `--release` during initial triage, not archived separately since the
+release-mode captures above are byte-identical in message/location).
+
+=== AFTER (same tree, patch.diff applied to sparse_strips/vello_common/src/encode.rs) ===
+
+$ cargo build -p vello_common -p vello_cpu
+   Compiling vello_common v0.2.0 (/tmp/vello-bughunt-003/sparse_strips/vello_common)
+   Compiling glifo v0.3.0 (/tmp/vello-bughunt-003/glifo)
+   Compiling vello_cpu v0.2.0 (/tmp/vello-bughunt-003/sparse_strips/vello_cpu)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.68s
+
+$ cargo run --release   (repro/, pointed at the patched tree; 3 runs shown, all identical)
+   Compiling vello_common v0.2.0 (/tmp/vello-bughunt-003/sparse_strips/vello_common)
+   Compiling glifo v0.3.0 (/tmp/vello-bughunt-003/glifo)
+   Compiling vello_cpu v0.2.0 (/tmp/vello-bughunt-003/sparse_strips/vello_cpu)
+   Compiling repro v0.1.0 (.../003.IMAGE_OPACITY_UNIMPLEMENTED/repro)
+    Finished `release` profile [optimized] target(s) in 14.67s
+     Running `target/release/repro`
+about to render an image paint with sampler.alpha = 0.5 ...
+rendered successfully (bug is fixed)
+     Running `target/release/repro`
+about to render an image paint with sampler.alpha = 0.5 ...
+rendered successfully (bug is fixed)
+     Running `target/release/repro`
+about to render an image paint with sampler.alpha = 0.5 ...
+rendered successfully (bug is fixed)
+
+=== Additional boundary-value inputs checked against the patched tree (same bug class,
+    ad hoc scratch crate at /tmp/repro_variant, not part of the archived repro/) ===
+
+$ cargo run --release
+alpha=0.0, no tint: OK
+alpha=0.5, existing Multiply tint: OK
+alpha=0.3, existing AlphaMask tint: OK
+
+=== Project test suite, vello_common + vello_cpu, before vs after patch.diff ===
+
+BEFORE (pristine):
+test result: ok. 159 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out  (vello_common)
+test result: ok. 81 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out   (vello_cpu)
+test result: ok. 1 passed; 0 failed (vello_cpu doctest)
+
+AFTER (patched):
+test result: ok. 159 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out  (vello_common)
+test result: ok. 81 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out   (vello_cpu)
+test result: ok. 1 passed; 0 failed (vello_cpu doctest)
+
+Identical pass/fail counts before and after - the existing suite has no coverage of
+ImageSampler.alpha != 1.0 (consistent with this path being entirely unimplemented on main),
+and the fix introduces no regressions in either crate's existing suite.

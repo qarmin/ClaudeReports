@@ -1,0 +1,40 @@
+# Self-contained reproduction for candidate 037.
+#
+# Unlike most ___BUGHUNT___ candidates, the bug here does NOT exist in pristine upstream `HEAD` -
+# it is introduced by applying open PR linebender/vello#1728's own patch (`pr1728.diff`, fetched
+# via `gh pr diff 1728`, identical to
+# `___OPTIMIZATIONS___/011.VELLO_CPU_AVOID_SPLAT_POS_PER_CHUNK/patch.diff`) on top of it. So the
+# order here is: prove pristine is fine, THEN apply the PR's patch, THEN prove it crashes - the
+# reverse of the usual "prove buggy, apply fix, prove fixed" flow. See RESULT.md.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "75168314"
+# This repo's .gitattributes wires up Git LFS for reference PNG snapshots; on a machine without
+# git-lfs installed, a plain clone/checkout hard-fails instead of just leaving pointer files (this
+# candidate's own image asset is a real, non-LFS-tracked PNG committed directly to the repo, so
+# disabling smudge/clean here does not affect it). Harmless for anyone who does have git-lfs.
+git_no_lfs := "-c filter.lfs.smudge=cat -c filter.lfs.clean=cat -c filter.lfs.process= -c filter.lfs.required=false"
+
+test: clone reproduce-pristine apply-pr1728 reproduce-with-pr1728
+
+clone:
+    rm -rf clone
+    git {{git_no_lfs}} clone {{repo_url}} clone
+    cd clone && git {{git_no_lfs}} checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should NOT crash.
+reproduce-pristine:
+    cd repro && cargo run --release
+
+apply-pr1728:
+    cd clone && git apply "{{justfile_directory()}}/pr1728.diff"
+
+# Same repro again, now against the PR-#1728-patched clone - should panic in Pixmap::sample_idx.
+reproduce-with-pr1728:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target

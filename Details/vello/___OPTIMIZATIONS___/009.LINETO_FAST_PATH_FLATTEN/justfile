@@ -1,0 +1,73 @@
+# Self-contained reproduction for candidate 009 (LINETO fast path in the vello_shaders CPU
+# mirror of flatten.wgsl - see linebender/vello#1633).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff bundles two things, both real diffs against the project's own tracked source: (1) a
+# new example bench, `vello_shaders/examples/bench_flatten.rs` (needed to reach/measure the
+# `flatten` CPU shader without a GPU - no suitable existing bench reached this code path), and
+# (2) the actual LINETO fast-path fix in `vello_shaders/src/cpu/flatten.rs`. The bench runs
+# entirely on the CPU (drives the `pathtag_reduce` -> `pathtag_scan` -> `flatten` CPU shader
+# chain directly via `vello_encoding`) - no GPU/wgpu adapter is required to build or run
+# `just test`.
+#
+# There is no meaningful "before" build of the new bench itself (it doesn't exist before the
+# patch is applied, since it's part of the patch) - like candidate 006, this applies the full
+# patch first, builds the PATCHED binary, then reverts only the flatten.rs fix (keeping the
+# harness) to derive a same-harness BASELINE binary, the way `bench` below does.
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone apply build-patched bench
+
+clone:
+    rm -rf clone
+    # -c filter.lfs.*: this repo's .gitattributes wires up Git LFS for reference PNG snapshots
+    # (used only by vello_sparse_tests, an unrelated rendering engine not touched by this
+    # candidate); on a machine without git-lfs installed, a plain clone hard-fails at checkout
+    # instead of just leaving pointer files in place. Disabling the filter here matches what
+    # happens automatically for anyone who already has git-lfs configured with
+    # `git lfs install --skip-smudge`, and is harmless for this candidate's own build/bench,
+    # which never reads those assets.
+    git -c filter.lfs.required=false -c filter.lfs.smudge= -c filter.lfs.process= clone --no-checkout {{repo_url}} clone
+    cd clone && git config filter.lfs.required false && git config filter.lfs.smudge "" && git config filter.lfs.process "" && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone && cargo build --release -p vello_shaders --example bench_flatten
+    cp clone/target/release/examples/bench_flatten ./bin_patched
+
+# Prints fill and stroke timings for both builds. Use `taskset -c 0 just bench` for a
+# low-noise single-core comparison; the underlying `flatten`/`pathtag_*` CPU shaders are plain
+# single-threaded Rust, so unpinned timings should track the pinned ones closely.
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "=== patched (after patch) - fill ==="
+    ./bin_patched fill 2000 48 30
+    echo "=== patched (after patch) - stroke ==="
+    ./bin_patched stroke 2000 48 30
+    echo ""
+    echo "=== reverting only the flatten.rs fix to get a same-harness baseline binary ==="
+    cd clone
+    git diff --no-color -- vello_shaders/src/cpu/flatten.rs > /tmp/vello009_flatten_only.diff
+    git checkout -- vello_shaders/src/cpu/flatten.rs
+    cargo build --release -p vello_shaders --example bench_flatten
+    cp target/release/examples/bench_flatten ../bin_baseline
+    git apply /tmp/vello009_flatten_only.diff
+    cd ..
+    echo "=== baseline (before patch, same harness) - fill ==="
+    ./bin_baseline fill 2000 48 30
+    echo "=== baseline (before patch, same harness) - stroke ==="
+    ./bin_baseline stroke 2000 48 30
+    echo ""
+    echo "Compare the 'p50' lines above (fill vs fill, stroke vs stroke). See RESULT.md for"
+    echo "this candidate's own paired-run methodology and noise-floor discussion - single runs"
+    echo "on a shared/loaded machine can swing more than the true delta."
+
+clean:
+    rm -rf clone bin_baseline bin_patched

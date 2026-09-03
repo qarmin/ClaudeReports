@@ -1,0 +1,57 @@
+diff --git a/pixeldata/src/lib.rs b/pixeldata/src/lib.rs
+index 6ede5847..01fbe8dd 100644
+--- a/pixeldata/src/lib.rs
++++ b/pixeldata/src/lib.rs
+@@ -2364,10 +2364,13 @@ where
+ 
+                 if bits_allocated == 1 {
+                     // Expand 1-bit samples to 0/255 bytes for all frames
+-                    let frame_pixels = (rows as usize) * (cols as usize);
+-                    let frame_samples = frame_pixels * (samples_per_pixel as usize);
++                    let frame_pixels = (rows as usize)
++                        .checked_mul(cols as usize)
++                        .unwrap_or(usize::MAX);
++                    let frame_samples = frame_pixels.saturating_mul(samples_per_pixel as usize);
+                     let frame_size = frame_samples / 8;
+-                    let frame_size_all = frame_size * (number_of_frames as usize);
++                    let frame_size_all = frame_size.saturating_mul(number_of_frames as usize);
++                    let take_count = frame_pixels.saturating_mul(number_of_frames as usize);
+ 
+                     let frame_data = data.get(0..frame_size_all).context(FrameOutOfRangeSnafu {
+                         frame_number: frame_size_all as u32,
+@@ -2376,7 +2379,7 @@ where
+                     frame_data
+                         .iter()
+                         .flat_map(|&byte| (0..8).map(move |bit| ((byte >> bit) & 1) * 255))
+-                        .take(frame_pixels * number_of_frames as usize)
++                        .take(take_count)
+                         .collect()
+                 } else {
+                     data.to_vec()
+@@ -2516,18 +2519,21 @@ where
+             }
+             DicomValue::Primitive(p) => {
+                 // Non-encoded, just return the pixel data for a single frame
+-                let frame_pixels = (rows as usize) * (cols as usize);
+-                let frame_samples = frame_pixels * (samples_per_pixel as usize);
++                let frame_pixels = (rows as usize)
++                    .checked_mul(cols as usize)
++                    .unwrap_or(usize::MAX);
++                let frame_samples = frame_pixels.saturating_mul(samples_per_pixel as usize);
+                 let frame_size = if bits_allocated == 1 {
+                     frame_samples / 8
+                 } else {
+-                    frame_samples * (bits_allocated.div_ceil(8) as usize)
++                    frame_samples.saturating_mul(bits_allocated.div_ceil(8) as usize)
+                 };
+-                let frame_offset = frame_size * (frame as usize);
++                let frame_offset = frame_size.saturating_mul(frame as usize);
++                let frame_end = frame_offset.saturating_add(frame_size);
+ 
+                 let data = p.to_bytes();
+ 
+-                let frame_data = data.get(frame_offset..frame_offset + frame_size).context(
++                let frame_data = data.get(frame_offset..frame_end).context(
+                     FrameOutOfRangeSnafu {
+                         frame_number: frame,
+                     },

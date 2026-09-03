@@ -1,0 +1,62 @@
+# This candidate touches TWO repos: the main slint tree (patch.diff, against
+# internal/renderers/femtovg/itemrenderer.rs) AND the vendored femtovg crate's own source
+# (patch_femtovg.diff, against src/path.rs). See ~/.claude/skills/perf-optimize/SKILL.md's
+# "Vendoring a suspect dependency" section for the concept.
+#
+# femtovg is cloned straight into clone-slint/femtovg (not a separate top-level clone) because
+# perf_test's own Cargo.toml already has `[patch.crates-io] femtovg = { path = "../femtovg" }`
+# relative to itself - putting femtovg there wires the patch up with no manual Cargo.toml edit.
+# perf_test itself is copied in from ../harness/perf_test (untracked in the main repo - see
+# ../README.md's "Reproducing a candidate standalone" section); this makes this folder
+# self-contained given the whole ___OPTIMIZATIONS___ folder, not as a fully isolated subfolder.
+# Needs a display or Xvfb: this candidate is femtovg-specific and there is no headless
+# (`--bench`, software-renderer) path that reaches the femtovg-only code it touches.
+
+slint_repo_url := "https://github.com/slint-ui/slint.git"
+slint_base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone both repos, build a BASELINE binary (both unpatched) before touching
+# anything, apply both patches, build a PATCHED binary, then run both and print both results.
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone-slint
+    git clone {{slint_repo_url}} clone-slint
+    cd clone-slint && git checkout {{slint_base_commit}}
+    git clone {{femtovg_repo_url}} clone-slint/femtovg
+    cd clone-slint/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone-slint/perf_test
+
+build-baseline:
+    cd clone-slint/perf_test && cargo build --release --bin perf_test
+    cp clone-slint/target/release/perf_test ./perf_test_baseline
+
+# patch.diff needs femtovg::Path::clear(), which only exists once patch_femtovg.diff is applied
+# too - both must be applied together, never patch.diff alone.
+apply:
+    cd clone-slint && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone-slint/femtovg && git apply "{{justfile_directory()}}/patch_femtovg.diff"
+
+build-patched:
+    cd clone-slint/perf_test && cargo build --release --bin perf_test
+    cp clone-slint/target/release/perf_test ./perf_test_patched
+
+bench:
+    @echo "=== baseline (unpatched slint + unpatched femtovg) ==="
+    LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1280x900x24" \
+        ./perf_test_baseline --renderer femtovg --mode rects --count 3000 --frames 8 --alloc-profile 3
+    @echo "=== patched (candidate 006's Path pooling, both repos) ==="
+    LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1280x900x24" \
+        ./perf_test_patched --renderer femtovg --mode rects --count 3000 --frames 8 --alloc-profile 3
+
+# femtovg's own unit test suite, isolated from slint entirely - a second, independent
+# correctness check alongside the bench above (candidate 011's justfile pins a slightly older
+# femtovg commit for this same suite; not reconciled here, see that candidate for why).
+test-femtovg: clone
+    cd clone-slint/femtovg && git apply "{{justfile_directory()}}/patch_femtovg.diff"
+    cd clone-slint/femtovg && cargo test --lib
+
+clean:
+    rm -rf clone-slint perf_test_baseline perf_test_patched

@@ -1,0 +1,91 @@
+=== run 1: REPRO_MB=64 (default) ===
+candidate 038 - APE item length / key length / num_items bounds check
+crafted-file size per case: 64 MiB (override with REPRO_MB)
+
+tiny-stream check: clean error, no panic, no 4 GiB reservation: unexpected end of file
+size=u32::MAX+has_header check: clean error, no overflow panic: unexpected end of file
+
+item-len-max           file=   64.0 MiB  peakRSS=  188.1 MiB  amplification=  2.9x  elapsed=101.05388ms  tags=0         Err: unexpected end of file
+                        (declared item value length = u32::MAX (4 GiB))
+key-no-nul             file=   64.0 MiB  peakRSS=  128.2 MiB  amplification=  2.0x  elapsed=136.167119ms  tags=0         Err: unexpected end of file
+                        (key with no NUL terminator for the whole file)
+num-items-past-extent  file=   64.0 MiB  peakRSS= 1144.9 MiB  amplification= 17.9x  elapsed=1.0236063s  tags=0         Err: unexpected end of file
+                        (declared size = 32 bytes, declared num_items = u32::MAX)
+num-items-honest       file=   64.0 MiB  peakRSS= 1145.3 MiB  amplification= 17.9x  elapsed=1.066127298s  tags=0         Err: unexpected end of file
+                        (size and num_items both declared truthfully)
+id3v2-baseline         file=   64.0 MiB  peakRSS=  884.5 MiB  amplification= 13.8x  elapsed=1.207534821s  tags=6100805   Ok
+                        (ID3v2.3 tag of minimal TIT2 frames, same file size)
+probe-trailing         file=   64.0 MiB  peakRSS= 1085.1 MiB  amplification= 17.0x  elapsed=1.011052253s  tags=0         Ok: probe returned a format reader
+                        (real probe(), APEv2 footer appended to a valid WAV)
+probe-leading          file=   64.0 MiB  peakRSS= 1084.9 MiB  amplification= 17.0x  elapsed=1.009967498s  tags=0         Err: unexpected end of file
+                        (real probe(), APEv2 header leading a valid WAV)
+
+Reading of the numbers above:
+- `item-len-max` and `key-no-nul` at a small constant multiple of the file size (the
+  multiple is the doubling-realloc transient, not the declared length) means the 32-bit
+  item length and the uncapped key loop are both bounded by how many bytes the stream
+  actually has, not by the declared 32-bit value:
+  `ReadBytes::read_boxed_slice_exact` grows progressively (4 MiB first, then doubling)
+  with `try_reserve_exact`, so a 4 GiB claim behind a short file fails with a clean error
+  instead of reserving 4 GiB.
+- `num-items-past-extent` and `num-items-honest` costing the same means the missing
+  num_items-vs-size cross-check does not change the resource cost: a tag can declare the
+  same item stream honestly and get the same result.
+- `id3v2-baseline` in the same ballpark means the per-byte amplification is a property of
+  storing one `Tag` per parsed item/frame, shared with the crate's other standalone
+  reader, not an APE-specific defect.
+
+=== run 2: REPRO_MB=64, repeat (repeatability check) ===
+item-len-max           file=   64.0 MiB  peakRSS=  188.1 MiB  amplification=  2.9x  elapsed=97.207595ms  tags=0         Err: unexpected end of file
+                        (declared item value length = u32::MAX (4 GiB))
+key-no-nul             file=   64.0 MiB  peakRSS=  127.8 MiB  amplification=  2.0x  elapsed=138.614875ms  tags=0         Err: unexpected end of file
+                        (key with no NUL terminator for the whole file)
+num-items-past-extent  file=   64.0 MiB  peakRSS= 1144.6 MiB  amplification= 17.9x  elapsed=1.039250794s  tags=0         Err: unexpected end of file
+                        (declared size = 32 bytes, declared num_items = u32::MAX)
+num-items-honest       file=   64.0 MiB  peakRSS= 1144.9 MiB  amplification= 17.9x  elapsed=1.030468682s  tags=0         Err: unexpected end of file
+                        (size and num_items both declared truthfully)
+id3v2-baseline         file=   64.0 MiB  peakRSS=  884.4 MiB  amplification= 13.8x  elapsed=1.222050306s  tags=6100805   Ok
+                        (ID3v2.3 tag of minimal TIT2 frames, same file size)
+probe-trailing         file=   64.0 MiB  peakRSS= 1084.8 MiB  amplification= 17.0x  elapsed=981.179075ms  tags=0         Ok: probe returned a format reader
+                        (real probe(), APEv2 footer appended to a valid WAV)
+probe-leading          file=   64.0 MiB  peakRSS= 1084.9 MiB  amplification= 17.0x  elapsed=1.012862988s  tags=0         Err: unexpected end of file
+
+=== run 3: REPRO_MB=16 (linear-scaling check) ===
+item-len-max           file=   16.0 MiB  peakRSS=   44.0 MiB  amplification=  2.8x  elapsed=21.743769ms  tags=0         Err: unexpected end of file
+                        (declared item value length = u32::MAX (4 GiB))
+key-no-nul             file=   16.0 MiB  peakRSS=   32.0 MiB  amplification=  2.0x  elapsed=34.081625ms  tags=0         Err: unexpected end of file
+                        (key with no NUL terminator for the whole file)
+num-items-past-extent  file=   16.0 MiB  peakRSS=  286.3 MiB  amplification= 17.9x  elapsed=255.584366ms  tags=0         Err: unexpected end of file
+                        (declared size = 32 bytes, declared num_items = u32::MAX)
+num-items-honest       file=   16.0 MiB  peakRSS=  286.4 MiB  amplification= 17.9x  elapsed=263.423822ms  tags=0         Err: unexpected end of file
+                        (size and num_items both declared truthfully)
+id3v2-baseline         file=   16.0 MiB  peakRSS=  221.1 MiB  amplification= 13.8x  elapsed=303.126051ms  tags=1525201   Ok
+                        (ID3v2.3 tag of minimal TIT2 frames, same file size)
+probe-trailing         file=   16.0 MiB  peakRSS=  274.1 MiB  amplification= 17.1x  elapsed=253.273218ms  tags=0         Ok: probe returned a format reader
+                        (real probe(), APEv2 footer appended to a valid WAV)
+probe-leading          file=   16.0 MiB  peakRSS=  274.0 MiB  amplification= 17.1x  elapsed=263.013946ms  tags=0         Err: unexpected end of file
+                        (real probe(), APEv2 header leading a valid WAV)
+
+=== libFuzzer run 1 (seeded corpus with a mis-flagged Cover Art item; final stats) ===
+#15096191	DONE   cov: 132 ft: 341 corp: 18/3527b lim: 65536 exec/s: 45607 rss: 357Mb
+Done 15096191 runs in 331 second(s)
+stat::number_of_executed_units: 15096191
+stat::average_exec_per_sec:     45607
+stat::new_units_added:          74
+stat::slowest_unit_time_sec:    0
+stat::peak_rss_mb:              357
+
+=== libFuzzer run 2 (corrected corpus: seeds verified to parse to 6 tags + 2 visuals; final stats) ===
+#18699810	DONE   cov: 132 ft: 328 corp: 15/893b lim: 65536 exec/s: 46632 rss: 356Mb
+Done 18699810 runs in 401 second(s)
+stat::number_of_executed_units: 18699810
+stat::average_exec_per_sec:     46632
+stat::new_units_added:          116
+stat::slowest_unit_time_sec:    0
+stat::peak_rss_mb:              356
+
+=== artifacts written by either run ===
+(none)
+
+=== cargo test --workspace (worktree at ee35874, before and after: no source change was made) ===
+total passed=106 failed=0 (0 ignored)

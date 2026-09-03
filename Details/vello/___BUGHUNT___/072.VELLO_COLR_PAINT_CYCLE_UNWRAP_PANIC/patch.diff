@@ -1,0 +1,103 @@
+diff --git a/vello/src/scene.rs b/vello/src/scene.rs
+index 70542df7..b02ed851 100644
+--- a/vello/src/scene.rs
++++ b/vello/src/scene.rs
+@@ -863,20 +863,29 @@ impl<'a> DrawGlyphs<'a> {
+                             .glyph_transform
+                             .unwrap_or(Transform::IDENTITY)
+                             .to_kurbo();
+-                    colr.paint(
++                    let mut draw_color_glyphs = DrawColorGlyphs {
++                        scene: self.scene,
++                        cpal: &font.cpal().unwrap(),
++                        outlines: &font.outline_glyphs(),
++                        transform_stack: vec![Transform::from_kurbo(&transform)],
++                        clip_box: DEFAULT_CLIP_RECT,
++                        clip_depth: 0,
++                        open_layers: 0,
+                         location,
+-                        &mut DrawColorGlyphs {
+-                            scene: self.scene,
+-                            cpal: &font.cpal().unwrap(),
+-                            outlines: &font.outline_glyphs(),
+-                            transform_stack: vec![Transform::from_kurbo(&transform)],
+-                            clip_box: DEFAULT_CLIP_RECT,
+-                            clip_depth: 0,
+-                            location,
+-                            foreground_brush: self.brush,
+-                        },
+-                    )
+-                    .unwrap();
++                        foreground_brush: self.brush,
++                    };
++                    // `skrifa`'s paint-graph traversal can legitimately fail partway through
++                    // (a self-referential `PaintColrGlyph` cycle, or its recursion depth
++                    // limit) - this is a safe-failure signal skrifa itself detects and
++                    // reports, not a malformed-input error that should be fatal here. Match
++                    // `glifo`'s handling of the same condition (used by `vello_cpu`/
++                    // `vello_hybrid` for the same COLRv1 format): draw whatever content was
++                    // completed before the error, then drain any layers still open on `scene`
++                    // so its layer stack stays balanced for whatever is drawn next.
++                    let _ = colr.paint(location, &mut draw_color_glyphs);
++                    for _ in 0..draw_color_glyphs.open_layers {
++                        draw_color_glyphs.scene.pop_layer();
++                    }
+                 }
+             }
+         }
+@@ -961,6 +970,15 @@ struct DrawColorGlyphs<'a> {
+     outlines: &'a OutlineGlyphCollection<'a>,
+     clip_box: Rect,
+     clip_depth: u32,
++    /// Total number of layers (clips *and* blend layers) currently open on `scene`.
++    ///
++    /// `skrifa`'s paint-graph traversal can stop partway through with an error (a
++    /// self-referential `PaintColrGlyph` cycle, or its recursion depth limit) after already
++    /// having called [`push_layer`](ColorPainter::push_layer)/[`push_clip_glyph`
++    /// ](ColorPainter::push_clip_glyph)/[`push_clip_box`](ColorPainter::push_clip_box) some number
++    /// of times without matching pops. This tracks that count so the caller can drain any
++    /// still-open layers and leave `scene`'s own layer stack balanced.
++    open_layers: u32,
+     location: LocationRef<'a>,
+     foreground_brush: BrushRef<'a>,
+ }
+@@ -990,6 +1008,7 @@ impl ColorPainter for DrawColorGlyphs<'_> {
+             return;
+         };
+         self.clip_depth += 1;
++        self.open_layers += 1;
+         self.scene
+             .push_clip_layer(Fill::NonZero, self.last_transform().to_kurbo(), &path.0);
+     }
+@@ -1005,6 +1024,7 @@ impl ColorPainter for DrawColorGlyphs<'_> {
+             self.clip_box = clip_box;
+         }
+         self.clip_depth += 1;
++        self.open_layers += 1;
+         self.scene
+             .push_clip_layer(Fill::NonZero, self.last_transform().to_kurbo(), &clip_box);
+     }
+@@ -1012,6 +1032,7 @@ impl ColorPainter for DrawColorGlyphs<'_> {
+     fn pop_clip(&mut self) {
+         self.scene.pop_layer();
+         self.clip_depth -= 1;
++        self.open_layers -= 1;
+         if self.clip_depth == 0 {
+             self.clip_box = DEFAULT_CLIP_RECT;
+         }
+@@ -1046,6 +1067,7 @@ impl ColorPainter for DrawColorGlyphs<'_> {
+             // TODO:
+             _ => Compose::SrcOver,
+         };
++        self.open_layers += 1;
+         self.scene.push_layer(
+             Fill::NonZero,
+             blend,
+@@ -1057,6 +1079,7 @@ impl ColorPainter for DrawColorGlyphs<'_> {
+ 
+     fn pop_layer(&mut self) {
+         self.scene.pop_layer();
++        self.open_layers -= 1;
+     }
+ 
+     fn fill_glyph(

@@ -1,0 +1,64 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# The subject here is a *compiler backend*, and the bug is in the backend's own `--print` handling
+# rather than in generated code, so repro/ is an ordinary LLVM-built program that *invokes* both
+# compilers: plain rustc (the oracle) and the freshly built ./clone/dist/rustc-clif. It asks each
+# of them for the six `--print` requests rustc dispatches through `CodegenBackend::print` and
+# exits non-zero when cg_clif answers with an empty string where LLVM answers with real data.
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone build-clif reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# ~2-5 min cold. Produces clone/dist/{cargo-clif,rustc-clif} plus a cg_clif-built sysroot.
+build-clif:
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build
+
+# The repro driver itself is built with plain rustc - it is a harness, not the thing under test.
+build-repro:
+    cd repro && cargo build
+
+# Ask the unpatched cg_clif for every backend `--print` request - must exit 1 (empty answers).
+reproduce-before: build-repro
+    #!/usr/bin/env bash
+    ulimit -c 0
+    set +e
+    cd repro
+    RUSTC_LLVM="$(cd ../clone && rustup which rustc)" \
+        RUSTC_CLIF="$PWD/../clone/dist/rustc-clif" \
+        OUT="$PWD/target" \
+        ./target/debug/print_target_features_empty
+    echo "repro exit: $? (1 = the bug is present)"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && ./y.sh build
+
+# Same repro again, now against the patched clone - must print OK and exit 0.
+reproduce-after:
+    #!/usr/bin/env bash
+    ulimit -c 0
+    set +e
+    cd repro
+    RUSTC_LLVM="$(cd ../clone && rustup which rustc)" \
+        RUSTC_CLIF="$PWD/../clone/dist/rustc-clif" \
+        OUT="$PWD/target" \
+        ./target/debug/print_target_features_empty
+    echo "repro exit: $? (0 = fixed)"
+
+clean:
+    rm -rf clone repro/target

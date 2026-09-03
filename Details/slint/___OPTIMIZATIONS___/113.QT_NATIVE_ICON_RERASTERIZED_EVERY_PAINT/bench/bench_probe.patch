@@ -1,0 +1,49 @@
+diff --git a/internal/backends/qt/Cargo.toml b/internal/backends/qt/Cargo.toml
+index 4e8f55869..f3aa1cdc5 100644
+--- a/internal/backends/qt/Cargo.toml
++++ b/internal/backends/qt/Cargo.toml
+@@ -17,6 +17,8 @@ links = "i_slint_backend_qt"                   # just so we can pass metadata to
+ rtti = ["i-slint-core/rtti"]
+ default = ["enable"]
+ enable = ["dep:cpp", "dep:lyon_path", "dep:pin-project", "dep:pin-weak", "dep:qttypes", "dep:cpp_build"]
++# TEMPORARY, for candidate 113's bench probe only - reverted before the session ends.
++bench-probe = []
+ 
+ [lib]
+ path = "lib.rs"
+diff --git a/internal/backends/qt/lib.rs b/internal/backends/qt/lib.rs
+index 8140b0781..f724e4765 100644
+--- a/internal/backends/qt/lib.rs
++++ b/internal/backends/qt/lib.rs
+@@ -34,6 +34,9 @@
+ mod qt_widgets;
+ #[cfg(not(no_qt))]
+ mod qt_window;
++// TEMPORARY, for candidate 113's bench probe only - reverted before the session ends.
++#[cfg(all(not(no_qt), feature = "bench-probe"))]
++pub use qt_window::bench_probe_image_to_pixmap;
+ 
+ mod accessible_generated;
+ mod key_generated;
+diff --git a/internal/backends/qt/qt_window.rs b/internal/backends/qt/qt_window.rs
+index eb1067097..49bfe9e6e 100644
+--- a/internal/backends/qt/qt_window.rs
++++ b/internal/backends/qt/qt_window.rs
+@@ -1636,6 +1636,17 @@ pub(crate) fn image_to_pixmap(
+     shared_image_buffer_to_pixmap(&image.render_to_buffer(source_size)?)
+ }
+ 
++// TEMPORARY, for candidate 113's bench probe only - reverted before the session ends, never
++// shipped. Exposes image_to_pixmap so an out-of-crate probe binary can time it directly.
++#[cfg(feature = "bench-probe")]
++pub fn bench_probe_image_to_pixmap(image: &ImageInner, size: u32) -> Option<(u32, u32)> {
++    cpp! { unsafe [] { ensure_initialized(false); } }
++    image_to_pixmap(image, Some(euclid::Size2D::new(size, size))).map(|p| {
++        let s = p.size();
++        (s.width as u32, s.height as u32)
++    })
++}
++
+ /// Converts a Qt image to a Slint `SharedPixelBuffer<Rgba8Pixel>`, repacking each
+ /// scan line so the result has no row padding. Returns `None` for empty images.
+ pub(crate) fn qimage_to_shared_pixel_buffer(

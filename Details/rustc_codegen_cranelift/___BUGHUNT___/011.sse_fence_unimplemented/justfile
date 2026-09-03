@@ -1,0 +1,65 @@
+# Self-contained reproduction for candidate 011 (_mm_sfence/_mm_lfence/_mm_mfence abort at run
+# time under cg_clif).
+#
+# Nothing here reaches outside this folder: `just clone` fetches cg_clif into ./clone (gitignored)
+# and builds it, then the repro is compiled twice from the same source - once with plain rustc
+# (LLVM = the oracle) and once with the clone's dist/cargo-clif - and the run-time output compared.
+#
+# `just test` is the full cycle: clone, build cg_clif, show LLVM's answer, show the run-time abort,
+# apply patch.diff, rebuild, show the abort is gone and the program now prints LLVM's answer.
+#
+# To point the reproduce recipes at an existing cg_clif checkout instead of ./clone:
+#   CLIF_ROOT=/path/to/rustc_codegen_cranelift just llvm clif
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+clif := env_var_or_default("CLIF_ROOT", justfile_directory() / "clone")
+
+test:
+    @test -z "${CLIF_ROOT:-}" || { echo "run 'just test' without CLIF_ROOT set - it builds ./clone"; exit 2; }
+    just clone
+    just build-clif
+    @echo "=== LLVM (the oracle) ==="
+    just llvm
+    @echo "=== cg_clif BEFORE the patch (expected: abort on llvm.x86.sse.sfence) ==="
+    -just clif
+    just apply
+    just build-clif
+    @echo "=== cg_clif AFTER the patch (expected: same output as LLVM) ==="
+    just clif
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-clif:
+    cd {{clif}} && ./y.sh prepare
+    cd {{clif}} && ./y.sh build
+
+# The oracle: plain rustc/LLVM on the same source.
+llvm:
+    ulimit -c 0 && cd repro && CARGO_TARGET_DIR=target-llvm cargo run --bin sse_fence_unimplemented
+
+# The same source through cg_clif. Fresh target dir each time so a stale object file from the
+# other backend/patch state can never be reused.
+clif:
+    ulimit -c 0 && cd repro && rm -rf target-clif && CARGO_TARGET_DIR=target-clif {{clif}}/dist/cargo-clif run --bin sse_fence_unimplemented
+
+# The wider family sweep (single file, no cargo): the three fences plus _mm_pause plus
+# _mm_clflush, interleaved with real memory traffic. Informational, not part of `just test`:
+# _mm_clflush is deliberately NOT covered by patch.diff (see RESULT.md), so this sweep still
+# differs from LLVM after the patch - just later, at clflush instead of at sfence.
+family:
+    ulimit -c 0 && cd repro && rustc -Copt-level=0 -o fam_llvm fence_family.rs && ./fam_llvm > fam_llvm.out; true
+    ulimit -c 0 && cd repro && {{clif}}/dist/rustc-clif -Copt-level=0 -o fam_clif fence_family.rs && ./fam_clif > fam_clif.out; true
+    -diff repro/fam_llvm.out repro/fam_clif.out
+    @echo "(a diff starting at 'clflush' is expected even with patch.diff applied)"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+clean:
+    rm -rf clone repro/target-llvm repro/target-clif repro/target-clif-unpatched
+    rm -f repro/fam_llvm repro/fam_clif repro/fam_llvm.out repro/fam_clif.out

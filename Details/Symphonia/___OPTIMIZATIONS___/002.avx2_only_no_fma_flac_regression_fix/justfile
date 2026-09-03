@@ -1,0 +1,36 @@
+# Self-contained reproduction for this candidate (build-flag comparison, no source patch -
+# see RESULT.md). Same shape as candidate 001's justfile.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone build-baseline build-avx2only bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp "{{justfile_directory()}}/bench_decode.rs" clone/symphonia/examples/bench_decode.rs
+    cp "{{justfile_directory()}}/master.flac" "{{justfile_directory()}}/master.mp3" \
+       "{{justfile_directory()}}/master.ogg" "{{justfile_directory()}}/master.wav" clone/
+
+build-baseline:
+    cd clone && cargo build --release --example bench_decode -p symphonia --features symphonia/mp3
+    cp clone/target/release/examples/bench_decode ./bin_baseline
+
+build-avx2only:
+    cd clone && RUSTFLAGS="-C target-feature=+avx2" cargo build --release --example bench_decode -p symphonia --features symphonia/mp3
+    cp clone/target/release/examples/bench_decode ./bin_avx2only
+
+bench:
+    @echo "=== baseline (SSE2 default) ==="
+    taskset -c 2 ./bin_baseline clone/master.mp3 20
+    taskset -c 2 ./bin_baseline clone/master.flac 20
+    taskset -c 2 ./bin_baseline clone/master.ogg 20
+    @echo "=== +avx2 only (no fma) ==="
+    taskset -c 2 ./bin_avx2only clone/master.mp3 20
+    taskset -c 2 ./bin_avx2only clone/master.flac 20
+    taskset -c 2 ./bin_avx2only clone/master.ogg 20
+
+clean:
+    rm -rf clone bin_baseline bin_avx2only

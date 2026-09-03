@@ -1,0 +1,120 @@
+diff --git a/internal/renderers/femtovg/itemrenderer.rs b/internal/renderers/femtovg/itemrenderer.rs
+index 6eb271c99..9ec78d6a8 100644
+--- a/internal/renderers/femtovg/itemrenderer.rs
++++ b/internal/renderers/femtovg/itemrenderer.rs
+@@ -87,6 +87,13 @@ pub struct GLItemRenderer<'a, R: femtovg::Renderer + TextureImporter> {
+     graphics_cache: &'a ItemGraphicsCache<R>,
+     layer_cache: &'a LayerCache<R>,
+     texture_cache: &'a RefCell<super::images::TextureCache<R>>,
++    // `draw_image_direct` (unlike `draw_image_impl`) has no per-item cache to memoize its result
++    // across frames, so a repeatedly-drawn image with no stable `ImageCacheKey` (e.g. one built
++    // with `Image::from_rgba8`) would otherwise be re-uploaded to the GPU on every single call.
++    // This one-entry, last-drawn-image cache covers the common case of the same `Image` handle
++    // (unchanged content, checked via `Image`'s own `PartialEq`) being drawn again unchanged.
++    direct_image_cache:
++        &'a RefCell<Option<(i_slint_core::graphics::Image, Rc<super::images::Texture<R>>)>>,
+     box_shadow_cache: &'a FemtovgBoxShadowCache<R>,
+     canvas: CanvasRc<R>,
+     // Textures from layering or tiling that were scheduled for rendering where we can't delete the femtovg::ImageId yet
+@@ -751,13 +758,26 @@ fn draw_image_direct(&mut self, image: i_slint_core::graphics::Image) {
+             })
+         })
+         .or_else(|| {
+-            Texture::new_from_image(
++            // No stable `ImageCacheKey` (e.g. an in-memory `Image::from_rgba8`/`from_rgb8`
++            // buffer): fall back to a one-entry cache keyed on `Image`'s own `PartialEq`, which
++            // does a real content comparison for buffer-backed images (not just pointer
++            // identity), so an unchanged image drawn again (e.g. every frame while a drag is in
++            // progress) reuses the texture instead of re-uploading it to the GPU each time.
++            let mut last = self.direct_image_cache.borrow_mut();
++            if let Some((last_image, last_texture)) = last.as_ref()
++                && *last_image == image
++            {
++                return Some(last_texture.clone());
++            }
++            let texture = Texture::new_from_image(
+                 image_inner,
+                 &self.canvas,
+                 target_size_for_scalable_source,
+                 Default::default(),
+                 Default::default(),
+-            )
++            )?;
++            *last = Some((image.clone(), texture.clone()));
++            Some(texture)
+         }) else {
+             return;
+         };
+@@ -1047,6 +1067,9 @@ pub(super) fn new(
+         graphics_cache: &'a ItemGraphicsCache<R>,
+         layer_cache: &'a LayerCache<R>,
+         texture_cache: &'a RefCell<super::images::TextureCache<R>>,
++        direct_image_cache: &'a RefCell<
++            Option<(i_slint_core::graphics::Image, Rc<super::images::Texture<R>>)>,
++        >,
+         box_shadow_cache: &'a FemtovgBoxShadowCache<R>,
+         text_layout_cache: &'a sharedparley::TextLayoutCache,
+         window: &'a i_slint_core::api::Window,
+@@ -1058,6 +1081,7 @@ pub(super) fn new(
+             graphics_cache,
+             layer_cache,
+             texture_cache,
++            direct_image_cache,
+             box_shadow_cache,
+             canvas: canvas.clone(),
+             textures_to_delete_after_flush: Default::default(),
+diff --git a/internal/renderers/femtovg/lib.rs b/internal/renderers/femtovg/lib.rs
+index 04ad6b482..e9671f4a8 100644
+--- a/internal/renderers/femtovg/lib.rs
++++ b/internal/renderers/femtovg/lib.rs
+@@ -107,6 +107,10 @@ pub struct FemtoVGRenderer<B: GraphicsBackend> {
+     graphics_cache: itemrenderer::ItemGraphicsCache<B::Renderer>,
+     layer_cache: itemrenderer::LayerCache<B::Renderer>,
+     texture_cache: RefCell<images::TextureCache<B::Renderer>>,
++    // See `GLItemRenderer::direct_image_cache`'s doc comment for why `draw_image_direct` needs
++    // its own persistent (across frames) one-entry cache.
++    direct_image_cache:
++        RefCell<Option<(i_slint_core::graphics::Image, Rc<images::Texture<B::Renderer>>)>>,
+     box_shadow_cache: itemrenderer::FemtovgBoxShadowCache<B::Renderer>,
+     text_layout_cache: sharedparley::TextLayoutCache,
+     rendering_metrics_collector: RefCell<Option<Rc<RenderingMetricsCollector>>>,
+@@ -125,6 +129,7 @@ pub(crate) fn new_internal(graphics_backend: B) -> Self {
+             graphics_cache: Default::default(),
+             layer_cache: Default::default(),
+             texture_cache: Default::default(),
++            direct_image_cache: Default::default(),
+             box_shadow_cache: Default::default(),
+             text_layout_cache: Default::default(),
+             rendering_metrics_collector: Default::default(),
+@@ -247,6 +252,7 @@ fn internal_render_with_post_callback(
+                     &self.graphics_cache,
+                     &self.layer_cache,
+                     &self.texture_cache,
++                    &self.direct_image_cache,
+                     &self.box_shadow_cache,
+                     &self.text_layout_cache,
+                     window,
+@@ -374,6 +380,7 @@ fn set_window_adapter(&self, window_adapter: &Rc<dyn WindowAdapter>) {
+                 self.graphics_cache.clear_all();
+                 self.layer_cache.clear_all();
+                 self.texture_cache.borrow_mut().clear();
++                *self.direct_image_cache.borrow_mut() = None;
+                 self.box_shadow_cache.clear();
+             })
+             .ok();
+@@ -458,6 +465,7 @@ fn new_suspended() -> Self {
+             graphics_cache: Default::default(),
+             layer_cache: Default::default(),
+             texture_cache: Default::default(),
++            direct_image_cache: Default::default(),
+             box_shadow_cache: Default::default(),
+             text_layout_cache: Default::default(),
+             rendering_metrics_collector: Default::default(),
+@@ -483,6 +491,7 @@ fn clear_graphics_context(&self) -> Result<(), i_slint_core::platform::PlatformE
+             self.graphics_cache.clear_all();
+             self.layer_cache.clear_all();
+             self.texture_cache.borrow_mut().clear();
++            *self.direct_image_cache.borrow_mut() = None;
+             self.box_shadow_cache.clear();
+         })?;
+ 

@@ -1,0 +1,39 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# Uses --release throughout: in a debug build, the pristine code's `debug_assert!` fires first
+# and aborts the whole process before the repro can print anything useful - itself part of the
+# bug (an uncatchable panic on untrusted-adjacent arithmetic), but --release cleanly demonstrates
+# the silent-corruption side documented in RESULT.md/backtrace.txt. See backtrace.txt for a
+# captured debug-mode panic too.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro (release) against the pristine clone - should print
+# "BUG REPRODUCED" and exit 1.
+reproduce-before:
+    cd repro && cargo run --release; test "$?" -eq 1 && echo "(exit 1 expected here: bug reproduced)"; true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - all four results should stay correctly
+# defined, and the program should exit 0.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

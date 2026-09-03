@@ -1,0 +1,46 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# patch.diff is candidate 073's chunked_arena patch with CHUNK_SIZE set directly to 4096 (unlike
+# 074/080/110's copies of 073's unmodified CHUNK_SIZE=256 patch plus a described one-line edit) -
+# this file alone reproduces the exact binary this candidate measured against a plain-256 build.
+# To reproduce the 256 baseline side of the comparison, apply patch.diff and edit
+# `internal/core/partial_renderer.rs`'s `const CHUNK_SIZE: usize = 4096;` back down to `256`
+# before building the second binary.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench at CHUNK_SIZE=4096.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# perf_test (the project's own headless bench harness) reaches the patched code path directly -
+# no standalone bench crate was needed. This candidate needs `perf_test/` copied into `clone/`
+# manually first (it is untracked in the main checkout, see ___OPTIMIZATIONS___/README.md).
+#
+# This builds and runs only the CHUNK_SIZE=4096 side of the comparison on the `layout` static
+# scene. For the full paired comparison against CHUNK_SIZE=256 (and the pixel/test-suite
+# correctness checks), see RESULT.md for the exact tools/paired.sh and tools/pixelcheck.sh
+# invocations (copied from ___OPTIMIZATIONS___/tools/ in the main checkout).
+bench:
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug
+    ./clone/target/rdebug/perf_test --bench --mode scroll --count 100000 --row-style layout --scroll-step 0 --frames 20
+
+clean:
+    rm -rf clone

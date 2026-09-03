@@ -1,0 +1,57 @@
+# Self-contained reproduction for candidate 027.JSON_TAG_HEX_FASTPATH.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern). Self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+# This candidate's own result is Mixed (strong win on 2 fixtures, small consistent regression on
+# a third) - this justfile exists so both sides of that claim are independently reproducible.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cp "{{justfile_directory()}}/testdata/seq_10k.dcm" clone/
+    cp "{{justfile_directory()}}/testdata/liver.dcm" clone/
+    cp "{{justfile_directory()}}/testdata/rtplan.dcm" clone/
+    echo "=== bit-exactness check (all 3 fixtures) ==="
+    for f in seq_10k liver rtplan; do
+        ./bin_baseline json-encode "clone/$f.dcm" 1 > "/tmp/candidate027_${f}_baseline.txt"
+        ./bin_patched json-encode "clone/$f.dcm" 1 > "/tmp/candidate027_${f}_patched.txt"
+        diff <(grep -oE 'checksum=0x[0-9a-f]+' "/tmp/candidate027_${f}_baseline.txt") \
+             <(grep -oE 'checksum=0x[0-9a-f]+' "/tmp/candidate027_${f}_patched.txt") \
+            && echo "$f: bit-exact" || echo "$f: DIFFERS (unexpected)"
+    done
+    echo "=== seq_10k.dcm (many small elements) - expect a ~25% win ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- json-encode clone/seq_10k.dcm 100
+    echo "=== rtplan.dcm (real fixture, small, many elements) - expect a ~28% win ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- json-encode clone/rtplan.dcm 1000
+    echo "=== liver.dcm (real fixture, one large PixelData, few tags) - expect a ~5% REGRESSION ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- json-encode clone/liver.dcm 1000
+
+clean:
+    rm -rf clone bin_baseline bin_patched

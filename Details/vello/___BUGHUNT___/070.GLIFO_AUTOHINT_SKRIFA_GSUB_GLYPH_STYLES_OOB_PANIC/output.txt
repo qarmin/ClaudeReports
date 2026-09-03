@@ -1,0 +1,95 @@
+=== reproduce-before (pristine tree, skrifa 0.44.0) ===
+$ cd repro && cargo run --release
+   Compiling skrifa v0.44.0
+   Compiling glifo v0.3.0 (.../clone/glifo)
+   Compiling vello_cpu v0.2.0 (.../clone/sparse_strips/vello_cpu)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 22.58s
+     Running `target/release/repro`
+
+thread 'main' (300706) panicked at /home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/skrifa-0.44.0/src/outline/autohint/shape.rs:635:48:
+range end index 1 out of range for slice of length 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - panicked: range end index 1 out of range for slice of length 0
+
+Exit code: 1
+
+--- Full backtrace (captured separately, RUST_BACKTRACE=full, debug build, same input) ---
+thread 'main' panicked at .../skrifa-0.44.0/src/outline/autohint/shape.rs:635:48:
+range end index 1 out of range for slice of length 0
+   0: core::panicking::panic_fmt
+   1: core::slice::index::slice_index_fail
+   2: <core::ops::range::Range<usize> as core::slice::index::SliceIndex<[skrifa::outline::autohint::style::GlyphStyle]>>::index_mut
+             at .../library/core/src/slice/index.rs:427:13
+   3: <[skrifa::outline::autohint::style::GlyphStyle] as core::ops::index::IndexMut<core::ops::range::Range<usize>>>::index_mut
+             at .../library/core/src/slice/index.rs:32:15
+   4: <skrifa::outline::autohint::shape::GsubHandler>::finish
+             at .../skrifa-0.44.0/src/outline/autohint/shape.rs:635:48
+   5: <skrifa::outline::autohint::shape::Shaper>::compute_coverage
+             at .../skrifa-0.44.0/src/outline/autohint/shape.rs:247:43
+   6: <skrifa::outline::autohint::style::GlyphStyleMap>::new_inner
+             at .../skrifa-0.44.0/src/outline/autohint/style.rs:160:27
+   7: <skrifa::outline::autohint::style::GlyphStyleMap>::new
+             at .../skrifa-0.44.0/src/outline/autohint/style.rs:146:13
+   8: <skrifa::outline::autohint::instance::GlyphStyles>::new
+             at .../skrifa-0.44.0/src/outline/autohint/instance.rs:45:27
+   9: <skrifa::outline::autohint::instance::Instance>::new::{closure#0}
+             at .../skrifa-0.44.0/src/outline/autohint/instance.rs:75:47
+  10: <skrifa::outline::autohint::instance::Instance>::new
+             at .../skrifa-0.44.0/src/outline/autohint/instance.rs:75:29
+  11: <skrifa::outline::hint::HintingInstance>::reconfigure
+             at .../skrifa-0.44.0/src/outline/hint.rs:387:32
+  12: <skrifa::outline::hint::HintingInstance>::new
+             at .../skrifa-0.44.0/src/outline/hint.rs:303:16
+  13: <glifo::glyph::HintKey>::instance
+             at glifo/src/glyph.rs:2058:9
+  14: glifo::glyph::find_hint_entry
+             at glifo/src/glyph.rs:2153:28
+  15: <glifo::glyph::HintCache>::get
+             at glifo/src/glyph.rs:2100:38
+  16: glifo::glyph::prepare_glyph_run
+             at glifo/src/glyph.rs:1604:47
+  17: <glifo::glyph::GlyphRun>::build
+             at glifo/src/glyph.rs:926:28
+  18: <vello_cpu::text::CpuGlyphRunBackend>::render_glyphs
+             at sparse_strips/vello_cpu/src/text.rs:243:33
+  19: <vello_cpu::text::CpuGlyphRunBackend as glifo::glyph::GlyphRunBackend>::fill_glyphs
+             at sparse_strips/vello_cpu/src/text.rs:262:14
+  20: <glifo::glyph::GlyphRunBuilder<_>>::fill_glyphs
+             at glifo/src/glyph.rs:958:17
+
+=== apply: git apply patch.diff against pristine clone ===
+$ cd clone && git apply .../070.../patch.diff
+(no output - applied cleanly)
+
+=== reproduce-after (patched tree, skrifa 0.46.2) ===
+$ cd repro && cargo run --release
+    Updating crates.io index
+     Locking 2 packages to latest compatible versions
+    Updating read-fonts v0.41.0 -> v0.43.3
+    Updating skrifa v0.44.0 -> v0.46.2
+   Compiling read-fonts v0.43.3
+   Compiling skrifa v0.46.2
+   Compiling glifo v0.3.0 (.../clone/glifo)
+   Compiling vello_cpu v0.2.0 (.../clone/sparse_strips/vello_cpu)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 21.21s
+     Running `target/release/repro`
+did not reproduce - fill_glyphs completed normally on the mutated font
+
+Exit code: 0
+
+=== Repeat-run confirmation (debug build, pristine tree, same input, via a temporary in-tree
+    single-glyph example driving vello_cpu's public glyph_run API) ===
+run 1: thread 'main' panicked at .../skrifa-0.44.0/src/outline/autohint/shape.rs:635:48:
+        range end index 1 out of range for slice of length 0
+run 2: thread 'main' panicked at .../skrifa-0.44.0/src/outline/autohint/shape.rs:635:48:
+        range end index 1 out of range for slice of length 0
+run 3: thread 'main' panicked at .../skrifa-0.44.0/src/outline/autohint/shape.rs:635:48:
+        range end index 1 out of range for slice of length 0
+-> 3/3 deterministic.
+
+=== Second input in the same bug class (a different single-byte mutation of the same base font,
+    offset 181 instead of 185, still part of maxp's sfnt directory record) ===
+pre-fix:  panics identically at skrifa-0.44.0/src/outline/autohint/shape.rs:635:48
+post-fix: "did not reproduce - fill_glyphs completed normally on the mutated font"

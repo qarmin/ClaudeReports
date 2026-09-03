@@ -1,0 +1,27 @@
+diff --git a/kurbo/src/offset.rs b/kurbo/src/offset.rs
+index 48ecfad..81b4451 100644
+--- a/kurbo/src/offset.rs
++++ b/kurbo/src/offset.rs
+@@ -346,10 +346,18 @@ impl CubicOffset {
+     /// undershoots. The theory is that the least squares refinement improves those
+     /// cases.
+     fn draw_arc(&self, rec: &OffsetRec) -> (f64, f64) {
+-        // possible optimization: this can probably be done with vectors
+-        // rather than arctangent
+-        let th = rec.utan1.cross(rec.utan0).atan2(rec.utan1.dot(rec.utan0));
+-        let a = (2. / 3.) / (1.0 + (0.5 * th).cos()) * 2.0 * (0.5 * th).sin();
++        // The angle between the endpoint tangents is only ever consumed through the sine and
++        // cosine of its half, so the arctangent and the trigonometry that undoes it cancel out.
++        // Both tangents are unit length, so their cross product is sin(th) and their dot product
++        // is cos(th), and the half-angle identities give what's needed directly. `th` lies in
++        // (-pi, pi], so `th / 2` lies in (-pi/2, pi/2] and cos(th / 2) is never negative - which
++        // is what makes taking the positive square root correct here.
++        let sin_th = rec.utan1.cross(rec.utan0);
++        let cos_th = rec.utan1.dot(rec.utan0);
++        // Rounding can leave `cos_th` a hair outside [-1, 1] even for unit-length inputs.
++        let half_cos = (0.5 * (1.0 + cos_th)).max(0.0).sqrt();
++        let half_sin = (0.5 * (1.0 - cos_th)).max(0.0).sqrt().copysign(sin_th);
++        let a = (2. / 3.) / (1.0 + half_cos) * 2.0 * half_sin;
+         let b = -a;
+         (a, b)
+     }

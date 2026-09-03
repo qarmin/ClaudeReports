@@ -1,0 +1,78 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# Fill in repo_url/base_commit when this candidate is created (read them once with
+# `git remote get-url origin` / `git rev-parse HEAD` in the main project, at the moment
+# patch.diff is captured) - patch.diff is a diff against that exact commit and may stop
+# applying cleanly once the main branch moves on.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+# patch.diff only touches src/codecs/bmp/decoder.rs (candidates 008+011's patches merged, no new
+# source change) - no harness change needed, so the baseline build is just the pristine clone and
+# the patched build is clone + apply. `disasm` does its own separate baseline/patched comparison
+# via `git stash` for the disassembly-level confirmation.
+test: clone bench-baseline apply bench-patched disasm
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Reuses the project's own existing criterion bench (benches/decode.rs), filtered to the
+# three BMP files large enough in the repo's own test corpus to give a clean signal
+# (435x353, 8-bit/4-bit/1-bit indexed). No standalone bench crate needed for this candidate -
+# same bench files candidates 008/011 already used, just measured together in one build here.
+bench-baseline:
+    @echo "=== baseline (before patch) ==="
+    cd clone && cargo build --release --bench decode
+    cd clone && cargo bench --bench decode -- "load-Bmp/Core_8_Bit.bmp" --exact
+    cd clone && cargo bench --bench decode -- "load-Bmp/Core_4_Bit.bmp" --exact
+    cd clone && cargo bench --bench decode -- "load-Bmp/Core_1_Bit.bmp" --exact
+
+bench-patched:
+    @echo "=== patched (after patch) ==="
+    cd clone && cargo build --release --bench decode
+    cd clone && cargo bench --bench decode -- "load-Bmp/Core_8_Bit.bmp" --exact
+    cd clone && cargo bench --bench decode -- "load-Bmp/Core_4_Bit.bmp" --exact
+    cd clone && cargo bench --bench decode -- "load-Bmp/Core_1_Bit.bmp" --exact
+
+# The actual point of this candidate: disassemble the patched `decode` bench binary and confirm
+# (or refute) the number of palette-lookup bounds checks eliminated per bit depth. Requires
+# `objdump`/`nm` (binutils) - not `perf`. Also builds a baseline (unpatched) copy for comparison;
+# `nm` on the baseline build should show `set_8bit_pixel_run`/`set_4bit_pixel_run` as standalone
+# symbols (a real `call` from `read_image_data`) while `set_2bit_pixel_run`/`set_1bit_pixel_run`
+# are fully inlined into `read_image_data` in both builds - inspect that function's disassembly
+# for those two.
+disasm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone
+    cp target/release/deps/decode-* /tmp/decode_patched_disasm 2>/dev/null || true
+    git stash
+    cargo build --release --bench decode
+    BASE_BIN=$(ls -t target/release/deps/decode-* | grep -v '\.d$' | head -1)
+    cp "$BASE_BIN" /tmp/decode_baseline_disasm
+    git stash pop
+    cargo build --release --bench decode
+    PATCH_BIN=$(ls -t target/release/deps/decode-* | grep -v '\.d$' | head -1)
+    cp "$PATCH_BIN" /tmp/decode_patched_disasm
+    echo "=== baseline set_8bit/4bit_pixel_run symbols ==="
+    nm --demangle /tmp/decode_baseline_disasm | grep pixel_run
+    echo "=== patched set_8bit/4bit_pixel_run symbols ==="
+    nm --demangle /tmp/decode_patched_disasm | grep pixel_run
+    echo "=== panic_bounds_check call count inside set_8bit_pixel_run/set_4bit_pixel_run (baseline vs patched) ==="
+    for bin in /tmp/decode_baseline_disasm /tmp/decode_patched_disasm; do
+        echo "-- $bin --"
+        objdump -d -C "$bin" | awk '/<image::codecs::bmp::decoder::set_[84]bit_pixel_run/{f=1} f{print} f && /^$/{exit}' | grep -c panic_bounds_check
+    done
+    echo "See this candidate's RESULT.md for the full read_image_data (1-bit/2-bit inlined) analysis."
+
+clean:
+    rm -rf clone

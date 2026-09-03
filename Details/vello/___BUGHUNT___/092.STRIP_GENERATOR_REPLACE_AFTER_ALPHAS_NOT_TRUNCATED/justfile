@@ -1,0 +1,42 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+# The `-c filter.lfs...` overrides disable this repo's Git LFS smudge filter (this repo is
+# configured for LFS but doesn't actually need it for any file this repro touches) - without them,
+# `git clone`/`checkout` abort with "the remote end hung up unexpectedly" on any machine without
+# the `git-lfs` binary installed.
+clone:
+    rm -rf clone
+    git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false clone {{repo_url}} clone
+    cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug
+# (alphas growing unboundedly across repeated `ReplaceAfter` calls while strips stays bounded).
+# Both binaries `exit(1)` when the bug is present (real signal, not just prose) - the leading
+# `-` tells `just` to keep going anyway so `just test` can still reach `apply`/`reproduce-after`.
+reproduce-before:
+    -cd repro && cargo run --release --bin repro
+    -cd repro && cargo run --release --bin variant
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repros again, now against the patched clone - should no longer demonstrate the bug, and
+# both binaries should exit 0.
+reproduce-after:
+    cd repro && cargo run --release --bin repro
+    cd repro && cargo run --release --bin variant
+
+clean:
+    rm -rf clone

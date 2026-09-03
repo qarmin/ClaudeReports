@@ -1,0 +1,47 @@
+diff --git a/src/worker/rayon.rs b/src/worker/rayon.rs
+index 292eba2..55d138d 100644
+--- a/src/worker/rayon.rs
++++ b/src/worker/rayon.rs
+@@ -12,6 +12,12 @@ use std::sync::Arc;
+ 
+ use super::{RowData, Worker};
+ 
++/// Number of output rows batched into a single rayon work item in `compute_image_parallel`.
++/// Dispatching one task per row (the previous behavior) maximizes rayon overhead relative to the
++/// actual per-row upsample/interleave work; batching a small constant amortizes that overhead
++/// while still leaving enough chunks to keep all threads busy on larger images.
++const ROW_CHUNK: usize = 4;
++
+ /// Technically similar to `immediate::ImmediateWorker` but we copy it since we may prefer
+ /// different style of managing the memory allocation, something that multiple actors can access in
+ /// parallel.
+@@ -202,17 +208,19 @@ pub fn compute_image_parallel(
+     let mut image = vec![0u8; line_size * output_size.height as usize];
+ 
+     image
+-        .par_chunks_mut(line_size)
+-        .with_max_len(1)
++        .par_chunks_mut(line_size * ROW_CHUNK)
+         .enumerate()
+-        .for_each(|(row, line)| {
+-            upsampler.upsample_and_interleave_row(
+-                &data,
+-                row,
+-                output_size.width as usize,
+-                line,
+-                color_convert_func,
+-            );
++        .for_each(|(chunk_index, lines)| {
++            let first_row = chunk_index * ROW_CHUNK;
++            for (offset, line) in lines.chunks_mut(line_size).enumerate() {
++                upsampler.upsample_and_interleave_row(
++                    &data,
++                    first_row + offset,
++                    output_size.width as usize,
++                    line,
++                    color_convert_func,
++                );
++            }
+         });
+ 
+     Ok(image)

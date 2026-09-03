@@ -1,0 +1,59 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+
+repo_url := "https://github.com/linebender/kurbo.git"
+base_commit := "ca273499e3e48bd2de6f02aa8e99a148984e45f3"
+
+# Full cycle: clone pristine, prove the bug's real entry point is reached, apply the fix, prove
+# the fix builds and the entry point still behaves the same way (see RESULT.md's "What was
+# tried"/"The fix": the internal NaN corruption doesn't flip fit_to_cubic's/fit_to_bezpath's
+# return value for the inputs tried, so `reproduce-before`/`reproduce-after` are expected to
+# print IDENTICAL output here - use `just diagnose` for the recipe that actually shows the NaN
+# disappearing).
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - reaches the real bug (internally,
+# see `diagnose` below), but its own printed return value is unaffected (see RESULT.md).
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone.
+reproduce-after:
+    cd repro && cargo run --release
+
+# The actual before/after evidence: apply a temporary diagnostic-only instrumentation patch
+# (two eprintln!s in CurveDist::compute_arc_params/eval_arc, no behavior change) to a pristine
+# clone and to a patched clone, and run the same repro (via its own throwaway copy, with
+# Cargo.toml's path swapped to point at each) against each - this is what output.txt's captured
+# NaN-vs-0.0 comparison came from. Neither diagnostic patch is part of the real fix (patch.diff);
+# they exist purely to make the crate-private CurveDist's internal state visible for this
+# investigation, the same way one would read a sanitizer/miri diagnostic.
+diagnose:
+    rm -rf clone-diag-before clone-diag-after repro-diag
+    git clone {{repo_url}} clone-diag-before
+    cd clone-diag-before && git checkout {{base_commit}} && git apply "{{justfile_directory()}}/diagnostic_before.patch"
+    git clone {{repo_url}} clone-diag-after
+    cd clone-diag-after && git checkout {{base_commit}} && git apply "{{justfile_directory()}}/diagnostic_after.patch"
+    cp -r repro repro-diag
+    @echo "=== BEFORE (pristine + diagnostic instrumentation): expect NaN ==="
+    sed -i 's#path = "../clone/kurbo"#path = "../clone-diag-before/kurbo"#' repro-diag/Cargo.toml
+    cd repro-diag && cargo run --release 2>&1 | grep -E 'diagnostic|fit_to_cubic'
+    @echo "=== AFTER (patched + diagnostic instrumentation): expect 0.0, no NaN ==="
+    sed -i 's#path = "../clone-diag-before/kurbo"#path = "../clone-diag-after/kurbo"#' repro-diag/Cargo.toml
+    cd repro-diag && cargo run --release 2>&1 | grep -E 'diagnostic|fit_to_cubic'
+
+clean:
+    rm -rf clone clone-diag-before clone-diag-after repro-diag

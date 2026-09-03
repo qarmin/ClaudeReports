@@ -1,0 +1,120 @@
+diff --git a/sparse_strips/vello_common/src/flatten.rs b/sparse_strips/vello_common/src/flatten.rs
+index be219c6c..6dfacdcd 100644
+--- a/sparse_strips/vello_common/src/flatten.rs
++++ b/sparse_strips/vello_common/src/flatten.rs
+@@ -235,10 +235,21 @@ pub fn stroke(
+             .max(affine.as_coeffs()[3].abs())
+             .max(1.);
+ 
+-    expand_stroke(path, style, tolerance, stroke_ctx);
++    // `kurbo::stroke_with` (kurbo 0.13.1) silently drops any subpath whose every segment
++    // has zero length, so `Cap::Round`/`Cap::Square` never get a chance to render the dot
++    // the SVG spec requires for a degenerate subpath. This is a known upstream bug (fix
++    // proposed but unmerged as of this writing in kurbo#597), and since the relevant state
++    // (`StrokeCtx`'s forward/backward path tracking) is private to that crate, we can't
++    // patch it from here. Instead, detect degenerate subpaths ourselves and synthesize
++    // their cap geometry directly.
++    let elements: Vec<PathEl> = path.into_iter().collect();
++
++    expand_stroke(elements.iter().copied(), style, tolerance, stroke_ctx);
++    let dots = degenerate_cap_dots(&elements, style);
++
+     fill(
+         level,
+-        stroke_ctx.output(),
++        stroke_ctx.output().into_iter().chain(dots),
+         affine,
+         line_buf,
+         flatten_ctx,
+@@ -256,6 +267,91 @@ pub fn expand_stroke(
+     kurbo::stroke_with(path, style, &StrokeOpts::default(), tolerance, stroke_ctx);
+ }
+ 
++/// Synthesize fill geometry for the SVG "degenerate subpath" case: a subpath whose every
++/// segment has zero length still paints a dot (`Cap::Round`) or square (`Cap::Square`)
++/// centered on that point, unless the cap style is `Cap::Butt`. See the note on [`stroke`]
++/// for why `kurbo::stroke_with` can't be relied on to do this itself.
++fn degenerate_cap_dots(elements: &[PathEl], style: &Stroke) -> kurbo::BezPath {
++    let mut out = kurbo::BezPath::new();
++    let mut subpath_start: Option<kurbo::Point> = None;
++    let mut cur = kurbo::Point::ZERO;
++    let mut degenerate = true;
++    let mut has_segment = false;
++
++    for el in elements.iter().copied() {
++        match el {
++            PathEl::MoveTo(p) => {
++                if degenerate && has_segment {
++                    // `subpath_start` is always `Some` once `has_segment` is `true`.
++                    append_cap_shape(&mut out, subpath_start.unwrap(), style);
++                }
++                subpath_start = Some(p);
++                cur = p;
++                degenerate = true;
++                has_segment = false;
++            }
++            PathEl::LineTo(p) => {
++                has_segment = true;
++                degenerate &= p == cur;
++                cur = p;
++            }
++            PathEl::QuadTo(p1, p2) => {
++                has_segment = true;
++                degenerate &= p1 == cur && p2 == cur;
++                cur = p2;
++            }
++            PathEl::CurveTo(p1, p2, p3) => {
++                has_segment = true;
++                degenerate &= p1 == cur && p2 == cur && p3 == cur;
++                cur = p3;
++            }
++            PathEl::ClosePath => {
++                if let Some(start) = subpath_start {
++                    degenerate &= cur == start;
++                    cur = start;
++                }
++            }
++        }
++    }
++    if degenerate && has_segment {
++        if let Some(start) = subpath_start {
++            append_cap_shape(&mut out, start, style);
++        }
++    }
++
++    out
++}
++
++/// Append the filled shape for a single degenerate-subpath cap centered at `center`.
++///
++/// When the start and end caps differ, `Cap::Round` takes priority over `Cap::Square`
++/// (rendering the full shape rather than attempting to split it into two half-shapes,
++/// since a zero-length subpath has no direction to orient a half-shape split by).
++fn append_cap_shape(out: &mut kurbo::BezPath, center: kurbo::Point, style: &Stroke) {
++    use kurbo::Shape;
++
++    let radius = 0.5 * style.width;
++    if radius <= 0.0 {
++        return;
++    }
++    let shape_path = match (style.start_cap, style.end_cap) {
++        (kurbo::Cap::Butt, kurbo::Cap::Butt) => return,
++        (kurbo::Cap::Round, _) | (_, kurbo::Cap::Round) => {
++            kurbo::Circle::new(center, radius).to_path(0.1)
++        }
++        (kurbo::Cap::Square, _) | (_, kurbo::Cap::Square) => {
++            kurbo::Rect::new(
++                center.x - radius,
++                center.y - radius,
++                center.x + radius,
++                center.y + radius,
++            )
++            .to_path(0.1)
++        }
++    };
++    out.extend(shape_path);
++}
++
+ struct FlattenerCallback<'a> {
+     line_buf: &'a mut Vec<Line>,
+     start: Point,

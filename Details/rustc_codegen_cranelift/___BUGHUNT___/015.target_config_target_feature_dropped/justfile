@@ -1,0 +1,73 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder or fetched by `just clone` into ./clone
+# (gitignored) - nothing reaches outside the folder it lives in, so the whole folder can be copied
+# anywhere (e.g. attached to a GitHub issue) and `just test` still works.
+#
+# The subject is a *compiler backend*, so "run the repro" means: build cg_clif from ./clone, then
+# compile + run repro/ twice - once with plain cargo (LLVM = the oracle) and once with
+# clone/dist/cargo-clif, with identical RUSTFLAGS - and compare. repro/ has two binaries:
+#
+#   cfgpath  built with `-C target-feature=+avx2,+fma,+bmi2,+popcnt` and branching on
+#            `cfg(target_feature = ...)`. LLVM prints `kernel=avx2`; unpatched cg_clif prints
+#            `kernel=baseline`, i.e. the generated program runs a different code path than the
+#            same source built by LLVM. patch.diff fixes this.
+#   abi      an `extern "C"` fn taking/returning `__m256` by value with `-C target-feature=+avx`.
+#            LLVM compiles it and prints the sum; cg_clif rejects it, because rustc's
+#            `abi_required_features` check reads the same dropped feature set. patch.diff does
+#            NOT make this compile (Cranelift has no >128-bit vector type - see RESULT.md); with
+#            prereq-candidate-012.diff also applied it is a clean `error:` instead of an ICE.
+#
+# run.sh's exit code: 1 = `cfgpath` differs (the bug this patch fixes), 2 = only `abi` differs
+# (the expected post-patch state), 0 = no difference at all.
+#
+# Requirements: the nightly toolchain pinned by clone/rust-toolchain.toml (rustup fetches it), the
+# rust-src component, and an x86-64 host. Building cg_clif takes a few minutes the first time.
+# Swap repo_url for https://github.com/rust-lang/rustc_codegen_cranelift.git if you have no SSH key
+# on GitHub.
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+# Full cycle: clone pristine, prove the divergence exists, apply the fix, prove it is gone.
+# Written as sequential `just` calls rather than a dependency list because build-backend has to run
+# twice and just would deduplicate it as a dependency.
+test:
+    just repo_url={{repo_url}} base_commit={{base_commit}} clone
+    just build-backend
+    just reproduce-before
+    just apply
+    just build-backend
+    just reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Builds clone/dist/{cargo-clif,rustc-clif} plus the cg_clif sysroot. Must be re-run after `apply`.
+build-backend:
+    cd clone && ./y.sh build
+
+# Build + run repro/ against the current state of ./clone. Unpatched, run.sh exits 1, so the `-`
+# prefix keeps `just test` going to the apply/after half.
+reproduce-before:
+    -ulimit -c 0 && CLIF_ROOT="{{justfile_directory()}}/clone" bash repro/run.sh
+    rm -f rustc-ice-*.txt repro/rustc-ice-*.txt
+
+# patch.diff is this candidate's fix. prereq-candidate-012.diff is candidate 012's fix, applied
+# first because honoring `-C target-feature=+avx` makes rustc accept the `abi` binary's signature,
+# which then reaches cg_clif's unguarded >128-bit vector ABI path and ICEs without 012's guard.
+apply:
+    cd clone && git apply "{{justfile_directory()}}/prereq-candidate-012.diff"
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro against the patched clone: `cfgpath` must now match LLVM exactly, and `abi` must be
+# a clean `error:` instead of an ICE. run.sh therefore exits 2, not 1.
+reproduce-after:
+    -ulimit -c 0 && CLIF_ROOT="{{justfile_directory()}}/clone" bash repro/run.sh; test "$?" = 2
+    rm -f rustc-ice-*.txt repro/rustc-ice-*.txt
+
+clean:
+    rm -rf clone repro/target-llvm repro/target-clif repro/Cargo.lock repro/*.log
+    rm -f rustc-ice-*.txt repro/rustc-ice-*.txt

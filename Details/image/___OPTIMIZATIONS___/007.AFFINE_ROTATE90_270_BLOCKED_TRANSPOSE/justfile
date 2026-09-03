@@ -1,0 +1,38 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+# patch.diff only touches src/imageops/affine.rs - the crate's own benches/imageops.rs already
+# has "rotate90"/"rotate270" criterion cases (they exercise rotate90_in/rotate270_in via the
+# public rotate90()/rotate270() wrappers), so no bench file changes or standalone bench crate
+# are needed - the baseline build is just the pristine clone and the patched build is clone +
+# apply.
+test: clone bench-baseline apply bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+bench-baseline:
+    @echo "=== baseline (before patch) ==="
+    cd clone && cargo bench --bench imageops -- --exact rotate90
+    cd clone && cargo bench --bench imageops -- --exact rotate270
+
+bench-patched:
+    @echo "=== patched (after patch) ==="
+    cd clone && cargo bench --bench imageops -- --exact rotate90
+    cd clone && cargo bench --bench imageops -- --exact rotate270
+
+clean:
+    rm -rf clone

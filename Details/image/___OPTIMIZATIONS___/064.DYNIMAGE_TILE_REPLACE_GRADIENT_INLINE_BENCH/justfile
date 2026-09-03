@@ -1,0 +1,54 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff bundles the harness-only hunk (4 new "dyn image tile"/"dyn image replace"/
+# "dyn image vertical gradient"/"dyn image horizontal gradient" criterion cases in
+# benches/imageops.rs) with the actual fix (src/images/dynimage.rs: #[inline(always)] on
+# get_pixel, #[inline] on put_pixel - same fix candidate 060 already measured for overlay).
+# apply-harness applies just the former so the same benchmarks exist in both the baseline and
+# patched build; apply-fix applies the latter on top, for the patched build only.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+test: clone apply-harness build-baseline apply-fix build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-harness:
+    cd clone && git apply --exclude='src/images/dynimage.rs' "{{justfile_directory()}}/patch.diff"
+
+apply-fix:
+    cd clone && git apply --include='src/images/dynimage.rs' "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone && cargo bench --bench imageops --no-run
+    cp "$(ls -t clone/target/release/deps/imageops-* | grep -v '\.d$' | head -1)" ./bin_baseline
+
+build-patched:
+    cd clone && cargo bench --bench imageops --no-run
+    cp "$(ls -t clone/target/release/deps/imageops-* | grep -v '\.d$' | head -1)" ./bin_patched
+
+bench:
+    @for id in "dyn image tile" "dyn image replace" "dyn image vertical gradient" "dyn image horizontal gradient"; do \
+        echo "=== $$id: baseline (before patch), single-core ==="; \
+        taskset -c 0 ./bin_baseline --bench "$$id" --exact --warm-up-time 1 --measurement-time 2; \
+        echo "=== $$id: patched (after patch), single-core ==="; \
+        taskset -c 0 ./bin_patched --bench "$$id" --exact --warm-up-time 1 --measurement-time 2; \
+        echo "=== $$id: baseline (before patch), multi-core (unpinned) ==="; \
+        ./bin_baseline --bench "$$id" --exact --warm-up-time 1 --measurement-time 2; \
+        echo "=== $$id: patched (after patch), multi-core (unpinned) ==="; \
+        ./bin_patched --bench "$$id" --exact --warm-up-time 1 --measurement-time 2; \
+    done
+    @echo "For a rigorous paired comparison instead of one-shot criterion runs, use paired.sh:"
+    @echo "  bash paired.sh ./bin_baseline ./bin_patched \"dyn image tile\" single 10"
+    @echo "  bash paired.sh ./bin_baseline ./bin_patched \"dyn image replace\" multi 10"
+    @echo "  (bench ids: \"dyn image tile\", \"dyn image replace\", \"dyn image vertical gradient\", \"dyn image horizontal gradient\")"
+
+clean:
+    rm -rf clone bin_baseline bin_patched

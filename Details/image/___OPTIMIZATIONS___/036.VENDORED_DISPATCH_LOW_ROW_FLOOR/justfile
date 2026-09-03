@@ -1,0 +1,51 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+# patch.diff bundles the harness hunk (Cargo.toml's `benches/imageops.rs` addition, already
+# present on `main` as of this candidate since candidate 033 re-added it, kept here so this
+# folder stays reproducible standalone) together with the actual fix (Cargo.toml's
+# `[patch.crates-io]`/rayon-forward hunks, plus the entire vendored+patched `vendor/pic-scale-safe/`
+# tree - candidate 035's per-filter capped-thread rayon pool, now gated behind a low
+# `MIN_ROWS_FOR_POOL = 8` row-count floor per dispatch function instead of always dispatching
+# into the pool). This reproduces "S (serial/main) vs H (this candidate's hybrid fix)" from
+# RESULT.md. It does NOT reproduce the "G" (candidate 034's own flat 32-row gate) or "E"
+# (candidate 035's own always-dispatch) comparisons from RESULT.md - those require candidates
+# 034/035's own patch.diff, applied and built separately; see those candidates' own folders.
+test: clone bench-serial apply bench-hybrid
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && git apply --exclude='Cargo.toml' --exclude='vendor/*' "{{justfile_directory()}}/patch.diff"
+
+apply:
+    cd clone && git apply --include='Cargo.toml' --include='vendor/*' "{{justfile_directory()}}/patch.diff"
+
+# "Serial" here means pic-scale-safe/rayon forwarding has no effect - the vendored pic-scale-safe
+# is used as-is, with its own `rayon` feature never compiled in. Note this needs
+# --no-default-features (not just omitting --features rayon): the image crate's own
+# `default = ["rayon", "default-formats"]` enables its own "rayon" feature on a plain
+# `cargo bench` with no flags at all, which would also forward into pic-scale-safe once
+# apply runs.
+bench-serial:
+    @echo "=== S: true serial (main today, no pic-scale-safe/rayon forward) - four filters at 400x300->32x24 ==="
+    cd clone && cargo bench --bench imageops --no-default-features --features default-formats -- "dynamic_resize/DynamicImage::resize_exact 400x300->32x24 (Triangle|CatmullRom|Gaussian|Lanczos3)"
+
+# "Hybrid" here means the rayon feature IS enabled, pic-scale-safe/rayon is forwarded, and the
+# vendored `[patch.crates-io]` override (per-filter capped-thread pool, gated behind an 8-row
+# floor) is in effect.
+bench-hybrid:
+    @echo "=== H: this candidate's fix (vendored pic-scale-safe, per-filter capped-thread pool below a low 8-row floor) - four filters at 400x300->32x24 ==="
+    cd clone && cargo bench --bench imageops --features rayon -- "dynamic_resize/DynamicImage::resize_exact 400x300->32x24 (Triangle|CatmullRom|Gaussian|Lanczos3)"
+
+clean:
+    rm -rf clone

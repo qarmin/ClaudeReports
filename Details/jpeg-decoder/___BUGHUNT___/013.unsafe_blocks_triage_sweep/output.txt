@@ -1,0 +1,128 @@
+=== git rev-parse HEAD ===
+eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c
+
+=== unsafe block/fn enumeration (grep -rn 'unsafe fn|unsafe {' src/) ===
+src/arch/neon.rs:6:unsafe fn idct8(data: &mut [int16x8_t; 8]) {
+src/arch/neon.rs:86:unsafe fn transpose8(data: &mut [int16x8_t; 8]) {
+src/arch/neon.rs:113:pub unsafe fn dequantize_and_idct_block_8x8(
+src/arch/neon.rs:171:pub unsafe fn color_convert_line_ycbcr(y: &[u8], cb: &[u8], cr: &[u8], output: &mut [u8]) -> usize {
+src/arch/mod.rs:13:pub fn get_color_convert_line_ycbcr() -> Option<unsafe fn(&[u8], &[u8], &[u8], &mut [u8]) -> usize>
+src/arch/mod.rs:38:) -> Option<unsafe fn(&[i16; 64], &[u16; 64], usize, &mut [u8])> {
+src/arch/ssse3.rs:8:unsafe fn idct8(data: &mut [__m128i; 8]) {
+src/arch/ssse3.rs:88:unsafe fn transpose8(data: &mut [__m128i; 8]) {
+src/arch/ssse3.rs:124:pub unsafe fn dequantize_and_idct_block_8x8(
+src/arch/ssse3.rs:196:pub unsafe fn color_convert_line_ycbcr(y: &[u8], cb: &[u8], cr: &[u8], output: &mut [u8]) -> usize {
+src/decoder.rs:1414:            unsafe {
+src/arch/wasm.rs:146:    unsafe {
+src/arch/wasm.rs:177:        unsafe {
+src/arch/wasm.rs:209:        unsafe {
+src/arch/wasm.rs:270:        unsafe {
+src/idct.rs:250:        unsafe {
+
+=== raw grep -rn 'unsafe' src/ | wc -l (matches candidate description's count) ===
+23
+
+=== perf-optimize patches never touch unsafe (grep over ___OPTIMIZATIONS___/*/patch.diff) ===
+(no matches in any patch.diff)
+=== Approach 1a: miri, idct unit tests, default (ssse3 not runtime-detected under miri => scalar fallback exercised) ===
+cmd: MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --lib idct
+test idct::test_choose_idct_size ... ok
+test idct::test_dequantize_and_idct_block_8x8 ... ok
+test idct::test_dequantize_and_idct_block_8x8_all_zero ... ok
+test idct::test_dequantize_and_idct_block_8x8_saturated ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.32s
+
+=== Approach 1b: miri, idct unit tests, RUSTFLAGS=-C target-feature=+ssse3 (forces the ssse3::* unsafe path to actually run under miri) ===
+cmd: RUSTFLAGS="-C target-feature=+ssse3" MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --lib idct
+test idct::test_choose_idct_size ... ok
+test idct::test_dequantize_and_idct_block_8x8 ... ok
+test idct::test_dequantize_and_idct_block_8x8_all_zero ... ok
+test idct::test_dequantize_and_idct_block_8x8_saturated ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.28s
+
+=== Approach 1c: miri, custom boundary-width integration test (tests/miri_simd_boundary.rs), ssse3 forced, --no-default-features (rayon disabled - see note below) ===
+cmd: RUSTFLAGS="-C target-feature=+ssse3" MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --test miri_simd_boundary --no-default-features -- --nocapture
+test simd_boundary_widths_no_ub ... jpg-size-1x1.jpg: RGB24 1x1 3 bytes
+jpg-size-2x2.jpg: RGB24 2x2 12 bytes
+jpg-size-3x3.jpg: RGB24 3x3 27 bytes
+jpg-size-4x4.jpg: RGB24 4x4 48 bytes
+jpg-size-5x5.jpg: RGB24 5x5 75 bytes
+jpg-size-7x7.jpg: RGB24 7x7 147 bytes
+jpg-size-8x8.jpg: RGB24 8x8 192 bytes
+jpg-size-9x9.jpg: RGB24 9x9 243 bytes
+jpg-size-15x15.jpg: RGB24 15x15 675 bytes
+jpg-size-16x16.jpg: RGB24 16x16 768 bytes
+jpg-size-17x17.jpg: RGB24 17x17 867 bytes
+jpg-size-31x31.jpg: RGB24 31x31 2883 bytes
+jpg-size-32x32.jpg: RGB24 32x32 3072 bytes
+jpg-size-33x33.jpg: RGB24 33x33 3267 bytes
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.01s
+=== Approach 2: full real test suite on native host CPU (has ssse3, confirmed via /proc/cpuinfo), stable toolchain 1.87.0 since 1.61.0-pinned lockfile deps are too new to build ===
+host CPU flags (ssse3/sse4 present):
+ssse3
+sse4_1
+sse4_2
+
+cmd: cargo +1.87.0 test --lib --tests
+     Running unittests src/lib.rs (target/debug/deps/jpeg_decoder-47452dd5affad452)
+running 5 tests
+test idct::test_choose_idct_size ... ok
+test idct::test_dequantize_and_idct_block_8x8 ... ok
+test idct::test_dequantize_and_idct_block_8x8_all_zero ... ok
+test idct::test_dequantize_and_idct_block_8x8_saturated ... ok
+test parser::test_update_component_sizes ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/lib.rs (target/debug/deps/lib-c5cecceee89ce5a9)
+running 12 tests
+test read_icc_profile ... ok
+test read_icc_profile_double_seq_no ... ok
+test read_icc_profile_missing_chunk ... ok
+test read_icc_profile_seq_no_0 ... ok
+test read_icc_profile_random_order ... ok
+test read_icc_profile_chunk_count_mismatch ... ok
+test read_info ... ok
+test read_xmp_data ... ok
+test read_exif_data ... ok
+test reftest::reftest_scaled ... ok
+test reftest::reftest ... ok
+test crashtest::crashtest ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.99s
+     Running tests/miri_simd_boundary.rs (target/debug/deps/miri_simd_boundary-08ba08cbbbd6ea1b)
+running 1 test
+test simd_boundary_widths_no_ub ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests/rayon.rs (target/debug/deps/rayon-b8a56dfdd6f4773a)
+running 1 test
+test decoding_in_limited_threadpool_does_not_deadlock ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/rayon-0.rs (target/debug/deps/rayon_0-a872918d5d9b7437)
+running 1 test
+test decoding_in_global_pool ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/rayon-1.rs (target/debug/deps/rayon_1-6b80069373013191)
+running 1 test
+test decoding_in_fetched_global_pool ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/rayon-2.rs (target/debug/deps/rayon_2-c072873ff33bfcef)
+running 1 test
+test decoding_in_global_pool ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.79s
+=== Approach 3: cross-target attempts for the NEON (aarch64) and wasm32 unsafe paths, which the native host (x86_64) can't exercise via approaches 1/2 ===
+
+-- 3a: miri interpreting aarch64-unknown-linux-gnu (cross-target, no real aarch64 hardware needed for miri in principle) --
+cmd: cargo +nightly miri test --target aarch64-unknown-linux-gnu --lib idct --features nightly_aarch64_neon
+test idct::test_choose_idct_size ... ok
+test idct::test_dequantize_and_idct_block_8x8 ... error: unsupported operation: can't call LLVM intrinsic `llvm.aarch64.neon.sqrdmulh.v8i16` on architecture `aarch64`
+      |              ^^^^^^^^^^^^^^^^^^^^ unsupported operation occurred here
+error: aborting due to 1 previous error; 8 warnings emitted
+error: test failed, to rerun pass `--lib`
+
+-- 3b: qemu-aarch64 present but no aarch64 cross-linker (aarch64-linux-gnu-gcc) available in this environment to produce a runnable cross-binary, so the qemu fallback for the NEON path could not be attempted this session --
+/usr/bin/qemu-aarch64
+no aarch64 cross-linker found
+
+-- 3c: wasm32 unsafe path (arch/wasm.rs) - compile-time check only (simd128 forced), no interpreter/runtime available in this session to execute it under instrumentation --
+cmd: RUSTFLAGS="-C target-feature=+simd128" cargo +nightly build --target wasm32-unknown-unknown --lib --no-default-features
+
+warning: `jpeg-decoder` (lib) generated 14 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s

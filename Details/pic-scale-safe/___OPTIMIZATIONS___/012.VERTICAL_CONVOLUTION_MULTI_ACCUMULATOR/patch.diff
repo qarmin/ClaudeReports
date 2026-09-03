@@ -1,0 +1,103 @@
+diff --git a/src/fixed_point_vertical.rs b/src/fixed_point_vertical.rs
+index a946626..c077d79 100644
+--- a/src/fixed_point_vertical.rs
++++ b/src/fixed_point_vertical.rs
+@@ -157,6 +157,83 @@ pub(crate) fn convolve_column_handler_fixed_point_direct_buffer16<
+     }
+ }
+ 
++/// Candidate 012 (___OPTIMIZATIONS___): 8 separate `[J; 8]` accumulators kept live across the
++/// whole tap loop, covering 64 columns per call - each accumulator is one AVX2 register's worth
++/// for `J = i32`, so the compiler can plausibly keep all 8 resident in vector registers for the
++/// whole tap loop while still amortizing the row-hop cost by 8x versus that smallest tier.
++/// # Generics
++/// `T` - template buffer type
++/// `J` - accumulator type
++pub(crate) fn convolve_column_handler_fixed_point_direct_buffer_octo<
++    T: Copy + 'static + AsPrimitive<J> + Default,
++    J: Copy + 'static + AsPrimitive<T> + Mul<Output = J> + AddAssign + SaturateNarrow<T> + Default,
++>(
++    src: &[T],
++    src_stride: usize,
++    dst: &mut [T],
++    filter: &[i16],
++    bounds: &FilterBounds,
++    bit_depth: u32,
++    x: usize,
++) where
++    i32: AsPrimitive<J>,
++    i16: AsPrimitive<J>,
++{
++    if filter.is_empty() {
++        return;
++    }
++
++    let rc: J = ROUNDING_CONST.as_();
++    let mut s0: [J; 8] = [rc; 8];
++    let mut s1: [J; 8] = [rc; 8];
++    let mut s2: [J; 8] = [rc; 8];
++    let mut s3: [J; 8] = [rc; 8];
++    let mut s4: [J; 8] = [rc; 8];
++    let mut s5: [J; 8] = [rc; 8];
++    let mut s6: [J; 8] = [rc; 8];
++    let mut s7: [J; 8] = [rc; 8];
++
++    let base = src_stride * bounds.start + x;
++
++    for (j, filter_weight) in filter[..bounds.size].iter().enumerate() {
++        let w: J = filter_weight.as_();
++        let off = base + src_stride * j;
++        let row = &src[off..off + 64];
++
++        for (acc, &s) in s0.iter_mut().zip(&row[0..8]) {
++            *acc += s.as_() * w;
++        }
++        for (acc, &s) in s1.iter_mut().zip(&row[8..16]) {
++            *acc += s.as_() * w;
++        }
++        for (acc, &s) in s2.iter_mut().zip(&row[16..24]) {
++            *acc += s.as_() * w;
++        }
++        for (acc, &s) in s3.iter_mut().zip(&row[24..32]) {
++            *acc += s.as_() * w;
++        }
++        for (acc, &s) in s4.iter_mut().zip(&row[32..40]) {
++            *acc += s.as_() * w;
++        }
++        for (acc, &s) in s5.iter_mut().zip(&row[40..48]) {
++            *acc += s.as_() * w;
++        }
++        for (acc, &s) in s6.iter_mut().zip(&row[48..56]) {
++            *acc += s.as_() * w;
++        }
++        for (acc, &s) in s7.iter_mut().zip(&row[56..64]) {
++            *acc += s.as_() * w;
++        }
++    }
++
++    let v_dst = &mut dst[x..x + 64];
++    for (i, store) in [s0, s1, s2, s3, s4, s5, s6, s7].into_iter().enumerate() {
++        for (d, s) in v_dst[i * 8..(i + 1) * 8].iter_mut().zip(store) {
++            *d = s.saturate_narrow(bit_depth);
++        }
++    }
++}
++
+ /// # Generics
+ /// `T` - template buffer type
+ /// `J` - accumulator type
+@@ -401,6 +478,14 @@ pub(crate) fn column_handler_fixed_point<
+         cx += 64;
+     }
+ 
++    while cx + 64 <= total_width {
++        convolve_column_handler_fixed_point_direct_buffer_octo::<T, J>(
++            src, src_stride, dst, weight, bounds, bit_depth, cx,
++        );
++
++        cx += 64;
++    }
++
+     while cx + 32 <= total_width {
+         convolve_column_handler_fixed_point_direct_buffer_double::<T, J, 16>(
+             src, src_stride, dst, weight, bounds, bit_depth, cx,

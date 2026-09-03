@@ -1,0 +1,139 @@
+=== Boundary sweep (standalone harness calling hayro-jpeg2000's public Image::new/decode()
+    directly, target_resolution=(20,20)), demonstrating candidate 012's own (unmerged)
+    raw_code_block_layer_estimate cap alone (patch.diff from 012.jpeg2000_packet_header_layer_dos
+    applied, no fix from this candidate) does NOT reject a precinct-driven per-resolution-level
+    code-block-size-clamp bypass ===
+
+--- malicious shape: 6000x6000 raw, 3 decomposition levels (4 raw resolution levels), Xcb=Ycb=6
+    (64x64 code blocks), num_layers=1, precincts defined with PPx=PPy=15 (unbounded) at every
+    resolution level except the one right below the top (PPx=PPy=1, forcing that single level's
+    code-block clamp down to 1x1 per the crate's own B-17/B-18 code) ---
+Image::new OK: 750x750
+decode() FAILED after 560.328865ms: Validation(InvalidExponents)
+total elapsed: 657.769639ms
+peak RSS (VmHWM): 1427972 kB (~1394.50 MB)
+(candidate 012's own patch never rejected this: per-component raw_code_block_layer_estimate for
+this shape = top-level-only count (~8789) * num_layers (1) = 8789, ~455x under their own
+4,000,000 cap - yet build_decompositions' real total cost, driven by the one intermediate
+resolution level whose code-block size was forced to 1x1, is ~560ms / ~1.4GB)
+
+--- same shape, num_layers=32 (still using candidate 012's own patch alone) ---
+Image::new OK: 750x750
+decode() FAILED after 2.184670396s: Validation(InvalidExponents)
+total elapsed: 2.574016166s
+peak RSS (VmHWM): 6337112 kB (~6188.59 MB)
+(candidate 012's own estimate for this shape = 8789 * 32 = 281,248, still ~14x under their own
+4,000,000 cap - real cost is now ~2.18s / ~6.19GB, i.e. num_layers compounds with the
+per-resolution-level clamp bypass exactly as expected, on top of it, not instead of it)
+
+--- control: candidate 011/012's own original PoC shape (7900x7900, 1 decomposition level, 4x4
+    code blocks, default PPx=PPy=15 everywhere - no precinct trick), num_layers=1 - sits "just
+    under" candidate 011/012's own reported cap boundary (~3.9M against their top-only estimate) ---
+Image::new OK: 3950x3950
+decode() FAILED after 11.221µs: Validation(ImageTooLarge)
+(REJECTED by this candidate's own fix, see below - because summing every raw resolution level's
+own code-block count for this shape actually totals ~4.88M, already over the cap even before any
+precinct trick; candidate 011/012's own top-only estimate of ~3.9M for this exact shape was
+itself already an underestimate of the true structural-build cost, just not by an amount large
+enough to have been previously noticed)
+
+--- control: realistic large image, realistic code-block size, all 32 layers (should be fast and
+    NOT rejected by any cap - default PPx=PPy=15 everywhere, no precinct trick) ---
+20000x15000, 1 decomposition level, 64x64 code blocks, 32 layers, no precincts defined:
+Image::new OK: 10000x7500
+decode() FAILED after 28.147763ms: Validation(InvalidExponents)
+peak RSS (VmHWM): 71204 kB (~69.54 MB)
+(accepted by this candidate's own fix too, see below - real total estimate ~2,929,664, under the
+4,000,000 cap)
+
+--- control: realistic multi-resolution-level image (4000x3000, 5 decomposition levels, 64x64
+    code blocks, 20 layers, default PPx=PPy=15 everywhere - no precinct trick) ---
+Image::new OK: 125x94
+decode() FAILED after 1.235426ms: Validation(InvalidExponents)
+peak RSS (VmHWM): 5208 kB (~5.09 MB)
+(accepted by this candidate's own fix too - ordinary multi-level real-world-shaped content is not
+penalized by summing all levels instead of just the top one)
+
+
+=== This candidate's own fix applied (build.rs: sums every raw resolution level's own code-block
+    count, using that level's own code-block dimensions, instead of only the top level's) ===
+
+--- malicious shape (6000x6000, 3 decomposition levels, 64x64 code blocks except one
+    precinct-clamped-to-1x1 intermediate level, num_layers=1) ---
+Image::new OK: 750x750
+decode() FAILED after 7.844µs: Validation(ImageTooLarge)
+total elapsed: 29.315µs
+peak RSS (VmHWM): 2996 kB (~2.93 MB)
+
+--- same shape, num_layers=32 ---
+Image::new OK: 750x750
+decode() FAILED after 8.516µs: Validation(ImageTooLarge)
+total elapsed: 33.614µs
+peak RSS (VmHWM): 2972 kB (~2.90 MB)
+
+
+=== Real, standalone, end-to-end repro/ (own Cargo.toml, real public hayro/hayro-syntax API,
+    real hayro::render() entry point, real classic-xref-table PDF with a real /JPXDecode image
+    XObject placed as a 20x20 thumbnail on a 200x200 page) ===
+
+--- pristine tree (base_commit 5a5f0e247c970df948505ee0bb36e2df2504bf86, no cap of any kind -
+    candidates 008/011/012/013's own fixes are all unmerged), 3 separate runs ---
+run 1:
+built PoC PDF: 766 bytes (embedded JPEG2000 codestream: 84 bytes, declares 6000x6000 raw, 3
+decomposition levels, 32 quality layers, normal 64x64 code blocks everywhere except one
+intermediate resolution level forced to 1x1 via a tiny (PPx=PPy=1) precinct size; placed as a
+20x20 thumbnail via `cm 20 0 0 20 90 90` on a 200x200 page)
+calling the real, public hayro::render() and timing it...
+render() returned after 3.209478073s (pixmap 200x200)
+peak RSS (VmHWM): 6339628 kB (~6191.04 MB)
+SLOW: took >= 500ms to render a 20x20 thumbnail placement
+
+run 2:
+render() returned after 2.460189964s (pixmap 200x200)
+peak RSS (VmHWM): 6340920 kB (~6192.30 MB)
+SLOW
+
+run 3:
+render() returned after 2.384479853s (pixmap 200x200)
+peak RSS (VmHWM): 6340744 kB (~6192.13 MB)
+SLOW
+
+--- patched tree (this candidate's own patch.diff applied to hayro-jpeg2000/src/j2c/build.rs, not
+    stacked on candidate 012's own unmerged patch), 3 separate runs ---
+run 1:
+render() returned after 159.934µs (pixmap 200x200)
+peak RSS (VmHWM): 6636 kB (~6.48 MB)
+FAST: rendering completed quickly (or was rejected early by a size cap)
+
+run 2:
+render() returned after 202.655µs (pixmap 200x200)
+peak RSS (VmHWM): 6744 kB (~6.59 MB)
+FAST
+
+run 3:
+render() returned after 226.71µs (pixmap 200x200)
+peak RSS (VmHWM): 6728 kB (~6.57 MB)
+FAST
+
+
+=== Project test suite (patch applied vs pristine, hayro-tests / hayro-jpeg2000) ===
+
+cargo test -p hayro-jpeg2000 --release:
+  pristine: unit tests 1 passed / 0 failed; asset_suite integration test fails with
+  "Failed to read asset directory: missing test input serenity/buggie-gray.jpf" - a pre-existing
+  environment limitation (downloaded test assets not present in this checkout), not a regression,
+  same as documented by candidates 004/006/008/009/011/012.
+  patched: identical - unit tests 1 passed / 0 failed; asset_suite fails identically.
+
+cargo test -p hayro-tests --release --test tests -- load::
+  pristine:  112 passed / 0 failed
+  patched:   112 passed / 0 failed
+  identical (includes load::issue391, the specific regression candidate 011's own first (reverted)
+  fix attempt broke; this candidate's fix does not reintroduce it).
+
+cargo test -p hayro-tests --release --test tests -- render::
+  pristine:  266 passed / 1259 failed
+  patched:   266 passed / 1259 failed
+  identical pass/fail counts and identical failing-test set before and after - the failures are
+  the same pre-existing environment limitation (missing downloaded reference PDFs/snapshots)
+  candidates 004/006/008/009/011/012 already documented, not caused by this change.

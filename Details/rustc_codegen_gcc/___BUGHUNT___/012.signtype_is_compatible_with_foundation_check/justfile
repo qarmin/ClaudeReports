@@ -1,0 +1,44 @@
+# Self-contained reproduction for candidate 012 (signtype_is_compatible_with_foundation_check).
+#
+# This candidate is Not reproducible - there is no patch.diff and nothing to apply against a
+# clone of rustc_codegen_gcc's own source. What repro/ actually needs is a *built libgccjit.so*
+# to dlopen (the exact library the real backend links against) - it does not depend on
+# rustc_codegen_gcc's own Rust source at all, only on the `gccjit` crate (same version this
+# project depends on) and a libgccjit shared library.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored, used only to build a real libgccjit.so via this project's own tooling) -
+# nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+# Full cycle: clone pristine, build its bundled libgccjit.so, run the direct query against it.
+test: clone build reproduce
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# One-time setup: downloads a prebuilt libgccjit.so (this project's default
+# `download-gccjit = true`). Only the libgccjit download is actually needed here - a full
+# sysroot build is not, since repro/ never invokes rustc_codegen_gcc itself.
+build:
+    cd clone && ./y.sh prepare
+
+# Finds whatever libgccjit.so `./y.sh prepare` downloaded and runs the direct compatibility
+# query against it.
+reproduce:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lib=$(find clone/build/libgccjit -iname 'libgccjit.so' | head -1)
+    if [ -z "$lib" ]; then
+        echo "libgccjit.so not found under clone/build/libgccjit - did 'just build' succeed?" >&2
+        exit 1
+    fi
+    cd repro
+    LIBGCCJIT_PATH="$(cd "$(dirname "$lib")" && pwd)/$(basename "$lib")" cargo run --release
+
+clean:
+    rm -rf clone

@@ -1,0 +1,44 @@
+# Self-contained reproduction for candidate 031: divide-by-zero panic in symphonia-core's
+# AudioBuffer::new when the AudioSpec has zero channels.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone - nothing here reaches outside the folder it lives in.
+#
+# `just test` prints the full before/after. The repro exits 1 while the bug is present and 0
+# once it is fixed.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Should panic with "attempt to divide by zero" at symphonia-core/src/audio/buf.rs and exit 1
+# (the leading `-` lets the recipe continue past that non-zero exit).
+reproduce-before:
+    -ulimit -c 0 && cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Should now construct the zero-channel buffer without panicking and exit 0. Part B still ends in
+# an unrelated `unreachable!()` panic inside symphonia-codec-adpcm - a separate defect, see
+# RESULT.md's "What's not done"; the repro prints it as such and does not count it as this bug.
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo run --release
+
+# Supplementary: the same trigger with no catch_unwind, for a real stack backtrace.
+backtrace:
+    -ulimit -c 0 && cd repro && RUST_BACKTRACE=1 cargo run --release --bin uncaught
+
+# Supplementary: boundary-value sweep proving the patched assert still rejects an over-large
+# capacity for every non-zero channel count.
+bounds:
+    ulimit -c 0 && cd repro && cargo run --release --bin bounds
+
+clean:
+    rm -rf clone repro/target

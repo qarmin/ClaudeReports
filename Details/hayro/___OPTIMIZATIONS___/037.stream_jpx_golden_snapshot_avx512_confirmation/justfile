@@ -1,0 +1,46 @@
+# Self-contained reproduction for candidate 037: confirms (and refutes) the AVX-512-vs-non-AVX-512
+# FMA-precision hypothesis for hayro-tests' stream_jpx_3/5/6 golden-snapshot failures, and confirms
+# the real cause (a stale snapshot predating upstream PR #1340).
+#
+# No patch.diff in this folder - this is a pure investigation, not a fix (see RESULT.md). `just
+# test` clones the project, drops in the golden PNGs saved in testdata/ (hayro-tests/snapshots/ is
+# git-ignored, so a fresh clone/worktree never has them - see RESULT.md's "What was tried"), then
+# runs the same 4 variants RESULT.md's table reports: default dispatch, AVX-512 dispatch disabled,
+# AVX-512+AVX2 dispatch disabled, and PR #1340 reverted - printing each one's pixel-diff counts so
+# the reader sees the same before/after without needing to re-derive the RUSTFLAGS/revert by hand.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+test: clone snapshots run-default run-no-avx512 run-no-avx512-avx2 run-pr1340-reverted
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+snapshots:
+    mkdir -p clone/hayro-tests/snapshots/render/custom
+    cp testdata/stream_jpx_1.png testdata/stream_jpx_3.png testdata/stream_jpx_5.png testdata/stream_jpx_6.png \
+        clone/hayro-tests/snapshots/render/custom/
+
+run-default:
+    @echo "=== default build (AVX-512-eligible dispatch on this host) ==="
+    cd clone && cargo test -p hayro-tests --release --test tests -- stream_jpx --nocapture --test-threads=1 || true
+
+run-no-avx512:
+    @echo "=== RUSTFLAGS=--cfg disable_dispatch_avx512 (falls back to AVX2) ==="
+    cd clone && RUSTFLAGS="--cfg disable_dispatch_avx512" cargo test -p hayro-tests --release --test tests -- stream_jpx --nocapture --test-threads=1 || true
+
+run-no-avx512-avx2:
+    @echo "=== RUSTFLAGS=--cfg disable_dispatch_avx512 --cfg disable_dispatch_avx2 (falls back to SSE4.2) ==="
+    cd clone && RUSTFLAGS="--cfg disable_dispatch_avx512 --cfg disable_dispatch_avx2" cargo test -p hayro-tests --release --test tests -- stream_jpx --nocapture --test-threads=1 || true
+
+run-pr1340-reverted:
+    @echo "=== default build, PR #1340 (reconstruction midpoint fix) reverted ==="
+    cd clone && git apply -R "{{justfile_directory()}}/testdata/pr1340.diff"
+    cd clone && cargo test -p hayro-tests --release --test tests -- stream_jpx --nocapture --test-threads=1 || true
+    cd clone && git checkout -- hayro-jpeg2000/src/j2c/bitplane.rs hayro-jpeg2000/src/j2c/decode.rs
+
+clean:
+    rm -rf clone

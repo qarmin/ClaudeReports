@@ -1,0 +1,42 @@
+diff --git a/scpproxy/src/main.rs b/scpproxy/src/main.rs
+index fde07148..b19d9b38 100644
+--- a/scpproxy/src/main.rs
++++ b/scpproxy/src/main.rs
+@@ -220,7 +220,20 @@ fn run(
+                                 println!("scu <---- scp: {}", pdu.short_description());
+                             }
+                             buffer.clear();
+-                            write_pdu(&mut buffer, &pdu).unwrap();
++                            // the PDU being relayed was parsed from the other side's
++                            // connection - it may be technically well-formed but still
++                            // fail to re-encode (e.g. an AE title that decodes to an
++                            // empty/all-space string, which the wire reader accepts but
++                            // the writer's own validation rejects). Log and end this
++                            // relay session gracefully instead of crashing the proxy.
++                            if let Err(err) = write_pdu(&mut buffer, &pdu) {
++                                error!(
++                                    "error encoding PDU to relay to {:?}: {}",
++                                    ProviderType::Scu,
++                                    Report::from_error(err)
++                                );
++                                break;
++                            }
+                             scu_stream.write_all(&buffer).unwrap();
+                         }
+                         ProviderType::Scp => {
+@@ -228,7 +241,14 @@ fn run(
+                                 println!("scu ----> scp: {}", pdu.short_description());
+                             }
+                             buffer.clear();
+-                            write_pdu(&mut buffer, &pdu).unwrap();
++                            if let Err(err) = write_pdu(&mut buffer, &pdu) {
++                                error!(
++                                    "error encoding PDU to relay to {:?}: {}",
++                                    ProviderType::Scp,
++                                    Report::from_error(err)
++                                );
++                                break;
++                            }
+                             scp_stream.write_all(&buffer).unwrap();
+                         }
+                     },

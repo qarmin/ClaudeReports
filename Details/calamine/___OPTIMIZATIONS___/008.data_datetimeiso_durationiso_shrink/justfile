@@ -1,0 +1,55 @@
+# Self-contained reproduction for this candidate.
+#
+# Uses the `rss_probe` harness from ../harness/rss_probe (untracked in the main calamine repo -
+# see ../README.md). Self-contained given the whole ___OPTIMIZATIONS___ folder kept together.
+#
+# The XLS fixture (adhocallbabynames1996to2016.xls, 18MB) is already tracked in the main repo's
+# own tests/ dir, so it's available at clone/tests/... once cloned - not duplicated here. The
+# XLSX fixture (big_300k_rows.xlsx, ~20MB) is re-downloaded from the public URL documented in
+# ../README.md.
+
+repo_url := "https://github.com/tafia/calamine.git"
+base_commit := "5c02e86e99ec5c1fb1dcc15e64c2bbaf19bff60d"
+harness_dir := "../harness/rss_probe"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/rss_probe
+    mkdir -p testdata
+    curl -sL -o testdata/big_300k_rows.xlsx https://test-files.sheetjs.com/8-by-300000-cells.xlsx
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_baseline
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_patched
+
+bench:
+    @echo "=== baseline: XLS real file (expect peak ~150.9-151.4 MB, end ~78.1-78.3 MB) ==="
+    ./rss_probe_baseline range clone/tests/adhocallbabynames1996to2016.xls
+    @echo "=== patched: XLS real file (expect peak ~-12%, end ~+17% - see RESULT.md) ==="
+    ./rss_probe_patched range clone/tests/adhocallbabynames1996to2016.xls
+    @echo ""
+    @echo "=== baseline: XLSX real file (expect peak ~172.0-172.6 MB) ==="
+    ./rss_probe_baseline range testdata/big_300k_rows.xlsx
+    @echo "=== patched: XLSX real file (expect peak ~134.5-135.1 MB, -~22%) ==="
+    ./rss_probe_patched range testdata/big_300k_rows.xlsx
+
+test-suite:
+    @echo "=== baseline test suite ==="
+    cd clone && git stash && cargo test --all-features 2>&1 | grep -E "running|test result|error" && git stash pop
+    @echo "=== patched test suite (patch already applied) ==="
+    cd clone && cargo test --all-features 2>&1 | grep -E "running|test result|error"
+
+clean:
+    rm -rf clone rss_probe_baseline rss_probe_patched testdata/big_300k_rows.xlsx

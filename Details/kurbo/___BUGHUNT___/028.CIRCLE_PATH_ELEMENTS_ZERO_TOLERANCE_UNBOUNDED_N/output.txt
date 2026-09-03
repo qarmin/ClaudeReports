@@ -1,0 +1,83 @@
+Repro run against a real `git clone` of the project at base_commit
+ca273499e3e48bd2de6f02aa8e99a148984e45f3 (cd repro && cargo run --release), before and after
+applying patch.diff to ./clone.
+
+=== BEFORE (pristine clone, unpatched) ===
+    Updating crates.io index
+     Locking 7 packages to latest compatible versions
+   Compiling arrayvec v0.7.8
+   Compiling smallvec v1.16.0
+   Compiling polycool v0.4.0 (.../clone/polycool)
+   Compiling kurbo v0.13.1 (.../clone/kurbo)
+   Compiling repro-028-circle-path-elements-zero-tolerance-unbounded-n v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 1.74s
+     Running `target/release/repro-028-circle-path-elements-zero-tolerance-unbounded-n`
+[path_elements, tolerance=0.0] tolerance=0e0 -> 20000000 elements in 370.602981ms, iterator finished on its own: false
+FAIL: Circle::path_elements did not terminate in a reasonable time/element budget for tolerance=0.0
+
+(exit code 1 - the 20,000,000-element cap / 5s wall-clock cutoff fired; the real, uncapped
+iterator does not terminate in any practical amount of time. Separate, uncapped manual checks
+against a worktree copy of the unpatched source hit tens to well over a hundred million elements
+within a few seconds without ever returning None - see below and RESULT.md for details.)
+
+=== AFTER (same clone, patch.diff applied) ===
+   Compiling kurbo v0.13.1 (.../clone/kurbo)
+   Compiling repro-028-circle-path-elements-zero-tolerance-unbounded-n v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 0.88s
+     Running `target/release/repro-028-circle-path-elements-zero-tolerance-unbounded-n`
+[path_elements, tolerance=0.0] tolerance=0e0 -> 1048578 elements in 19.937989ms, iterator finished on its own: true
+PASS: Circle::path_elements terminated promptly for tolerance=0.0
+
+(exit code 0 - the iterator now terminates on its own after exactly 1048578 elements
+(2 * MAX_CIRCLE_SEGMENTS + a MoveTo + a ClosePath) = 2 * 2^20 + 2, in ~20ms.)
+
+=== Manual boundary-value arithmetic (pure arithmetic, no crate involved) ===
+Standalone `rustc -O` snippet computing scaled_err/n_f/n by hand exactly as circle.rs does, for
+radius=10.0:
+
+scaled_err = inf
+n_f = inf
+n as usize = 18446744073709551615
+
+tolerance=1e-300: scaled_err=9999999999999999...(elided)...000, n_f=149496200181292260...(elided)...000, n=18446744073709551615
+
+tolerance=NaN: scaled_err=NaN, n_f=NaN, n=0
+
+=== Real end-to-end run of the public API against an unpatched worktree (debug build,
+debug-assertions=true, overflow-checks=true) ===
+Standalone crate depending on kurbo via a path dependency to a worktree of the project at the
+same base_commit, calling `Circle::new((0,0),10.0).path_elements(0.0)` directly and driving the
+returned iterator with a 3-second wall-clock cutoff (no element cap, to see the natural rate):
+
+count=5000000 elapsed=192.108029ms
+count=10000000 elapsed=383.644746ms
+...
+count=75000000 elapsed=2.883250903s
+CUTOFF after 78029240 elements, iterator did not finish on its own
+
+=== Repeat runs (repeatability check, CONFIRMATION.md section 1) ===
+Same unpatched-worktree harness, release build, 3 separate process runs, 3-second cutoff, no
+element cap:
+
+Run 1 (release): CUTOFF after 129518504 elements, iterator did not finish on its own
+Run 2 (release): CUTOFF after 125567664 elements, iterator did not finish on its own
+Run 3 (release): CUTOFF after 127020546 elements, iterator did not finish on its own
+Plus the debug run above (78029240 elements) and the standalone repro/ run against the pristine
+clone (20000000-element cap fired at 370ms) = 5/5 runs show the same non-termination behavior.
+
+=== Post-fix spot checks (same public API, varying tolerance within the same bug class, release
+build, against the patched worktree) ===
+tolerance=0.0            (radius=10) -> finished naturally after 1048578 elements in ~19.5ms
+tolerance=1e-300         (radius=10) -> finished naturally after 1048578 elements in ~19.5ms
+tolerance=NaN            (radius=10) -> finished naturally after 1048578 elements in ~19.4ms
+                            (note: pre-fix, NaN tolerance instead silently saturated `n` to 0,
+                             i.e. an empty/degenerate circle with no CurveTo elements at all -
+                             a separate, already-noted silent-wrong-output case for NaN
+                             specifically, not the same "unbounded iteration" bug as tolerance=0.0;
+                             the fix's `.min()` clamp happens to also neutralize this NaN case as
+                             a side effect, per f64::min's documented NaN-propagation semantics)
+tolerance=0.1 (normal)   (radius=10) -> finished naturally after 6 elements in ~150ns (unchanged)
+tolerance=1.0 (normal)   (radius=10) -> finished naturally after 6 elements in ~150ns (unchanged)
+tolerance=-0.0           (radius=10) -> finished naturally after 6 elements in ~200ns (unchanged;
+                            already hits the existing fast-path branch pre- and post-fix, since
+                            radius.abs()/(-0.0) = -inf which is < the fast-path threshold)

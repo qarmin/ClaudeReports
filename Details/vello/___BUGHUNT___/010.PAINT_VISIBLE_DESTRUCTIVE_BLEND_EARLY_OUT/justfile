@@ -1,0 +1,42 @@
+# Self-contained reproduction for candidate 010 (vello_hybrid Scene's paint_visible early-out vs
+# destructive blend modes). Status: Not reproducible - see RESULT.md. No patch.diff exists for
+# this candidate, so this justfile only has a `reproduce-before` step (per the template's own
+# instructions for that case).
+#
+# `repo_url`/`base_commit` were read via `git remote get-url origin` / `git rev-parse HEAD` in the
+# main project at investigation time.
+#
+# Note: this environment's git-lfs binary is missing, which makes a plain `git clone`/`git
+# checkout` of this repo fail on its LFS-tracked PNG test snapshots. The repro below never touches
+# those files (it renders and inspects pixels itself via the public wgpu-backed API, it doesn't
+# compare against the checked-in snapshot PNGs), so the clone step disables the LFS filter
+# outright (`-c filter.lfs.*`) to stay robust regardless of whether git-lfs is installed on the
+# machine running this. This also requires a working GPU/Vulkan-or-software adapter reachable by
+# wgpu (the same requirement `render_to_file`/the project's own `vello_sparse_tests` hybrid tests
+# have).
+
+# https (not the ssh form `git remote get-url origin` actually returns) so `just clone` works
+# without an ssh key/agent configured.
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false clone {{repo_url}} clone
+    cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone. For each of the 6 "destructive"
+# Compose modes (Clear/Copy/SrcIn/DestIn/SrcOut/DestAtop - see peniko::BlendMode::is_destructive),
+# renders the same scene twice via vello_hybrid's real wgpu-backed Renderer: once with an opaque
+# source paint inside the blend layer, once with a fully-transparent source paint (which hits
+# Scene::fill_rect's paint_visible early-out and records zero strips for that draw, exactly the
+# candidate's suspected trigger). Prints whether the transparent-source case still erases the
+# backdrop rect exactly like the opaque-source reference does. Exits non-zero and prints
+# "RESULT: BUG REPRODUCED" if any compose mode disagrees.
+reproduce-before:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

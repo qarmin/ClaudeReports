@@ -1,0 +1,125 @@
+=== just clone ===
+rm -rf clone
+git clone https://github.com/orxfun/orx-parallel.git clone
+Cloning into 'clone'...
+cd clone && git checkout b9214fbeb714e4bb8f8858676a818cef2f21b097
+Note: switching to 'b9214fbeb714e4bb8f8858676a818cef2f21b097'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at b9214fbe iter of iter uses fixed chunk heuristic (#198)
+
+=== just reproduce-before (run 1/3, fresh clone) ===
+cd repro && cargo run --release
+   Compiling orx-self-or v1.2.0
+   Compiling orx-pseudo-default v2.1.0
+   Compiling orx-priority-queue v1.9.0
+   Compiling orx-iterable v1.3.0
+   Compiling orx-concurrent-iter v4.3.0
+   Compiling orx-pinned-vec v4.0.0
+   Compiling orx-fixed-vec v4.0.0
+   Compiling orx-split-vec v4.0.2
+   Compiling orx-pinned-concurrent-col v3.0.1
+   Compiling orx-concurrent-bag v4.0.1
+   Compiling orx-concurrent-ordered-bag v4.0.1
+   Compiling orx-parallel v3.4.0 (/home/rafal/Projekty/Obce/orx-parallel/___BUGHUNT___/002.use_slice_sync_missing_send/clone)
+   Compiling repro v0.1.0 (/home/rafal/Projekty/Obce/orx-parallel/___BUGHUNT___/002.use_slice_sync_missing_send/repro)
+    Finished `release` profile [optimized + debuginfo] target(s) in 2.01s
+     Running `target/release/repro`
+initial strong_count (just `control`):        1
+strong_count after building 4 slots:  5
+strong_count after parallel clone/drop storm:  100556994971493
+strong_count after dropping `slots`:           100556994971489
+REPRODUCED: Rc strong_count corrupted by unsynchronized concurrent access (expected 5 after storm / 1 after final drop, got 100556994971493 / 100556994971489)
+error: Recipe `reproduce-before` failed on line 23 with exit code 1
+exit=1
+
+=== just reproduce-before (run 2/3) ===
+cd repro && cargo run --release
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+     Running `target/release/repro`
+initial strong_count (just `control`):        1
+strong_count after building 4 slots:  5
+strong_count after parallel clone/drop storm:  98163806616117
+strong_count after dropping `slots`:           98163806616113
+REPRODUCED: Rc strong_count corrupted by unsynchronized concurrent access (expected 5 after storm / 1 after final drop, got 98163806616117 / 98163806616113)
+error: Recipe `reproduce-before` failed on line 23 with exit code 1
+exit=1
+
+=== just reproduce-before (run 3/3) ===
+cd repro && cargo run --release
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.01s
+     Running `target/release/repro`
+Illegal instruction (core dumped)
+error: Recipe `reproduce-before` failed on line 23 with exit code 132
+exit=132
+
+=== just apply (patch.diff) ===
+cd clone && git apply "/home/rafal/Projekty/Obce/orx-parallel/___BUGHUNT___/002.use_slice_sync_missing_send/patch.diff"
+
+=== just reproduce-after (patched tree - expected to fail to COMPILE, proving the fix) ===
+cd repro && cargo run --release
+   Compiling orx-parallel v3.4.0 (/home/rafal/Projekty/Obce/orx-parallel/___BUGHUNT___/002.use_slice_sync_missing_send/clone)
+   Compiling repro v0.1.0 (/home/rafal/Projekty/Obce/orx-parallel/___BUGHUNT___/002.use_slice_sync_missing_send/repro)
+error[E0277]: `Rc<Cell<i64>>` cannot be sent between threads safely
+   --> src/main.rs:37:10
+    |
+ 37 |         .use_slice(&mut slots)
+    |          ^^^^^^^^^ `Rc<Cell<i64>>` cannot be sent between threads safely
+    |
+    = help: within `RcSync`, the trait `Send` is not implemented for `Rc<Cell<i64>>`
+note: required because it appears within the type `RcSync`
+   --> src/main.rs:16:8
+    |
+ 16 | struct RcSync(Rc<Cell<i64>>);
+    |        ^^^^^^
+note: required by a bound in `orx_parallel::Par::use_slice::{anon_assoc#0}`
+   --> /home/rafal/Projekty/Obce/orx-parallel/___BUGHUNT___/002.use_slice_sync_missing_send/clone/src/infallible/par.rs:584:12
+    |
+584 |         U: Send + Sync + 'a,
+    |            ^^^^ required by this bound in `Par::use_slice::{anon_assoc#0}`
+
+error[E0277]: `Rc<Cell<i64>>` cannot be sent between threads safely
+   --> src/main.rs:34:5
+    |
+ 34 | /     (0..(n_threads * iters_per_thread))
+ 35 | |         .into_par()
+ 36 | |         .num_threads(n_threads)
+ 37 | |         .use_slice(&mut slots)
+...   |
+ 48 | |             drop(c);
+ 49 | |         });
+    | |__________^ `Rc<Cell<i64>>` cannot be sent between threads safely
+    |
+    = help: within `RcSync`, the trait `Send` is not implemented for `Rc<Cell<i64>>`
+note: required because it appears within the type `RcSync`
+   --> src/main.rs:16:8
+    |
+ 16 | struct RcSync(Rc<Cell<i64>>);
+    |        ^^^^^^
+note: required by a bound in `orx_parallel::Par::use_slice`
+   --> /home/rafal/Projekty/Obce/orx-parallel/___BUGHUNT___/002.use_slice_sync_missing_send/clone/src/infallible/par.rs:584:12
+    |
+579 |     fn use_slice<'a, U>(
+    |        --------- required by a bound in this associated function
+...
+584 |         U: Send + Sync + 'a,
+    |            ^^^^ required by this bound in `Par::use_slice`
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `repro` (bin "repro") due to 2 previous errors
+error: Recipe `reproduce-after` failed on line 34 with exit code 101
+exit=101

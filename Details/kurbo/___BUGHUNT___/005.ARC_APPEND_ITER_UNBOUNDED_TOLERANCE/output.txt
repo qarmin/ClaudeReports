@@ -1,0 +1,46 @@
+Repro run against a real `git clone` of the project at base_commit
+ca273499e3e48bd2de6f02aa8e99a148984e45f3 (cd repro && cargo run --release), before and after
+applying patch.diff to ./clone.
+
+=== BEFORE (pristine clone, unpatched) ===
+   Compiling kurbo v0.13.1 (.../clone/kurbo)
+   Compiling repro-005-arc-append-iter-unbounded-tolerance v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 1.35s
+     Running `target/release/repro-005-arc-append-iter-unbounded-tolerance`
+[append_iter, tolerance=0.0] tolerance=0e0 -> 20000000 elements in 431.272488ms, iterator finished on its own: false
+FAIL: Arc::append_iter did not terminate in a reasonable time/element budget for tolerance=0.0
+
+(exit code 1 - the 20,000,000-element cap / 5s wall-clock cutoff fired; the real,
+uncapped iterator does not terminate in any practical amount of time. A separate,
+uncapped standalone check hit 130,597,437 elements in 3s in release mode, 24,282,733
+in 3s in a debug build, without ever returning None - see RESULT.md for details of
+that additional manual check.)
+
+=== AFTER (same clone, patch.diff applied) ===
+   Compiling kurbo v0.13.1 (.../clone/kurbo)
+   Compiling repro-005-arc-append-iter-unbounded-tolerance v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 1.10s
+     Running `target/release/repro-005-arc-append-iter-unbounded-tolerance`
+[append_iter, tolerance=0.0] tolerance=0e0 -> 1048576 elements in 20.409337ms, iterator finished on its own: true
+PASS: Arc::append_iter terminated promptly for tolerance=0.0
+
+(exit code 0 - the iterator now terminates on its own after exactly 1048576 = 2^20
+elements = MAX_ARC_SEGMENTS, in ~20ms.)
+
+=== Repeat runs (repeatability check, CONFIRMATION.md section 1) ===
+Debug build, in-process (not the standalone repro/, same public API `to_cubic_beziers`),
+against the unpatched worktree copy of the source, 3 separate process runs:
+
+Run 1 (debug, 3s cutoff):   24,282,733 elements counted via append_iter.next(), did not terminate.
+Run 2 (release, 3s cutoff, via to_cubic_beziers): panicked after 130,597,437 elements, did not terminate.
+Run 3 (release, 3s cutoff, via to_cubic_beziers): panicked after 103,367,920 elements, did not terminate.
+=> 4/4 runs (including the repro/ run above) show the same non-termination behavior.
+
+Post-fix spot checks (same public API, varying tolerance/sweep within the same bug class,
+release build, against the patched worktree):
+  zero tolerance, half circle:  tol=0            sweep=pi     -> 1048576 elements, ~0ms
+  zero tolerance, full circle:  tol=0            sweep=2*pi   -> 1048576 elements, ~0ms
+  tiny tolerance:                tol=1e-300       sweep=pi     -> 1048576 elements, ~0ms
+  negative zero tolerance:       tol=-0.0         sweep=pi     -> 1048576 elements, ~0ms
+  normal tolerance 0.1:          tol=0.1          sweep=pi     -> 2 elements, ~0ms (unchanged from pre-fix behavior)
+  normal tolerance 1.0:          tol=1.0          sweep=pi     -> 2 elements, ~0ms (unchanged from pre-fix behavior)

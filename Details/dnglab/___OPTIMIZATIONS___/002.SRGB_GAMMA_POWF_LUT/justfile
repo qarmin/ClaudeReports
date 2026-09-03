@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# repo_url/base_commit read at the moment patch.diff was captured (2026-08-24).
+
+repo_url := "https://github.com/dnglab/dnglab.git"
+base_commit := "ac975f5d1b3362feb3974811db6cc5a37a77b02b"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cp "{{justfile_directory()}}/bench/srgb_gamma_bench.rs" clone/rawler/examples/srgb_gamma_bench.rs
+
+# No existing bench in this repo isolates the sRGB gamma stage alone (rawler/benches/demosaic.rs
+# stops before ProcessingStep::SRgb) - this candidate's own microbenchmark
+# (bench/srgb_gamma_bench.rs, copied into rawler/examples/ by `just apply`) calls
+# srgb_apply_gamma_inplace directly on a buffer matching a real full-develop sample's element
+# count. Run once unpinned (multi-core, realistic) and once under taskset -c 0 with
+# RAYON_NUM_THREADS=1 (single-core, for ranking) - compare against a baseline build (checkout
+# base_commit again without applying the patch) the same way.
+bench:
+    cd clone && cargo build --release -p rawler --example srgb_gamma_bench
+    @echo "--- multi-core (unpinned) ---"
+    ./clone/target/release/examples/srgb_gamma_bench
+    @echo "--- single-core (taskset -c 0, RAYON_NUM_THREADS=1) ---"
+    RAYON_NUM_THREADS=1 taskset -c 0 ./clone/target/release/examples/srgb_gamma_bench
+
+# Accuracy/correctness check: dense analytic scan of the approximation vs. real powf, standalone
+# (no rawler dependency, uses the same constants/algorithm copied into accuracy_check.rs).
+accuracy:
+    rustc -O "{{justfile_directory()}}/bench/accuracy_check.rs" -o /tmp/srgb_gamma_accuracy_check
+    /tmp/srgb_gamma_accuracy_check
+
+clean:
+    rm -rf clone

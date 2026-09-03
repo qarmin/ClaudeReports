@@ -1,0 +1,82 @@
+diff --git a/src/metadata/cicp.rs b/src/metadata/cicp.rs
+index 16c14dc5..cf279993 100644
+--- a/src/metadata/cicp.rs
++++ b/src/metadata/cicp.rs
+@@ -668,14 +668,33 @@ impl CicpTransform {
+         output: &mut [P],
+         coef: [f32; 3],
+     ) {
+-        for (rgb, pix) in input.as_chunks::<3>().0.iter().zip(output) {
+-            let mut luma = 0.0;
+-
+-            for (&component, coef) in rgb.iter().zip(coef) {
+-                luma = multiply_accumulate(luma, component, coef);
++        // Split the per-pixel horizontal reduction (rgb -> luma) from the elementwise clamp/cast
++        // (luma -> P) into two separate loops over an intermediate stack buffer. Fusing both into
++        // one loop body (the previous shape) left the reduction auto-vectorized (SLP groups 4
++        // pixels' worth of multiply-accumulate into packed ops) but forced the clamp/cast/pack
++        // tail back to scalar per-lane code, since it had to unpack the just-computed vector one
++        // lane at a time to interleave with the next pixel's reduction. Decoupling them lets each
++        // loop vectorize on its own terms.
++        const CHUNK: usize = 256;
++        let mut luma_buf = [0.0f32; CHUNK];
++
++        let input_chunks = input.as_chunks::<3>().0.chunks(CHUNK);
++        let output_chunks = output.chunks_mut(CHUNK);
++
++        for (rgb_chunk, out_chunk) in input_chunks.zip(output_chunks) {
++            let luma = &mut luma_buf[..rgb_chunk.len()];
++
++            for (rgb, luma) in rgb_chunk.iter().zip(luma.iter_mut()) {
++                let mut acc = 0.0;
++                for (&component, coef) in rgb.iter().zip(coef) {
++                    acc = multiply_accumulate(acc, component, coef);
++                }
++                *luma = acc;
+             }
+ 
+-            *pix = P::clamp_from_f32(luma);
++            for (&l, pix) in luma.iter().zip(out_chunk) {
++                *pix = P::clamp_from_f32(l);
++            }
+         }
+     }
+ 
+@@ -684,17 +703,29 @@ impl CicpTransform {
+         output: &mut [P],
+         coef: [f32; 3],
+     ) {
+-        let input_chunks = input.as_chunks::<4>().0.iter();
+-        let output_chunks = output.as_chunks_mut::<2>().0.iter_mut();
+-        for (rgba, pix) in input_chunks.zip(output_chunks) {
+-            let mut luma = 0.0;
++        // See `clamp_rgb_luma` above for why the reduction and the clamp/cast are split into two
++        // loops over an intermediate buffer instead of one fused loop.
++        const CHUNK: usize = 256;
++        let mut luma_buf = [0.0f32; CHUNK];
++
++        let input_chunks = input.as_chunks::<4>().0.chunks(CHUNK);
++        let output_chunks = output.as_chunks_mut::<2>().0.chunks_mut(CHUNK);
+ 
+-            for (&component, coef) in rgba[..3].iter().zip(coef) {
+-                luma = multiply_accumulate(luma, component, coef);
++        for (rgba_chunk, out_chunk) in input_chunks.zip(output_chunks) {
++            let luma = &mut luma_buf[..rgba_chunk.len()];
++
++            for (rgba, luma) in rgba_chunk.iter().zip(luma.iter_mut()) {
++                let mut acc = 0.0;
++                for (&component, coef) in rgba[..3].iter().zip(coef) {
++                    acc = multiply_accumulate(acc, component, coef);
++                }
++                *luma = acc;
+             }
+ 
+-            pix[0] = P::clamp_from_f32(luma);
+-            pix[1] = P::clamp_from_f32(rgba[3]);
++            for ((&l, rgba), pix) in luma.iter().zip(rgba_chunk).zip(out_chunk) {
++                pix[0] = P::clamp_from_f32(l);
++                pix[1] = P::clamp_from_f32(rgba[3]);
++            }
+         }
+     }
+ }

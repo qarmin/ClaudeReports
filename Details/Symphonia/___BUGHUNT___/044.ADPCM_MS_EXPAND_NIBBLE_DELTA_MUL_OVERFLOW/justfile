@@ -1,0 +1,34 @@
+# Self-contained reproduction for candidate 044: `attempt to multiply with overflow` panic in
+# symphonia-codec-adpcm's MS ADPCM decoder (AdpcmMsBlockStatus::expand_nibble, codec_ms.rs:96).
+#
+# Found via real fuzzing of the real `decode_adpcm` cargo-fuzz target, after first applying
+# candidate 012's fix to symphonia/fuzz/src/lib.rs (without it, the fuzz harness always
+# constructs Packet::new(..., Duration::ZERO, ...), so the ADPCM block-decode loop this bug lives
+# in never runs no matter what packet_data the fuzzer generates - see RESULT.md).
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Should panic: "attempt to multiply with overflow" at symphonia-codec-adpcm/src/codec_ms.rs:96.
+# NOTE: plain `cargo run` (dev/debug profile), not `--release` - see repro/Cargo.toml's own note
+# for why the release profile's overflow-checks override doesn't reach this path dependency.
+reproduce-before:
+    -ulimit -c 0 && cd repro && cargo run
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Should no longer panic - decode now returns an `Err` (buffer underrun, since the crafted packet
+# is deliberately short) instead of crashing.
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo run
+
+clean:
+    rm -rf clone

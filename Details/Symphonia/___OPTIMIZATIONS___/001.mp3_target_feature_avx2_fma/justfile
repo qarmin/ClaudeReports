@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate is a BUILD-FLAG comparison, not a source patch - there is no patch.diff (see
+# RESULT.md's "Does it change behavior/output?" section: N/A, no source changed). Both builds use
+# identical source at base_commit; only RUSTFLAGS differs. `bench_decode.rs` is this workspace's
+# own harness (see ../README.md), not present upstream at base_commit, so it's copied in from a
+# local copy kept alongside this justfile (bench_decode.rs) rather than assumed to exist in a
+# fresh clone - see SKILL.md "Bench harnesses" shape 3.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone build-baseline build-avx2fma bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp "{{justfile_directory()}}/bench_decode.rs" clone/symphonia/examples/bench_decode.rs
+    cp "{{justfile_directory()}}/master.flac" "{{justfile_directory()}}/master.mp3" \
+       "{{justfile_directory()}}/master.ogg" "{{justfile_directory()}}/master.wav" clone/
+
+build-baseline:
+    cd clone && cargo build --release --example bench_decode -p symphonia --features symphonia/mp3
+    cp clone/target/release/examples/bench_decode ./bin_baseline
+
+build-avx2fma:
+    cd clone && RUSTFLAGS="-C target-feature=+avx2,+fma" cargo build --release --example bench_decode -p symphonia --features symphonia/mp3
+    cp clone/target/release/examples/bench_decode ./bin_avx2fma
+
+bench:
+    @echo "=== baseline (SSE2 default) ==="
+    taskset -c 2 ./bin_baseline clone/master.mp3 20
+    taskset -c 2 ./bin_baseline clone/master.flac 20
+    taskset -c 2 ./bin_baseline clone/master.ogg 20
+    taskset -c 2 ./bin_baseline clone/master.wav 20
+    @echo "=== +avx2,+fma ==="
+    taskset -c 2 ./bin_avx2fma clone/master.mp3 20
+    taskset -c 2 ./bin_avx2fma clone/master.flac 20
+    taskset -c 2 ./bin_avx2fma clone/master.ogg 20
+    taskset -c 2 ./bin_avx2fma clone/master.wav 20
+
+clean:
+    rm -rf clone bin_baseline bin_avx2fma

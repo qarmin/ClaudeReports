@@ -1,0 +1,93 @@
+diff --git a/kurbo/src/fit.rs b/kurbo/src/fit.rs
+index 1f739cb..6eecefe 100644
+--- a/kurbo/src/fit.rs
++++ b/kurbo/src/fit.rs
+@@ -164,10 +164,27 @@ impl CurveFitSample {
+ /// consider [`fit_to_bezpath_opt`] instead.
+ pub fn fit_to_bezpath(source: &impl ParamCurveFit, accuracy: f64) -> BezPath {
+     let mut path = BezPath::new();
+-    fit_to_bezpath_rec(source, 0.0..1.0, accuracy, &mut path);
++    fit_to_bezpath_into(source, accuracy, &mut path);
+     path
+ }
+ 
++/// Generate a Bézier path that fits the source curve, writing it into `result`.
++///
++/// This is [`fit_to_bezpath`] with a caller-provided output path: the previous contents of
++/// `result` are discarded and replaced with the fitted path, but its allocation is reused. A
++/// caller that fits many curves in a loop (stroke expansion, path simplification) can therefore
++/// hold one `BezPath` and pay for at most one allocation overall instead of one per fit. This
++/// mirrors the convention of [`offset_cubic`].
++///
++/// See [`fit_to_bezpath`] for the semantics of the fit itself and of the `accuracy` parameter;
++/// the output is identical.
++///
++/// [`offset_cubic`]: crate::offset::offset_cubic
++pub fn fit_to_bezpath_into(source: &impl ParamCurveFit, accuracy: f64, result: &mut BezPath) {
++    result.truncate(0);
++    fit_to_bezpath_rec(source, 0.0..1.0, accuracy, result);
++}
++
+ // Discussion question: possibly should take endpoint samples, to avoid
+ // duplication of that work.
+ fn fit_to_bezpath_rec(
+diff --git a/kurbo/src/lib.rs b/kurbo/src/lib.rs
+index ae92bd3..63bd62e 100644
+--- a/kurbo/src/lib.rs
++++ b/kurbo/src/lib.rs
+@@ -163,7 +163,8 @@ pub use crate::cubicbez::{CubicBez, CubicBezIter, CuspType, cubics_to_quadratic_
+ pub use crate::ellipse::Ellipse;
+ pub use crate::expand::{Diagonal2, expand_path, expand_path_signed};
+ pub use crate::fit::{
+-    CurveFitSample, ParamCurveFit, fit_to_bezpath, fit_to_bezpath_opt, fit_to_cubic,
++    CurveFitSample, ParamCurveFit, fit_to_bezpath, fit_to_bezpath_into, fit_to_bezpath_opt,
++    fit_to_cubic,
+ };
+ pub use crate::insets::Insets;
+ pub use crate::line::{ConstPoint, Line, LinePathIter};
+diff --git a/kurbo/src/simplify.rs b/kurbo/src/simplify.rs
+index 411571e..8c78888 100644
+--- a/kurbo/src/simplify.rs
++++ b/kurbo/src/simplify.rs
+@@ -39,7 +39,7 @@ use crate::common::FloatFuncs;
+ 
+ use crate::{
+     BezPath, CubicBez, CurveFitSample, Line, ParamCurve, ParamCurveDeriv, ParamCurveFit, PathEl,
+-    PathSeg, Point, QuadBez, Vec2, fit_to_bezpath, fit_to_bezpath_opt,
++    PathSeg, Point, QuadBez, Vec2, fit_to_bezpath_into, fit_to_bezpath_opt,
+ };
+ 
+ /// A Bézier path which has been prepared for simplification.
+@@ -243,6 +243,8 @@ impl ParamCurveFit for SimplifyBezPath {
+ struct SimplifyState {
+     queue: BezPath,
+     result: BezPath,
++    /// Scratch output for `fit_to_bezpath_into`, reused across every flush.
++    fit_buf: BezPath,
+     needs_moveto: bool,
+ }
+ 
+@@ -269,12 +271,17 @@ impl SimplifyState {
+                 .extend(self.queue.iter().skip(!self.needs_moveto as usize));
+         } else {
+             let s = SimplifyBezPath::new(&self.queue);
+-            let b = match options.opt_level {
+-                SimplifyOptLevel::Subdivide => fit_to_bezpath(&s, accuracy),
+-                SimplifyOptLevel::Optimize => fit_to_bezpath_opt(&s, accuracy),
+-            };
+-            self.result
+-                .extend(b.iter().skip(!self.needs_moveto as usize));
++            let skip = !self.needs_moveto as usize;
++            match options.opt_level {
++                SimplifyOptLevel::Subdivide => {
++                    fit_to_bezpath_into(&s, accuracy, &mut self.fit_buf);
++                    self.result.extend(self.fit_buf.iter().skip(skip));
++                }
++                SimplifyOptLevel::Optimize => {
++                    let b = fit_to_bezpath_opt(&s, accuracy);
++                    self.result.extend(b.iter().skip(skip));
++                }
++            }
+         }
+         self.needs_moveto = false;
+         self.queue.truncate(0);

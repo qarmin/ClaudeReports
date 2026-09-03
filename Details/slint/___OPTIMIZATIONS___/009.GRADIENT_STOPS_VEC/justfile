@@ -1,0 +1,43 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff is a diff against base_commit and may stop applying cleanly once
+# the main branch moves on.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "fb263fd4b78225112c71c374386fd986b9a54e44"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# The original measurement used perf_test's `--mode rects --count 3000 --gradient --frames 8`
+# (needs a display, e.g. Xvfb). perf_test itself is untracked in the main repo's git history, so
+# it is NOT present in ./clone - fully reproducing the bench needs `perf_test/` copied in
+# manually into `clone/perf_test` before running it.
+bench:
+    @echo "Copy perf_test/ into clone/ manually first (see comment above), then:"
+    @echo "  cd clone/perf_test && cargo build --profile rdebug --bin perf_test"
+    @echo "  LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -s '-screen 0 1280x900x24' \\"
+    @echo "      ./target/rdebug/perf_test --mode rects --count 3000 --gradient --frames 8"
+
+clean:
+    rm -rf clone

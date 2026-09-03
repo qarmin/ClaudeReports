@@ -1,0 +1,54 @@
+=== BEFORE patch.diff (pristine clone @ 7eec7cfde2aed58a1606a48b5c7bd084536f9624) ===
+$ bash repro/compare.sh
+(build output omitted)
+seed 2: max per-value diff = 410 (> 50 - candidate 007's bug)
+seed 6: max per-value diff = 1701 (> 50 - candidate 007's bug)
+seed 9: max per-value diff = 600 (> 50 - candidate 007's bug)
+seed 19: max per-value diff = 1514 (> 50 - candidate 007's bug)
+seed 27: max per-value diff = 1046 (> 50 - candidate 007's bug)
+seed 39: max per-value diff = 173 (> 50 - candidate 007's bug)
+seed 40: max per-value diff = 489 (> 50 - candidate 007's bug)
+seed 41: max per-value diff = 530 (> 50 - candidate 007's bug)
+seed 44: max per-value diff = 1344 (> 50 - candidate 007's bug)
+seed 47: max per-value diff = 2287 (> 50 - candidate 007's bug)
+seed 48: max per-value diff = 4043 (> 50 - candidate 007's bug)
+REPRODUCED - 11/50 seeds show a large SIMD-vs-scalar divergence
+$ echo exit code: $?
+exit code: 1
+
+Example (seed 48), the actual mismatching pixels traced back to source (via the crate's own
+AVX2 unpremultiply function, instrumented during this session's investigation):
+  pixel 24: R=0, G=588,  B=1150, A=0  -> AVX2 output [0,0,0,0]     scalar reference [0,588,1150,0]
+  pixel 27: R=4043, G=1661, B=1092, A=0 -> AVX2 output [0,0,0,0]   scalar reference [4043,1661,1092,0]
+  pixel 46: R=72, G=0, B=3177, A=0    -> AVX2 output [0,0,0]       scalar reference [72,0,3177,0]
+  pixel 70: R=0, G=439, B=343, A=0    -> AVX2 output [0,0,0]       scalar reference [0,439,343,0]
+Every mismatching pixel has alpha == 0 (reached via Lanczos3's negative lobes driving the
+convolved alpha channel down to exactly 0 for some output pixels) with a nonzero convolved color
+- AVX2's zero-alpha handling wrongly zeroes the color channels instead of preserving them.
+
+=== AFTER patch.diff applied to the same clone ===
+$ git apply patch.diff && bash repro/compare.sh
+(build output omitted)
+did not reproduce - no seed showed a large (>50) SIMD-vs-scalar divergence across all 50 seeds
+$ echo exit code: $?
+exit code: 0
+
+=== Direct differential unit test (crate-internal, full u16 domain @ bit_depth=16) ===
+$ cargo test --lib bughunt_diff_tests -- --nocapture
+running 2 tests
+test avx2::alpha_u16::bughunt_diff_tests::avx2_unpremultiply_u16_bit_depth_16_matches_scalar_reference_across_full_range ... ok
+test sse::alpha_u16::bughunt_diff_tests::sse_unpremultiply_u16_bit_depth_16_matches_scalar_reference_across_full_range ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 66 filtered out; finished in 0.02s
+
+(Before the fix, the AVX2 test failed identically to what is shown above - every mismatch was an
+alpha == 0 pixel with the color channels wrongly zeroed; the SSE counterpart passed even without
+any SSE-side fix, since SSE's `_mm_select_si128` already preserves the original pixel correctly.)
+
+=== Project test suite ===
+$ cargo test --lib            (pristine, before)
+test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+$ cargo test --lib            (patch.diff + verification_tests.diff applied, after)
+test result: ok. 68 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+(66 pre-existing + 2 new bughunt_diff_tests added by verification_tests.diff)

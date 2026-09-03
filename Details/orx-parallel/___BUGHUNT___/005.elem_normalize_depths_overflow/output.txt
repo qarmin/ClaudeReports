@@ -1,0 +1,101 @@
+=== approach 1: debug-assertions build, real end-to-end par_recursive, pristine tree ===
+$ cargo build --example overflow_probe   (single-spine construction, BRANCH=1000, LEVELS=8)
+$ ./target/debug/examples/overflow_probe
+thread 'main' (64519) panicked at src/infallible/recursive/execution/elem.rs:22:30:
+attempt to multiply with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+(repeated 3/3 times, identical panic location and message each run)
+
+=== approach 1 (repro/, two-spine construction, BRANCH=3, LEVELS=42), debug build, pristine tree ===
+$ cd repro && cargo build
+$ ./target/debug/order_corruption
+thread 'main' (117309) panicked at /tmp/bughunt_worktrees/005/src/infallible/recursive/execution/elem.rs:22:30:
+attempt to multiply with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+(exit code 101)
+
+=== approach 2: manual boundary-value construction, release build (no overflow-checks), pristine tree ===
+Two-spine tree (see repro/src/main.rs): a single root splits into spine A (local width 0)
+and spine B (local width 1); each spine keeps expanding with branching factor 3, only its
+own last local child (index 2) continues, for 42 levels (3^42 ~ 1.09e20 >> usize::MAX ~
+1.8e19 on 64-bit, so the encoded sort key must overflow partway through). Correctness
+invariant checked: since A's path key started strictly smaller than B's and the identical
+recurrence is applied to both, every A-lineage element visited at a given tree depth must
+sort strictly before every B-lineage element visited at that same depth, under the
+documented default `IterationOrder::Ordered` - unless the encoded usize key has overflowed.
+
+$ cd repro && cargo run --release
+total visited = 249
+ORDER VIOLATED at tree depth 41: an A element at output index 242 appears after a B element at output index 237 (both same depth, A should sort first since A's path key started smaller)
+ORDER VIOLATED at tree depth 42: an A element at output index 248 appears after a B element at output index 243 (both same depth, A should sort first since A's path key started smaller)
+TOTAL VIOLATIONS: 2
+(exit code 1)
+
+(repeated 3/3 times: violations always first appear starting exactly at tree depth 41 - the
+level where 3^41 first exceeds usize::MAX - never at depth <= 40; minor per-run jitter of +/-1
+in the exact output index reported, from ordinary hash/thread scheduling noise unrelated to the
+bug, but the violation itself and its onset depth are identical across all 3 runs)
+
+=== negative control: same construction, LEVELS=40 (3^40 ~ 1.2e19 < usize::MAX, no overflow) ===
+$ cd repro && cargo run --release   (LEVELS temporarily set to 40)
+total visited = 237
+ORDER OK: within every depth level, all A elements precede all B elements
+(exit code 0 - confirms the violation above is specifically caused by the overflow, not a
+pre-existing, unrelated ordering bug in the algorithm)
+
+=== negative control: different branching factor, BRANCH=5, LEVELS=30 (5^30 ~ 9.3e20, overflows) ===
+$ cd repro && cargo run --release   (BRANCH=5, LEVELS=30, verifying the bug generalizes)
+thread 'main' (87441) panicked at src/infallible/recursive/execution/elem.rs:26:22:
+... (this run was against the ALREADY-PATCHED tree - see "after patch" section below; the
+point of this run was confirming the fix's checked-arithmetic panic fires correctly for a
+different branching factor too, not just the exact BRANCH=3 construction the repro was
+originally built with)
+
+=== AFTER APPLYING patch.diff: release build ===
+$ cd repro && cargo run --release   (BRANCH=3, LEVELS=42, same construction as "before")
+thread 'main' (117429) panicked at /tmp/bughunt_worktrees/005/src/infallible/recursive/execution/elem.rs:26:22:
+par_recursive: breadth-first sort key overflowed usize; the recursion is too deep and/or too wide (accumulated depth * branching-factor product across levels exceeds usize::MAX) for the default IterationOrder::Ordered to keep an exact key. Wrapping instead of failing here would silently corrupt iteration order, so this is a hard error instead: reduce recursion depth/branching, or switch to IterationOrder::Arbitrary.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+(exit code 101; reproduced identically via the candidate's own `just test` recipe, run from a
+genuinely fresh `git clone` of base_commit b9214fbeb714e4bb8f8858676a818cef2f21b097 - see the
+full transcript below)
+
+=== AFTER APPLYING patch.diff: negative control, LEVELS=40 (no overflow) ===
+$ cd repro && cargo run --release   (LEVELS temporarily set to 40)
+total visited = 237
+ORDER OK: within every depth level, all A elements precede all B elements
+(exit code 0 - confirms the fix does not change behavior/output for non-overflowing inputs)
+
+=== full `just test` transcript (fresh clone, local repo_url substituted for network access) ===
+rm -rf clone
+mkdir -p clone
+git clone /home/rafal/Projekty/Obce/orx-parallel clone/orx-parallel
+Cloning into 'clone/orx-parallel'...
+done.
+cd clone/orx-parallel && git checkout b9214fbeb714e4bb8f8858676a818cef2f21b097
+HEAD is now at b9214fbe iter of iter uses fixed chunk heuristic (#198)
+cd repro && cargo run --release || true
+    Finished `release` profile [optimized + debuginfo] target(s) in 2.05s
+     Running `target/release/order_corruption`
+total visited = 249
+ORDER VIOLATED at tree depth 41: an A element at output index 242 appears after a B element at output index 237 (both same depth, A should sort first since A's path key started smaller)
+ORDER VIOLATED at tree depth 42: an A element at output index 248 appears after a B element at output index 243 (both same depth, A should sort first since A's path key started smaller)
+TOTAL VIOLATIONS: 2
+cd clone/orx-parallel && git apply "/tmp/candidate_005_verify/patch.diff"
+cd repro && cargo run --release || true
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.73s
+     Running `target/release/order_corruption`
+
+thread 'main' (117639) panicked at /tmp/candidate_005_verify/clone/orx-parallel/src/infallible/recursive/execution/elem.rs:26:22:
+par_recursive: breadth-first sort key overflowed usize; the recursion is too deep and/or too wide (accumulated depth * branching-factor product across levels exceeds usize::MAX) for the default IterationOrder::Ordered to keep an exact key. Wrapping instead of failing here would silently corrupt iteration order, so this is a hard error instead: reduce recursion depth/branching, or switch to IterationOrder::Arbitrary.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+=== project test suite, in the worktree (/tmp/bughunt_worktrees/005) ===
+BEFORE patch:
+  cargo test --lib     -> test result: ok. 99 passed; 0 failed; 0 ignored
+  cargo test (full)    -> test result: ok. 260 passed; 0 failed; 16 ignored (doctests)
+AFTER patch:
+  cargo test --lib     -> test result: ok. 99 passed; 0 failed; 0 ignored
+  cargo test (full)    -> test result: ok. 260 passed; 0 failed; 16 ignored (doctests)
+(identical counts before/after; no regressions)

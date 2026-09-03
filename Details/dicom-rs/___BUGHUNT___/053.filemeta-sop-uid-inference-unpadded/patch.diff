@@ -1,0 +1,74 @@
+diff --git a/object/src/mem.rs b/object/src/mem.rs
+index f403b109..73de19c0 100644
+--- a/object/src/mem.rs
++++ b/object/src/mem.rs
+@@ -647,22 +647,24 @@ where
+             // if Media Storage SOP Class UID is empty attempt to infer from SOP Class UID
+             if meta.media_storage_sop_class_uid().is_empty() {
+                 if let Some(elem) = obj.get(tags::SOP_CLASS_UID) {
+-                    meta.media_storage_sop_class_uid = elem
+-                        .value()
+-                        .to_str()
+-                        .context(ParseSopAttributeSnafu)?
+-                        .to_string();
++                    // `to_str()` trims the trailing pad character (if any) from the
++                    // dataset value, so the result must be re-padded with `ui_padded`
++                    // before being stored here - otherwise an even-length dataset value
++                    // (e.g. "...\0" padded to begin with) gets stored as an odd-length
++                    // string, which then grows by one byte the next time this object is
++                    // written out, without ever comparing equal to its own round trip.
++                    meta.media_storage_sop_class_uid =
++                        crate::meta::ui_padded(elem.value().to_str().context(ParseSopAttributeSnafu)?);
+                 }
+             }
+
+             // if Media Storage SOP Instance UID is empty attempt to infer from SOP Instance UID
+             if meta.media_storage_sop_instance_uid().is_empty() {
+                 if let Some(elem) = obj.get(tags::SOP_INSTANCE_UID) {
+-                    meta.media_storage_sop_instance_uid = elem
+-                        .value()
+-                        .to_str()
+-                        .context(ParseSopAttributeSnafu)?
+-                        .to_string();
++                    // see the comment above for Media Storage SOP Class UID: the same
++                    // re-padding is needed here for the same reason.
++                    meta.media_storage_sop_instance_uid =
++                        crate::meta::ui_padded(elem.value().to_str().context(ParseSopAttributeSnafu)?);
+                 }
+             }
+
+diff --git a/object/src/meta.rs b/object/src/meta.rs
+index 2c0352e9..793d292c 100644
+--- a/object/src/meta.rs
++++ b/object/src/meta.rs
+@@ -1263,7 +1263,7 @@ where
+ }
+
+ /// Ensure that the string is even lengthed with trailing '\0's.
+-fn ui_padded<T>(s: T) -> String
++pub(crate) fn ui_padded<T>(s: T) -> String
+ where
+     T: Into<String>,
+ {
+@@ -1408,10 +1408,17 @@ impl FileMetaTableBuilder {
+         })?;
+         let mut implementation_version_name = self.implementation_version_name;
+         let implementation_class_uid = self.implementation_class_uid.unwrap_or_else(|| {
+-            // override implementation version name
+-            implementation_version_name = Some(IMPLEMENTATION_VERSION_NAME.to_string());
+-
+-            IMPLEMENTATION_CLASS_UID.to_string()
++            // override implementation version name.
++            //
++            // Padded the same way the builder setters pad their own values
++            // (`ui_padded`/`txt_padded`): these constants are not
++            // guaranteed to already have an even length, and an unpadded
++            // odd-length value stored here would silently grow by one byte
++            // the next time this object is written out, without that
++            // growth ever being reported as an error.
++            implementation_version_name = Some(txt_padded(IMPLEMENTATION_VERSION_NAME));
++
++            ui_padded(IMPLEMENTATION_CLASS_UID)
+         });
+
+         let mut table = FileMetaTable {

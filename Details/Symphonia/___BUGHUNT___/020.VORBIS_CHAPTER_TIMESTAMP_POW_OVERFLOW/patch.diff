@@ -1,0 +1,21 @@
+diff --git a/symphonia-metadata/src/embedded/vorbis.rs b/symphonia-metadata/src/embedded/vorbis.rs
+index 1c6a98b..46c75b3 100644
+--- a/symphonia-metadata/src/embedded/vorbis.rs
++++ b/symphonia-metadata/src/embedded/vorbis.rs
+@@ -245,8 +245,14 @@ fn parse_chapter_timestamp(time: &str) -> Result<Time> {
+     let (s, _) = parse_unsigned_num(s_str, true)?;
+     // This is the numerator portion of fractional seconds.
+     let (frac_s_numer, frac_s_digits) = parse_unsigned_num(frac_s_str, false)?;
+-    // The number of digits in the numerator indicates the denominator.
+-    let ns = (1_000_000_000 * u64::from(frac_s_numer)) / 10u64.pow(u32::from(frac_s_digits));
++    // The number of digits in the numerator indicates the denominator. If there are enough
++    // digits that 10^frac_s_digits overflows a u64, then, since frac_s_numer is at most u32::MAX,
++    // the numerator (scaled up to nanoseconds) is necessarily smaller than the denominator and
++    // the fractional-second contribution rounds down to 0 anyway.
++    let ns = match 10u64.checked_pow(u32::from(frac_s_digits)) {
++        Some(denom) => (1_000_000_000 * u64::from(frac_s_numer)) / denom,
++        None => 0,
++    };
+ 
+     Time::from_hhmmss(
+         h,

@@ -1,0 +1,45 @@
+# Self-contained reproduction for candidate 037: unchecked u64 byte-offset arithmetic in
+# WavReader::seek when the WAVE data chunk length is unknown (ffmpeg streaming convention), so the
+# track's frame count - the only bound on the requested timestamp - is None.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing here reaches outside the folder it lives in.
+#
+# The two input files under repro/assets/ were produced by really running
+# `ffmpeg ... -f wav pipe:1 > file.wav`; the repro re-generates them with a real ffmpeg run at
+# start-up when ffmpeg is on PATH, and falls back to the shipped copies when it is not.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Opens both streaming WAVE files through the real `symphonia::default::get_probe().probe()` entry
+# point and seeks each with a set of large timestamps/times via the public `FormatReader::seek`
+# API. Should panic 5 times ("attempt to multiply with overflow" at wave/mod.rs:297:35 and
+# "attempt to add with overflow" at wave/mod.rs:297:13) and exit non-zero - the leading `-` keeps
+# `just test` going so it can reach apply/reproduce-after.
+reproduce-before:
+    -ulimit -c 0 && cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro against the patched clone - every out-of-range seek must now return
+# `SeekErrorKind::OutOfRange` instead of panicking, ordinary seeks unchanged, exit 0.
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo run --release
+
+# Optional: same as reproduce-before, but with cargo's default release setting
+# (overflow-checks = false). No panic there; instead one seek reports success while the stream is
+# actually positioned 3584 bytes into the data chunk (see output.txt).
+reproduce-before-no-overflow-checks:
+    ulimit -c 0 && cd repro && CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false cargo run --release
+
+clean:
+    rm -rf clone repro/target

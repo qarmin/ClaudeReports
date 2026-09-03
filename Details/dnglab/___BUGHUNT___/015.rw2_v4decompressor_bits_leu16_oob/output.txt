@@ -1,0 +1,91 @@
+Captured by actually running repro/ (release build) against the real crash-report RW2 file, via
+`just clone && just reproduce-before && just apply && just reproduce-after` from a fresh GitHub
+clone at base_commit ac975f5d1b3362feb3974811db6cc5a37a77b02b. RAYON_NUM_THREADS=1 is forced inside
+repro/src/main.rs so the exact bits.rs LEu16 panic this candidate is about reproduces
+deterministically instead of racing with a sibling panic at v4decompressor.rs:12 (same root cause,
+different line - see repro/src/main.rs's top comment). rayon's parallel row decoding means many
+worker threads independently hit their own out-of-bounds read once the first one panics; the full
+backtrace log has ~220 panic lines from that fan-out - only the first (real) panic's full backtrace
+is kept below, everything else is summarized.
+
+=== BEFORE (pristine base_commit, `just reproduce-before`) ===
+
+$ cd repro && cargo run --release
+loaded 525764 bytes from repro/testdata/sample1_IDX_1_RAND_173729052516569860293996.rw2
+
+thread '<unnamed>' (172327) panicked at rawler/src/bits.rs:207:30:
+range start index 24583 out of range for slice of length 24020
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::slice::index::slice_index_fail
+   3: <&rawler::decompressors::decompress_strips_fn<u16, rawler::decoders::rw2::v4decompressor::decode_panasonic_v4::{closure#0}>::{closure#0} as core::ops::function::FnMut<((usize, &mut [u16]),)>>::call_mut
+   4: <rayon::iter::try_reduce::TryReduceFolder<...> as rayon::iter::plumbing::Folder<...>>::consume_iter::<...>
+   5: rayon::iter::plumbing::bridge_producer_consumer::helper::<...>
+   6: rayon_core::join::join_context::<...>
+   7: rayon_core::registry::in_worker::<...>
+   8: rayon::iter::plumbing::bridge_producer_consumer::helper::<...>
+   9: rayon_core::join::join_context::<...>
+  10: rayon_core::registry::in_worker::<...>
+  11: rayon::iter::plumbing::bridge_producer_consumer::helper::<...>
+  12: rayon_core::join::join_context::<...>
+  13: <rayon_core::job::StackJob<...> as rayon_core::job::Job>::execute
+  14: <rayon_core::registry::WorkerThread>::wait_until_cold
+  15: <rayon_core::registry::ThreadBuilder>::run
+note: Some details are omitted, run with RUST_BACKTRACE=full for a verbose backtrace.
+
+[... ~217 further panics from sibling rayon worker threads, each either the same
+rawler::bits::LEu16 out-of-bounds read at a different byte offset/slice length, or the sibling
+`&buf[blocks * 0x4000..]` slice panic at rawler/src/decoders/rw2/v4decompressor.rs:12:21 (same
+root cause: `skip`/`blocks` computed purely from width/row, unrelated to the file's actual
+remaining length) - omitted here, all captured in the session's raw log if needed ...]
+
+REPRODUCED - panicked: Any { .. }
+error: Recipe `reproduce-before` failed on line 23 with exit code 1
+(exit code 1 - matches this candidate's definition of "reproduced")
+
+Repeat-run count (release build, real crash file, RAYON_NUM_THREADS=1): 5/5 runs panic, first
+panic always at rawler/src/bits.rs:207:30 (LEu16), message varying only in the exact byte
+offset/slice length by run (rayon scheduling), always of the shape "range start/end index N out of
+range for slice of length M" - matching the GitHub issue #571 report almost exactly (issue: "range
+end index 24585 out of range for slice of length 24020"; this session's runs: "range start index
+24583 out of range for slice of length 24020" - same slice length 24020, near-identical offset;
+the few-byte/word ("end" vs "start") difference is consistent with minor unrelated code drift
+between the issue's original commit 58d4c57 and this session's base_commit ac975f5d).
+
+With the default (multi-threaded) rayon pool instead of RAYON_NUM_THREADS=1, the exact same file
+still panics 5/5 runs, but the *first* reported panic is racy between this bits.rs:207 location
+and the sibling v4decompressor.rs:12:21 location, depending on thread scheduling - both are the
+same root cause (see repro/src/main.rs's top comment and RESULT.md's Root cause section).
+
+=== AFTER (patch.diff applied, `just reproduce-after`) ===
+
+$ cd repro && cargo run --release
+   Compiling rawler v0.7.2 (.../clone/rawler)
+   Compiling repro v0.0.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 10.04s
+     Running `target/release/repro`
+loaded 525764 bytes from repro/testdata/sample1_IDX_1_RAND_173729052516569860293996.rw2
+did not reproduce - decode completed without panicking
+(exit code 0)
+
+Repeat-run count (release build, real crash file, both RAYON_NUM_THREADS=1 and the default
+multi-threaded pool): 5/5 runs each configuration - clean exit 0, no panic.
+
+=== Project test suite (rawler crate, `cargo test -p rawler --lib`) ===
+
+Before patch: test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+After patch:  test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+(no regression; the existing suite has no RW2 v4 coverage that would exercise this code either way)
+
+=== Fix verified against a second, different-length truncation of the same real file ===
+
+Truncating the same real crash-report file to 90% of its original length (a different byte length
+than the original 525764-byte file, same bug class - same `decode_panasonic_v4`/BitPumpPanasonic
+code path, still runs out of source bytes mid-row) also panics before the patch (same
+bits.rs:207/v4decompressor.rs:12 pair, RAYON_NUM_THREADS=1, 1/1 tried) and decodes cleanly
+(no panic) after the patch is applied - confirms the fix isn't narrowly tied to the exact original
+473187/525764-byte boundary. More aggressive truncations (70%/50%/30%) hit an unrelated, already
+correctly-handled I/O bounds check further up the RW2 decode pipeline
+(`subview_until_eof_padded(): Offset ... is behind EOF`, returned as a graceful `Result::Err`, not
+a panic) before ever reaching `decode_panasonic_v4` at all - out of scope for this candidate.

@@ -1,0 +1,127 @@
+diff --git a/ul/src/association/pdata.rs b/ul/src/association/pdata.rs
+index dcb4eb20..e0bb4678 100644
+--- a/ul/src/association/pdata.rs
++++ b/ul/src/association/pdata.rs
+@@ -287,6 +287,17 @@ where
+                 return Ok(0);
+             }
+ 
++            // Reject PDUs whose declared length would require buffering an unreasonable
++            // amount of data. This is intentionally more permissive than `max_pdu_length`
++            // alone: this reader (like the rest of this module) doesn't enforce
++            // `max_pdu_length` as a strict upper bound on incoming PDU-TF frames (`strict`
++            // is always `false` here), and legitimately-sized frames larger than a small
++            // negotiated `max_pdu_length` are already exercised by this module's own tests.
++            // `LARGE_PDU_SIZE` comfortably covers any such legitimate frame while still
++            // capping growth well short of actually buffering gigabytes for a bogus
++            // declared length.
++            let max_buffer_size =
++                (self.max_pdu_length.max(LARGE_PDU_SIZE) as usize) * 2 + (PDU_PDV_HEADER_SIZE * 2);
+             let mut reader = BufReader::new(&mut self.stream);
+             let msg = loop {
+                 let mut buf = Cursor::new(&self.read_buffer[..]);
+@@ -298,6 +309,15 @@ where
+                         break pdu;
+                     }
+                     None => {
++                        // parse returned None: not enough bytes yet
++                        if self.read_buffer.len() >= max_buffer_size {
++                            // already have more than a max-size PDU and still can't parse
++                            return Err(std::io::Error::other(format!(
++                                "PDU too large: {} bytes buffered without a complete PDU (max {})",
++                                self.read_buffer.len(),
++                                max_buffer_size,
++                            )));
++                        }
+                         // Reset position
+                         buf.set_position(0)
+                     }
+@@ -675,6 +695,10 @@ pub mod non_blocking {
+                     max_pdu_length,
+                     ..
+                 } = &mut *self;
++                // see the sync `read` impl above for why this is based on `LARGE_PDU_SIZE`
++                // rather than `max_pdu_length` alone
++                let max_buffer_size = (max_pdu_length.max(crate::pdu::LARGE_PDU_SIZE) as usize) * 2
++                    + (PDU_PDV_HEADER_SIZE * 2);
+                 let mut reader = BufReader::new(stream);
+                 let msg = loop {
+                     let mut buf = Cursor::new(&read_buffer[..]);
+@@ -686,6 +710,14 @@ pub mod non_blocking {
+                             break pdu;
+                         }
+                         None => {
++                            // parse returned None: not enough bytes yet
++                            if read_buffer.len() >= max_buffer_size {
++                                return Poll::Ready(Err(std::io::Error::other(format!(
++                                    "PDU too large: {} bytes buffered without a complete PDU (max {})",
++                                    read_buffer.len(),
++                                    max_buffer_size,
++                                ))));
++                            }
+                             // Reset position
+                             buf.set_position(0)
+                         }
+@@ -765,6 +797,62 @@ mod tests {
+     type Result<T, E = Box<dyn std::error::Error + Send + Sync + 'static>> =
+         std::result::Result<T, E>;
+ 
++    /// A fake peer that dribbles out a fixed total amount of data in small
++    /// chunks, then closes the connection (returns Ok(0)) - simulating a
++    /// malicious/slow peer sending a P-Data-TF header that declares a huge
++    /// `pdu_length` it never actually finishes delivering.
++    struct DribblingStream {
++        remaining: usize,
++        chunk_size: usize,
++    }
++
++    impl Read for DribblingStream {
++        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
++            let n = self.chunk_size.min(self.remaining).min(buf.len());
++            for b in &mut buf[..n] {
++                *b = 0x41;
++            }
++            self.remaining -= n;
++            Ok(n)
++        }
++    }
++
++    #[test]
++    fn pdata_reader_unbounded_buffer_growth_repro() {
++        // P-Data-TF header declaring a huge pdu_length (10,000,000 bytes) -
++        // far larger than max_pdu_length - that a malicious/misbehaving peer
++        // never actually finishes sending (only 2,000,000 bytes follow, then
++        // the connection closes).
++        let mut header = vec![0x04u8, 0x00];
++        header.extend_from_slice(&10_000_000u32.to_be_bytes());
++
++        let stream = std::io::Read::chain(
++            std::io::Cursor::new(header),
++            DribblingStream {
++                remaining: 2_000_000,
++                chunk_size: 4096,
++            },
++        );
++
++        let mut remaining = BytesMut::new();
++        let mut reader = PDataReader::new(stream, MINIMUM_PDU_SIZE, &mut remaining);
++
++        let mut out = vec![0u8; 4096];
++        let result = std::io::Read::read(&mut reader, &mut out);
++
++        // the read should fail quickly (PDU too large) rather than buffering
++        // the entire 2,000,000 bytes the peer was willing to send before
++        // finally erroring with "Connection closed by peer"
++        assert!(result.is_err(), "expected an error, got {result:?}");
++        let msg = result.unwrap_err().to_string();
++        assert!(
++            !msg.contains("Connection closed by peer"),
++            "BUG: buffered the peer's entire stream (unbounded growth) before finally failing \
++             with a generic disconnect error, instead of rejecting the oversized PDU declaration \
++             early: {msg}"
++        );
++    }
++
+     #[test]
+     fn test_write_pdata_and_finish() {
+         let presentation_context_id = 12;

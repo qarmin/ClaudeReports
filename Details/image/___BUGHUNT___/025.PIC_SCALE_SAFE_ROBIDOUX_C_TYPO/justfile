@@ -1,0 +1,41 @@
+# Self-contained reproduction for this candidate.
+#
+# The bug lives entirely inside the `pic-scale-safe` dependency (github.com/awxkee/pic-scale-safe)
+# `src/math/bc_spline.rs`'s `robidoux()` function - it is not reachable through the `image` crate's
+# own public `FilterType` enum at all (only `Nearest`/`Triangle`/`CatmullRom`/`Gaussian`/`Lanczos3`
+# are exposed there), so this candidate's real end-to-end trigger path is `pic-scale-safe`'s own
+# public API (`resize_plane_f32` with `ResamplingFunction::Robidoux`) - the same API any downstream
+# crate depending on `pic-scale-safe` directly would call. No `image` clone is needed.
+#
+# repo_url/base_commit: `awxkee/pic-scale-safe`, tag `0.1.12` (== what this repo's own Cargo.lock
+# resolves `pic-scale-safe` to at the time of this candidate).
+
+repo_url := "https://github.com/awxkee/pic-scale-safe.git"
+base_commit := "b50e020d72a1c0063f39c2c0166343d4e44790ca"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone. `repro/Cargo.toml` points
+# `pic-scale-safe` at `../clone` via a path dependency. The repro's own oracle (a faithful,
+# independent reimplementation of `compute_weights.rs`'s public, documented weight-generation
+# algorithm, using the textbook-correct Robidoux B/C constants) should NOT match the real crate's
+# output here - the real crate's `Robidoux` output should instead match the repro's *second*,
+# deliberately-buggy oracle (same algorithm, but with the crate's own miscoded `C = 13/(58+216*sqrt2)`).
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - the real crate's `Robidoux` output should now
+# match the textbook-correct-C oracle instead.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

@@ -1,0 +1,37 @@
+Captured output of `just test` (repro/src/main.rs), run against a fresh clone of
+df2b9e4236298efa3fa37a1f360fc4bf284d586a.
+
+=== BEFORE (pristine master) ===
+input bytes: 38 bytes, item declared len = 10
+leaf value before mutation: Primitive(Strs(["AB"]))
+output bytes: 52 bytes
+BUG REPRODUCED: re-parsing the writer's own output failed: Could not read data set token
+
+(the full error chain from a direct, non-justfile run is:
+ReadToken { source: InconsistentSequenceEnd { end_of_sequence: 30, bytes_read: 44, .. } }
+- the reader expected the item to end at offset 30, as declared by the item's own stale cached
+length, but had already read 44 bytes by the time it got there, because the mutated leaf's real
+encoded size grew past what the stale length promised.)
+
+Repeated 3/3 times with identical output (fully deterministic, no randomness/timing involved).
+
+=== AFTER (patch.diff applied) ===
+input bytes: 38 bytes, item declared len = 10
+leaf value before mutation: Primitive(Strs(["AB"]))
+output bytes: 60 bytes
+re-parsed successfully (bug not present): InMemDicomObject { entries: {Tag(0x0008, 0x1140):
+DataElement { header: DataElementHeader { tag: Tag(0x0008, 0x1140), vr: SQ, len: Length(Undefined)
+}, value: Sequence(DataSetSequence { items: [InMemDicomObject { entries: {Tag(0x0010, 0x0010):
+DataElement { header: DataElementHeader { tag: Tag(0x0010, 0x0010), vr: PN, len: Length(16) },
+value: Primitive(Strs(["ABCDEFGHIJKLMNOP"])) }}, dict: StandardDataDictionary,
+len: Length(Undefined), charset_changed: false }], length: Length(Undefined) }) }},
+dict: StandardDataDictionary, len: Length(Undefined), charset_changed: false }
+
+Repeated 3/3 times with identical output.
+
+=== Project test suite (dicom-object) ===
+Before fix: cargo test -p dicom-object --lib -> 75 passed; 0 failed; 0 ignored
+After fix:  cargo test -p dicom-object --lib -> 75 passed; 0 failed; 0 ignored
+
+=== Project test suite (whole workspace) ===
+cargo test --workspace --lib -> 351 passed; 0 failed; 2 ignored (identical before and after)

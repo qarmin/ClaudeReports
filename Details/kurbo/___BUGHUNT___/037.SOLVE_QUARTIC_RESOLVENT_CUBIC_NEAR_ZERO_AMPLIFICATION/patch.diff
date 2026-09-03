@@ -1,0 +1,37 @@
+diff --git a/kurbo/src/common.rs b/kurbo/src/common.rs
+index 9df3fc7..b80c273 100644
+--- a/kurbo/src/common.rs
++++ b/kurbo/src/common.rs
+@@ -347,11 +347,31 @@ fn solve_quartic_inner(a: f64, b: f64, c: f64, d: f64, rescale: bool) -> Option<
+     factor_quartic_inner(a, b, c, d, rescale).map(|quadratics| {
+         quadratics
+             .iter()
+-            .flat_map(|(a, b)| solve_quadratic(*b, *a, 1.0))
++            .flat_map(|(a, b)| solve_quadratic_factor(*a, *b))
+             .collect()
+     })
+ }
+ 
++/// Solve one of the two `x² + a·x + b` quadratic factors produced by [`factor_quartic_inner`].
++///
++/// The `a`/`b` here are themselves derived through a chain of subtractions (`phi`, `l_1`, `l_3`,
++/// `d_2`, `l_2`, refined by Newton-Raphson) that can leave a handful of ULPs of absolute error even
++/// when the underlying quartic genuinely has two real roots that happen to be very close together
++/// (a near-double root pair). In that case the true discriminant `a*a - 4*b` is a tiny positive
++/// number comparable to or smaller than that accumulated error, so it can come out negative by
++/// pure floating-point noise - [`solve_quadratic`]'s strict `arg < 0.0` check then silently drops
++/// both real roots instead of reporting the (numerically indistinguishable) double root. Snap a
++/// discriminant that's negative only within that noise floor to zero before delegating.
++fn solve_quadratic_factor(a: f64, b: f64) -> ArrayVec<f64, 2> {
++    let disc = a * a - 4. * b;
++    if disc < 0.0 && disc.abs() <= 1e-12 * (a * a).abs().max((4. * b).abs()).max(1.0) {
++        let mut result = ArrayVec::new();
++        result.push(-0.5 * a);
++        return result;
++    }
++    solve_quadratic(b, a, 1.0)
++}
++
+ /// Factor a quartic into two quadratics.
+ ///
+ /// Attempt to factor a quartic equation into two quadratic equations. Returns `None` either if there

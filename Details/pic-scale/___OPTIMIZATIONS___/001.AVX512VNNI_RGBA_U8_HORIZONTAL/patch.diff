@@ -1,0 +1,261 @@
+diff --git a/src/avx512/mod.rs b/src/avx512/mod.rs
+index 105465a..3cd06a5 100644
+--- a/src/avx512/mod.rs
++++ b/src/avx512/mod.rs
+@@ -33,5 +33,6 @@ mod utils;
+ 
+ pub(crate) use check_alpha::avx512_has_non_constant_cap_alpha_rgba8;
+ pub(crate) use rgba_u8_dot_vnni::{
++    convolve_horizontal_rgba_avx512vnni_row_1, convolve_horizontal_rgba_avx512vnni_row_4,
+     convolve_horizontal_rgba_vnni_row_1, convolve_horizontal_rgba_vnni_row_4,
+ };
+diff --git a/src/avx512/rgba_u8_dot_vnni.rs b/src/avx512/rgba_u8_dot_vnni.rs
+index c6afb5e..1edc936 100644
+--- a/src/avx512/rgba_u8_dot_vnni.rs
++++ b/src/avx512/rgba_u8_dot_vnni.rs
+@@ -34,6 +34,40 @@ use std::arch::x86::*;
+ #[cfg(target_arch = "x86_64")]
+ use std::arch::x86_64::*;
+ 
++/// `_mm256_dpwssd_avx_epi32` (VEX, requires only the narrow `avxvnni` extension found on Alder
++/// Lake+/Sierra Forest) and `_mm256_dpwssd_epi32` (EVEX, requires `avx512vnni`+`avx512vl`, found
++/// on Skylake-X/Cascade Lake/Ice Lake Xeon/Zen4) compute identical results - callers pick the
++/// branch matching the CPU features they've already runtime-detected.
++#[inline(always)]
++unsafe fn dpwssd_dispatch256<const USE_AVX512VNNI: bool>(
++    src: __m256i,
++    a: __m256i,
++    b: __m256i,
++) -> __m256i {
++    unsafe {
++        if USE_AVX512VNNI {
++            _mm256_dpwssd_epi32(src, a, b)
++        } else {
++            _mm256_dpwssd_avx_epi32(src, a, b)
++        }
++    }
++}
++
++#[inline(always)]
++unsafe fn dpwssd_dispatch128<const USE_AVX512VNNI: bool>(
++    src: __m128i,
++    a: __m128i,
++    b: __m128i,
++) -> __m128i {
++    unsafe {
++        if USE_AVX512VNNI {
++            _mm_dpwssd_epi32(src, a, b)
++        } else {
++            _mm_dpwssd_avx_epi32(src, a, b)
++        }
++    }
++}
++
+ pub(crate) fn convolve_horizontal_rgba_vnni_row_4(
+     src: &[u8],
+     src_stride: usize,
+@@ -43,12 +77,37 @@ pub(crate) fn convolve_horizontal_rgba_vnni_row_4(
+     _: u32,
+ ) {
+     unsafe {
+-        convolve_horizontal_rgba_vnni_row_4_impl(src, src_stride, dst, dst_stride, filter_weights);
++        convolve_horizontal_rgba_vnni_row_4_impl::<false>(
++            src,
++            src_stride,
++            dst,
++            dst_stride,
++            filter_weights,
++        );
++    }
++}
++
++pub(crate) fn convolve_horizontal_rgba_avx512vnni_row_4(
++    src: &[u8],
++    src_stride: usize,
++    dst: &mut [u8],
++    dst_stride: usize,
++    filter_weights: &FilterWeights<i16>,
++    _: u32,
++) {
++    unsafe {
++        convolve_horizontal_rgba_vnni_row_4_impl::<true>(
++            src,
++            src_stride,
++            dst,
++            dst_stride,
++            filter_weights,
++        );
+     }
+ }
+ 
+-#[target_feature(enable = "avxvnni", enable = "avx2")]
+-fn convolve_horizontal_rgba_vnni_row_4_impl(
++#[target_feature(enable = "avx2")]
++fn convolve_horizontal_rgba_vnni_row_4_impl<const USE_AVX512VNNI: bool>(
+     src: &[u8],
+     src_stride: usize,
+     dst: &mut [u8],
+@@ -165,17 +224,17 @@ fn convolve_horizontal_rgba_vnni_row_4_impl(
+                     let hi3 = _mm256_shuffle_epi8(rgb_pixel3, a_shuffle_2_table_hi);
+                     let lo3 = _mm256_shuffle_epi8(rgb_pixel3, a_shuffle_2_table);
+ 
+-                    store_avx0 = _mm256_dpwssd_avx_epi32(store_avx0, lo0, weight01);
+-                    store_avx0 = _mm256_dpwssd_avx_epi32(store_avx0, hi0, weight23);
++                    store_avx0 = dpwssd_dispatch256::<USE_AVX512VNNI>(store_avx0, lo0, weight01);
++                    store_avx0 = dpwssd_dispatch256::<USE_AVX512VNNI>(store_avx0, hi0, weight23);
+ 
+-                    store_avx1 = _mm256_dpwssd_avx_epi32(store_avx1, lo1, weight01);
+-                    store_avx1 = _mm256_dpwssd_avx_epi32(store_avx1, hi1, weight23);
++                    store_avx1 = dpwssd_dispatch256::<USE_AVX512VNNI>(store_avx1, lo1, weight01);
++                    store_avx1 = dpwssd_dispatch256::<USE_AVX512VNNI>(store_avx1, hi1, weight23);
+ 
+-                    store_avx2 = _mm256_dpwssd_avx_epi32(store_avx2, lo2, weight01);
+-                    store_avx2 = _mm256_dpwssd_avx_epi32(store_avx2, hi2, weight23);
++                    store_avx2 = dpwssd_dispatch256::<USE_AVX512VNNI>(store_avx2, lo2, weight01);
++                    store_avx2 = dpwssd_dispatch256::<USE_AVX512VNNI>(store_avx2, hi2, weight23);
+ 
+-                    store_avx3 = _mm256_dpwssd_avx_epi32(store_avx3, lo3, weight01);
+-                    store_avx3 = _mm256_dpwssd_avx_epi32(store_avx3, hi3, weight23);
++                    store_avx3 = dpwssd_dispatch256::<USE_AVX512VNNI>(store_avx3, lo3, weight01);
++                    store_avx3 = dpwssd_dispatch256::<USE_AVX512VNNI>(store_avx3, hi3, weight23);
+ 
+                     jx += 8;
+                 }
+@@ -217,10 +276,10 @@ fn convolve_horizontal_rgba_vnni_row_4_impl(
+                     let lo2 = _mm256_shuffle_epi8(rgb_pixel2, a_shuffle_2_table);
+                     let lo3 = _mm256_shuffle_epi8(rgb_pixel3, a_shuffle_2_table);
+ 
+-                    store_avx0 = _mm256_dpwssd_avx_epi32(store_avx0, lo0, weight01);
+-                    store_avx1 = _mm256_dpwssd_avx_epi32(store_avx1, lo1, weight01);
+-                    store_avx2 = _mm256_dpwssd_avx_epi32(store_avx2, lo2, weight01);
+-                    store_avx3 = _mm256_dpwssd_avx_epi32(store_avx3, lo3, weight01);
++                    store_avx0 = dpwssd_dispatch256::<USE_AVX512VNNI>(store_avx0, lo0, weight01);
++                    store_avx1 = dpwssd_dispatch256::<USE_AVX512VNNI>(store_avx1, lo1, weight01);
++                    store_avx2 = dpwssd_dispatch256::<USE_AVX512VNNI>(store_avx2, lo2, weight01);
++                    store_avx3 = dpwssd_dispatch256::<USE_AVX512VNNI>(store_avx3, lo3, weight01);
+ 
+                     jx += 4;
+                 }
+@@ -264,8 +323,8 @@ fn convolve_horizontal_rgba_vnni_row_4_impl(
+                 let lo_0 = _mm256_shuffle_epi8(px0, a_shuffle_2_table);
+                 let lo_1 = _mm256_shuffle_epi8(px1, a_shuffle_2_table);
+ 
+-                store_0 = _mm256_dpwssd_avx_epi32(store_0, lo_0, weight01);
+-                store_1 = _mm256_dpwssd_avx_epi32(store_1, lo_1, weight01);
++                store_0 = dpwssd_dispatch256::<USE_AVX512VNNI>(store_0, lo_0, weight01);
++                store_1 = dpwssd_dispatch256::<USE_AVX512VNNI>(store_1, lo_1, weight01);
+ 
+                 jx += 2;
+             }
+@@ -300,8 +359,8 @@ fn convolve_horizontal_rgba_vnni_row_4_impl(
+                 let lo0 = _mm256_shuffle_epi8(px0, shuffle_1_table);
+                 let lo1 = _mm256_shuffle_epi8(px1, shuffle_1_table);
+ 
+-                store_0 = _mm256_dpwssd_avx_epi32(store_0, lo0, weight0);
+-                store_1 = _mm256_dpwssd_avx_epi32(store_1, lo1, weight0);
++                store_0 = dpwssd_dispatch256::<USE_AVX512VNNI>(store_0, lo0, weight0);
++                store_1 = dpwssd_dispatch256::<USE_AVX512VNNI>(store_1, lo1, weight0);
+ 
+                 jx += 1;
+             }
+@@ -342,12 +401,23 @@ pub(crate) fn convolve_horizontal_rgba_vnni_row_1(
+     _: u32,
+ ) {
+     unsafe {
+-        convolve_horizontal_rgba_vnni_rows_one_impl(src, dst, filter_weights);
++        convolve_horizontal_rgba_vnni_rows_one_impl::<false>(src, dst, filter_weights);
++    }
++}
++
++pub(crate) fn convolve_horizontal_rgba_avx512vnni_row_1(
++    src: &[u8],
++    dst: &mut [u8],
++    filter_weights: &FilterWeights<i16>,
++    _: u32,
++) {
++    unsafe {
++        convolve_horizontal_rgba_vnni_rows_one_impl::<true>(src, dst, filter_weights);
+     }
+ }
+ 
+-#[target_feature(enable = "avxvnni", enable = "avx2")]
+-fn convolve_horizontal_rgba_vnni_rows_one_impl(
++#[target_feature(enable = "avx2")]
++fn convolve_horizontal_rgba_vnni_rows_one_impl<const USE_AVX512VNNI: bool>(
+     src: &[u8],
+     dst: &mut [u8],
+     filter_weights: &FilterWeights<i16>,
+@@ -427,8 +497,8 @@ fn convolve_horizontal_rgba_vnni_rows_one_impl(
+                     let hi = _mm256_shuffle_epi8(rgb_pixel, a_shuffle_2_table_hi);
+                     let lo = _mm256_shuffle_epi8(rgb_pixel, a_shuffle_2_table);
+ 
+-                    store_avx = _mm256_dpwssd_avx_epi32(store_avx, lo, weight01);
+-                    store_avx = _mm256_dpwssd_avx_epi32(store_avx, hi, weight23);
++                    store_avx = dpwssd_dispatch256::<USE_AVX512VNNI>(store_avx, lo, weight01);
++                    store_avx = dpwssd_dispatch256::<USE_AVX512VNNI>(store_avx, hi, weight23);
+ 
+                     jx += 8;
+                 }
+@@ -451,7 +521,7 @@ fn convolve_horizontal_rgba_vnni_rows_one_impl(
+ 
+                     let lo = _mm256_shuffle_epi8(rgb_pixel, a_shuffle_2_table);
+ 
+-                    store_avx = _mm256_dpwssd_avx_epi32(store_avx, lo, weight01);
++                    store_avx = dpwssd_dispatch256::<USE_AVX512VNNI>(store_avx, lo, weight01);
+                     jx += 4;
+                 }
+ 
+@@ -474,7 +544,7 @@ fn convolve_horizontal_rgba_vnni_rows_one_impl(
+ 
+                 let rgb_pixel = _mm_loadu_si64(src_ptr.as_ptr());
+                 let lo = _mm_shuffle_epi8(rgb_pixel, shuffle_2_table);
+-                store = _mm_dpwssd_avx_epi32(store, lo, weight01);
++                store = dpwssd_dispatch128::<USE_AVX512VNNI>(store, lo, weight01);
+ 
+                 jx += 2;
+             }
+@@ -496,7 +566,7 @@ fn convolve_horizontal_rgba_vnni_rows_one_impl(
+ 
+                 let lo = _mm_shuffle_epi8(rgba_pixel, shuffle_1_table);
+ 
+-                store = _mm_dpwssd_avx_epi32(store, lo, weight0);
++                store = dpwssd_dispatch128::<USE_AVX512VNNI>(store, lo, weight0);
+ 
+                 jx += 1;
+             }
+diff --git a/src/factory/rgba_u8.rs b/src/factory/rgba_u8.rs
+index 46fc39f..9cbfe0c 100644
+--- a/src/factory/rgba_u8.rs
++++ b/src/factory/rgba_u8.rs
+@@ -130,14 +130,23 @@ impl HorizontalFilterPass<u8, f32, 4> for ImageStore<'_, u8, 4> {
+         }
+         #[cfg(all(feature = "avx512", target_arch = "x86_64"))]
+         {
+-            if std::arch::is_x86_feature_detected!("avxvnni")
+-                && _options.workload_strategy != crate::WorkloadStrategy::PreferSpeed
+-            {
+-                use crate::avx512::{
+-                    convolve_horizontal_rgba_vnni_row_1, convolve_horizontal_rgba_vnni_row_4,
+-                };
+-                _dispatcher_4_rows = Some(convolve_horizontal_rgba_vnni_row_4);
+-                _dispatcher_1_row = convolve_horizontal_rgba_vnni_row_1;
++            if _options.workload_strategy != crate::WorkloadStrategy::PreferSpeed {
++                if std::arch::is_x86_feature_detected!("avx512vnni")
++                    && std::arch::is_x86_feature_detected!("avx512vl")
++                {
++                    use crate::avx512::{
++                        convolve_horizontal_rgba_avx512vnni_row_1,
++                        convolve_horizontal_rgba_avx512vnni_row_4,
++                    };
++                    _dispatcher_4_rows = Some(convolve_horizontal_rgba_avx512vnni_row_4);
++                    _dispatcher_1_row = convolve_horizontal_rgba_avx512vnni_row_1;
++                } else if std::arch::is_x86_feature_detected!("avxvnni") {
++                    use crate::avx512::{
++                        convolve_horizontal_rgba_vnni_row_1, convolve_horizontal_rgba_vnni_row_4,
++                    };
++                    _dispatcher_4_rows = Some(convolve_horizontal_rgba_vnni_row_4);
++                    _dispatcher_1_row = convolve_horizontal_rgba_vnni_row_1;
++                }
+             }
+         }
+         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]

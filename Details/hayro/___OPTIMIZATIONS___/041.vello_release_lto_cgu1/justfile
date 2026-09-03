@@ -1,0 +1,42 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# This candidate is a pure build-configuration change to hayro's own Cargo.toml (adds
+# [profile.release] lto="thin" + codegen-units=1) - no vendored vello source change, so `just
+# clone` only needs hayro itself, not a second clone of vello.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp "{{justfile_directory()}}/img.pdf" clone/img.pdf
+    mkdir -p clone/bench_input
+    cp "{{justfile_directory()}}/img.pdf" clone/bench_input/img.pdf
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone && cargo build --release -p hayro-bench --bin render_bench
+    cp clone/target/release/render_bench ./bin_baseline
+
+build-patched:
+    cd clone && cargo build --release -p hayro-bench --bin render_bench
+    cp clone/target/release/render_bench ./bin_patched
+
+bench:
+    @echo "=== baseline (before patch, lto=false codegen-units=16) ==="
+    taskset -c 0 ./bin_baseline clone/bench_input --backend hayro --iter 500
+    @echo "=== patched (after patch, lto=thin codegen-units=1) ==="
+    taskset -c 0 ./bin_patched clone/bench_input --backend hayro --iter 500
+    @echo "(run this a few times / compare medians - single runs are noisy, see RESULT.md for the paired-run methodology actually used to produce this candidate's numbers)"
+
+clean:
+    rm -rf clone bin_baseline bin_patched

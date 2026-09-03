@@ -1,0 +1,62 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# What this demonstrates: `vello_shaders/src/cpu/coarse.rs`'s two `ptcl`-buffer writes (the
+# `TileState::write` helper backing write_path/write_color/etc., and the unconditional
+# `CMD_END`/blend-offset writes at the end of each tile) index into `ptcl` with no bounds check of
+# their own, unlike the real GPU shader (`coarse.wgsl`), which either has an explicit
+# capacity-check-and-`bump.failed` guard (`alloc_cmd`, for the dynamic chunk-jump path) or is
+# silently protected by wgpu/naga's own storage-buffer bounds checks (the unconditional per-tile
+# `CMD_END` write, which has no explicit guard on the GPU side either). `ptcl_overflow.rs` triggers
+# the second case (a large enough canvas overflows the fixed-size `ptcl` buffer purely from tile
+# iteration, no scene content required) and `ptcl_dynamic.rs` triggers the first (many small
+# same-tile draws, on a canvas just under the direct-overflow threshold, force enough
+# `alloc_cmd` chunk-jumps to overflow `ptcl` dynamically). `patch.diff` adds the same
+# clamp-and-flag behavior as `coarse.wgsl`'s `alloc_cmd`, plus defensive bounds-checked writes
+# (`.get_mut()`) on every write this file makes into `ptcl`, mirroring the wgpu/naga implicit
+# clamp a plain Rust slice doesn't get for free.
+#
+# This machine has no real GPU: point VK_ICD_FILENAMES at a software Vulkan ICD (e.g. Google's
+# SwiftShader) to get a real wgpu::Device without real GPU hardware. Any real GPU backend
+# (Vulkan/Metal/DX12/GL) exercises the exact same GPU/CPU-shim dispatch code in vello_shaders; on
+# a machine with a real GPU, VK_ICD_FILENAMES can simply be dropped (or WGPU_BACKEND unset to let
+# wgpu pick the first working backend).
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+git_no_lfs := "git -c filter.lfs.smudge= -c filter.lfs.clean= -c filter.lfs.process= -c filter.lfs.required=false"
+
+export WGPU_BACKEND := "vulkan"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    {{git_no_lfs}} clone {{repo_url}} clone
+    cd clone && {{git_no_lfs}} checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone (expected: both panic - ptcl_overflow
+# at coarse.rs:382, ptcl_dynamic at coarse.rs:68).
+# Requires VK_ICD_FILENAMES to point at a working Vulkan ICD if there's no real GPU (see header
+# comment above) - e.g.:
+#   VK_ICD_FILENAMES=/path/to/vk_swiftshader_icd.json just test
+reproduce-before:
+    cd repro && cargo run --release --bin ptcl_overflow
+    cd repro && cargo run --release --bin ptcl_dynamic
+
+apply:
+    cd clone && {{git_no_lfs}} apply ../patch.diff
+
+# Re-run against the patched clone. Expected: neither panics any more (both print
+# "rendered OK, no panic").
+reproduce-after:
+    cd repro && cargo run --release --bin ptcl_overflow
+    cd repro && cargo run --release --bin ptcl_dynamic
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

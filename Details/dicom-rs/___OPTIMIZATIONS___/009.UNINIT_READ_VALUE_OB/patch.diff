@@ -1,0 +1,44 @@
+diff --git a/parser/src/stateful/decode.rs b/parser/src/stateful/decode.rs
+index 39e8e856..a1db9ba1 100644
+--- a/parser/src/stateful/decode.rs
++++ b/parser/src/stateful/decode.rs
+@@ -17,11 +17,29 @@ use dicom_encoding::text::{
+     validate_dt, validate_tm,
+ };
+ use dicom_encoding::transfer_syntax::{DynDecoder, TransferSyntax};
+-use smallvec::smallvec;
++use smallvec::{Array, SmallVec, smallvec};
+ use snafu::{Backtrace, OptionExt, ResultExt, Snafu};
+ use std::io::Read;
+ use std::{fmt::Debug, io::Seek, io::SeekFrom};
+ 
++/// Allocates a `SmallVec` of the given length without zero-initializing it, for a caller that is
++/// about to fully overwrite every element (via `read_exact` or a `decode_*_into` call that writes
++/// every `dst` element in order) - `smallvec![0; n]` / `vec![0; n]` pay a real, measured memset
++/// cost for content that gets fully discarded a few instructions later. Sound for any `T: Copy`
++/// with no `Drop` glue (all of `u8`/`u16`/`u32`/`u64`/`i16`/`i32`/`i64`/`f32`/`f64` here): if the
++/// subsequent write is interrupted by an error, the partially-written `SmallVec` is dropped
++/// without any of its elements ever being read by safe code, and every bit pattern is already a
++/// valid value for these types, so no uninitialized-memory read ever occurs.
++#[inline]
++fn uninit_smallvec<T: Copy, A: Array<Item = T>>(len: usize) -> SmallVec<A> {
++    let mut v: SmallVec<A> = SmallVec::with_capacity(len);
++    // SAFETY: see function doc - T has no Drop glue and every bit pattern is a valid T.
++    unsafe {
++        v.set_len(len);
++    }
++    v
++}
++
+ #[derive(Debug, Snafu)]
+ #[non_exhaustive]
+ pub enum Error {
+@@ -457,7 +475,7 @@ where
+         let len = self.require_known_length(header)?;
+ 
+         // sequence of 8-bit integers (or arbitrary byte data)
+-        let mut buf = smallvec![0u8; len];
++        let mut buf = uninit_smallvec(len);
+         self.from.read_exact(&mut buf).context(ReadValueDataSnafu {
+             position: self.position,
+         })?;

@@ -1,0 +1,119 @@
+All runs below were captured against a real (software) Vulkan adapter (Google SwiftShader,
+VK_ICD_FILENAMES=/tmp/swiftshader_icd/vk_swiftshader_icd.json), release build
+(`cargo run --release`), on 2026-09-02.
+
+=====================================================================
+1. PRISTINE checkout (before patch.diff) - 12,000,000 rects (288,000,000 bytes required,
+   exceeds wgpu::Limits::default().max_buffer_size = 268,435,456) - 3/3 runs, deterministic panic
+=====================================================================
+
+--- run 1 ---
+adapter: AdapterInfo { name: "SwiftShader Device (Subzero)", vendor: 6880, device: 49374, device_type: Cpu, device_pci_bus_id: "", driver: "SwiftShader driver", driver_info: "", backend: Vulkan, subgroup_min_size: 4, subgroup_max_size: 4, transient_saves_memory: false }
+max_buffer_size = 268435456
+Building scene with 4000 x 3000 = 12000000 distinct 1x1 opaque rects...
+Scene built in 653.694044ms
+
+thread 'main' (1017253) panicked at /home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1614:18:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_buffer, label = 'Strips Buffer'
+    Buffer size 288000000 is greater than the maximum buffer size (268435456)
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- run 2 ---
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_buffer, label = 'Strips Buffer'
+    Buffer size 288000000 is greater than the maximum buffer size (268435456)
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- run 3 ---
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_buffer, label = 'Strips Buffer'
+    Buffer size 288000000 is greater than the maximum buffer size (268435456)
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+=====================================================================
+2. PRISTINE checkout - 9,000,000 rects (216,000,000 bytes, UNDER the 256 MiB default limit) -
+   boundary check: renders successfully, confirming the panic above is specifically about
+   crossing max_buffer_size, not some unrelated failure
+=====================================================================
+
+adapter: AdapterInfo { name: "SwiftShader Device (Subzero)", vendor: 6880, device: 49374, device_type: Cpu, device_pci_bus_id: "", driver: "SwiftShader driver", driver_info: "", backend: Vulkan, subgroup_min_size: 4, subgroup_max_size: 4, transient_saves_memory: false }
+max_buffer_size = 268435456
+Building scene with 3000 x 3000 = 9000000 distinct 1x1 opaque rects...
+Scene built in 483.4579ms
+render() returned in 402.456486ms
+Rendered 9000000 rects without panicking.
+
+=====================================================================
+3. PATCHED checkout (after `git apply patch.diff`) - 12,000,000 rects - 3/3 runs, deterministic
+   graceful error instead of a panic
+=====================================================================
+
+--- run 1 ---
+adapter: AdapterInfo { name: "SwiftShader Device (Subzero)", vendor: 6880, device: 49374, device_type: Cpu, device_pci_bus_id: "", driver: "SwiftShader driver", driver_info: "", backend: Vulkan, subgroup_min_size: 4, subgroup_max_size: 4, transient_saves_memory: false }
+max_buffer_size = 268435456
+Building scene with 4000 x 3000 = 12000000 distinct 1x1 opaque rects...
+Scene built in 630.444908ms
+render() returned in 318.923416ms
+render() returned a graceful error instead of panicking: Required strips buffer size 288000000 exceeds the device's maximum buffer size 268435456
+
+--- run 2 ---
+Scene built in 624.308412ms
+render() returned in 319.385532ms
+render() returned a graceful error instead of panicking: Required strips buffer size 288000000 exceeds the device's maximum buffer size 268435456
+
+--- run 3 ---
+Scene built in 614.385129ms
+render() returned in 320.40417ms
+render() returned a graceful error instead of panicking: Required strips buffer size 288000000 exceeds the device's maximum buffer size 268435456
+
+=====================================================================
+4. PATCHED checkout - 9,000,000 rects (under the limit) - confirms the fix does not narrow the
+   valid capacity below what it was before (no false-positive rejection)
+=====================================================================
+
+adapter: AdapterInfo { name: "SwiftShader Device (Subzero)", vendor: 6880, device: 49374, device_type: Cpu, device_pci_bus_id: "", driver: "SwiftShader driver", driver_info: "", backend: Vulkan, subgroup_min_size: 4, subgroup_max_size: 4, transient_saves_memory: false }
+max_buffer_size = 268435456
+Building scene with 3000 x 3000 = 9000000 distinct 1x1 opaque rects...
+Scene built in 458.786185ms
+render() returned in 388.170616ms
+Rendered 9000000 rects without panicking.
+
+=====================================================================
+5. PATCHED checkout - HIGH_LIMITS=1 (requests the adapter's own real max_buffer_size, 1 GiB on
+   this SwiftShader adapter, instead of the WebGPU-spec default of 256 MiB) - 12,000,000 rects
+   (288,000,000 bytes, comfortably under 1 GiB) - per CONFIRMATION.md section 7, this varies the
+   input within the same bug class to confirm the fix tracks the device's REAL capacity rather
+   than unconditionally rejecting any scene over the old 256 MiB figure
+=====================================================================
+
+adapter: AdapterInfo { name: "SwiftShader Device (Subzero)", vendor: 6880, device: 49374, device_type: Cpu, device_pci_bus_id: "", driver: "SwiftShader driver", driver_info: "", backend: Vulkan, subgroup_min_size: 4, subgroup_max_size: 4, transient_saves_memory: false }
+max_buffer_size = 1073741824
+Building scene with 4000 x 3000 = 12000000 distinct 1x1 opaque rects...
+Scene built in 648.642792ms
+render() returned in 523.970378ms
+Rendered 12000000 rects without panicking.
+
+=====================================================================
+6. Project test suite, before vs. after patch.diff (worktree at commit
+   7516831426fb70f36d62c521c5477f6a7265b36a) - `cargo test -p vello_hybrid --all-features --lib`
+=====================================================================
+
+BEFORE (pristine):
+test result: ok. 122 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+AFTER (patched):
+test result: ok. 122 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+`cargo check -p vello_hybrid --all-features` (covers both the wgpu and webgl backend `Backend`
+trait implementations, since both are compiled under `--all-features`): 0 errors, 0 warnings,
+both before and after.

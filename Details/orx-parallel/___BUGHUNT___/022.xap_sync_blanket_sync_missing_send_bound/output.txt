@@ -1,0 +1,145 @@
+All runs below are against a genuinely fresh `git clone` of base_commit
+b9214fbeb714e4bb8f8858676a818cef2f21b097 (repo_url in justfile), rebuilt from scratch each time -
+not the dev worktree used while investigating.
+
+=== repro/src/main.rs (recursive/XapSync path: par_recursive(...).map(h).for_each(...)),
+    PRISTINE clone, 10 consecutive `cargo run` invocations ===
+
+expected=200000 actual=28944
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=30106
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=30346
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=26950
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=29759
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=30010
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=29802
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=30159
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=29442
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=29685
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+
+Result: 10/10 reproduced. Expected 200000, actual consistently ~27000-30500 (roughly 15% of
+updates observed, ~85% lost to the race) - never the correct value in any run.
+
+=== repro/src/bin/direct_check.rs (direct, non-recursive, non-XapSync path:
+    (0..n).into_par().for_each(h)), PRISTINE clone, 3 consecutive `cargo run` invocations ===
+    (supplementary evidence only - this path never touches XapSync at all and already gives each
+    real worker thread its own bitwise Copy of the closure; included to show the same class of
+    race is reachable independently of this candidate's own flagged code)
+
+expected=200000 actual=25548
+RACE DETECTED (direct, non-recursive, non-XapSync path): lost updates
+---
+expected=200000 actual=26053
+RACE DETECTED (direct, non-recursive, non-XapSync path): lost updates
+---
+expected=200000 actual=25910
+RACE DETECTED (direct, non-recursive, non-XapSync path): lost updates
+---
+
+Result: 3/3 reproduced through a code path that was already using the "correct" per-thread-copy
+design and never needed XapSync's unconditional Sync at all.
+
+=== repro/src/main.rs AGAIN, same pristine clone, AFTER `git apply attempted_fix.diff`
+    (removes the unconditional `unsafe impl Sync for XapSync`, switches all six recursive
+    execution entry points from implicit by-reference closure capture to `move`-by-value/Copy
+    capture matching the sibling per-thread-copy pattern), 10 consecutive `cargo run`
+    invocations ===
+
+expected=200000 actual=29444
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=30103
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=29282
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=30270
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=28701
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=29368
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=29648
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=29904
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=29881
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+expected=200000 actual=27740
+RACE DETECTED: lost updates, counter != expected (recursive/XapSync path)
+---
+
+Result: 10/10 STILL reproduces after the attempted fix, same magnitude as before the patch. See
+RESULT.md ("The fix") for why: the race is on the pointee of a raw pointer captured by the
+user-supplied closure, which is identically aliased whether the pointer is shared via one
+instance's `&self` (the pre-patch XapSync design) or duplicated into a bitwise Copy per real
+worker thread (the patched design, matching every sibling combinator) - Cell/RefCell/UnsafeCell
+are all `!Copy` in std, so no safe (non-`unsafe impl Send`-asserting) Copy + Send-but-!Sync type
+exists whose observable behavior would actually differ between the two designs.
+
+=== cargo test --lib --tests, pristine clone at base_commit (BEFORE attempted_fix.diff) ===
+
+test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.41s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Total: 180 passed; 0 failed.
+
+=== cargo test --lib --tests, SAME clone AFTER attempted_fix.diff applied ===
+
+test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.36s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Total: 180 passed; 0 failed (identical counts before/after; cargo test --doc also checked
+separately: 260 passed; 0 failed; 16 ignored, identical before/after).

@@ -1,0 +1,74 @@
+diff --git a/symphonia-codec-alac/src/lib.rs b/symphonia-codec-alac/src/lib.rs
+index 3213410..8ac9d3d 100644
+--- a/symphonia-codec-alac/src/lib.rs
++++ b/symphonia-codec-alac/src/lib.rs
+@@ -318,7 +318,11 @@ impl AlacDecoder {
+         let channel_map = map_channels(&self.config.channels);
+         let num_channels = self.config.num_channels as usize;
+         let mut next_channel = 0;
+-        let mut num_frames = 0;
++        // Every SCE/CPE/LFE element in a multichannel frame must decode the same number of
++        // samples. If they disagree, `truncate` below (which applies to every channel plane at
++        // once) would either drop already-decoded samples from an earlier, longer element, or
++        // expose stale silence padding from an earlier, shorter element as real audio.
++        let mut num_frames: Option<usize> = None;
+ 
+         // Fill the audio buffer with silence.
+         self.buf.clear();
+@@ -334,9 +338,18 @@ impl AlacDecoder {
+                         .plane_mut(channel_map[next_channel] as usize)
+                         .expect("invalid channel map");
+ 
+-                    num_frames =
++                    let frames =
+                         decode_sce_or_cpe(&self.config, &mut bs, &mut self.tail_bits, out0, None)?;
+ 
++                    match num_frames {
++                        Some(nf) if nf != frames => {
++                            return decode_error(
++                                "alac: elements in the same frame decoded a different number of samples",
++                            );
++                        }
++                        _ => num_frames = Some(frames),
++                    }
++
+                     next_channel += 1;
+                 }
+                 ALAC_ELEM_TAG_CPE => {
+@@ -354,7 +367,7 @@ impl AlacDecoder {
+                         )
+                         .expect("invalid channel map");
+ 
+-                    num_frames = decode_sce_or_cpe(
++                    let frames = decode_sce_or_cpe(
+                         &self.config,
+                         &mut bs,
+                         &mut self.tail_bits,
+@@ -362,6 +375,15 @@ impl AlacDecoder {
+                         Some(out1),
+                     )?;
+ 
++                    match num_frames {
++                        Some(nf) if nf != frames => {
++                            return decode_error(
++                                "alac: elements in the same frame decoded a different number of samples",
++                            );
++                        }
++                        _ => num_frames = Some(frames),
++                    }
++
+                     next_channel += 2;
+                 }
+                 ALAC_ELEM_TAG_DSE => {
+@@ -403,8 +425,9 @@ impl AlacDecoder {
+             }
+         }
+ 
+-        // Truncate the audio buffer to the number of samples of the last element.
+-        self.buf.truncate(num_frames);
++        // Truncate the audio buffer to the number of samples decoded by the elements (checked
++        // above to be consistent across all elements in this frame).
++        self.buf.truncate(num_frames.unwrap_or(0));
+ 
+         // The audio buffer is always signed 32-bit, but the actual bit-depth may be smaller. If
+         // the bit-depth is less-than 32, shift the final samples up.

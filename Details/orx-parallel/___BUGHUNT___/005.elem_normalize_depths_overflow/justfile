@@ -1,0 +1,39 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# Both `reproduce-before` and `reproduce-after` are EXPECTED to exit non-zero: the pristine
+# tree silently produces a wrong iteration order (detected and reported by the repro binary,
+# which exits 1), and the patched tree turns that same overflow into a deterministic, clearly
+# worded panic (exit 101) instead of silent corruption - see RESULT.md's "The fix" section for
+# why a fail-fast panic is the correct/intended outcome here, not a bug in this justfile.
+
+repo_url := "git@github.com:orxfun/orx-parallel.git"
+base_commit := "b9214fbeb714e4bb8f8858676a818cef2f21b097"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove the failure mode changed.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    mkdir -p clone
+    git clone {{repo_url}} clone/orx-parallel
+    cd clone/orx-parallel && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should print "ORDER VIOLATED"
+# lines (release) and exit 1, demonstrating the silent sort-key corruption.
+reproduce-before:
+    cd repro && cargo run --release || true
+
+apply:
+    cd clone/orx-parallel && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should panic with the new, explicit
+# "breadth-first sort key overflowed usize" message (exit 101) instead of silently printing
+# ORDER VIOLATED lines.
+reproduce-after:
+    cd repro && cargo run --release || true
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

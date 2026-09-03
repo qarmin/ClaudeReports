@@ -1,0 +1,61 @@
+=== BEFORE (unpatched src/int.rs, base commit 4cd7da5f9a5d9509b34ac0a766424ccdae706d33) ===
+
+$ CHANNEL=release ./y.sh rustc repro/int_to_float_cast.rs -o /tmp/i2f_before
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `.../build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+
+$ /tmp/i2f_before   (run 3/3 times, identical result each time)
+thread 'main' (387067) panicked at .../026.int_to_float_cast_missing_sign_cast/repro/int_to_float_cast.rs:35:5:
+assertion `left == right` failed: uitofp mismatch via transmute
+  left: -1.0
+ right: 1.8446744073709552e19
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit=101
+
+(Also reproduced with the original minimal repro used during investigation, before the final
+repro/int_to_float_cast.rs file was written, via a standalone `cargo build`-based crate:
+
+$ transmute::<*const (), usize>(ptr) as f64  ->  -1
+$ transmute::<*const (), isize>(ptr) as f64  ->  -1   (correct, sitofp control)
+
+thread 'main' (377847) panicked at src/main.rs:9:5:
+assertion `left == right` failed: uitofp mismatch via transmute
+  left: -1.0
+ right: 1.8446744073709552e19
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+)
+
+=== AFTER (patch.diff applied to src/int.rs, then `CHANNEL=release ./y.sh build --release`) ===
+
+$ CHANNEL=release ./y.sh rustc repro/int_to_float_cast.rs -o /tmp/i2f_after
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `.../build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+
+$ /tmp/i2f_after   (run 3/3 times, identical result each time)
+exit=0
+exit=0
+exit=0
+
+(No output on success - all assertions pass: the transmuted-usize uitofp case, the transmuted-isize
+sitofp control, and the four non-transmuted boundary-value checks.)
+
+=== Project test suite ===
+
+CHANNEL=release ./y.sh test --release --mini-tests: passes identically before and after (smoke
+test only, unrelated to this cast).
+
+CHANNEL=release ./y.sh test --release --cargo-tests, after (patched):
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 41 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out    (debug lang_tests)
+test result: ok. 41 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out    (release lang_tests)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+(Same counts observed before the fix too - the existing suite does not happen to exercise this
+cast path with a wrongly-signed operand, consistent with candidate 018's identical observation
+about its own sibling bug.)
+
+CHANNEL=release ./y.sh test --release --test-libcore, after (patched):
+test result: ok. 578 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s

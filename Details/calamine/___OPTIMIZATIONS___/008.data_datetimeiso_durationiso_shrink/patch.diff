@@ -1,0 +1,234 @@
+diff --git a/examples/excel_to_csv.rs b/examples/excel_to_csv.rs
+index b2d41f4..6bab507 100644
+--- a/examples/excel_to_csv.rs
++++ b/examples/excel_to_csv.rs
+@@ -65,9 +65,8 @@ fn write_to_csv<W: Write>(output_file: &mut W, range: &Range<Data>) -> std::io::
+                 Data::Error(e) => write!(output_file, "{e:?}"),
+                 Data::Float(f) => write!(output_file, "{f}"),
+                 Data::DateTime(d) => write!(output_file, "{}", d.as_f64()),
+-                Data::String(s) | Data::DateTimeIso(s) | Data::DurationIso(s) => {
+-                    write!(output_file, "{s}")
+-                }
++                Data::String(s) => write!(output_file, "{s}"),
++                Data::DateTimeIso(s) | Data::DurationIso(s) => write!(output_file, "{s}"),
+             }?;
+ 
+             // Write the field separator except for the last column.
+diff --git a/src/datatype.rs b/src/datatype.rs
+index 567b951..d1e2583 100644
+--- a/src/datatype.rs
++++ b/src/datatype.rs
+@@ -45,9 +45,9 @@ pub enum Data {
+     /// Date or Time
+     DateTime(ExcelDateTime),
+     /// Date, Time or Date/Time in ISO 8601
+-    DateTimeIso(String),
++    DateTimeIso(Box<str>),
+     /// Duration in ISO 8601
+-    DurationIso(String),
++    DurationIso(Box<str>),
+     /// Error
+     Error(CellErrorType),
+     /// Empty cell
+@@ -351,9 +351,9 @@ pub enum DataRef<'a> {
+     /// Date or Time
+     DateTime(ExcelDateTime),
+     /// Date, Time or Date/Time in ISO 8601
+-    DateTimeIso(String),
++    DateTimeIso(Box<str>),
+     /// Duration in ISO 8601
+-    DurationIso(String),
++    DurationIso(Box<str>),
+     /// Error
+     Error(CellErrorType),
+     /// Empty cell
+diff --git a/src/ods.rs b/src/ods.rs
+index 05a2304..9e7a0ac 100644
+--- a/src/ods.rs
++++ b/src/ods.rs
+@@ -685,8 +685,8 @@ where
+             {
+                 let attr = decode_attr(&reader.decoder(), value)?;
+                 val = match key {
+-                    b"office:date-value" => Data::DateTimeIso(attr),
+-                    b"office:time-value" => Data::DurationIso(attr),
++                    b"office:date-value" => Data::DateTimeIso(attr.into()),
++                    b"office:time-value" => Data::DurationIso(attr.into()),
+                     _ => Data::String(attr),
+                 };
+                 is_value_set = true;
+diff --git a/src/xlsx/cells_reader.rs b/src/xlsx/cells_reader.rs
+index 8336acb..97ec348 100644
+--- a/src/xlsx/cells_reader.rs
++++ b/src/xlsx/cells_reader.rs
+@@ -649,7 +649,7 @@ fn read_v<'s>(
+                 ))
+         }
+         Some(b"b") => Ok(DataRef::Bool(v != b"0")),
+-        Some(b"d") => Ok(DataRef::DateTimeIso(v_as_str(v)?.to_string())),
++        Some(b"d") => Ok(DataRef::DateTimeIso(v_as_str(v)?.into())),
+         Some(b"e") => Ok(DataRef::Error(v_as_str(v)?.parse()?)),
+         Some(b"str") => Ok(DataRef::String(v_as_str(v)?.to_string())),
+         Some(b"n") | None => {
+diff --git a/tests/test.rs b/tests/test.rs
+index e222e03..1477e0d 100644
+--- a/tests/test.rs
++++ b/tests/test.rs
+@@ -228,7 +228,7 @@ fn ods() {
+             [String("ab".to_string())],
+             [Bool(false)],
+             [String("test".to_string())],
+-            [DateTimeIso("2016-10-20T00:00:00".to_string())]
++            [DateTimeIso("2016-10-20T00:00:00".into())]
+         ]
+     );
+ 
+@@ -1013,15 +1013,15 @@ fn date_xlsx_iso() {
+ 
+     assert_eq!(
+         range.get_value((0, 0)),
+-        Some(&DateTimeIso("2021-01-01".to_string()))
++        Some(&DateTimeIso("2021-01-01".into()))
+     );
+     assert_eq!(
+         range.get_value((1, 0)),
+-        Some(&DateTimeIso("2021-01-01T10:10:10".to_string()))
++        Some(&DateTimeIso("2021-01-01T10:10:10".into()))
+     );
+     assert_eq!(
+         range.get_value((2, 0)),
+-        Some(&DateTimeIso("10:10:10".to_string()))
++        Some(&DateTimeIso("10:10:10".into()))
+     );
+ 
+     #[cfg(feature = "chrono")]
+@@ -1053,19 +1053,19 @@ fn date_ods() {
+ 
+     assert_eq!(
+         range.get_value((0, 0)),
+-        Some(&DateTimeIso("2021-01-01".to_string()))
++        Some(&DateTimeIso("2021-01-01".into()))
+     );
+     assert_eq!(
+         range.get_value((1, 0)),
+-        Some(&DateTimeIso("2021-01-01T10:10:10".to_string()))
++        Some(&DateTimeIso("2021-01-01T10:10:10".into()))
+     );
+     assert_eq!(
+         range.get_value((2, 0)),
+-        Some(&DurationIso("PT10H10M10S".to_string()))
++        Some(&DurationIso("PT10H10M10S".into()))
+     );
+     assert_eq!(
+         range.get_value((3, 0)),
+-        Some(&DurationIso("PT10H10M10.123456S".to_string()))
++        Some(&DurationIso("PT10H10M10.123456S".into()))
+     );
+ 
+     #[cfg(feature = "chrono")]
+@@ -2744,8 +2744,8 @@ fn test_header_row_ods() {
+         }]
+     );
+ 
+-    let first_line = [DateTimeIso("2021-01-01".to_string()), Float(15.0)];
+-    let third_line = [DurationIso("PT10H10M10S".to_string()), Float(17.0)];
++    let first_line = [DateTimeIso("2021-01-01".into()), Float(15.0)];
++    let third_line = [DurationIso("PT10H10M10S".into()), Float(17.0)];
+ 
+     let range = ods.worksheet_range("Sheet1").unwrap();
+     assert_eq!(range.start(), Some((0, 0)));
+@@ -3061,7 +3061,7 @@ fn test_pivot_cache_data_mapping() {
+             String("blue".to_string()),
+             Int(10),
+             Float(1.78),
+-            DateTimeIso("2024-11-01T00:00:00".to_string()),
++            DateTimeIso("2024-11-01T00:00:00".into()),
+             Float(5.617977528089887),
+             Bool(true),
+             Empty,
+@@ -3073,7 +3073,7 @@ fn test_pivot_cache_data_mapping() {
+             String("blue".to_string()),
+             Int(20),
+             Float(2.012),
+-            DateTimeIso("2024-01-04T00:00:00".to_string()),
++            DateTimeIso("2024-01-04T00:00:00".into()),
+             Float(9.940357852882704),
+             Bool(true),
+             Empty,
+@@ -3085,11 +3085,11 @@ fn test_pivot_cache_data_mapping() {
+             String("blue".to_string()),
+             Int(15),
+             Float(3.121),
+-            DateTimeIso("2024-01-31T00:00:00".to_string()),
++            DateTimeIso("2024-01-31T00:00:00".into()),
+             Float(4.806151874399231),
+             Bool(true),
+             Empty,
+-            DateTimeIso("2024-02-01T00:00:00".to_string()),
++            DateTimeIso("2024-02-01T00:00:00".into()),
+         ],
+         vec![
+             Int(4),
+@@ -3097,7 +3097,7 @@ fn test_pivot_cache_data_mapping() {
+             String("blue".to_string()),
+             Int(20),
+             Float(1.052),
+-            DateTimeIso("2024-01-21T00:00:00".to_string()),
++            DateTimeIso("2024-01-21T00:00:00".into()),
+             Float(19.011406844106464),
+             Bool(true),
+             Empty,
+@@ -3109,7 +3109,7 @@ fn test_pivot_cache_data_mapping() {
+             String("blue".to_string()),
+             Int(10),
+             Float(3.102),
+-            DateTimeIso("2024-02-01T00:00:00".to_string()),
++            DateTimeIso("2024-02-01T00:00:00".into()),
+             Float(3.2237266279819474),
+             Bool(true),
+             Empty,
+@@ -3121,7 +3121,7 @@ fn test_pivot_cache_data_mapping() {
+             String("yellow".to_string()),
+             Int(5),
+             Float(1.02),
+-            DateTimeIso("2024-01-01T00:00:00".to_string()),
++            DateTimeIso("2024-01-01T00:00:00".into()),
+             Float(4.901960784313726),
+             Bool(false),
+             Empty,
+@@ -3133,7 +3133,7 @@ fn test_pivot_cache_data_mapping() {
+             String("yellow".to_string()),
+             Int(10),
+             Int(0),
+-            DateTimeIso("2024-01-11T00:00:00".to_string()),
++            DateTimeIso("2024-01-11T00:00:00".into()),
+             Error(Ref),
+             Bool(false),
+             Empty,
+@@ -3145,7 +3145,7 @@ fn test_pivot_cache_data_mapping() {
+             String("yellow".to_string()),
+             Int(15),
+             Float(4.031),
+-            DateTimeIso("1999-01-01T00:00:00".to_string()),
++            DateTimeIso("1999-01-01T00:00:00".into()),
+             Float(3.721161002232697),
+             Bool(false),
+             Empty,
+@@ -3157,7 +3157,7 @@ fn test_pivot_cache_data_mapping() {
+             String("yellow".to_string()),
+             Int(15),
+             Float(1.0421),
+-            DateTimeIso("2024-12-01T00:00:00".to_string()),
++            DateTimeIso("2024-12-01T00:00:00".into()),
+             Float(14.394012090970156),
+             Bool(false),
+             Empty,
+@@ -3169,7 +3169,7 @@ fn test_pivot_cache_data_mapping() {
+             String("yellow".to_string()),
+             Int(5),
+             Float(1.20452),
+-            DateTimeIso("2024-01-01T00:00:00".to_string()),
++            DateTimeIso("2024-01-01T00:00:00".into()),
+             Float(4.151031116129246),
+             Bool(false),
+             Empty,

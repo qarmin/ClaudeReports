@@ -1,0 +1,71 @@
+=== BEFORE (pristine df2b9e42, bug present) ===
+$ cargo run --release
+[push-growth] input: 32 bytes, 1 item(s), explicit outer length
+[push-growth] header.len after items_mut() mutation: Length(Undefined)
+[push-growth] header.len after SetVr: Length(20)
+[push-growth] item count after SetVr: 2
+[push-growth] output: 60 bytes
+[push-growth] BUG REPRODUCED: re-parsing the writer's own output failed: Could not read data set token
+
+[remove-shrink] input: 52 bytes, 2 item(s), explicit outer length
+[remove-shrink] header.len after items_mut() mutation: Length(Undefined)
+[remove-shrink] header.len after SetVr: Length(40)
+[remove-shrink] item count after SetVr: 1
+[remove-shrink] output: 32 bytes
+[remove-shrink] BUG REPRODUCED: re-parsing the writer's own output failed: Could not read data set token
+
+RESULT: bug reproduced in at least one variant
+$ echo "exit code: $?"
+exit code: 1
+
+Note the mechanism: `header.len after items_mut() mutation` correctly shows `Length(Undefined)`
+in both variants (the `DataElement::update_value` guard candidate 109 confirmed is doing its
+job). But immediately after `apply(AttributeOp::new(seq_tag, AttributeAction::SetVr(VR::SQ)))`
+on the very same tag, `header.len` flips back to the *pre-mutation* explicit length (`Length(20)`
+for the 1-item input in push-growth, `Length(40)` for the 2-item input in remove-shrink) - the
+stale value cached in `DataSetSequence`'s own private `length` field at parse time, resurrected by
+`apply_leaf`'s `SetVr` arm calling `DataElement::new(header.tag, new_vr, value)`, which recomputes
+`header.len` from `value.length()`. Writing that stale length verbatim
+(`ExplicitLengthSqItemStrategy::NoChange`) produces a data set whose declared sequence length no
+longer matches its actual encoded item content (2 items where the old length only covered 1, in
+push-growth; 1 item's worth of bytes where the old length still claims 2, in remove-shrink) -
+detected by round-tripping the writer's own output back through the crate's own real reader,
+which fails to parse it at all in both variants.
+
+Reproduced identically on 3/3 repeat runs each variant (deterministic, fixed input, no
+randomness in this code path): same wire bytes, same header.len values, same error, same exit
+code, every time.
+
+=== AFTER (patched tree, `object/src/mem.rs` fix applied) ===
+$ touch src/main.rs && cargo run --release
+[push-growth] input: 32 bytes, 1 item(s), explicit outer length
+[push-growth] header.len after items_mut() mutation: Length(Undefined)
+[push-growth] header.len after SetVr: Length(Undefined)
+[push-growth] item count after SetVr: 2
+[push-growth] output: 68 bytes
+[push-growth] re-parsed OK: item count = 2 (expected 2)
+[push-growth] OK: round-trip preserved the sequence correctly
+
+[remove-shrink] input: 52 bytes, 2 item(s), explicit outer length
+[remove-shrink] header.len after items_mut() mutation: Length(Undefined)
+[remove-shrink] header.len after SetVr: Length(Undefined)
+[remove-shrink] item count after SetVr: 1
+[remove-shrink] output: 40 bytes
+[remove-shrink] re-parsed OK: item count = 1 (expected 1)
+[remove-shrink] OK: round-trip preserved the sequence correctly
+
+RESULT: no bug reproduced (fix appears to be in place)
+$ echo "exit code: $?"
+exit code: 0
+
+Post-fix, `SetVr` no longer recomputes `header.len` from the sequence's vestigial private
+`length` field - it keeps the length `Length::UNDEFINED` for `Value::Sequence`, which is always a
+valid encoding, instead of trusting a field `items_mut()` never updates. Both variants now
+round-trip correctly through the real writer and real reader with no corruption.
+
+Reproduced (fixed) identically on 3/3 repeat runs each variant.
+
+=== Project test suite (object/src/mem.rs fix, applied then reverted) ===
+cargo test -p dicom-object --lib
+  before: 75 passed, 0 failed
+  after:  75 passed, 0 failed  (identical)

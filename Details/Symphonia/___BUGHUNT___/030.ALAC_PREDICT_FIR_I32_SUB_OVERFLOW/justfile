@@ -1,0 +1,43 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# repro/ generates real CAF files carrying 32-bit ALAC and decodes them through the public
+# `symphonia` API only (get_probe -> caf demuxer -> get_codecs -> alac decoder). It exits 1 when
+# any file makes the decoder panic and 0 when none do.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - expected to report panics and exit 1
+# (hence the `!` - a non-zero exit here is the bug being demonstrated, not a broken recipe).
+reproduce-before:
+    #!/usr/bin/env bash
+    ulimit -c 0
+    cd repro && cargo run --release
+    status=$?
+    echo "repro exit status: ${status} (non-zero = the decoder panicked, i.e. the bug is present)"
+    if [ "${status}" -eq 0 ]; then echo "UNEXPECTED: no panic against the pristine clone"; exit 1; fi
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - every generated file must now decode or be
+# cleanly rejected, with no panic (exit 0).
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

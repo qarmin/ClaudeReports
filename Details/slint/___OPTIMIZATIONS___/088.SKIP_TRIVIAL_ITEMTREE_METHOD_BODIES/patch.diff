@@ -1,0 +1,218 @@
+diff --git a/internal/compiler/generator/rust.rs b/internal/compiler/generator/rust.rs
+index dc27468b3..6090ab95e 100644
+--- a/internal/compiler/generator/rust.rs
++++ b/internal/compiler/generator/rust.rs
+@@ -1756,6 +1756,139 @@ fn cross_axis_self_alignment_for_repeated(
+             }
+         });
+ 
++    // These match statements degenerate to a single default arm for the (common) case of a
++    // component with no accessible content of its own and no sub-components/ranges forwarding
++    // into it - skip emitting the match (and the now-unused `_self`) entirely in that case.
++    let item_geometry_fn = if item_geometry_branch.is_empty() {
++        quote! {
++            fn item_geometry(self: ::core::pin::Pin<&Self>, index: u32) -> sp::LogicalRect {
++                #![allow(unused)]
++                ::core::default::Default::default()
++            }
++        }
++    } else {
++        quote! {
++            fn item_geometry(self: ::core::pin::Pin<&Self>, index: u32) -> sp::LogicalRect {
++                #![allow(unused)]
++                let _self = self;
++                // The result of the expression is an anonymous struct, `{height: length, width: length, x: length, y: length}`
++                // fields are in alphabetical order
++                let (h, w, x, y) = match index {
++                    #(#item_geometry_branch)*
++                    _ => return ::core::default::Default::default()
++                };
++                sp::euclid::rect(x, y, w, h)
++            }
++        }
++    };
++
++    let accessible_role_fn = if accessible_role_branch.is_empty() {
++        quote! {
++            fn accessible_role(self: ::core::pin::Pin<&Self>, index: u32) -> sp::AccessibleRole {
++                #![allow(unused)]
++                sp::AccessibleRole::default()
++            }
++        }
++    } else {
++        quote! {
++            fn accessible_role(self: ::core::pin::Pin<&Self>, index: u32) -> sp::AccessibleRole {
++                #![allow(unused)]
++                let _self = self;
++                match index {
++                    #(#accessible_role_branch)*
++                    _ => sp::AccessibleRole::default(),
++                }
++            }
++        }
++    };
++
++    let accessible_string_property_fn = if accessible_string_property_branch.is_empty() {
++        quote! {
++            fn accessible_string_property(
++                self: ::core::pin::Pin<&Self>,
++                index: u32,
++                what: sp::AccessibleStringProperty,
++            ) -> sp::Option<sp::SharedString> {
++                #![allow(unused)]
++                sp::None
++            }
++        }
++    } else {
++        quote! {
++            fn accessible_string_property(
++                self: ::core::pin::Pin<&Self>,
++                index: u32,
++                what: sp::AccessibleStringProperty,
++            ) -> sp::Option<sp::SharedString> {
++                #![allow(unused)]
++                let _self = self;
++                match (index, what) {
++                    #(#accessible_string_property_branch)*
++                    _ => sp::None,
++                }
++            }
++        }
++    };
++
++    let accessibility_action_fn = if accessibility_action_branch.is_empty() {
++        quote! {
++            fn accessibility_action(self: ::core::pin::Pin<&Self>, index: u32, action: &sp::AccessibilityAction) {
++                #![allow(unused)]
++            }
++        }
++    } else {
++        quote! {
++            fn accessibility_action(self: ::core::pin::Pin<&Self>, index: u32, action: &sp::AccessibilityAction) {
++                #![allow(unused)]
++                let _self = self;
++                match (index, action) {
++                    #(#accessibility_action_branch)*
++                    _ => (),
++                }
++            }
++        }
++    };
++
++    let supported_accessibility_actions_fn = if supported_accessibility_actions_branch.is_empty() {
++        quote! {
++            fn supported_accessibility_actions(self: ::core::pin::Pin<&Self>, index: u32) -> sp::SupportedAccessibilityAction {
++                #![allow(unused)]
++                ::core::default::Default::default()
++            }
++        }
++    } else {
++        quote! {
++            fn supported_accessibility_actions(self: ::core::pin::Pin<&Self>, index: u32) -> sp::SupportedAccessibilityAction {
++                #![allow(unused)]
++                let _self = self;
++                match index {
++                    #(#supported_accessibility_actions_branch)*
++                    _ => ::core::default::Default::default(),
++                }
++            }
++        }
++    };
++
++    let item_element_infos_fn = if item_element_infos_branch.is_empty() {
++        quote! {
++            fn item_element_infos(self: ::core::pin::Pin<&Self>, index: u32) -> sp::Option<sp::SharedString> {
++                #![allow(unused)]
++                ::core::default::Default::default()
++            }
++        }
++    } else {
++        quote! {
++            fn item_element_infos(self: ::core::pin::Pin<&Self>, index: u32) -> sp::Option<sp::SharedString> {
++                #![allow(unused)]
++                let _self = self;
++                match index {
++                    #(#item_element_infos_branch)*
++                    _ => { ::core::default::Default::default() }
++                }
++            }
++        }
++    };
++
+     // FIXME! this is only public because of the ComponentHandle::WeakInner. we should find another way
+     let visibility = parent_ctx.is_none().then(|| quote!(pub));
+ 
+@@ -1944,67 +2077,17 @@ fn index_property(self: ::core::pin::Pin<&Self>) -> usize {
+                 #subtree_index_function
+             }
+ 
+-            fn item_geometry(self: ::core::pin::Pin<&Self>, index: u32) -> sp::LogicalRect {
+-                #![allow(unused)]
+-                let _self = self;
+-                // The result of the expression is an anonymous struct, `{height: length, width: length, x: length, y: length}`
+-                // fields are in alphabetical order
+-                let (h, w, x, y) = match index {
+-                    #(#item_geometry_branch)*
+-                    _ => return ::core::default::Default::default()
+-                };
+-                sp::euclid::rect(x, y, w, h)
+-            }
++            #item_geometry_fn
+ 
+-            fn accessible_role(self: ::core::pin::Pin<&Self>, index: u32) -> sp::AccessibleRole {
+-                #![allow(unused)]
+-                let _self = self;
+-                match index {
+-                    #(#accessible_role_branch)*
+-                    //#(#forward_sub_ranges => #forward_sub_field.apply_pin(_self).accessible_role())*
+-                    _ => sp::AccessibleRole::default(),
+-                }
+-            }
++            #accessible_role_fn
+ 
+-            fn accessible_string_property(
+-                self: ::core::pin::Pin<&Self>,
+-                index: u32,
+-                what: sp::AccessibleStringProperty,
+-            ) -> sp::Option<sp::SharedString> {
+-                #![allow(unused)]
+-                let _self = self;
+-                match (index, what) {
+-                    #(#accessible_string_property_branch)*
+-                    _ => sp::None,
+-                }
+-            }
++            #accessible_string_property_fn
+ 
+-            fn accessibility_action(self: ::core::pin::Pin<&Self>, index: u32, action: &sp::AccessibilityAction) {
+-                #![allow(unused)]
+-                let _self = self;
+-                match (index, action) {
+-                    #(#accessibility_action_branch)*
+-                    _ => (),
+-                }
+-            }
++            #accessibility_action_fn
+ 
+-            fn supported_accessibility_actions(self: ::core::pin::Pin<&Self>, index: u32) -> sp::SupportedAccessibilityAction {
+-                #![allow(unused)]
+-                let _self = self;
+-                match index {
+-                    #(#supported_accessibility_actions_branch)*
+-                    _ => ::core::default::Default::default(),
+-                }
+-            }
++            #supported_accessibility_actions_fn
+ 
+-            fn item_element_infos(self: ::core::pin::Pin<&Self>, index: u32) -> sp::Option<sp::SharedString> {
+-                #![allow(unused)]
+-                let _self = self;
+-                match index {
+-                    #(#item_element_infos_branch)*
+-                    _ => { ::core::default::Default::default() }
+-                }
+-            }
++            #item_element_infos_fn
+ 
+             #update_timers
+ 

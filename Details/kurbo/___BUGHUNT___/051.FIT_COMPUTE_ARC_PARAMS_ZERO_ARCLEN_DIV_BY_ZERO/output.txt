@@ -1,0 +1,107 @@
+$ just test
+rm -rf clone
+git clone https://github.com/linebender/kurbo.git clone
+Cloning into 'clone'...
+cd clone && git checkout ca273499e3e48bd2de6f02aa8e99a148984e45f3
+Note: switching to 'ca273499e3e48bd2de6f02aa8e99a148984e45f3'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at ca27349 ci: Update to stable Rust 1.97.1, typos 1.48.0 (#596)
+cd repro && cargo run --release
+   Compiling polycool v0.4.0 (/tmp/051_test_candidate/clone/polycool)
+   Compiling kurbo v0.13.1 (/tmp/051_test_candidate/clone/kurbo)
+   Compiling repro v0.1.0 (/tmp/051_test_candidate/repro)
+    Finished `release` profile [optimized] target(s) in 0.84s
+     Running `target/release/repro`
+fit_to_cubic(0.0..1.0) -> None
+
+This call deterministically reaches CurveDist::compute_arc_params with `deriv.hypot()`
+== 0.0 at all 110 sub-samples, making the internal `arclen` sum exactly 0.0 and
+`arclen.recip()` == +inf - see RESULT.md / output.txt for the captured internal NaN this
+produces in `arcparams`, and `just diagnose` in this folder to reproduce it.
+cd clone && git apply "/tmp/051_test_candidate/patch.diff"
+cd repro && cargo run --release
+   Compiling kurbo v0.13.1 (/tmp/051_test_candidate/clone/kurbo)
+   Compiling repro v0.1.0 (/tmp/051_test_candidate/repro)
+    Finished `release` profile [optimized] target(s) in 0.66s
+     Running `target/release/repro`
+fit_to_cubic(0.0..1.0) -> None
+
+This call deterministically reaches CurveDist::compute_arc_params with `deriv.hypot()`
+== 0.0 at all 110 sub-samples, making the internal `arclen` sum exactly 0.0 and
+`arclen.recip()` == +inf - see RESULT.md / output.txt for the captured internal NaN this
+produces in `arcparams`, and `just diagnose` in this folder to reproduce it.
+
+$ just diagnose
+rm -rf clone-diag-before clone-diag-after repro-diag
+git clone https://github.com/linebender/kurbo.git clone-diag-before
+Cloning into 'clone-diag-before'...
+cd clone-diag-before && git checkout ca273499e3e48bd2de6f02aa8e99a148984e45f3 && git apply "/tmp/051_test_candidate/diagnostic_before.patch"
+Note: switching to 'ca273499e3e48bd2de6f02aa8e99a148984e45f3'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at ca27349 ci: Update to stable Rust 1.97.1, typos 1.48.0 (#596)
+git clone https://github.com/linebender/kurbo.git clone-diag-after
+Cloning into 'clone-diag-after'...
+cd clone-diag-after && git checkout ca273499e3e48bd2de6f02aa8e99a148984e45f3 && git apply "/tmp/051_test_candidate/diagnostic_after.patch"
+Note: switching to 'ca273499e3e48bd2de6f02aa8e99a148984e45f3'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at ca27349 ci: Update to stable Rust 1.97.1, typos 1.48.0 (#596)
+cp -r repro repro-diag
+=== BEFORE (pristine + diagnostic instrumentation): expect NaN ===
+sed -i 's#path = "../clone/kurbo"#path = "../clone-diag-before/kurbo"#' repro-diag/Cargo.toml
+cd repro-diag && cargo run --release 2>&1 | grep -E 'diagnostic|fit_to_cubic'
+[bughunt-051 diagnostic] compute_arc_params: range=0.0..1.0 arclen=0 arclen_inv=inf
+[bughunt-051 diagnostic] compute_arc_params: arcparams after scaling = [NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN]
+[bughunt-051 diagnostic] eval_arc: s=NaN c_arclen=10 -> t=0.5
+fit_to_cubic(0.0..1.0) -> None
+=== AFTER (patched + diagnostic instrumentation): expect 0.0, no NaN ===
+sed -i 's#path = "../clone-diag-before/kurbo"#path = "../clone-diag-after/kurbo"#' repro-diag/Cargo.toml
+cd repro-diag && cargo run --release 2>&1 | grep -E 'diagnostic|fit_to_cubic'
+[bughunt-051 diagnostic] compute_arc_params: range=0.0..1.0 arclen=0 arclen_inv=inf
+[bughunt-051 diagnostic] compute_arc_params: arcparams after scaling = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+[bughunt-051 diagnostic] eval_arc: s=0 c_arclen=10 -> t=0
+fit_to_cubic(0.0..1.0) -> None

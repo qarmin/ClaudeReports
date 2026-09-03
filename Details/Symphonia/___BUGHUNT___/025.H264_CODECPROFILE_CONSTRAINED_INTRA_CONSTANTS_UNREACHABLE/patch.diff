@@ -1,0 +1,31 @@
+diff --git a/symphonia-common/src/mpeg/video/mod.rs b/symphonia-common/src/mpeg/video/mod.rs
+index 108c092..7fa44ff 100644
+--- a/symphonia-common/src/mpeg/video/mod.rs
++++ b/symphonia-common/src/mpeg/video/mod.rs
+@@ -32,11 +32,24 @@ impl AVCDecoderConfigurationRecord {
+ 
+         // AVC profile as defined in ISO/IEC 14496-10.
+         let avc_profile_indication = br.read_bits_leq32(8)?;
+-        let _profile_compatibility = br.read_bits_leq32(8)?;
++        let profile_compatibility = br.read_bits_leq32(8)?;
+         let avc_level_indication = br.read_bits_leq32(8)?;
+ 
++        // `profile_compatibility` carries the constraint_set0..5_flag bits (ISO/IEC 14496-10
++        // Annex A), at byte bit positions 7 down to 2. Fold each constraint_set{n}_flag into bit
++        // (8 + n) of the profile code, matching the encoding used by the
++        // CODEC_PROFILE_H264_CONSTRAINED_*/*_INTRA constants, so a real Constrained
++        // Baseline/Progressive High/Constrained High/*_Intra stream's parsed profile can actually
++        // equal those constants.
++        let mut profile_code = avc_profile_indication;
++        for constraint_set in 0..=5u32 {
++            if profile_compatibility & (1 << (7 - constraint_set)) != 0 {
++                profile_code |= 1 << (8 + constraint_set);
++            }
++        }
++
+         Ok(AVCDecoderConfigurationRecord {
+-            profile: CodecProfile::new(avc_profile_indication),
++            profile: CodecProfile::new(profile_code),
+             level: avc_level_indication,
+         })
+     }

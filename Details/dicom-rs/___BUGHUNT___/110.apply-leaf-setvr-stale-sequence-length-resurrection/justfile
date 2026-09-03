@@ -1,0 +1,41 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# repo_url/base_commit read via `git remote get-url origin` / `git rev-parse HEAD` in the main
+# project, at the moment patch.diff was captured.
+
+repo_url := "https://github.com/qarmin/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+# base_commit is not on repo_url's default branch (a plain `git clone` won't have it, since
+# GitHub's default clone only sends objects reachable from advertised refs) - fetch it by SHA
+# explicitly, which GitHub's public-repo smart-HTTP server allows even for non-advertised commits.
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git fetch origin {{base_commit}} && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should exit non-zero
+# (REPRODUCED: SetVr resurrects a stale pre-mutation explicit sequence length after
+# items_mut() correctly invalidated it, corrupting the writer's own round-trip).
+reproduce-before:
+    cd repro && cargo run --release; test "$?" -ne 0 && echo "(non-zero exit expected here: bug reproduced)"; true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should exit 0 (FIXED: SetVr keeps
+# the sequence's length undefined instead of trusting the vestigial private field).
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

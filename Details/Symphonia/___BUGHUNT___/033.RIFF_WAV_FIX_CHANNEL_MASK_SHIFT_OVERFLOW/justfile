@@ -1,0 +1,33 @@
+# Self-contained reproduction for candidate 033: u32 shift-amount overflow in
+# `fix_wave_channel_mask` while "fixing" a WAVE_FORMAT_EXTENSIBLE dwChannelMask.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing here reaches outside the folder it lives in.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Writes 8 WAVE_FORMAT_EXTENSIBLE files (varying nChannels/dwChannelMask) and opens each through
+# the real `symphonia::default::get_probe().probe()` entry point. Should panic with "attempt to
+# shift left with overflow" on 4 of them and exit non-zero (leading `-` keeps `just test` going
+# so it can reach apply/reproduce-after).
+reproduce-before:
+    -ulimit -c 0 && cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro against the patched clone - every file must now either probe successfully or be
+# rejected with "wav: too many channels in mask for fmt_ext", no panic, exit 0.
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target

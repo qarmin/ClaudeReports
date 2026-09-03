@@ -1,0 +1,50 @@
+diff --git a/symphonia-format-riff/src/aiff/chunks.rs b/symphonia-format-riff/src/aiff/chunks.rs
+index d3330cd..3fa1856 100644
+--- a/symphonia-format-riff/src/aiff/chunks.rs
++++ b/symphonia-format-riff/src/aiff/chunks.rs
+@@ -558,3 +558,25 @@ fn map_aiff_channel_count(count: u16) -> Result<Channels> {
+     };
+     Ok(channels)
+ }
++
++#[test]
++fn test_high_channel_count_packet_info() {
++    // AIFF accepts any 16-bit channel count, so the frame length (channels * bytes per sample)
++    // does not fit in a u16 for large counts.
++    for (num_channels, sample_size) in [(16384, 32), (21846, 24), (u16::MAX, 32)] {
++        let format_data = CommonChunk::read_pcm_fmt(sample_size, num_channels).unwrap();
++
++        let comm = CommonChunk {
++            num_channels,
++            num_sample_frames: 4,
++            sample_size,
++            sample_rate: NonZero::new(44100).unwrap(),
++            format_data,
++        };
++
++        let packet_info = comm.packet_info().unwrap();
++
++        let bytes_per_sample = u64::from(sample_size.div_ceil(8));
++        assert_eq!(packet_info.block_size.get(), u64::from(num_channels) * bytes_per_sample);
++    }
++}
+diff --git a/symphonia-format-riff/src/common.rs b/symphonia-format-riff/src/common.rs
+index 9810913..effcf2e 100644
+--- a/symphonia-format-riff/src/common.rs
++++ b/symphonia-format-riff/src/common.rs
+@@ -211,9 +211,12 @@ pub struct FormatPcm {
+ 
+ impl FormatPcm {
+     pub fn make_packet_info(&self) -> Result<PacketInfo> {
+-        let num_channels = self.channels.count() as u16;
+-        let frame_len = (self.bits_per_sample / 8) * num_channels;
+-        PacketInfo::without_blocks(u32::from(frame_len))
++        // AIFF's channel count is an unrestricted 16-bit field (map_aiff_channel_count maps any
++        // count above 3 to Channels::Discrete), so the frame length must be computed in a width
++        // that cannot overflow: 65535 channels * 4 bytes/sample does not fit in a u16.
++        let num_channels = self.channels.count() as u32;
++        let frame_len = u32::from(self.bits_per_sample / 8) * num_channels;
++        PacketInfo::without_blocks(frame_len)
+     }
+ }
+ 

@@ -1,0 +1,328 @@
+import { Button, Palette } from "std-widgets.slint";
+
+export enum PerfMode {
+    text,
+    list,
+    scroll,
+    rects,
+    images,
+    nest,
+    layouts,
+}
+
+export struct RecordItem {
+    first: string,
+    second: string,
+    third: string,
+}
+
+// How a row in the non-virtualized ScrollView mode is built. Each variant is a separate
+// component instantiated by its own `for` loop, so switching between them costs nothing per
+// row - the point is to measure what the renderer's per-item work is made of.
+export enum RowStyle {
+    // Rectangle + HorizontalLayout + 3 Texts. What a real row looks like.
+    layout,
+    // Same three texts, explicitly positioned: nothing needs the children's layout-info.
+    flat,
+    // The layout row plus `clip: true`, which is the only subtree pruning the renderer has
+    // today (`visit_clip` returns ContinueRenderingWithoutChildren for an empty clip region).
+    clipped,
+    // Rectangle only. The floor: what visiting an item costs when it has no children at all.
+    bare,
+    // The layout row with every child given a fixed width and no stretch, to find out whether it is
+    // the layout as such that shapes the text at startup, or only a layout that has to distribute
+    // space and therefore needs the children's preferred sizes.
+    layout-fixed,
+    // The layout row plus a `TouchArea`. Clickable list rows are ubiquitous and add an item that
+    // takes part in hit-testing *and* keeps hover state, which nothing else here measures.
+    touch,
+    // A `VerticalLayout` of 3 fixed-width, `NoWrap` `Text`s - the transpose of `layout-fixed`, for
+    // candidate VERTICALLAYOUT_TEXT_ORIENTATION_QUERY: does an off-screen row still shape its text
+    // when only `Orientation::Vertical` is ever queried on it (never `Horizontal`)?
+    vertical-fixed,
+    // Same as `vertical-fixed`, but with `TextInput`s instead of `Text`s - `TextInputItem`'s
+    // `layout_info` is a separate implementation, not the shared `text_layout_info` helper.
+    vertical-fixed-input,
+}
+
+export global Settings {
+    // Number of distinct font sizes rows cycle through. Every distinct (font, size) pair is its own
+    // entry in the glyph cache and its own shaping key, so a UI that varies text size per row - a
+    // chat with headings, a log with severity levels - stresses caches that a uniform list never
+    // touches. 1 means every row is the same size, which is what every scene did until now.
+    in-out property <int> font-size-variants: 1;
+    // Base size the variants are added to. Without this, raising `font-size-variants` also raises
+    // the *average* size (13px + up to N-1), so "more distinct sizes" and "bigger text" could not
+    // be told apart - which is what candidate 24 measured.
+    in-out property <length> font-size-base: 13px;
+    // Toggled per frame by `--toggle-global`. Every row reads it, so one write dirties one binding
+    // per row - what a theme switch or a "compact mode" toggle does in a real app, and something
+    // no scene here measured: the other scenes only ever write properties the *renderer* reads.
+    in-out property <bool> alt-theme: false;
+    in-out property <RowStyle> row-style: RowStyle.layout;
+    // Kept for the checkbox in the UI: layout <-> flat.
+    in-out property <bool> flat-rows: false;
+}
+
+
+export global Logic {
+    callback add-lines(count: int);
+    callback clear-text();
+    callback add-records(count: int);
+    callback clear-records();
+    // Must be pure to be usable in a binding; the heavy work stays in Rust.
+    pure callback selection-info(text: string, cursor: int, anchor: int) -> string;
+}
+
+export component AddButtons inherits HorizontalLayout {
+    callback add(count: int);
+    callback clear();
+
+    spacing: 6px;
+
+    for count in [10, 100, 1000, 10000, 100000]: Button {
+        text: "+" + count;
+        clicked => {
+            root.add(count);
+        }
+    }
+
+    Button {
+        text: "Clear";
+        clicked => {
+            root.clear();
+        }
+    }
+}
+
+component RowBackground inherits Rectangle {
+    in property <bool> alternate;
+
+    height: 34px;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: Palette.border;
+    background: Settings.alt-theme
+        ? (root.alternate ? Palette.control-background : Palette.alternate-background)
+        : (root.alternate ? Palette.alternate-background : Palette.control-background);
+}
+
+// The realistic row: three texts in a layout.
+export component RecordRow inherits RowBackground {
+    in property <RecordItem> record;
+    in property <int> variant;
+    // 13px..13+N-1 px. Kept small so line heights stay close and the row height does not change.
+    property <length> size: Settings.font-size-base
+        + mod(root.variant, max(1, Settings.font-size-variants)) * 1px;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 12px;
+
+        Text {
+            width: 110px;
+            font-size: root.size;
+            text: root.record.first;
+            color: Palette.accent-background;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Text {
+            horizontal-stretch: 1;
+            font-size: root.size;
+            text: root.record.second;
+            color: Palette.foreground;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Text {
+            width: 130px;
+            text: root.record.third;
+            color: Palette.foreground;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// The same row without any layout: nothing here needs the children's layout-info,
+// so the renderer can walk over an off-screen row without shaping its text.
+export component FlatRecordRow inherits RowBackground {
+    in property <RecordItem> record;
+
+    Text {
+        x: 10px;
+        y: 0;
+        width: 110px;
+        height: parent.height;
+        text: root.record.first;
+        color: Palette.accent-background;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Text {
+        x: 132px;
+        y: 0;
+        width: parent.width - 284px;
+        height: parent.height;
+        text: root.record.second;
+        color: Palette.foreground;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Text {
+        x: parent.width - 140px;
+        y: 0;
+        width: 130px;
+        height: parent.height;
+        text: root.record.third;
+        color: Palette.foreground;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+export component ClippedRecordRow inherits RecordRow {
+    clip: true;
+}
+
+/// The layout row with no stretch and no elide: every width is fixed, so the layout has nothing to
+/// solve. If this still shapes at startup the trigger is the layout itself; if it does not, the
+/// trigger is having to ask the children how wide they would like to be.
+export component FixedLayoutRecordRow inherits RowBackground {
+    in property <RecordItem> record;
+    in property <int> variant;
+    property <length> size: Settings.font-size-base
+        + mod(root.variant, max(1, Settings.font-size-variants)) * 1px;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 12px;
+
+        Text {
+            width: 110px;
+            font-size: root.size;
+            text: root.record.first;
+            color: Palette.accent-background;
+            vertical-alignment: center;
+        }
+
+        Text {
+            width: 400px;
+            font-size: root.size;
+            text: root.record.second;
+            color: Palette.foreground;
+            vertical-alignment: center;
+        }
+
+        Text {
+            width: 130px;
+            text: root.record.third;
+            color: Palette.foreground;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+    }
+}
+
+/// The transpose of `FixedLayoutRecordRow`: a `VerticalLayout` of 3 fixed-width, `NoWrap` `Text`s
+/// stacked top to bottom instead of side by side. Same row height (34px) as every other row style,
+/// so the comparison stays apples to apples; the 3 texts split it evenly.
+export component VerticalFixedLayoutRecordRow inherits RowBackground {
+    in property <RecordItem> record;
+    in property <int> variant;
+    property <length> size: Settings.font-size-base
+        + mod(root.variant, max(1, Settings.font-size-variants)) * 1px;
+
+    VerticalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+
+        Text {
+            width: 300px;
+            font-size: root.size;
+            text: root.record.first;
+            color: Palette.accent-background;
+            wrap: no-wrap;
+        }
+
+        Text {
+            width: 300px;
+            font-size: root.size;
+            text: root.record.second;
+            color: Palette.foreground;
+            wrap: no-wrap;
+        }
+
+        Text {
+            width: 300px;
+            text: root.record.third;
+            color: Palette.foreground;
+            wrap: no-wrap;
+        }
+    }
+}
+
+/// Same shape as `VerticalFixedLayoutRecordRow`, but with `TextInput`s (a search-box/form-field
+/// style widget) instead of plain `Text`s - `TextInput::layout_info` is a separate implementation
+/// from the shared `text_layout_info` helper `Text` uses, so this exercises a different code path.
+export component VerticalFixedInputRecordRow inherits RowBackground {
+    in property <RecordItem> record;
+    in property <int> variant;
+    property <length> size: Settings.font-size-base
+        + mod(root.variant, max(1, Settings.font-size-variants)) * 1px;
+
+    VerticalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+
+        TextInput {
+            width: 300px;
+            font-size: root.size;
+            text: root.record.first;
+            color: Palette.accent-background;
+            wrap: no-wrap;
+            single-line: true;
+        }
+
+        TextInput {
+            width: 300px;
+            text: root.record.second;
+            color: Palette.foreground;
+            wrap: no-wrap;
+            single-line: true;
+        }
+
+        TextInput {
+            width: 300px;
+            text: root.record.third;
+            color: Palette.foreground;
+            wrap: no-wrap;
+            single-line: true;
+        }
+    }
+}
+
+/// A clickable row: the realistic row plus a `TouchArea` over it.
+export component TouchRecordRow inherits RecordRow {
+    TouchArea {
+        // Reading `has-hover` is what a real row does (a hover highlight), and it is what makes
+        // the hover state actually propagate rather than being optimized away.
+        Rectangle {
+            background: parent.has-hover ? Palette.accent-background.transparentize(0.9) : transparent;
+        }
+    }
+}
+
+/// The floor of the per-item cost: no children, so the renderer visits one item per row.
+export component BareRecordRow inherits RowBackground {
+    in property <RecordItem> record;
+}

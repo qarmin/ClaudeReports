@@ -1,0 +1,67 @@
+diff --git a/lofty/src/mp4/ilst/write.rs b/lofty/src/mp4/ilst/write.rs
+index 1be152bb..a0aa142d 100644
+--- a/lofty/src/mp4/ilst/write.rs
++++ b/lofty/src/mp4/ilst/write.rs
+@@ -433,6 +433,26 @@ where
+ 	Ok(())
+ }
+ 
++// `read_offset` comes straight from file data and can be any `u64`, including values well
++// outside the range a bare `read_offset as i64 + difference` can represent without overflowing.
++fn apply_offset_difference(
++	ident: &AtomIdent<'static>,
++	read_offset: u64,
++	difference: i64,
++) -> Result<u64, FileEncodingError> {
++	i64::try_from(read_offset)
++		.ok()
++		.and_then(|offset| offset.checked_add(difference))
++		.and_then(|offset| u64::try_from(offset).ok())
++		.ok_or_else(|| {
++			FileParseError::from(AtomParseError::message(
++				Some(ident.clone()),
++				"offset update would overflow",
++			))
++			.into()
++		})
++}
++
+ fn update_offsets(
+ 	writer: &AtomWriter,
+ 	moov: &ContextualAtom,
+@@ -487,13 +507,12 @@ fn update_offsets(
+ 				continue;
+ 			}
+ 
++			let new_offset = apply_offset_difference(&co64.ident, read_offset, difference)?;
++
+ 			write_handle.seek(SeekFrom::Current(-8))?;
+-			write_handle.write_u64::<BigEndian>((read_offset as i64 + difference) as u64)?;
++			write_handle.write_u64::<BigEndian>(new_offset)?;
+ 
+-			log::trace!(
+-				"Updated offset from {read_offset} to {}",
+-				((read_offset as i64) + difference) as u64
+-			);
++			log::trace!("Updated offset from {read_offset} to {new_offset}");
+ 		}
+ 	}
+ 
+@@ -528,13 +547,12 @@ fn update_offsets(
+ 				continue;
+ 			}
+ 
++			let new_offset = apply_offset_difference(&tfhd.ident, read_offset, difference)?;
++
+ 			write_handle.seek(SeekFrom::Current(-8))?;
+-			write_handle.write_u64::<BigEndian>((read_offset as i64 + difference) as u64)?;
++			write_handle.write_u64::<BigEndian>(new_offset)?;
+ 
+-			log::trace!(
+-				"Updated offset from {read_offset} to {}",
+-				((read_offset as i64) + difference) as u64
+-			);
++			log::trace!("Updated offset from {read_offset} to {new_offset}");
+ 		}
+ 	}
+ 

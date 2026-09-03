@@ -1,0 +1,56 @@
+# Self-contained reproduction for candidate 046.OVERLAY_UNPACK_SIMD_WIDE.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern). Self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+# The harness's own `overlay-decode` mode (added for candidate 022) builds its own synthetic
+# overlay plane in-process - no external testdata file is needed for this candidate.
+#
+# Note: patch.diff is against the same base_commit as candidate 022 (the original bit-at-a-time
+# unpack_overlay_bits, since every candidate always reverts the main tree - see SKILL.md's "the
+# one rule that matters most"), so `just test` here reproduces baseline-vs-patched (~88% win,
+# inherited from candidate 022's table fallback this patch also ships). The finding this
+# candidate is actually about - whether a `pdep`-based wide bit-expansion beats candidate 022's
+# table lookup - was measured with a temporary, unshipped env-var toggle during the session (see
+# RESULT.md); it is not reproducible from this justfile alone since the final patch has no
+# runtime switch between the two paths (bmi2 is used automatically when available).
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "=== bit-exactness check (4096x4096 synthetic overlay) ==="
+    ./bin_baseline overlay-decode 4096 4096 1
+    ./bin_patched overlay-decode 4096 4096 1
+    echo "(expect identical checksum= on both lines above)"
+
+    echo ""
+    echo "=== wall-clock (expect patched ~88% faster than the original bit-at-a-time baseline;"
+    echo "this does NOT distinguish the pdep path from candidate 022's table path - see RESULT.md)"
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- overlay-decode 4096 4096 20
+
+clean:
+    rm -rf clone bin_baseline bin_patched

@@ -1,0 +1,119 @@
+All output below is real, captured by actually running `just test` / `just apply reproduce-after`
+in ___BUGHUNT___/061.PIXMAP_FROM_PARTS_LENGTH_MISMATCH_PANIC/ against a genuinely fresh
+`git clone` of https://github.com/linebender/vello.git at base_commit
+7516831426fb70f36d62c521c5477f6a7265b36a (git-lfs was required for the clone/checkout to succeed
+in this sandbox - a static git-lfs 3.5.1 binary was placed on PATH for this run only; no repo
+config was changed).
+
+=== `just test` (clone + reproduce-before) ===
+
+$ cd repro && cargo run --bin vulnerable
+   Compiling vello_common v0.2.0 (/tmp/candidate061_check/clone/sparse_strips/vello_common)
+   Compiling repro v0.1.0 (/tmp/candidate061_check/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.57s
+     Running `target/debug/vulnerable`
+
+thread 'main' (77752) panicked at /tmp/candidate061_check/clone/sparse_strips/vello_common/src/pixmap.rs:129:9:
+assertion `left == right` failed: Expected `data` to have length of exactly `width * height`
+  left: 15
+ right: 16
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+[length_mismatch] REPRODUCED - panicked: Any { .. }
+
+thread 'main' (77752) panicked at /tmp/candidate061_check/clone/sparse_strips/vello_common/src/pixmap.rs:128:14:
+The capacity of the vector needs to be divisible by 4.: OutputSliceWouldHaveSlop
+[odd_capacity] REPRODUCED - panicked: Any { .. }
+error: Recipe `reproduce-before` failed on line 28 with exit code 1
+
+(`just test`'s own chain stops here by design, the same way as candidate 006's justfile - a
+nonzero exit from `reproduce-before` is what "demonstrates the bug" and `just` naturally halts the
+recipe chain there. `just apply reproduce-after` was then run separately to show the fix - see
+below.)
+
+=== `just apply reproduce-after` (patch applied, `vulnerable` unchanged, `safe` is new) ===
+
+$ cd clone && git apply patch.diff
+$ cd repro && cargo run --bin vulnerable || true
+   Compiling vello_common v0.2.0 (/tmp/candidate061_check/clone/sparse_strips/vello_common)
+   Compiling repro v0.1.0 (/tmp/candidate061_check/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.62s
+     Running `target/debug/vulnerable`
+
+thread 'main' (78792) panicked at /tmp/candidate061_check/clone/sparse_strips/vello_common/src/pixmap.rs:112:14:
+`data` must be exactly `width * height * 4` bytes long, with a vector capacity divisible by 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+[length_mismatch] REPRODUCED - panicked: Any { .. }
+
+thread 'main' (78792) panicked at /tmp/candidate061_check/clone/sparse_strips/vello_common/src/pixmap.rs:112:14:
+`data` must be exactly `width * height * 4` bytes long, with a vector capacity divisible by 4
+[odd_capacity] REPRODUCED - panicked: Any { .. }
+
+$ cd repro && cargo run --bin safe
+   Compiling repro v0.1.0 (/tmp/candidate061_check/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.11s
+     Running `target/debug/safe`
+[length_mismatch] handled gracefully - try_from_parts returned None
+[odd_capacity] handled gracefully - try_from_parts returned None
+[well_formed] try_from_parts returned Some: true
+
+=== Repeatability (CONFIRMATION.md section 1): 5/5 runs, both binaries, debug build ===
+
+(captured directly against /tmp/vello-061-worktree, a git worktree at the same base_commit, before
+the patch was applied there)
+
+$ for i in 1 2 3 4 5; do ./target/debug/vulnerable >/dev/null 2>&1; echo "run $i exit=$?"; done
+run 1 exit=1
+run 2 exit=1
+run 3 exit=1
+run 4 exit=1
+run 5 exit=1
+
+(and, after applying the same patch to that worktree)
+
+$ for i in 1 2 3 4 5; do ./target/debug/vulnerable >/dev/null 2>&1; echo "vulnerable run $i exit=$?"; ./target/debug/safe >/dev/null 2>&1; echo "safe run $i exit=$?"; done
+vulnerable run 1 exit=1
+safe run 1 exit=0
+vulnerable run 2 exit=1
+safe run 2 exit=0
+vulnerable run 3 exit=1
+safe run 3 exit=0
+vulnerable run 4 exit=1
+safe run 4 exit=0
+vulnerable run 5 exit=1
+safe run 5 exit=0
+
+=== Release build check (assert_eq!/  expect() are not debug_assert - both panic in --release too) ===
+
+$ cargo run --release
+   Running `target/release/qt`
+
+thread 'main' (31358) panicked at .../pixmap.rs:129:9:
+assertion `left == right` failed: Expected `data` to have length of exactly `width * height`
+  left: 15
+ right: 16
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+PANIC: Any { .. }
+
+=== Project test suite (before vs. after the patch) ===
+
+$ cargo test -p vello_common
+before: test result: ok. 159 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+after:  test result: ok. 162 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+        (the 3 new tests are try_from_parts_rejects_length_mismatch,
+        try_from_parts_rejects_capacity_not_multiple_of_four, try_from_parts_accepts_matching_length)
+
+$ cargo test -p vello_cpu --lib
+before: test result: ok. 81 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+after:  test result: ok. 81 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+$ cargo test -p vello_sparse_tests
+before: test result: FAILED. 89 passed; 3538 failed; 1230 ignored
+after:  test result: FAILED. 89 passed; 3538 failed; 1230 ignored (identical before and after)
+        Root cause of the failures: this sandbox has no working `git-lfs` on PATH at the time
+        these tests were run (git worktree creation itself printed the warning "This repository
+        is configured for Git LFS but 'git-lfs' was not found on your path"), so every
+        `vello_sparse_tests` reference PNG under version control as an LFS pointer decodes as
+        `Unsupported(UnsupportedError { format: Unknown, kind: Format(Unknown) })` at
+        `sparse_strips/vello_sparse_tests/tests/util.rs:403`. This reproduces identically with
+        and without the patch (`git stash`/`git stash pop` around the same test run) - a pre-
+        existing environment limitation unrelated to this candidate, not a regression it caused.

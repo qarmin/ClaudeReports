@@ -1,0 +1,67 @@
+Real captured output of `just test` (fresh clone of https://github.com/linebender/kurbo.git at
+ca273499e3e48bd2de6f02aa8e99a148984e45f3, `cargo run --release` inside repro/), run 2026-09-01.
+Deterministic (no randomness involved) - re-run to confirm identical output each time.
+
+$ just test
+rm -rf clone
+git clone https://github.com/linebender/kurbo.git clone
+Cloning into 'clone'...
+cd clone && git checkout ca273499e3e48bd2de6f02aa8e99a148984e45f3
+Note: switching to 'ca273499e3e48bd2de6f02aa8e99a148984e45f3'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at ca27349 ci: Update to stable Rust 1.97.1, typos 1.48.0 (#596)
+cd repro && cargo run --release
+   Compiling polycool v0.4.0 (/tmp/candidate010_test/clone/polycool)
+   Compiling kurbo v0.13.1 (/tmp/candidate010_test/clone/kurbo)
+   Compiling repro v0.1.0 (/tmp/candidate010_test/repro)
+    Finished `release` profile [optimized] target(s) in 1.40s
+     Running `target/release/repro`
+offset_cubic (direct): endpoint = (+100.000000, +5.000000)
+  -> OK (landed at the expected offset endpoint)
+stroke() outline elements:
+  MoveTo((0.0, -5.0))
+  LineTo((100.0, -5.0))
+  CurveTo((102.76142374915396, -5.0), (105.0, -2.761423749153967), (105.0, -3.061616997868383e-16))
+  CurveTo((105.0, 2.761423749153966), (102.76142374915396, 4.999999999999999), (100.0, 5.0))
+  LineTo((0.0, 5.0))
+  CurveTo((-2.7614237491539666, 5.0), (-4.999999999999999, 2.761423749153967), (-5.0, 3.061616997868383e-16))
+  CurveTo((-5.0, -2.761423749153966), (-2.761423749153967, -4.999999999999999), (-6.123233995736766e-16, -5.0))
+stroke() end-to-end: outline has 6 segments, hairpin_found=false
+
+(informational, not part of the verdict) fully-degenerate point cubic: 257 elements produced, last endpoint = Some((NaN, NaN))
+  -> this is the pre-existing, documented "not suitable for degenerate cubics" limitation, a different failure mode (NaN) than the hairpin pattern checked above, and not reachable via the public stroke() driver (do_cubic() routes such input to do_linear() first).
+
+did not reproduce - CubicOffset does not show the atan2(0,0) hairpin pattern
+
+--- Interpretation ---
+Check 1 (offset_cubic direct call on a degenerate line-as-cubic, CubicBez::new(p0,p0,p1,p1) -
+exactly PathSeg::Line::to_cubic()'s shape, the same input shape that broke
+SimplifyBezPath::sample_pt_tangent before PR #606): endpoint lands exactly on the expected offset
+line endpoint (100, 5) - no hairpin.
+
+Check 2 (kurbo::stroke(), the real public end-to-end entry point, fed a path whose one segment is
+a CurveTo with the same degenerate control points): produces a correct round-capped stroke
+outline - both the top edge (y=+5, LineTo (0,5) after a correctly-curving round cap) and bottom
+edge (y=-5) run in the expected, non-reversed direction. No hairpin.
+
+Check 3 (informational only, a stronger degeneracy than either bug pattern: all four control
+points identical, i.e. a zero-length curve) produces NaN throughout, but this is unrelated to the
+hairpin pattern being checked (offset_cubic's own doc comment already disclaims this input class),
+is not reachable through the real public stroke() driver (stroke.rs's do_cubic() detects
+near-colinear/degenerate control points and routes to do_linear() before ever calling
+offset_cubic), and is a distinct failure mode (NaN propagation, not a silently-wrong direction).

@@ -1,0 +1,23 @@
+=== BEFORE (pristine df2b9e42) ===
+=== control: Kerberos service ticket well under the 65535-byte limit ===
+  association established normally, as expected
+
+=== a Kerberos service ticket larger than a u16 can express (70000 bytes) ===
+  association failed: SCU result: Err(failed to receive pdu); SCP result: Err(SCP establish: failed to receive pdu)
+  -> BUG: the SCU got past writing/sending the PDU (meaning it silently emitted a wire-corrupt A-ASSOCIATE-RQ - declared length 4464 instead of the real 70000 bytes for the secondary field) and the failure above is something *downstream* choking on the corrupted bytes instead of a clean upfront refusal; a real DICOM SCP that isn't this crate's own reader could behave far worse than a failed parse
+
+RESULT: bug reproduced or control case failed (see above)
+
+=== AFTER (patch.diff applied) ===
+=== control: Kerberos service ticket well under the 65535-byte limit ===
+  association established normally, as expected
+
+=== a Kerberos service ticket larger than a u16 can express (70000 bytes) ===
+  association failed: SCU result: Err(failed to send pdu); SCP result: Err(SCP establish: connection closed by peer)
+  -> bug ABSENT: the SCU itself refused to build the oversized chunk before writing anything to the wire (a clean, local error - see the fix)
+
+RESULT: no wire corruption observed
+
+=== Test suite, before and after (identical except the new error variant existing) ===
+cargo test -p dicom-ul --all-features: 33 passed / 0 failed / 1 ignored (lib) + 20 doctests passed, identical before and after
+cargo test --workspace --exclude dcms --lib: 351 passed / 0 failed / 2 ignored, identical before and after

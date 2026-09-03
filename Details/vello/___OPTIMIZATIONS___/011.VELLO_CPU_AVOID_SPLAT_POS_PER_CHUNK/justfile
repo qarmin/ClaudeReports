@@ -1,0 +1,61 @@
+# Self-contained reproduction for candidate 011 (vello_cpu: avoid continuous SIMD position
+# re-splatting in image/gradient painters - upstream PR linebender/vello#1728, applied verbatim
+# here minus its binary snapshot-PNG updates, see RESULT.md "What's not done").
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# The benchmark this uses (`sparse_strips/vello_bench`'s `fine_gradient`/`fine_image` Criterion
+# groups) is a normal, already-tracked crate in the main repo - no separate harness/ needed.
+# One of its image fixtures (`vello_tests/snapshots/big_colr.png`) is Git-LFS-tracked; `clone:`
+# below tries `git lfs pull` if a `git-lfs` binary is available, and prints a loud warning
+# (rather than silently producing wrong numbers) if it isn't - without real LFS content, the
+# `image/quality/*` and `image/transform/*` sub-benchmarks panic with a PNG signature error.
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+filter := "fine/(gradient/(linear|radial|sweep)/opaque_u8|image/(quality|transform)/(low|medium|high|scale|none|rotate)_u8)"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    if command -v git-lfs >/dev/null 2>&1; then
+      git lfs install --local --force && git lfs pull
+    else
+      echo "WARNING: git-lfs not found on PATH - image/quality and image/transform sub-benchmarks"
+      echo "         will panic (PNG signature error) because their fixture is an LFS pointer,"
+      echo "         not real image data. Install git-lfs and re-run 'just clone' to fix this."
+      echo "         gradient/* sub-benchmarks are unaffected (no LFS fixture)."
+    fi
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone && cargo build --release -p vello_bench --benches --features extended
+    cp "$(find clone/target/release/deps -maxdepth 1 -iname 'main-*' ! -name '*.d' | head -1)" ./bin_baseline
+
+build-patched:
+    cd clone && cargo build --release -p vello_bench --benches --features extended
+    cp "$(find clone/target/release/deps -maxdepth 1 -iname 'main-*' ! -name '*.d' | head -1)" ./bin_patched
+
+# Uses Criterion's own paired --save-baseline/--baseline comparison (bootstrap CI + p-value per
+# benchmark) instead of eyeballing two separate raw runs - see RESULT.md for why (this project's
+# CI/dev machines can show real single-core noise that a raw median diff would misread as a
+# regression or a bigger win than is really there).
+bench:
+    @echo "=== baseline (before patch) ==="
+    ./bin_baseline --bench "{{filter}}" --warm-up-time 1 --measurement-time 3 --save-baseline cand011_base
+    @echo "=== patched (after patch), compared against the saved baseline ==="
+    ./bin_patched --bench "{{filter}}" --warm-up-time 1 --measurement-time 3 --baseline cand011_base
+    @echo ""
+    @echo "Re-run 'just bench' with 'taskset -c N' prefixed to both binary invocations above (edit"
+    @echo "this recipe) for single-core numbers; the above is unpinned/multi-core."
+
+clean:
+    rm -rf clone bin_baseline bin_patched

@@ -1,0 +1,93 @@
+rm -rf clone
+git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false clone https://github.com/linebender/vello.git clone
+Cloning into 'clone'...
+cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false checkout 7516831426fb70f36d62c521c5477f6a7265b36a
+Note: switching to '7516831426fb70f36d62c521c5477f6a7265b36a'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at 75168314 Remove some Vello-Classic-specific info from the root README (#1698)
+cd repro && cargo run --release
+    Updating crates.io index
+     Locking 41 packages to latest compatible versions
+      Adding fearless_simd v0.4.1 (available: v0.7.0)
+=== Step 1: confirm the f32 rounding claim (dx=62, dy=14, k=7) ===
+x_slope (f32) = 4.4285712242
+  k= 0  computed=0.00000000  as u16= 0  exact_rational=0
+  k= 6  computed=26.57142639  as u16=26  exact_rational=26.571428571428573
+  k= 7  computed=30.99999809  as u16=30  exact_rational=31
+  k= 8  computed=35.42856979  as u16=35  exact_rational=35.42857142857143
+  k=14  computed=61.99999619  as u16=61  exact_rational=62
+Confirmed: k=7 computes to 30.999998 instead of the exact 31.
+
+=== Step 2: is the underlying x_slope truncation shared with the real render path? ===
+--- make_tiles_msaa (candidate's flagged code): tile rows 6-7 ---
+  x= 26 y=  6 mask=0b11001
+  x= 27 y=  6 mask=0b01100
+  x= 28 y=  6 mask=0b01100
+  x= 29 y=  6 mask=0b01100
+  x= 30 y=  6 mask=0b00110
+  x= 30 y=  7 mask=0b11001
+  x= 31 y=  7 mask=0b01100
+  x= 32 y=  7 mask=0b01100
+  x= 33 y=  7 mask=0b01100
+  x= 34 y=  7 mask=0b01100
+  x= 35 y=  7 mask=0b00110
+--- make_tiles_analytic_aa (real render path): tile rows 6-7 ---
+  x= 26 y=  6 mask=0b10000
+  x= 27 y=  6 mask=0b00000
+  x= 28 y=  6 mask=0b00000
+  x= 29 y=  6 mask=0b00000
+  x= 30 y=  6 mask=0b00000
+  x= 30 y=  7 mask=0b10000
+  x= 31 y=  7 mask=0b00000
+  x= 32 y=  7 mask=0b00000
+  x= 33 y=  7 mask=0b00000
+  x= 34 y=  7 mask=0b00000
+  x= 35 y=  7 mask=0b00000
+Row 7 tile columns, MSAA path:      [30, 31, 32, 33, 34, 35]
+Row 7 tile columns, AnalyticAA path: [30, 31, 32, 33, 34, 35]
+Confirmed: both paths independently place a tile at column 30, row 7 - the true
+geometric crossing for row 7 (y in [7,8)) never has x<31, so a tile entry at column 30
+looks like a phantom/off-by-one entry from the outside.
+
+=== Step 3: real end-to-end render (RenderContext::fill_path -> Pixmap) ===
+--- EXACT (248,56) - hits the ULP-short rounding case: alpha values (x=112..145, y=26..34) ---
+y\x  112 113 114 115 116 117 118 119 120 121 122 123 124 125 126 127 128 129 130 131 132 133 134 135 136 137 138 139 140 141 142 143 144
+ 26    0   0   0  21  78 136 193 246 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255
+ 27    0   0   0   0   0   0   0   5  53 111 169 226 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255
+ 28    0   0   0   0   0   0   0   0   0   0   0   0  29  86 144 202 250 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255
+ 29    0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   9  62 119 177 234 255 255 255 255 255 255 255 255 255 255 255 255
+ 30    0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   1  37  95 152 210 253 255 255 255 255 255 255 255
+ 31    0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0  15  70 127 185 240 255 255 255
+ 32    0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   2  45 103 160
+ 33    0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0
+--- CONTROL (248.3,56) - generic slope, no exact tile-grid alignment: alpha values (x=112..145, y=26..34) ---
+y\x  112 113 114 115 116 117 118 119 120 121 122 123 124 125 126 127 128 129 130 131 132 133 134 135 136 137 138 139 140 141 142 143 144
+ 26    0   0   0  15  70 128 185 240 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255
+ 27    0   0   0   0   0   0   0   2  45 103 160 218 254 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255
+ 28    0   0   0   0   0   0   0   0   0   0   0   0  21  78 135 193 245 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255
+ 29    0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   5  53 110 168 225 255 255 255 255 255 255 255 255 255 255 255 255
+ 30    0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0  28  85 143 200 249 255 255 255 255 255 255 255
+ 31    0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   9  60 118 175 232 255 255 255
+ 32    0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0  35  93 150
+ 33    0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0   0
+
+Any non-zero alpha inside the phantom tile (30,7) region (px x=120..123, y=28..31)? false
+(Both renders otherwise show a smooth, monotonic antialiasing ramp along the diagonal edge,
+with the EXACT case's ramp centered close to the mathematically exact crossing column, and no
+extra dark/bright stripe or missing pixel compared to the CONTROL case - see output.txt for the
+full captured grids.)

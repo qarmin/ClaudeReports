@@ -1,0 +1,64 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# This candidate is an upstream-known-issue check for `fearless_simd`'s non-inlining behavior
+# (see candidate 013's suspect #4), not a performance fix to real hayro source. `patch.diff`
+# reapplies candidate 002's deinterleave-based SIMD rewrite of the horizontal IDWT filter (never
+# applied to real source - it regressed 8.6x, see 002's own RESULT.md) plus candidate 013's
+# temporary diagnostic test module, so `irreversible_filter_97i_horizontal_simd` (the function
+# under investigation) exists to inspect. `bench/idwt/` is a copy of candidate 002's own harness
+# (real JPX decode of an embedded 1241x1752 codestream, output-hash-checked every iteration).
+#
+# `test` reproduces this session's three-way comparison: fearless_simd 0.6.0 (current hayro
+# pin) vs 0.7.0 (newest release, same source - checks whether upgrading alone fixes anything)
+# vs 0.6.0 with the one `#[inline(always)]` this session found missing on the outer function
+# added by hand - counting real `__fearless_simd_kernel` call sites via `nm`/`objdump` in each,
+# and timing the real decode via bench/idwt.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+test: clone apply count-060 bump-070 count-070 add-inline-always count-inline bench-inline
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+func_symbol := "hayro_jpeg2000::j2c::idwt::irreversible_filter_97i_horizontal_simd::<fearless_simd::generated::avx512::Avx512>"
+
+count-060:
+    cd bench/idwt && cargo build --release
+    @echo "=== fearless_simd 0.6.0 (current hayro pin): __fearless_simd_kernel calls in irreversible_filter_97i_horizontal_simd::<Avx512> (expect 28) ==="
+    objdump -d --demangle bench/idwt/target/release/bench_idwt | awk '/<{{func_symbol}}>:/{f=1} f{print} f&&/^$/{exit}' | grep -c "call.*__fearless_simd_kernel"
+
+bump-070:
+    sed -i 's/^fearless_simd = "0.6.0"$/fearless_simd = "0.7.0"/' clone/Cargo.toml
+    cd bench/idwt && cargo update -p fearless_simd@0.6.0 --precise 0.7.0
+    cd bench/idwt && cargo build --release
+
+count-070:
+    @echo "=== fearless_simd 0.7.0 (newest release), same source: same check (expect 28 - unchanged) ==="
+    objdump -d --demangle bench/idwt/target/release/bench_idwt | awk '/<{{func_symbol}}>:/{f=1} f{print} f&&/^$/{exit}' | grep -c "call.*__fearless_simd_kernel"
+
+add-inline-always:
+    sed -i 's/^fearless_simd = "0.7.0"$/fearless_simd = "0.6.0"/' clone/Cargo.toml
+    cd bench/idwt && cargo update -p fearless_simd@0.7.0 --precise 0.6.0
+    perl -0pi -e 's/(\/\/\/ The 1D Filter 9-7I procedure from F\.3\.8\.2, operating on deinterleaved rows\.\n)(fn irreversible_filter_97i_horizontal_simd)/$1#[inline(always)]\n$2/' clone/hayro-jpeg2000/src/j2c/idwt.rs
+    cd bench/idwt && cargo build --release
+
+count-inline:
+    @echo "=== fearless_simd 0.6.0 + the missing #[inline(always)] added: symbol should no longer exist (fully inlined into filter_horizontal) ==="
+    objdump -d --demangle bench/idwt/target/release/bench_idwt | grep -c "irreversible_filter_97i_horizontal_simd" || true
+
+bench-inline:
+    @echo "=== timing with the #[inline(always)] fix applied ==="
+    taskset -c 0 ./bench/idwt/target/release/bench_idwt 200
+
+clean:
+    rm -rf clone bench/idwt/target

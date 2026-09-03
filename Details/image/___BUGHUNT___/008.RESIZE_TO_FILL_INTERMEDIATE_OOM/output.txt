@@ -1,0 +1,58 @@
+Captured by running `just test` (and its underlying `reproduce-before`/`reproduce-after` recipes)
+in this candidate's own folder, against a fresh clone of https://github.com/image-rs/image.git at
+commit 44ce9226c541dd2b11897b9ef07156a28871cdb7, with `patch.diff` applied/reverted in between.
+Both recipes run `repro/` under `ulimit -v 4000000` (4GB virtual-memory cap, in KiB) so the ~40GB
+allocation attempt fails deterministically and safely instead of needing that much real RAM.
+
+=== reproduce-before (pristine clone, bug present) ===
+$ cd repro && bash -c 'ulimit -v 4000000; cargo run --release'
+   Compiling image v0.25.9 (.../clone)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 3.67s
+     Running `target/release/repro`
+building source image 1x1000000 (1000000 pixels, 4000000 bytes as RGBA8)
+calling resize_to_fill(100, 100, Triangle)
+memory allocation of 40000000000 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+/bin/bash: line 1: 67541 Aborted                 (core dumped) bash -c 'ulimit -v 4000000; cargo run --release'
+exit code: 134 (SIGABRT)
+
+=== apply patch.diff to clone ===
+$ cd clone && git apply patch.diff
+(applied cleanly, no output)
+
+=== reproduce-after (patched clone, bug fixed) ===
+$ cd repro && bash -c 'ulimit -v 4000000; cargo run --release'
+   Compiling image v0.25.9 (.../clone)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 3.76s
+     Running `target/release/repro`
+building source image 1x1000000 (1000000 pixels, 4000000 bytes as RGBA8)
+calling resize_to_fill(100, 100, Triangle)
+did not reproduce - result dims: (100, 100)
+exit code: 0
+
+=== Repeat runs against the pristine (unpatched) clone, same ulimit, confirming determinism ===
+run 1: memory allocation of 40000000000 bytes failed -> Aborted, exit 134
+run 2: memory allocation of 40000000000 bytes failed -> Aborted, exit 134
+run 3: memory allocation of 40000000000 bytes failed -> Aborted, exit 134
+(These 3 repeat runs were captured during the live working session against the main project's own
+working tree, before the standalone repro/ + clone were built - same crate, same code path, same
+deterministic 40000000000-byte allocation request every time.)
+
+=== Differential correctness check of the fix (not an OOM check) ===
+Ran a separate scratch harness (___BUGHUNT___/_reference/resize_fill_probe/src/bin/diff.rs, not
+part of this candidate's repro/) comparing the old resize-then-crop algorithm against the new
+crop-then-resize algorithm on 6 ordinary (non-extreme-aspect-ratio) cases with smooth gradient
+source images, to check the fix doesn't silently change resize_to_fill's output for normal inputs:
+
+case (800, 600, 100, 50): dims ok (100, 50), max_channel_diff=1, avg_channel_diff=0.001
+case (800, 600, 50, 100): dims ok (50, 100), max_channel_diff=1, avg_channel_diff=0.069
+case (100, 100, 40, 40): dims ok (40, 40), max_channel_diff=0, avg_channel_diff=0.000
+case (37, 91, 20, 20): dims ok (20, 20), max_channel_diff=1, avg_channel_diff=0.183
+case (640, 480, 480, 640): dims ok (480, 640), max_channel_diff=1, avg_channel_diff=0.079
+case (300, 300, 300, 300): dims ok (300, 300), max_channel_diff=0, avg_channel_diff=0.000
+
+All differences are within +/-1 out of 255 (sub-pixel rounding from doing the crop before the
+resize instead of after), consistent with the two algorithms being mathematically equivalent up to
+rounding, not a correctness regression.

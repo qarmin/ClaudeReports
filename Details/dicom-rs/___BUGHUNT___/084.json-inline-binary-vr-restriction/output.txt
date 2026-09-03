@@ -1,0 +1,38 @@
+=== BEFORE (pristine df2b9e4236298efa3fa37a1f360fc4bf284d586a, `repro/` run 1) ===
+input JSON (DICOM+JSON, PS3.18): {"00100010":{"vr":"DS","InlineBinary":"AAE="}}
+declared VR = DS
+actual in-memory value = Primitive(U8([0, 1]))
+BUG REPRODUCED: a "DS" (Decimal String, text) element was deserialized with an actual PrimitiveValue::U8 (raw byte) payload via InlineBinary, which PS3.19 Table A.1.5-2 does not permit for VR DS.
+write_to_file: OK (no panic)
+readback VR = DS
+readback value = Primitive(Strs(["0", "1 "]))
+note: the on-disk bytes for this DS element are the *decimal-text rendering* of the original raw bytes [0, 1] ("0\\1"), not the raw bytes themselves - a silent, VR-driven reinterpretation happening one layer further down in the encoder (parser/src/stateful/encode.rs's DS/IS special case), independent of and downstream from the deserializer bug demonstrated above.
+
+=== BEFORE, run 2 (repeatability check) ===
+input JSON (DICOM+JSON, PS3.18): {"00100010":{"vr":"DS","InlineBinary":"AAE="}}
+declared VR = DS
+actual in-memory value = Primitive(U8([0, 1]))
+BUG REPRODUCED: a "DS" (Decimal String, text) element was deserialized with an actual PrimitiveValue::U8 (raw byte) payload via InlineBinary, which PS3.19 Table A.1.5-2 does not permit for VR DS.
+write_to_file: OK (no panic)
+readback VR = DS
+readback value = Primitive(Strs(["0", "1 "]))
+note: the on-disk bytes for this DS element are the *decimal-text rendering* of the original raw bytes [0, 1] ("0\\1"), not the raw bytes themselves - a silent, VR-driven reinterpretation happening one layer further down in the encoder (parser/src/stateful/encode.rs's DS/IS special case), independent of and downstream from the deserializer bug demonstrated above.
+
+=== AFTER (patch.diff applied) ===
+input JSON (DICOM+JSON, PS3.18): {"00100010":{"vr":"DS","InlineBinary":"AAE="}}
+correctly rejected: value of VR DS should not be encoded in InlineBinary at line 1 column 45
+BUG NOT PRESENT
+
+=== additional check: a valid case (whitelisted VR OB) still deserializes fine after the fix ===
+(from an earlier probe against the same patched source, not part of repro/, reproduced separately)
+VR = OB
+value = Primitive(U8([0, 1]))
+correctly rejected DS InlineBinary: value of VR DS should not be encoded in InlineBinary at line 1 column 45
+
+=== project test suite, unpatched (baseline) ===
+cargo test -p dicom-json --lib: 12 passed; 0 failed; 0 ignored
+cargo test --workspace --lib: 351 passed; 0 failed; 2 ignored (sum across all 12 crates' lib test binaries)
+
+=== project test suite, patched ===
+cargo test -p dicom-json --lib: 12 passed; 0 failed; 0 ignored
+cargo test --workspace --lib: 351 passed; 0 failed; 2 ignored (identical to baseline)

@@ -1,0 +1,23 @@
+diff --git a/sparse_strips/vello_common/src/filter/gaussian_blur.rs b/sparse_strips/vello_common/src/filter/gaussian_blur.rs
+index 0b68f6ac..d4f22e10 100644
+--- a/sparse_strips/vello_common/src/filter/gaussian_blur.rs
++++ b/sparse_strips/vello_common/src/filter/gaussian_blur.rs
+@@ -105,6 +105,18 @@ pub fn plan_decimated_blur(std_deviation: f32) -> (usize, [f32; MAX_KERNEL_SIZE]
+     // G(σ₁) ⊗ G(σ₂) = G(√(σ₁² + σ₂²)). This means variance is additive: σ²_total = σ²_1 + σ²_2.
+     // Rearranging: σ²_2 = σ²_total - σ²_1, allowing us to decompose the target blur.
+     let variance = std_deviation * std_deviation;
++    // `std_deviation` can be driven arbitrarily large by a pathological transform scale
++    // (see `transform_blur_params`/`extract_scales`, which have no upper clamp) or a
++    // directly-huge SVG `stdDeviation`. Once `variance` overflows `f32` to `+inf` (or is
++    // `NaN`), the decimation loop below (`remaining_variance = (remaining_variance - 1.5)
++    // * 0.25`) never converges below the `4.0` exit threshold and spins forever, so
++    // non-finite variance must be rejected the same way non-positive `std_deviation`
++    // already is.
++    if !variance.is_finite() {
++        let mut kernel = [0.0; MAX_KERNEL_SIZE];
++        kernel[0] = 1.0;
++        return (0, kernel, 1);
++    }
+     let mut n_decimations = 0;
+     let mut remaining_variance = variance;
+ 

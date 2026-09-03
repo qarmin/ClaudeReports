@@ -1,0 +1,63 @@
+# Self-contained reproduction for this candidate.
+#
+# Like local candidate 010 (lossless_restart_boundary_pr287_cross_check), this candidate is a
+# review of code that is NOT present in any commit of tracked history: the bug lives entirely in
+# an unmerged, always-reverted perf-optimize candidate patch
+# (___OPTIMIZATIONS___/009.gated_row_batching/patch.diff, bundled here as 009_under_review.diff)
+# sitting in this project's own ___OPTIMIZATIONS___/ workspace. So this justfile applies that
+# patch first to reach the state actually under review, demonstrates the regression it
+# introduces relative to pristine base_commit, then applies this candidate's own additional fix
+# (patch.diff) on top and shows the regression is gone.
+#
+# 016.hybrid_gated_periodic_flush/patch.diff (016_under_review.diff, also bundled here) embeds
+# the exact same dry-run loop and is affected identically - see RESULT.md's "Introduced by" and
+# output.txt for the cross-check confirming this candidate's patch.diff also fixes 016's copy.
+
+repo_url := "https://github.com/image-rs/jpeg-decoder.git"
+base_commit := "eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c"
+
+# Full cycle: clone pristine, apply 009's own patch (the state under review), prove the
+# regression exists, apply this candidate's own fix on top, prove it's gone.
+# reproduce-before is expected to exit non-zero (the repro's catch_unwind turns the panic into
+# exit code 1) - invoked with `-` so that expected failure doesn't abort the rest of the chain.
+test: clone apply-under-review
+    -just reproduce-before
+    just apply-fix
+    just reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-under-review:
+    cd clone && git apply "{{justfile_directory()}}/009_under_review.diff"
+
+# Build+run the standalone repro against 009's own state (not yet this candidate's fix).
+# Expect a panic: "attempt to multiply with overflow" at src/decoder.rs (the new pre-scan
+# `batch_this_scan` dry-run loop 009 adds), fed tests/crashtest/images/max_size.jpg (bundled here
+# verbatim as repro/max_size.jpg) - a real, pre-existing adversarial fixture from this project's
+# own crashtest corpus (SOF0 declaring width=height=0xFFFF), via jpeg-decoder's real public
+# `Decoder::decode()` API. repro/Cargo.toml forces `overflow-checks = true` /
+# `debug-assertions = true` even in --release, since this is a debug-assertions-class bug (a
+# plain release build silently wraps instead of panicking - see RESULT.md section on build
+# dependence).
+#
+# Uses `+stable` explicitly: this repo's own `rust-toolchain` file (pinned at 1.61.0, inherited
+# by rustup's directory walk-up since this candidate folder lives inside the main checkout) can't
+# build a current lockfile's transitive deps - same MSRV/lockfile mismatch local candidates
+# 001/002/010 already noted, unrelated to anything under test here.
+reproduce-before:
+    cd repro && rm -f Cargo.lock && cargo +stable run --release
+
+apply-fix:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now with this candidate's own fix applied on top of 009's state - should no
+# longer panic; decode() should return the same clean Err as the pristine baseline
+# ("invalid JPEG format: failed to decode huffman code").
+reproduce-after:
+    cd repro && rm -f Cargo.lock && cargo +stable run --release
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

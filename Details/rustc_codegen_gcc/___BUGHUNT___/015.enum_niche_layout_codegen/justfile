@@ -1,0 +1,37 @@
+# Self-contained reproduction for candidate 015 (enum_niche_layout_codegen).
+#
+# Status: Not reproducible - there is no patch.diff (no bug found, no fix). `just test` clones a
+# pristine checkout and re-runs the same investigation this candidate's RESULT.md describes: four
+# self-checking Rust programs (signed Direct tag encoding, niche encoding in both directions,
+# 140-way niche-filling forcing the signed-comparison branch documented in
+# rustc_codegen_ssa's own codegen_get_discr, a repr(i128) enum exercising the non-native
+# array-based tag comparison path, and a real coroutine/async-fn state machine), compiled and run
+# through rustc_codegen_gcc at optimization levels 0-3, and checked against the known-correct
+# answer via inline assertions (no second compiler needed as an oracle - Rust's enum/cast
+# semantics are specified, so the expected values are known statically).
+#
+# Requires this project's own toolchain to already be buildable in the environment running this
+# (see the upstream project's Readme.md "Quick start" - `./y.sh prepare` needs network access to
+# download a prebuilt libgccjit.so and to fetch rustc-dev components). Not fast: a fresh clone's
+# first `./y.sh prepare && ./y.sh build --sysroot --release` takes a few minutes.
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && cp config.example.toml config.toml
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Runs all four programs at opt-levels 0-3 inside the fresh clone - see repro/run.sh for what
+# each one checks. A non-zero exit anywhere (a panicking assertion) would indicate a real
+# enum/niche discriminant mismatch; none was found.
+reproduce-before:
+    bash repro/run.sh clone
+
+clean:
+    rm -rf clone

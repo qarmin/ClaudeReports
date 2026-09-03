@@ -1,0 +1,57 @@
+# Self-contained reproduction for this candidate.
+#
+# IMPORTANT: this candidate DEPENDS ON candidate 007 (../007.xlsx_xlsb_from_sparse_direct_dense_write/)
+# - it measures the DataRef->Data conversion in isolation from candidate 007's own sparse-buffer
+# fix, so `apply` applies BOTH patches, in order, not just this folder's own patch.diff. This
+# candidate's patch.diff was captured as a diff against a tree that already has candidate 007's
+# patch applied - it will not apply cleanly to a bare base_commit checkout on its own.
+#
+# Uses the `rss_probe` harness from ../harness/rss_probe (untracked in the main calamine repo -
+# see ../README.md). Self-contained given the whole ___OPTIMIZATIONS___ folder kept together.
+#
+# The primary fixture (big_300k_rows.xlsx, ~20MB, 2.4M cells, ~75% shared-string) is
+# re-downloaded from the public URL documented in ../README.md - it is the fixture this
+# candidate's own RESULT.md numbers were measured against.
+
+repo_url := "https://github.com/tafia/calamine.git"
+base_commit := "5c02e86e99ec5c1fb1dcc15e64c2bbaf19bff60d"
+harness_dir := "../harness/rss_probe"
+candidate_007_patch := "../007.xlsx_xlsb_from_sparse_direct_dense_write/patch.diff"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/rss_probe
+    mkdir -p testdata
+    curl -sL -o testdata/big_300k_rows.xlsx https://test-files.sheetjs.com/8-by-300000-cells.xlsx
+
+# "baseline" for this candidate means "candidate 007 applied, candidate 012 not yet applied" -
+# that isolates the exact thing this candidate changes (the second DataRef->Data dense-buffer
+# conversion) from candidate 007's own already-measured sparse-buffer removal.
+build-baseline:
+    cd clone && git apply "{{justfile_directory()}}/{{candidate_007_patch}}"
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_patched
+
+bench:
+    @echo "=== baseline (candidate 007 applied only): XLSX real file, worksheet_range() ==="
+    ./rss_probe_baseline range testdata/big_300k_rows.xlsx
+    @echo "=== patched (007 + this candidate's in-place conversion): same file ==="
+    @echo "expect peak_rss_kb/sig/cells to match the baseline run above within noise - this"
+    @echo "candidate's own finding is that there is NO second dense buffer left to remove, see"
+    @echo "RESULT.md"
+    ./rss_probe_patched range testdata/big_300k_rows.xlsx
+
+clean:
+    rm -rf clone rss_probe_baseline rss_probe_patched testdata

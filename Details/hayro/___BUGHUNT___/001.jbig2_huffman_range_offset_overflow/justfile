@@ -1,0 +1,32 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug
+# (panic: "attempt to add with overflow" at hayro-jbig2/src/huffman_table.rs:455). The repro
+# binary exits non-zero on a reproduced panic by design (see repro/src/main.rs) - ignore that
+# exit code here (`-`) so `just test`'s single-command chain still reaches `apply`/
+# `reproduce-after` afterwards instead of stopping on the expected failure.
+reproduce-before:
+    -cd repro && cargo run
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer panic.
+reproduce-after:
+    cd repro && cargo run
+
+clean:
+    rm -rf clone

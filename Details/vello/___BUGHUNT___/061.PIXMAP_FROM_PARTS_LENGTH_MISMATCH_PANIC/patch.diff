@@ -1,0 +1,102 @@
+diff --git a/sparse_strips/vello_common/src/pixmap.rs b/sparse_strips/vello_common/src/pixmap.rs
+index b7204d4b..66cec091 100644
+--- a/sparse_strips/vello_common/src/pixmap.rs
++++ b/sparse_strips/vello_common/src/pixmap.rs
+@@ -103,11 +103,36 @@ impl Pixmap {
+     /// - Panics if `data` is not exactly `width * height * 4` bytes long.
+     /// - Panics if the capacity of the vector is not a multiple of 4.
+     pub fn from_parts(
+-        mut data: Vec<u8>,
++        data: Vec<u8>,
+         width: u16,
+         height: u16,
+         pixel_metadata: PixelMetadata,
+     ) -> Self {
++        Self::try_from_parts(data, width, height, pixel_metadata)
++            .expect("`data` must be exactly `width * height * 4` bytes long, with a vector capacity divisible by 4")
++    }
++
++    /// Attempts to create a new pixmap from the given buffer of bytes, representing pixel data.
++    ///
++    /// This is a fallible counterpart to [`from_parts`](Self::from_parts), for callers that
++    /// cannot guarantee `data`'s length matches `width`/`height` up front (e.g. `width`/`height`
++    /// coming from a source independent of the decoded buffer itself).
++    ///
++    /// Returns `None` if `data` is not exactly `width * height * 4` bytes long, or if the
++    /// capacity of the vector is not a multiple of 4.
++    ///
++    /// When passing premultiplied pixels, the data must be correctly premultiplied, i.e. each RGB
++    /// component must be less than or equal to its pixel's alpha component.
++    pub fn try_from_parts(
++        mut data: Vec<u8>,
++        width: u16,
++        height: u16,
++        pixel_metadata: PixelMetadata,
++    ) -> Option<Self> {
++        if data.len() != usize::from(width) * usize::from(height) * 4 {
++            return None;
++        }
++
+         let may_have_transparency = if pixel_metadata.may_have_transparency
+             && pixel_metadata.alpha_type == ImageAlphaType::Alpha
+         {
+@@ -123,21 +148,19 @@ impl Pixmap {
+             pixel_metadata.may_have_transparency
+         };
+ 
+-        let data: Vec<PremulRgba8> = bytemuck::try_cast_vec(data)
+-            .map_err(|(error, _data)| error)
+-            .expect("The capacity of the vector needs to be divisible by 4.");
+-        assert_eq!(
++        let data: Vec<PremulRgba8> = bytemuck::try_cast_vec(data).ok()?;
++        debug_assert_eq!(
+             data.len(),
+             usize::from(width) * usize::from(height),
+-            "Expected `data` to have length of exactly `width * height`"
++            "already checked above in terms of bytes"
+         );
+ 
+-        Self {
++        Some(Self {
+             width,
+             height,
+             buf: data,
+             may_have_transparency,
+-        }
++        })
+     }
+ 
+     /// Resizes the pixmap container to the given width and height; this does not resize the
+@@ -606,4 +629,32 @@ mod tests {
+         assert!(!pixmap.may_have_transparency());
+         assert_eq!(pixmap.data_as_u8_slice(), data);
+     }
++
++    #[test]
++    fn try_from_parts_rejects_length_mismatch() {
++        let data = vec![0_u8; 60];
++        assert!(
++            Pixmap::try_from_parts(data, 4, 4, PixelMetadata::new(ImageAlphaType::Alpha, false))
++                .is_none()
++        );
++    }
++
++    #[test]
++    fn try_from_parts_rejects_capacity_not_multiple_of_four() {
++        let mut data = alloc::vec::Vec::with_capacity(7);
++        data.extend_from_slice(&[1, 2, 3, 4]);
++        assert!(
++            Pixmap::try_from_parts(data, 1, 1, PixelMetadata::new(ImageAlphaType::Alpha, false))
++                .is_none()
++        );
++    }
++
++    #[test]
++    fn try_from_parts_accepts_matching_length() {
++        let data = vec![0_u8; 64];
++        assert!(
++            Pixmap::try_from_parts(data, 4, 4, PixelMetadata::new(ImageAlphaType::Alpha, false))
++                .is_some()
++        );
++    }
+ }

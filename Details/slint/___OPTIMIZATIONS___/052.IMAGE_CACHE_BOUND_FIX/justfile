@@ -1,0 +1,32 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# repo_url/base_commit read via `git remote get-url origin` / `git rev-parse HEAD` in the main
+# project, at the moment patch.diff was captured.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# bench/ is a standalone crate (own [workspace]) depending on `{ path = "../clone/api/rs/slint" }`
+# - the clone/ directory `just clone` just created. image_probe.rs/make_assets.rs are copies of
+# perf_test/src/bin/{image_probe,make_assets}.rs (perf_test itself is not part of the pinned
+# commit's tracked tree, so it can't be referenced directly from a standalone folder).
+bench:
+    cd bench && cargo run --release --bin make_assets
+    cd bench && cargo run --release --bin image_probe
+
+clean:
+    rm -rf clone bench/target bench/assets

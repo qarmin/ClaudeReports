@@ -1,0 +1,48 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# repro/ is a downstream crate that depends on orx-parallel exactly the way docs/wasm.md's own
+# "Which feature to enable" section documents (`default-features = false, features = ["wasm"]`),
+# then builds it for wasm32-unknown-unknown *without* the extra `-C target-feature=+atomics`
+# RUSTFLAGS docs/wasm.md describes as a separate, additional opt-in step. This is the real,
+# ordinary entry point (`cargo build --target wasm32-unknown-unknown`) a consumer following the
+# documented "Which feature to enable" snippet would hit first, before ever getting to the
+# atomics-enabled build.
+
+repo_url := "https://github.com/orxfun/orx-parallel.git"
+base_commit := "b9214fbeb714e4bb8f8858676a818cef2f21b097"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build the downstream repro crate for wasm32 without atomics - the bug IS a compile failure, so
+# this build is *expected* to fail (error[E0080] pointing at assert_wasm_thread_pool_initialized's
+# `const { assert!(...) }` block). The recipe itself still exits 0 (via `-`) so `just test` can
+# continue on to apply/reproduce-after; the grep after it is what actually fails the recipe if the
+# expected error ever stops showing up (e.g. this candidate has been fixed upstream already).
+reproduce-before:
+    -cd repro && cargo build --target wasm32-unknown-unknown 2>&1 | tee /tmp/repro014-before.log
+    grep -q "E0080" /tmp/repro014-before.log
+    grep -q "assert_wasm_thread_pool_initialized" /tmp/repro014-before.log
+    @echo "Confirmed: build fails to compile as expected (see /tmp/repro014-before.log)."
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same build again, now against the patched clone - should compile cleanly (exit 0).
+reproduce-after:
+    cd repro && cargo build --target wasm32-unknown-unknown 2>&1 | tee /tmp/repro014-after.log
+    @echo "Confirmed: build now succeeds after the fix."
+
+clean:
+    rm -rf clone repro/target

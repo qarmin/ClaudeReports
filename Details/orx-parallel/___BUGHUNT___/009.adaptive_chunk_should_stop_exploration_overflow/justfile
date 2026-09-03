@@ -1,0 +1,70 @@
+# Self-contained reproduction for candidate 009 (adaptive_chunk State::should_stop_exploration
+# non-saturating `total * EXPLORATION_CAP_PCT` / `total * EXPLORATION_TARGET_PCT`).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere and `just test` still works.
+#
+# The repro goes through the crate's real public API (`Range<usize>::par().sum()`, the default
+# `AdaptiveChunkRunner`) - a real `std::ops::Range` is a genuine `ExactSizeIterator` reporting a
+# huge size_hint without needing to materialize any elements, so no memory allocation is needed to
+# trigger this even at the 64-bit `usize::MAX / 10` boundary.
+#
+# The bug only panics under a debug-assertions build (release silently wraps and keeps running,
+# which would take an impractically long time to finish summing ~1.8e18 items either way) - so
+# `reproduce-before`/`reproduce-after` deliberately run the debug profile with a short wall-clock
+# timeout: "panics within the timeout" = bug present; "no panic before the timeout expires" = bug
+# absent (the timeout is generous relative to the near-instant panic actually observed - see
+# RESULT.md/output.txt).
+
+repo_url := "https://github.com/orxfun/orx-parallel.git"
+base_commit := "b9214fbeb714e4bb8f8858676a818cef2f21b097"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone.
+# Expected (bug present): panics with "attempt to multiply with overflow" at
+# state.rs:108, process exits 101, well within the timeout.
+reproduce-before:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    cd repro
+    timeout 30 cargo run 2>&1 | tee /tmp/repro_009_before.log
+    code=${PIPESTATUS[0]}
+    echo "--- exit code: $code ---"
+    if grep -q "attempt to multiply with overflow" /tmp/repro_009_before.log; then
+        echo "REPRODUCED: overflow panic observed (bug present), exit=$code"
+    else
+        echo "NOT REPRODUCED: no overflow panic observed before timeout, exit=$code"
+        exit 1
+    fi
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should NOT panic within the same timeout
+# (it will instead keep running the (correct, now non-crashing) exploration/summation, which is
+# why this is a bounded-time negative check rather than waiting for full completion).
+reproduce-after:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    cd repro
+    cargo build 2>&1 | tail -5
+    timeout 5 cargo run 2>&1 | tee /tmp/repro_009_after.log
+    code=${PIPESTATUS[0]}
+    echo "--- exit code (124 = timed out without crashing, expected): $code ---"
+    if grep -q "attempt to multiply with overflow" /tmp/repro_009_after.log; then
+        echo "STILL BUGGY: overflow panic observed after patch"
+        exit 1
+    else
+        echo "FIXED: no overflow panic within the timeout"
+    fi
+
+clean:
+    rm -rf clone

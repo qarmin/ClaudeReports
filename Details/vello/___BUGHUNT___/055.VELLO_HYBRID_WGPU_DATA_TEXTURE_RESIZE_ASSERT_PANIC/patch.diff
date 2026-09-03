@@ -1,0 +1,167 @@
+diff --git a/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs b/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
+index 9521829f..86fdf739 100644
+--- a/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
++++ b/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
+@@ -191,9 +191,15 @@ impl Renderer {
+         settings.memory_settings.normalize(&device_limits);
+         let resources = Resources::new(settings.memory_settings.image_atlas_config);
+         let resource_texture_dimension_2d = device_limits.resource_texture_dimension_2d();
++        // The real device limit, uncapped: data textures never need to be wider than
++        // `resource_texture_dimension_2d` (see its own doc comment for why that's capped below
++        // what many devices actually support), but there's no reason to also cap how *tall*
++        // they may grow - bounding that by the real device limit instead avoids needlessly
++        // shrinking the max representable alpha/paint/gradient data per frame.
++        let max_resource_texture_height = u32::from(device_limits.max_texture_dimension_2d);
+         // Estimate the maximum number of gradient cache entries based on the resource texture
+         // dimension and the maximum gradient LUT size - worst case scenario.
+-        let max_gradient_cache_size = resource_texture_dimension_2d * resource_texture_dimension_2d
++        let max_gradient_cache_size = resource_texture_dimension_2d * max_resource_texture_height
+             / MAX_GRADIENT_LUT_SIZE as u32;
+         let gradient_cache = GradientRampCache::new(max_gradient_cache_size, settings.level);
+         let layer_config = settings.memory_settings.layers_config;
+@@ -205,6 +211,7 @@ impl Renderer {
+                 render_target_config,
+                 layer_config,
+                 resource_texture_dimension_2d,
++                max_resource_texture_height,
+             ),
+             gradient_cache,
+             encoded_paints: Vec::new(),
+@@ -1016,6 +1023,15 @@ struct Programs {
+     encoded_paints_data: Vec<u8>,
+     /// Scratch buffer for staging filter data texture data.
+     filter_data: Vec<u8>,
++    /// The device's real (uncapped) maximum 2D texture dimension.
++    ///
++    /// `resource_texture_dimension_2d` intentionally caps the *width* of data textures at a
++    /// fixed value lower than what many devices actually support (see
++    /// `DeviceLimits::resource_texture_dimension_2d` for why). That cap has nothing to do with
++    /// how tall those textures may grow: a device that truly supports larger textures can still
++    /// provide a taller (but no wider) data texture, so the resize logic bounds required heights
++    /// against this real device limit instead of reusing the artificially-capped width.
++    max_resource_texture_height: u32,
+ }
+ 
+ /// Contains all GPU resources needed for rendering
+@@ -1123,6 +1139,7 @@ impl Programs {
+         render_target_config: &RenderTargetConfig,
+         layer_config: LayersConfig,
+         resource_texture_dimension_2d: u32,
++        max_resource_texture_height: u32,
+     ) -> Self {
+         let strip_bind_group_layout =
+             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+@@ -1818,6 +1835,7 @@ impl Programs {
+             strip_layer_bind_groups: HashMap::new(),
+             blend_layer_bind_groups: HashMap::new(),
+             filter_pair_bind_groups: HashMap::new(),
++            max_resource_texture_height,
+         }
+     }
+ 
+@@ -2252,8 +2270,19 @@ impl Programs {
+         filter_context: &FilterContext,
+     ) {
+         let resource_texture_dimension_2d = self.resources.resource_texture_dimension_2d;
+-        self.maybe_resize_alphas_tex(device, resource_texture_dimension_2d, alphas.len());
+-        self.maybe_resize_encoded_paints_tex(device, resource_texture_dimension_2d, paint_idxs);
++        let max_resource_texture_height = self.max_resource_texture_height;
++        self.maybe_resize_alphas_tex(
++            device,
++            resource_texture_dimension_2d,
++            max_resource_texture_height,
++            alphas.len(),
++        );
++        self.maybe_resize_encoded_paints_tex(
++            device,
++            resource_texture_dimension_2d,
++            max_resource_texture_height,
++            paint_idxs,
++        );
+         self.maybe_resize_filter_tex(device, resource_texture_dimension_2d, filter_context);
+         self.maybe_update_config_buffer(queue, resource_texture_dimension_2d, new_render_size);
+ 
+@@ -2262,7 +2291,12 @@ impl Programs {
+         self.upload_filter_texture(queue, filter_context);
+ 
+         if gradient_cache.has_changed() {
+-            self.maybe_resize_gradient_tex(device, resource_texture_dimension_2d, gradient_cache);
++            self.maybe_resize_gradient_tex(
++                device,
++                resource_texture_dimension_2d,
++                max_resource_texture_height,
++                gradient_cache,
++            );
+             self.upload_gradient_texture(queue, gradient_cache);
+             gradient_cache.mark_synced();
+         }
+@@ -2311,6 +2345,7 @@ impl Programs {
+         &mut self,
+         device: &Device,
+         resource_texture_dimension_2d: u32,
++        max_resource_texture_height: u32,
+         alphas_len: usize,
+     ) {
+         let required_alpha_height = u32::try_from(alphas_len)
+@@ -2323,10 +2358,12 @@ impl Programs {
+         );
+         let current_alpha_height = self.resources.alphas_texture.height();
+         if required_alpha_height > current_alpha_height {
+-            // We need to resize the alpha texture to fit the new alpha data.
++            // We need to resize the alpha texture to fit the new alpha data. Only the texture's
++            // width is capped below the device's real limit (see `max_resource_texture_height`'s
++            // doc comment) - its height may still grow up to what the device actually supports.
+             assert!(
+-                required_alpha_height <= resource_texture_dimension_2d,
+-                "Alpha texture height exceeds resource texture dimensions"
++                required_alpha_height <= max_resource_texture_height,
++                "Alpha texture height exceeds device texture dimensions"
+             );
+ 
+             // The alpha texture encodes 16 1-byte alpha values per texel, with 4 alpha values packed in each channel
+@@ -2346,6 +2383,7 @@ impl Programs {
+         &mut self,
+         device: &Device,
+         resource_texture_dimension_2d: u32,
++        max_resource_texture_height: u32,
+         paint_idxs: &[u32],
+     ) {
+         let required_texels = paint_idxs.last().unwrap();
+@@ -2357,9 +2395,12 @@ impl Programs {
+         );
+         let current_encoded_paints_height = self.resources.encoded_paints_texture.height();
+         if required_encoded_paints_height > current_encoded_paints_height {
++            // Only the texture's width is capped below the device's real limit (see
++            // `max_resource_texture_height`'s doc comment) - its height may still grow up to
++            // what the device actually supports.
+             assert!(
+-                required_encoded_paints_height <= resource_texture_dimension_2d,
+-                "Encoded paints texture height exceeds resource texture dimensions"
++                required_encoded_paints_height <= max_resource_texture_height,
++                "Encoded paints texture height exceeds device texture dimensions"
+             );
+             let required_encoded_paints_size =
+                 (resource_texture_dimension_2d * required_encoded_paints_height) << 4;
+@@ -2389,6 +2430,7 @@ impl Programs {
+         &mut self,
+         device: &Device,
+         resource_texture_dimension_2d: u32,
++        max_resource_texture_height: u32,
+         gradient_cache: &GradientRampCache,
+     ) {
+         let gradient_pixels = (gradient_cache.luts_size() / 4) as u32; // 4 bytes per RGBA8 pixel
+@@ -2399,9 +2441,12 @@ impl Programs {
+         );
+         let current_gradient_height = self.resources.gradient_texture.height();
+         if required_gradient_height > current_gradient_height {
++            // Only the texture's width is capped below the device's real limit (see
++            // `max_resource_texture_height`'s doc comment) - its height may still grow up to
++            // what the device actually supports.
+             assert!(
+-                required_gradient_height <= resource_texture_dimension_2d,
+-                "Gradient texture height exceeds resource texture dimensions"
++                required_gradient_height <= max_resource_texture_height,
++                "Gradient texture height exceeds device texture dimensions"
+             );
+             let gradient_texture = Self::create_gradient_texture(
+                 device,

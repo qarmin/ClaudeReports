@@ -1,0 +1,36 @@
+diff --git a/src/intrinsics/llvm_x86.rs b/src/intrinsics/llvm_x86.rs
+index 136e9896..e2276311 100644
+--- a/src/intrinsics/llvm_x86.rs
++++ b/src/intrinsics/llvm_x86.rs
+@@ -25,6 +25,31 @@ pub(super) fn codegen_x86_llvm_intrinsic_call<'tcx>(
+             // Do nothing. It is a perf hint anyway.
+         }
+ 
++        // Cranelift has no cache-line-flush instruction, and a no-op would be silently wrong for
++        // the persistent-memory code that uses these, so emit the real instruction via inline asm.
++        "llvm.x86.sse2.clflush" | "llvm.x86.clflushopt" => {
++            // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_clflush
++            intrinsic_args!(fx, args => (ptr); intrinsic);
++
++            let ptr = ptr.load_scalar(fx);
++
++            let asm = match intrinsic {
++                "llvm.x86.sse2.clflush" => "clflush [rax]",
++                "llvm.x86.clflushopt" => "clflushopt [rax]",
++                _ => unreachable!(),
++            };
++
++            codegen_inline_asm_inner(
++                fx,
++                &[InlineAsmTemplatePiece::String(asm.into())],
++                &[CInlineAsmOperand::In {
++                    reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::ax)),
++                    value: ptr,
++                }],
++                InlineAsmOptions::NOSTACK,
++            );
++        }
++
+         // Used by is_x86_feature_detected!();
+         "llvm.x86.xgetbv" => {
+             intrinsic_args!(fx, args => (xcr_no); intrinsic);

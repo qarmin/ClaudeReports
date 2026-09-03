@@ -1,0 +1,50 @@
+diff --git a/internal/core/model/adapters.rs b/internal/core/model/adapters.rs
+index a72990253..0ce010ae4 100644
+--- a/internal/core/model/adapters.rs
++++ b/internal/core/model/adapters.rs
+@@ -754,28 +754,30 @@ fn row_removed(self: Pin<&Self>, index: usize, count: usize) {
+         }
+ 
+         let mut removed_rows = Vec::new();
++        let mut mapping = self.mapping.borrow_mut();
+ 
+-        let mut i = 0;
+-
+-        loop {
+-            if i >= self.mapping.borrow().len() {
+-                break;
+-            }
+-
+-            let sort_index = self.mapping.borrow()[i];
+-
++        // Single O(n) compaction pass instead of one `Vec::remove` (an O(n) memmove) per removed
++        // row: `write` tracks how many entries have been kept so far, which is exactly the
++        // position each removed row would have had in the mapping at the moment it's removed if
++        // removals were applied one at a time in order (matching the notifications a listener
++        // would previously have seen from the old per-row-`remove` loop).
++        let mut write = 0;
++        for read in 0..mapping.len() {
++            let sort_index = mapping[read];
+             if sort_index >= index {
+                 if sort_index < index + count {
+-                    removed_rows.push(i);
+-                    self.mapping.borrow_mut().remove(i);
++                    removed_rows.push(write);
+                     continue;
+-                } else {
+-                    self.mapping.borrow_mut()[i] -= count;
+                 }
++                mapping[write] = sort_index - count;
++                write += 1;
++                continue;
+             }
+-
+-            i += 1;
++            mapping[write] = sort_index;
++            write += 1;
+         }
++        mapping.truncate(write);
++        drop(mapping);
+ 
+         for removed_row in removed_rows {
+             self.notify.row_removed(removed_row, 1);

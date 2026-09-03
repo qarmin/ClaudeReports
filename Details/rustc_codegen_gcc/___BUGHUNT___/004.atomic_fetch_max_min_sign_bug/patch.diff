@@ -1,0 +1,58 @@
+diff --git a/src/builder.rs b/src/builder.rs
+index 8ec72bb..2487e57 100644
+--- a/src/builder.rs
++++ b/src/builder.rs
+@@ -96,6 +96,7 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
+     fn atomic_extremum(
+         &mut self,
+         operation: ExtremumOperation,
++        signed: bool,
+         dst: RValue<'gcc>,
+         src: RValue<'gcc>,
+         order: AtomicOrdering,
+@@ -130,11 +131,22 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
+             ExtremumOperation::Min => ComparisonOp::GreaterThan,
+         };
+ 
++        // The `__atomic_load_N` builtin used above always returns a fixed-signedness type
++        // regardless of the real Rust-level signedness of the atomic (see the FIXME in
++        // `atomic_load`), so the comparison below must re-cast to the signedness this specific
++        // operation (`Atomic{Max,Min}` vs `Atomic{UMax,UMin}`) actually needs, or e.g. comparing
++        // two `u8` values >= 128 would silently use signed comparison semantics instead.
++        let compare_type = if signed {
++            previous_value.get_type().to_signed(self.cx)
++        } else {
++            previous_value.get_type().to_unsigned(self.cx)
++        };
++
+         let cond1 = self.context.new_comparison(
+             self.location,
+             comparison_operator,
+-            previous_var.to_rvalue(),
+-            self.context.new_cast(self.location, src, previous_value.get_type()),
++            self.context.new_cast(self.location, previous_var.to_rvalue(), compare_type),
++            self.context.new_cast(self.location, src, compare_type),
+         );
+         let compare_exchange =
+             self.compare_exchange(dst, previous_var, src, order, load_ordering, false);
+@@ -1787,16 +1799,16 @@ impl<'a, 'gcc, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'gcc, 'tcx> {
+             AtomicRmwBinOp::AtomicOr => format!("__atomic_fetch_or_{}", size),
+             AtomicRmwBinOp::AtomicXor => format!("__atomic_fetch_xor_{}", size),
+             AtomicRmwBinOp::AtomicMax => {
+-                return self.atomic_extremum(ExtremumOperation::Max, dst, src, order);
++                return self.atomic_extremum(ExtremumOperation::Max, true, dst, src, order);
+             }
+             AtomicRmwBinOp::AtomicMin => {
+-                return self.atomic_extremum(ExtremumOperation::Min, dst, src, order);
++                return self.atomic_extremum(ExtremumOperation::Min, true, dst, src, order);
+             }
+             AtomicRmwBinOp::AtomicUMax => {
+-                return self.atomic_extremum(ExtremumOperation::Max, dst, src, order);
++                return self.atomic_extremum(ExtremumOperation::Max, false, dst, src, order);
+             }
+             AtomicRmwBinOp::AtomicUMin => {
+-                return self.atomic_extremum(ExtremumOperation::Min, dst, src, order);
++                return self.atomic_extremum(ExtremumOperation::Min, false, dst, src, order);
+             }
+         };
+ 

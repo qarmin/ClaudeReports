@@ -1,0 +1,37 @@
+# Self-contained reproduction for candidate 058 (does GradientRampCache::compact_luts's
+# `ramp.lut_start -= prefix_sum[pos]` underflow under adversarial/churny eviction patterns?).
+# Status: Not reproducible - see RESULT.md. No bug was found, so there is no patch.diff and no
+# `apply`/`reproduce-after` step, per the template's own instructions for that case.
+#
+# `GradientRampCache`/`compact_luts` are pub(crate), not part of vello_hybrid's public API, so
+# this cannot be a normal external `repro/Cargo.toml` binary. Instead, `repro/harness.patch` adds
+# two `#[test]` stress harnesses directly into gradient_cache.rs's own `mod tests` (a randomized
+# property fuzzer and a steady-churn boundary-value test), and `repro/run.sh` builds+runs them
+# with `cargo test` against the clone, in a debug build (debug_assertions on by default), which is
+# what would turn an actual `u32` underflow into a panic.
+#
+# repo_url/base_commit were read via `git remote get-url origin` / `git rev-parse HEAD` in the
+# main project at investigation time.
+
+# https (not the ssh form `git remote get-url origin` actually returns) so `just clone` works
+# without an ssh key/agent configured.
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone apply-harness reproduce-before
+
+clone:
+    rm -rf clone
+    git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false clone {{repo_url}} clone
+    cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false checkout {{base_commit}}
+
+apply-harness:
+    cd clone && git apply "{{justfile_directory()}}/repro/harness.patch"
+
+# Build+run the stress harness (debug build, debug_assertions on) against the pristine clone.
+# Should complete with all tests passing - no underflow panic - per RESULT.md's Status.
+reproduce-before:
+    bash "{{justfile_directory()}}/repro/run.sh" clone
+
+clean:
+    rm -rf clone

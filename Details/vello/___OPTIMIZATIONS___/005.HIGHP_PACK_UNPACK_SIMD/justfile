@@ -1,0 +1,57 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# repo_url/base_commit were read via `git remote get-url origin` / `git rev-parse HEAD` in the
+# main project at the moment patch.diff was captured.
+#
+# This candidate reuses the project's own existing benchmark (`sparse_strips/vello_bench`,
+# `fine_pack` criterion group, which already benches `pack`/`unpack` for the u8 kernel) but that
+# group's f32/highp-kernel variants are commented out at the shared-macro level by design (see
+# `vello_dev_macros::bench` - f32 benches are disabled by default project-wide to keep the
+# default bench run short). `harness.diff` adds two small, standalone bench functions directly
+# in `vello_bench/src/fine/pack.rs` (`pack_block_f32` / `unpack_block_f32`) that exercise exactly
+# `F32Kernel::pack`/`unpack` across every available SIMD level, without touching the shared macro
+# or re-enabling f32 variants for any other `#[vello_bench]`-annotated function. `harness.diff`
+# is applied for BOTH the baseline and patched build below, so the only difference between the
+# two bench runs is `patch.diff` itself (the library fix).
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone at the pinned commit, add the harness (needed by both sides), build+run a
+# BASELINE bench, apply the library patch, build+run a PATCHED bench.
+test: clone bench-baseline apply bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && git apply "{{justfile_directory()}}/harness.diff"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+bench-baseline:
+    @echo "=== baseline (before patch) ==="
+    cd clone && cargo bench --release -p vello_bench --bench main -- 'fine/pack/(pack|unpack)_block_f32'
+
+bench-patched:
+    @echo "=== patched (after patch) ==="
+    cd clone && cargo bench --release -p vello_bench --bench main -- 'fine/pack/(pack|unpack)_block_f32'
+
+# Runs the project's own unit test suite for the touched crate, before and after - separate from
+# `just test` since it roughly doubles the total run time and isn't needed to see the
+# performance delta. Note: this project's `vello_sparse_tests` snapshot suite needs git-lfs to
+# have real reference images checked out; without it, that suite fails identically before and
+# after this patch (see RESULT.md) and is not part of this recipe.
+test-correctness: clone
+    @echo "=== baseline test suite ==="
+    cd clone && cargo test --release -p vello_cpu --features f32_pipeline --lib
+    just apply
+    @echo "=== patched test suite ==="
+    cd clone && cargo test --release -p vello_cpu --features f32_pipeline --lib
+
+clean:
+    rm -rf clone

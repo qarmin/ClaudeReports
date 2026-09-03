@@ -1,0 +1,190 @@
+diff --git a/src/codecs/bmp/decoder.rs b/src/codecs/bmp/decoder.rs
+index cba61aed..39e6c0de 100644
+--- a/src/codecs/bmp/decoder.rs
++++ b/src/codecs/bmp/decoder.rs
+@@ -867,27 +867,62 @@ fn set_4bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+     true
+ }
+ 
++// Direct-indexing variants of `set_8bit_pixel_run`/`set_4bit_pixel_run` (and the 1-bit/2-bit
++// paths, which have no other caller) used only by the plain (non-RLE) palettized row path
++// (`read_palettized_pixel_data`). The RLE4/RLE8 paths above still use `ChunksExactMut` because
++// they rely on the iterator's own cursor (`nth`, `for_each`, partial consumption) across several
++// operations within one row - not just a per-pixel `.next()` - so aren't a fair like-for-like
++// swap; see candidate 051's RESULT.md.
++fn set_1bit_pixel_run_direct<'a, T: Iterator<Item = &'a u8>>(
++    row: &mut [u8],
++    num_channels: usize,
++    palette: &[[u8; 3]],
++    indices: T,
++) {
++    let mut offset = 0usize;
++    for idx in indices {
++        let mut bit = 0x80;
++        loop {
++            let Some(pixel) = row.get_mut(offset..offset + 3) else {
++                return;
++            };
++            let rgb = palette[usize::from((idx & bit) != 0)];
++            pixel[0] = rgb[0];
++            pixel[1] = rgb[1];
++            pixel[2] = rgb[2];
++            offset += num_channels;
++
++            bit >>= 1;
++            if bit == 0 {
++                break;
++            }
++        }
++    }
++}
++
+ #[rustfmt::skip]
+-fn set_2bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+-    pixel_iter: &mut ChunksExactMut<u8>,
++fn set_2bit_pixel_run_direct<'a, T: Iterator<Item = &'a u8>>(
++    row: &mut [u8],
++    num_channels: usize,
+     palette: &[[u8; 3]],
+     indices: T,
+     mut n_pixels: usize,
+ ) -> bool {
++    let mut offset = 0usize;
+     for idx in indices {
+         macro_rules! set_pixel {
+             ($i:expr) => {
+                 if n_pixels == 0 {
+                     break;
+                 }
+-                if let Some(pixel) = pixel_iter.next() {
+-                    let rgb = palette[$i as usize];
+-                    pixel[0] = rgb[0];
+-                    pixel[1] = rgb[1];
+-                    pixel[2] = rgb[2];
+-                } else {
++                let Some(pixel) = row.get_mut(offset..offset + 3) else {
+                     return false;
+-                }
++                };
++                let rgb = palette[$i as usize];
++                pixel[0] = rgb[0];
++                pixel[1] = rgb[1];
++                pixel[2] = rgb[2];
++                offset += num_channels;
+                 n_pixels -= 1;
+             };
+         }
+@@ -898,30 +933,56 @@ fn set_2bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+     }
+     true
+ }
++fn set_8bit_pixel_run_direct<'a, T: Iterator<Item = &'a u8>>(
++    row: &mut [u8],
++    num_channels: usize,
++    palette: &[[u8; 3]],
++    indices: T,
++    n_pixels: usize,
++) -> bool {
++    let mut offset = 0usize;
++    for idx in indices.take(n_pixels) {
++        let Some(pixel) = row.get_mut(offset..offset + 3) else {
++            return false;
++        };
++        let rgb = palette[*idx as usize];
++        pixel[0] = rgb[0];
++        pixel[1] = rgb[1];
++        pixel[2] = rgb[2];
++        offset += num_channels;
++    }
++    true
++}
+ 
+-fn set_1bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+-    pixel_iter: &mut ChunksExactMut<u8>,
++fn set_4bit_pixel_run_direct<'a, T: Iterator<Item = &'a u8>>(
++    row: &mut [u8],
++    num_channels: usize,
+     palette: &[[u8; 3]],
+     indices: T,
+-) {
++    mut n_pixels: usize,
++) -> bool {
++    let mut offset = 0usize;
+     for idx in indices {
+-        let mut bit = 0x80;
+-        loop {
+-            if let Some(pixel) = pixel_iter.next() {
+-                let rgb = palette[usize::from((idx & bit) != 0)];
++        macro_rules! set_pixel {
++            ($i:expr) => {
++                if n_pixels == 0 {
++                    break;
++                }
++                let Some(pixel) = row.get_mut(offset..offset + 3) else {
++                    return false;
++                };
++                let rgb = palette[$i as usize];
+                 pixel[0] = rgb[0];
+                 pixel[1] = rgb[1];
+                 pixel[2] = rgb[2];
+-            } else {
+-                return;
+-            }
+-
+-            bit >>= 1;
+-            if bit == 0 {
+-                break;
+-            }
++                offset += num_channels;
++                n_pixels -= 1;
++            };
+         }
++        set_pixel!(idx >> 4);
++        set_pixel!(idx & 0xf);
+     }
++    true
+ }
+ 
+ #[derive(PartialEq, Eq)]
+@@ -1888,19 +1949,36 @@ impl<R: BufRead + Seek> BmpDecoder<R> {
+                 if skip_palette {
+                     row.clone_from_slice(&indices[0..width]);
+                 } else {
+-                    let mut pixel_iter = row.chunks_exact_mut(num_channels);
+                     match bit_count {
+                         1 => {
+-                            set_1bit_pixel_run(&mut pixel_iter, palette, indices.iter());
++                            set_1bit_pixel_run_direct(row, num_channels, palette, indices.iter());
+                         }
+                         2 => {
+-                            set_2bit_pixel_run(&mut pixel_iter, palette, indices.iter(), width);
++                            set_2bit_pixel_run_direct(
++                                row,
++                                num_channels,
++                                palette,
++                                indices.iter(),
++                                width,
++                            );
+                         }
+                         4 => {
+-                            set_4bit_pixel_run(&mut pixel_iter, palette, indices.iter(), width);
++                            set_4bit_pixel_run_direct(
++                                row,
++                                num_channels,
++                                palette,
++                                indices.iter(),
++                                width,
++                            );
+                         }
+                         8 => {
+-                            set_8bit_pixel_run(&mut pixel_iter, palette, indices.iter(), width);
++                            set_8bit_pixel_run_direct(
++                                row,
++                                num_channels,
++                                palette,
++                                indices.iter(),
++                                width,
++                            );
+                         }
+                         _ => panic!(),
+                     }

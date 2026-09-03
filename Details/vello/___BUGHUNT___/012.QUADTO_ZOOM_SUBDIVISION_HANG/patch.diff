@@ -1,0 +1,35 @@
+diff --git a/sparse_strips/vello_common/src/flatten_simd.rs b/sparse_strips/vello_common/src/flatten_simd.rs
+index 0ab71eb9..8aa5fdc1 100644
+--- a/sparse_strips/vello_common/src/flatten_simd.rs
++++ b/sparse_strips/vello_common/src/flatten_simd.rs
+@@ -156,7 +156,8 @@ pub(crate) fn flatten<S: Simd>(
+                 } else {
+                     let q = QuadBez::new(p0, p1, p2);
+                     let params = q.estimate_subdiv(SQRT_TOL);
+-                    let n = ((0.5 / SQRT_TOL * params.val).ceil() as usize).max(1);
++                    let n = ((0.5 / SQRT_TOL * params.val).ceil() as usize)
++                        .clamp(1, MAX_QUAD_LINES);
+                     let step = 1.0 / (n as f64);
+                     for i in 1..n {
+                         let u = (i as f64) * step;
+@@ -337,6 +338,20 @@ struct FlattenParams {
+ /// transforms.
+ const MAX_QUADS: usize = 16;
+ 
++/// Upper bound on the number of line segments a single quadratic Bézier curve (a `QuadTo` path
++/// element) is flattened into.
++///
++/// Without this cap, the subdivision-count estimate (`params.val` in the `QuadTo` handling in
++/// [`flatten`]) grows with the affine transform's scale factor: at increasingly extreme "zoom"
++/// levels the estimate (and the resulting line count `n`) can reach into the billions, and the
++/// `for i in 1..n` loop that follows performs real, uncapped work with no allocation to fail and
++/// abort on - it just runs for as long as `n` demands, which for a sufficiently large transform
++/// scale is effectively forever (see <https://github.com/linebender/vello/issues/1752>). Clamping
++/// trades flattening accuracy for robustness in these edge cases; ordinary curves never come
++/// close to this limit. Mirrors `MAX_CUBIC_LINES`'s equivalent cap on the cubic (`CurveTo`) path
++/// in [`flatten_cubic_simd`].
++const MAX_QUAD_LINES: usize = 1 << 16;
++
+ /// The context needed for flattening curves.
+ #[derive(Default, Debug)]
+ pub struct FlattenCtx {

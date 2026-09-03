@@ -1,0 +1,35 @@
+# Self-contained reproduction attempt for candidate 016 (unwinding_panic_codegen).
+#
+# Status: Not reproducible - no patch.diff (nothing to fix on this checkout). `just test` clones a
+# pristine checkout, builds it, and re-runs the same differential unwinding/panic checks this
+# candidate's RESULT.md describes: five small Rust programs (drop ordering across nested unwinds,
+# nested/nested catch_unwind, a double panic during a destructor, a panic crossing an `extern "C"`
+# boundary, a chain of several potentially-panicking calls sharing cleanup blocks, and a panic in a
+# spawned thread + panic::resume_unwind) compiled with the GCC backend, compared against a
+# reference captured from the host's normal LLVM-backed rustc (baked into repro/expected/*.txt).
+#
+# Requires this project's own toolchain to already be buildable in the environment running this
+# (see the upstream project's Readme.md "Quick start" - `./y.sh prepare` needs network access to
+# download a prebuilt libgccjit.so and to fetch rustc-dev components). Not fast: a fresh clone's
+# first `./y.sh prepare && ./y.sh build --sysroot --release` takes a few minutes.
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && cp config.example.toml config.toml
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Runs the differential unwinding/panic checks inside the fresh clone - see repro/run.sh for what
+# each step does. Prints MATCH/MISMATCH per program and exits non-zero if anything mismatched.
+reproduce-before:
+    bash repro/run.sh clone
+
+clean:
+    rm -rf clone repro/target

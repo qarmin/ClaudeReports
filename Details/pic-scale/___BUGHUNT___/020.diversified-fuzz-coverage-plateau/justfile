@@ -1,0 +1,78 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate found no pic-scale source bug (Status: Not reproducible) - there is no
+# patch.diff and no repro/ crate to apply a fix to. What this justfile reproduces instead is the
+# actual finding: applying candidate 018's saved sampler_variant/ResamplingFunction::from(...)
+# diversification patch (harness_diversification_reference.diff, unmodified) to all 16 existing
+# cargo-fuzz targets, then running 8 representative targets from a fresh empty corpus and
+# snapshotting libFuzzer's own cov:/ft: coverage counters over time - the real session ran
+# 1800s/target (8 targets, ~96.3M executions total, see RESULT.md/output.txt); this justfile runs
+# a shorter default per-target duration so `just test` finishes in a reasonable time - override
+# with `just test 1800` to reproduce the full campaign (30 minutes wall-clock, parallel, on a
+# multi-core host).
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Default demo duration per target, in seconds. The real session used 1800.
+duration := "30"
+
+# Cloned outside this folder (see candidate 014's justfile for why: cargo's ancestor-workspace
+# search would otherwise wrongly fold a nested clone/fuzz into this project's own excluded-from-
+# workspace fuzz/ directory if cloned as a plain subdirectory here).
+clone_dir := "/tmp/pic_scale_bughunt_020_clone"
+
+test: clone patch build (run duration)
+
+clone:
+    rm -rf {{clone_dir}}
+    git clone {{repo_url}} {{clone_dir}}
+    cd {{clone_dir}} && git checkout {{base_commit}}
+    rm -f clone
+    ln -s {{clone_dir}} clone
+
+# Applies the diversification patch (identical to candidate 018's) to all 16 fuzz harnesses -
+# kept here only as a reference artifact, not as patch.diff, since it's a harness change, not a
+# bug fix.
+patch:
+    cd clone && git apply "{{justfile_directory()}}/harness_diversification_reference.diff"
+
+# The first build command exits non-zero (only the `colorspaces` bin fails, since it needs the
+# `colorspaces` Cargo feature this command doesn't pass) but still successfully builds the other
+# 15 target binaries - `-` tells `just` not to abort the recipe on that expected failure.
+build:
+    -cd clone/fuzz && cargo +nightly fuzz build --release --sanitizer none --features avx,sse,nightly_avx512
+    cd clone/fuzz && cargo +nightly fuzz build --release --sanitizer none --features avx,sse,nightly_avx512,colorspaces colorspaces
+
+# Runs 8 representative diversified targets in parallel for `duration` seconds each, from a fresh
+# empty corpus, and reports both the crash grep (should be empty) and the cov:/ft: coverage
+# counters at start/mid/end of the run (should show growth slowing/flattening well before
+# `duration` ends, the same plateau this candidate found at 1800s in the real session).
+run duration=duration:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone/fuzz
+    targets="resize_rgba resize_rgba_u16 resize_cbcr_f16 resize_plane_u16 resize_rgb_f32 resize_cbcr8 resize_rgba_f16 colorspaces"
+    mkdir -p /tmp/pic_scale_bughunt_020_demo_corpus /tmp/pic_scale_bughunt_020_demo_logs
+    for t in $targets; do
+      rm -rf "/tmp/pic_scale_bughunt_020_demo_corpus/$t"
+      mkdir -p "/tmp/pic_scale_bughunt_020_demo_corpus/$t"
+      ./target/x86_64-unknown-linux-gnu/release/$t \
+        -max_total_time={{duration}} -rss_limit_mb=1536 -print_final_stats=1 \
+        "/tmp/pic_scale_bughunt_020_demo_corpus/$t" \
+        > "/tmp/pic_scale_bughunt_020_demo_logs/$t.log" 2>&1 &
+    done
+    wait
+    echo "=== Results ==="
+    for t in $targets; do
+      echo "--- $t ---"
+      grep -E '^Done' "/tmp/pic_scale_bughunt_020_demo_logs/$t.log" || echo "(did not print Done - check log below)"
+      echo "coverage at start vs end (cov:/ft: - should be close together for a short demo duration, confirming the plateau):"
+      grep -om1 -E 'cov: [0-9]+ ft: [0-9]+' "/tmp/pic_scale_bughunt_020_demo_logs/$t.log"
+      grep -oE 'cov: [0-9]+ ft: [0-9]+' "/tmp/pic_scale_bughunt_020_demo_logs/$t.log" | tail -1
+    done
+    echo "=== Crash/panic grep (should be empty aside from the harmless --sanitizer none boilerplate warning) ==="
+    grep -inE 'ERROR|panic|SUMMARY: |deadly signal|leaked|timeout|out-of-memory|slow-unit' /tmp/pic_scale_bughunt_020_demo_logs/*.log | grep -v 'Failed to find function' || echo "(no matches - clean)"
+
+clean:
+    rm -rf {{clone_dir}} clone

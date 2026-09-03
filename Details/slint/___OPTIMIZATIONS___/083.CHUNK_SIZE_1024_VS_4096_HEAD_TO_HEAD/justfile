@@ -1,0 +1,56 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff is candidate 073's full patch, UNMODIFIED (CHUNK_SIZE = 256) - chunked_arena does
+# not exist on master, so this is the prerequisite both swept values in RESULT.md are a one-line
+# edit on top of. To reproduce this candidate's comparison: apply patch.diff, then edit
+# `internal/core/partial_renderer.rs`'s `const CHUNK_SIZE: usize = 256;` to 1024, build and save
+# that binary, then edit it again to 4096, build, and compare the two binaries directly (not
+# against the 256 build patch.diff itself produces) - see RESULT.md's table for the exact numbers.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone at the pinned commit, apply the patch, build both swept values, bench them
+# against each other on the flat scrolling scene (the scene with the clearest signal here).
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# perf_test (the project's own headless bench harness) reaches the patched code path directly -
+# no standalone bench crate was needed. This candidate needs `perf_test/` copied into `clone/`
+# manually first (it is untracked in the main checkout, see ___OPTIMIZATIONS___/README.md).
+#
+# This builds CHUNK_SIZE=1024 and CHUNK_SIZE=4096 in turn (saving each binary before editing the
+# constant again) and runs both on the `flat` scrolling scene. Use tools/paired.sh (copied from
+# the main workspace) to compare the two saved binaries directly - see RESULT.md for the exact
+# invocations, both scenes, and both core counts.
+bench:
+    sed -i 's/const CHUNK_SIZE: usize = 256;/const CHUNK_SIZE: usize = 1024;/' clone/internal/core/partial_renderer.rs
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug
+    cp clone/target/rdebug/perf_test perf_test_1024
+    sed -i 's/const CHUNK_SIZE: usize = 1024;/const CHUNK_SIZE: usize = 4096;/' clone/internal/core/partial_renderer.rs
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug
+    cp clone/target/rdebug/perf_test perf_test_4096
+    ./perf_test_1024 --bench --mode scroll --count 100000 --row-style flat --frames 20
+    ./perf_test_4096 --bench --mode scroll --count 100000 --row-style flat --frames 20
+
+clean:
+    rm -rf clone perf_test_1024 perf_test_4096

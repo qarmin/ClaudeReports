@@ -1,0 +1,55 @@
+# Self-contained reproduction for candidate 070.VERTICALLAYOUT_TEXT_ORIENTATION_QUERY, given the
+# whole ___OPTIMIZATIONS___ folder is kept together (not just this subfolder) - see
+# ../README.md's "Reproducing a candidate standalone" section for why: `perf_test` is untracked
+# in the main repo, so `clone:` copies it in from ../harness/perf_test (which already has the
+# `RowStyle.vertical-fixed` scene this candidate's bench needs - no overlay required).
+#
+# `patch.diff` touches only the main slint tree (internal/core/items/text.rs). Headless software
+# renderer (`--bench`), no display needed.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone, build a BASELINE binary before touching anything, apply the patch, build a
+# PATCHED binary, then run both and print both results.
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+build-baseline:
+    cd clone/perf_test && cargo build --profile rdebug --bin perf_test
+    cp clone/target/rdebug/perf_test ./perf_test_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/perf_test && cargo build --profile rdebug --bin perf_test
+    cp clone/target/rdebug/perf_test ./perf_test_patched
+
+# RESULT.md's headline number is the FIRST frame (startup shaping), not steady state.
+bench:
+    @echo "=== baseline (shapes through parley just to read .height) ==="
+    ./perf_test_baseline --bench --mode scroll --row-style vertical-fixed --count 20000 --frames 3
+    @echo "=== patched (font-metrics fast path) ==="
+    ./perf_test_patched --bench --mode scroll --row-style vertical-fixed --count 20000 --frames 3
+
+# What the fast path actually skips: reads the temporary orientation-call counters this candidate
+# added (and removed) to internal/core/items/text.rs during investigation, and a font-metrics-vs-
+# shaped-height comparison. Not needed to reproduce the timing result, only the confirmation step.
+# See probe/orientation_probe.rs and RESULT.md's "How the premise was confirmed" section. The
+# harness's own `orientation_probe` bin (see ../harness/perf_test/Cargo.toml) may already cover
+# this - check before assuming probe/ here needs registering by hand.
+probe:
+    @echo "See probe/orientation_probe.rs and RESULT.md's confirmation section for how this was used."
+
+clean:
+    rm -rf clone perf_test_baseline perf_test_patched

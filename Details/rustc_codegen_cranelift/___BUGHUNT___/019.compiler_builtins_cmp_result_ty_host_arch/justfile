@@ -1,0 +1,52 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# Extra host requirements beyond a Rust nightly toolchain:
+#   * a NON-aarch64 host (x86_64 was used): the bug is host-vs-target confusion, so it is
+#     invisible when the host already is aarch64
+#   * qemu-aarch64  - user-mode aarch64 emulation, so the aarch64 binary is actually RUN and its
+#                     output compared (Debian/Ubuntu: qemu-user)
+#   * the rust-src component of the pinned nightly (rust-toolchain.toml asks for it): there is no
+#     rustup rust-std for the cross target, so `core` and the real `compiler_builtins` crate are
+#     built from source
+#
+# `just build-clif` takes a few minutes the first time (it builds cg_clif and its sysroot).
+
+# Swap to https://github.com/rust-lang/rustc_codegen_cranelift.git if you have no SSH key set up.
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone build-clif reproduce-before apply build-clif reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-clif:
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build
+
+# Expected: cg_clif refuses the real compiler_builtins crate for aarch64 with
+# "attempt to declare `__letf2` ... returns: I64 ... but it was already declared ... I32", and the
+# aarch64 binary it does produce for a user crate prints `a > b` where `a < b` is true -> exit 1.
+reproduce-before:
+    -ulimit -c 0 && CLIF_ROOT="{{justfile_directory()}}/clone" bash repro/run.sh
+
+# Compile-only sweep over the whole bug class (4 aarch64 targets + 3 pointer-sized controls).
+sweep:
+    ulimit -c 0 && CLIF_ROOT="{{justfile_directory()}}/clone" bash repro/sweep_targets.sh
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro against the patched clone: compiler_builtins builds and all three run-time outputs
+# match LLVM's byte for byte -> exit 0.
+reproduce-after:
+    ulimit -c 0 && CLIF_ROOT="{{justfile_directory()}}/clone" bash repro/run.sh
+
+clean:
+    rm -rf clone repro/work repro/sweep_work

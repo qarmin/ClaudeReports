@@ -1,0 +1,54 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder or fetched by `just clone` into ./clone
+# (gitignored) - nothing reaches outside the folder it lives in, so the whole folder can be copied
+# anywhere (e.g. attached to a GitHub issue) and `just test` still works.
+#
+# The subject is a *compiler backend*, so "run the repro" means: build cg_clif from ./clone, then
+# compile + run repro/ twice - once with plain cargo (LLVM = the oracle) and once with
+# clone/dist/cargo-clif - and diff the two run-time outputs. Unpatched, cg_clif ICEs and never
+# produces a binary at all.
+#
+# Requirements: the nightly toolchain pinned by clone/rust-toolchain.toml (rustup fetches it), the
+# rust-src component, and an x86-64 CPU with AVX-512F (cases 05-08, 12, 13 use zmm registers).
+# Building cg_clif takes a few minutes the first time. Swap repo_url for
+# https://github.com/rust-lang/rustc_codegen_cranelift.git if you have no SSH key on GitHub.
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it is gone.
+# Written as sequential `just` calls rather than a dependency list because build-backend has to run
+# twice and just would deduplicate it as a dependency.
+test:
+    just repo_url={{repo_url}} base_commit={{base_commit}} clone
+    just build-backend
+    just reproduce-before
+    just apply
+    just build-backend
+    just reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Builds clone/dist/{cargo-clif,rustc-clif} plus the cg_clif sysroot. Must be re-run after `apply`.
+build-backend:
+    cd clone && ./y.sh build
+
+# Build + run repro/ against the current state of ./clone. Unpatched this fails to compile with
+# Compilation(Unsupported("Unexpected SSA-value type: f64x4")) and friends, so the `-` prefix keeps
+# `just test` going to the apply/after half.
+reproduce-before:
+    -ulimit -c 0 && bash repro/run.sh "{{justfile_directory()}}/clone"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro against the patched clone. All 15 cases must now match LLVM exactly.
+reproduce-after:
+    ulimit -c 0 && bash repro/run.sh "{{justfile_directory()}}/clone"
+
+clean:
+    rm -rf clone repro/target-llvm repro/target-clif repro/llvm.out repro/clif.out repro/clif.build

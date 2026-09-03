@@ -1,0 +1,39 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# NOTE: requires the `gdcm` feature (native GDCM library bindings via the `gdcm-rs` crate),
+# which builds its own vendored C++ dependency from source via CMake. On this machine this
+# stayed fast (~26s) even from a genuinely fresh clone (many cores) - see
+# projects/dicom-rs.md's 2026-09-01 tooling note; budget more time if that's not the case here.
+#
+# This candidate is a bounded follow-up to already-Confirmed candidates 100/103 (same
+# declared-vs-actual-size heap-corruption bug in vendored GDCM, exploring several different
+# declared-size gaps against the same real 64x64 embedded JPEG2000 codestream), NOT a distinct
+# new bug - see RESULT.md. No patch.diff - same as 100/103, the root cause lives entirely inside
+# vendored, third-party GDCM 3.1 C++ source. So there is only a `reproduce` step here, no
+# `apply`/`reproduce-after`.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone reproduce
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git fetch origin {{base_commit}} && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone for 3 declared-size gaps (32x32,
+# 8x8, 1x1, all vs the real 64x64 embedded codestream) - every run should crash the process
+# (non-zero exit, killed by a signal, see output.txt for the full 5-size + 3-repeat sweep this
+# candidate actually ran during investigation).
+reproduce:
+    cd repro && cargo build --release
+    cd repro && ./target/release/repro 32; echo "declared 32x32 exit code: $?"
+    cd repro && ./target/release/repro 8; echo "declared 8x8 exit code: $?"
+    cd repro && ./target/release/repro 1; echo "declared 1x1 exit code: $?"
+
+clean:
+    rm -rf clone repro/target repro/core.*

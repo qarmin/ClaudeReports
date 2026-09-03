@@ -1,0 +1,108 @@
+# Self-contained reproduction for candidate 018.
+#
+# NOTE (shape 3, see templates/candidate_justfile): kurbo's own benchmarks don't reach this code
+# path, so this uses the `kurbo_bench` harness built for this workspace. That harness is UNTRACKED
+# in the kurbo repo - a fresh `git clone` of repo_url will never contain it - so `clone:` copies it
+# in from `../harness/kurbo_bench` and rewrites its kurbo dependency path. That makes this folder
+# self-contained *given the whole ___OPTIMIZATIONS___ folder kept together*, not as a single
+# isolated subfolder.
+#
+# `just test` clones at the pinned commit, builds a baseline binary, applies patch.diff, builds a
+# patched binary, and prints:
+#   1. the attribution run (`bench/src/allocprobe.rs`)  - which of StrokeCtx's four BezPath
+#      buffers the ~26 allocations and ~1.4 MB per stroke() call actually belong to;
+#   2. the bound run (`bench/src/bound.rs`)              - what removing ALL of those allocations
+#      buys, via kurbo's own already-public stroke_with + reused StrokeCtx API;
+#   3. the real before/after on the stroke / stroke-miter / dash scenes, wall clock + MEM.
+
+repo_url := "https://github.com/linebender/kurbo.git"
+base_commit := "ca273499e3e48bd2de6f02aa8e99a148984e45f3"
+harness_dir := "../harness/kurbo_bench"
+
+test: clone build-baseline attribute-baseline bound apply build-patched attribute-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout --quiet {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/kurbo_bench
+    rm -rf clone/kurbo_bench/target
+    # The harness lives at ___OPTIMIZATIONS___/harness/kurbo_bench in the workspace, but at
+    # clone/kurbo_bench here, so its relative path to the kurbo crate changes.
+    sed -i 's|path = "../../../kurbo"|path = "../kurbo"|' clone/kurbo_bench/Cargo.toml
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/kurbo_bench && cargo build --release
+    cp clone/kurbo_bench/target/release/kurbo_bench ./bin_baseline
+
+build-patched:
+    find clone/kurbo/src -name '*.rs' -exec touch {} +
+    cd clone/kurbo_bench && cargo build --release
+    cp clone/kurbo_bench/target/release/kurbo_bench ./bin_patched
+
+# Which buffer do the ~26 allocations per stroke() call belong to? (baseline)
+#
+# CAVEAT: `bench/` builds against ./clone, so these two recipes report whatever state ./clone is
+# currently in, not a fixed variant. In `just test`'s order that is correct (baseline before
+# `apply`, patched after). Re-running `just attribute-baseline` on its own AFTER `just test` will
+# print the PATCHED log; `just clone` first to get the baseline one back.
+attribute-baseline:
+    cd bench && cargo build --release --bin allocprobe
+    @echo "=== BASELINE: per-allocation log of one stroke() call ==="
+    ./bench/target/release/allocprobe
+
+# Same log after the patch.
+attribute-patched:
+    cd bench && cargo build --release --bin allocprobe
+    @echo "=== PATCHED: per-allocation log of one stroke() call ==="
+    ./bench/target/release/allocprobe
+
+# Upper bound for the whole candidate: stroke() (fresh ctx, 26 allocations) vs stroke_with() on a
+# warmed StrokeCtx (0 allocations). Anything a reserve-capacity patch can win is a subset of this.
+# Same ./clone caveat as `attribute-baseline` above - in `just test`'s order this runs unpatched.
+bound:
+    cd bench && cargo build --release --bin bound
+    @echo "=== BOUND: stroke() vs stroke_with(reused ctx), same build, no patch ==="
+    for i in 1 2 3; do taskset -c 3 ./bench/target/release/bound 40; echo; done
+
+bench:
+    @echo "=== the two binaries must differ, or the patch didn't apply ==="
+    sha256sum ./bin_baseline ./bin_patched
+    @echo ""
+    @echo "=== stroke / stroke-miter / dash: baseline then patched (wall clock + MEM) ==="
+    for s in stroke stroke-miter dash; do \
+      echo "--- $s baseline ---"; taskset -c 2 ./bin_baseline $s 40; \
+      echo "--- $s patched  ---"; taskset -c 2 ./bin_patched  $s 40; \
+    done
+    @echo ""
+    @echo "=== paired comparison, single-core then multi-core ==="
+    TASKSET=2 RUNS=9 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- stroke 25
+    RUNS=9 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- stroke 25
+    @echo ""
+    @echo "=== peak RSS, 6 runs each ==="
+    printf 'base:    '; for i in 1 2 3 4 5 6; do taskset -c 2 ./bin_baseline stroke 40 | grep '^MEM' | grep -o 'peak_rss_kb [0-9]*' | cut -d' ' -f2 | tr '\n' ' '; done; echo
+    printf 'patched: '; for i in 1 2 3 4 5 6; do taskset -c 2 ./bin_patched  stroke 40 | grep '^MEM' | grep -o 'peak_rss_kb [0-9]*' | cut -d' ' -f2 | tr '\n' ' '; done; echo
+    @echo ""
+    @echo "NOTE: all 25 scene CHECK lines are identical between the two builds - this patch is"
+    @echo "      bit-exact. See RESULT.md; the headline is an allocation-count result, not a"
+    @echo "      wall-clock one."
+
+# Deterministic instruction counts, for when the host is too noisy for wall clock.
+callgrind:
+    ulimit -n 4096; for s in stroke stroke-miter dash; do \
+      valgrind --tool=callgrind --callgrind-out-file=cg.b.$s --cache-sim=no --branch-sim=no ./bin_baseline $s 3 >/dev/null 2>&1; \
+      valgrind --tool=callgrind --callgrind-out-file=cg.p.$s --cache-sim=no --branch-sim=no ./bin_patched  $s 3 >/dev/null 2>&1; \
+      echo "$s base $(callgrind_annotate cg.b.$s | grep 'PROGRAM TOTALS') patched $(callgrind_annotate cg.p.$s | grep 'PROGRAM TOTALS')"; \
+    done
+
+# Where the memmove in the stroke scene actually comes from (see RESULT.md - it is NOT the
+# BezPath buffers).
+callgrind-memmove:
+    ulimit -n 4096; valgrind --tool=callgrind --callgrind-out-file=cg.mm --cache-sim=no --branch-sim=no ./bin_baseline stroke 3 >/dev/null 2>&1
+    callgrind_annotate --tree=caller cg.mm | grep -i -B 14 'memmove-vec-unaligned-erms.S:__memcpy'
+
+clean:
+    rm -rf clone bin_baseline bin_patched bench/target cg.*

@@ -1,0 +1,54 @@
+diff --git a/src/intrinsics/simd.rs b/src/intrinsics/simd.rs
+index 270ea4e8..62dd022f 100644
+--- a/src/intrinsics/simd.rs
++++ b/src/intrinsics/simd.rs
+@@ -484,6 +484,49 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
+             });
+         }
+ 
++        sym::simd_funnel_shl | sym::simd_funnel_shr => {
++            intrinsic_args!(fx, args => (a, b, shift); intrinsic);
++
++            if !a.layout().ty.is_simd() {
++                report_simd_type_validation_error(fx, intrinsic, span, a.layout().ty);
++                return;
++            }
++            assert_eq!(a.layout(), b.layout());
++            assert_eq!(a.layout(), shift.layout());
++            assert_eq!(a.layout(), ret.layout());
++
++            let is_left = intrinsic == sym::simd_funnel_shl;
++
++            // FIXME use vector instructions when possible
++            simd_trio_for_each_lane(
++                fx,
++                a,
++                b,
++                shift,
++                ret,
++                &|fx, lane_ty, _ret_lane_ty, a_lane, b_lane, shift_lane| {
++                    assert!(matches!(lane_ty.kind(), ty::Uint(_) | ty::Int(_)));
++
++                    // Cranelift masks every shift amount to the operand width, so `!shift` is
++                    // exactly `bits - 1 - shift` for the `shift < bits` range the intrinsic
++                    // requires. The extra shift by one keeps the total at `bits - shift` while
++                    // still yielding 0 (rather than the unshifted operand) for `shift == 0`.
++                    let inv_shift_lane = fx.bcx.ins().bnot(shift_lane);
++                    if is_left {
++                        let lo = fx.bcx.ins().ushr_imm_u(b_lane, 1);
++                        let lo = fx.bcx.ins().ushr(lo, inv_shift_lane);
++                        let hi = fx.bcx.ins().ishl(a_lane, shift_lane);
++                        fx.bcx.ins().bor(hi, lo)
++                    } else {
++                        let hi = fx.bcx.ins().ishl_imm_u(a_lane, 1);
++                        let hi = fx.bcx.ins().ishl(hi, inv_shift_lane);
++                        let lo = fx.bcx.ins().ushr(b_lane, shift_lane);
++                        fx.bcx.ins().bor(hi, lo)
++                    }
++                },
++            );
++        }
++
+         // FIXME: simd_relaxed_fma doesn't relax to non-fused multiply-add
+         sym::simd_fma | sym::simd_relaxed_fma => {
+             intrinsic_args!(fx, args => (a, b, c); intrinsic);

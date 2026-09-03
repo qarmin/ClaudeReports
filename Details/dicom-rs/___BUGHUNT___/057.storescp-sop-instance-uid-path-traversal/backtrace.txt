@@ -1,0 +1,39 @@
+REBUILT to meet CONFIRMATION.md section 11's real end-to-end bar (this candidate's original
+repro hand-built wire bytes / called internal logic directly in one process - see RESULT.md's
+note on this). The repro below runs the REAL `dicom-storescp` and `dicom-storescu` binaries
+communicating over a REAL loopback TCP socket.
+
+$ just clone && just reproduce-before   (pristine clone at df2b9e4236298efa3fa37a1f360fc4bf284d586a)
+
+wrote evil file to /tmp/tmp.ZqogNh3gM5/evil.dcm with SOP Instance UID = "../escaped_057"
+--- storescp log ---
+INFO dicom_storescp: STORE-SCP listening on: tcp://0.0.0.0:23999
+INFO dicom_storescp::store_sync: New association from STORE-SCU
+INFO dicom_storescp::store_sync: Stored /tmp/tmp.ZqogNh3gM5/received/../escaped_057.dcm
+INFO dicom_storescp::store_sync: Released association with STORE-SCU
+INFO dicom_storescp::store_sync: Dropping connection with STORE-SCU (127.0.0.1:49318)
+--- received/ contents ---
+(empty - the file did NOT land here)
+--- checking for escape ---
+BUG REPRODUCED: file escaped to /tmp/tmp.ZqogNh3gM5/escaped_057.dcm, outside /tmp/tmp.ZqogNh3gM5/received
+(exit 1 expected here: bug reproduced)
+
+$ just apply && just reproduce-after   (patch.diff applied to the same clone)
+
+wrote evil file to /tmp/tmp.qADIgu7Wnu/evil.dcm with SOP Instance UID = "../escaped_057"
+--- storescp log ---
+INFO dicom_storescp: STORE-SCP listening on: tcp://0.0.0.0:23999
+INFO dicom_storescp::store_sync: New association from STORE-SCU
+INFO dicom_storescp::store_sync: Stored /tmp/tmp.qADIgu7Wnu/received/..escaped057.dcm
+INFO dicom_storescp::store_sync: Released association with STORE-SCU
+INFO dicom_storescp::store_sync: Dropping connection with STORE-SCU (127.0.0.1:49330)
+--- received/ contents ---
+-rw-r--r-- 1 rafal rafal 530 ..escaped057.dcm   (sanitized filename, safely inside received/)
+--- checking for escape ---
+no escape: file stayed inside /tmp/tmp.qADIgu7Wnu/received (or was rejected)
+
+Also confirmed live against the actual project tree (not the clone) before packaging this
+repro, using the built `target/debug/dicom-storescp`/`dicom-storescu` binaries directly:
+storescp's own log line read "Stored /tmp/dicom057_e2e/received/../../dicom_rs_057_escaped.dcm",
+and the file was independently verified to exist at /tmp/dicom_rs_057_escaped.dcm (two directory
+levels above the configured `received/` output dir) while `received/` itself was empty.

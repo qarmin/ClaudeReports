@@ -1,0 +1,47 @@
+diff --git a/internal/core/graphics.rs b/internal/core/graphics.rs
+index d621081cd..3deabc691 100644
+--- a/internal/core/graphics.rs
++++ b/internal/core/graphics.rs
+@@ -130,6 +130,18 @@ pub fn line_height_for_natural_height(&self, natural_line_height: f32) -> Option
+     }
+ }
+ 
++#[cfg(feature = "shared-fontique")]
++crate::thread_local! {
++    /// Memoizes the single most recently resolved `FontRequest`. The dominant access pattern is
++    /// the same request resolved twice in a row a few calls apart - once to decide which text
++    /// layout path a text item takes (e.g. the software renderer's `match_font`/`uses_parley`
++    /// split), once moments later to actually shape it - with no invalidation need beyond "the
++    /// request changed", since a `fontique::Collection`'s font set does not change within that
++    /// window.
++    static LAST_FONTIQUE_QUERY: core::cell::RefCell<Option<(FontRequest, Option<fontique::QueryFont>)>> =
++        core::cell::RefCell::new(None);
++}
++
+ #[cfg(feature = "shared-fontique")]
+ impl FontRequest {
+     /// Attempts to query the fontique font collection for a matching font.
+@@ -138,6 +150,14 @@ pub fn query_fontique(
+         collection: &mut fontique::Collection,
+         source_cache: &mut fontique::SourceCache,
+     ) -> Option<fontique::QueryFont> {
++        if let Some(cached) = LAST_FONTIQUE_QUERY.with(|cache| {
++            cache.borrow().as_ref().and_then(|(last_request, result)| {
++                (last_request == self).then(|| result.clone())
++            })
++        }) {
++            return cached;
++        }
++
+         let mut query = collection.query(source_cache);
+         query.set_families(
+             self.family
+@@ -172,6 +192,8 @@ pub fn query_fontique(
+             fontique::QueryStatus::Stop
+         });
+ 
++        LAST_FONTIQUE_QUERY.with(|cache| *cache.borrow_mut() = Some((self.clone(), font.clone())));
++
+         font
+     }
+ }

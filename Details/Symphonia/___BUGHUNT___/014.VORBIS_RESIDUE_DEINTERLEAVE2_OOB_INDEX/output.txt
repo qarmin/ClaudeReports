@@ -1,0 +1,48 @@
+=== BEFORE (unpatched, ee35874) ===
+$ cargo run
+packet sizes: ident=30 comment=15 setup=57 audio=1
+decoding packet, 1 bytes
+
+thread 'main' (67690) panicked at symphonia-codec-vorbis/src/residue.rs:189:63:
+mid > len
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:80:14
+   2: <[symphonia_codec_vorbis::dsp::DspChannel]>::split_at_mut
+             at /rustc/.../library/core/src/slice/mod.rs:1992:21
+   3: <symphonia_codec_vorbis::residue::Residue>::deinterleave_2
+             at symphonia-codec-vorbis/src/residue.rs:189:63
+   4: <symphonia_codec_vorbis::residue::Residue>::read_residue
+             at symphonia-codec-vorbis/src/residue.rs:170:18
+   5: <symphonia_codec_vorbis::VorbisDecoder>::decode_inner
+             at symphonia-codec-vorbis/src/lib.rs:241:21
+   6: <symphonia_codec_vorbis::VorbisDecoder as symphonia_core::codecs::audio::AudioDecoder>::decode_ref
+             at symphonia-codec-vorbis/src/lib.rs:350:30
+   7: <symphonia_codec_vorbis::VorbisDecoder as symphonia_core::codecs::audio::AudioDecoder>::decode
+             at symphonia-core/src/codecs/audio.rs:280:14
+   8: repro::main
+             at ./src/main.rs:284:25
+   9: <fn() as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/.../library/core/src/ops/function.rs:250:5
+
+Reproduced 3/3 runs (deterministic, no seed/timing dependence - the crafted input triggers this
+on every run, debug and release profiles both, since it's a plain slice-bounds panic).
+
+=== AFTER (patched, ch1 -> ch1 - ch0) ===
+$ cargo run
+packet sizes: ident=30 comment=15 setup=57 audio=1
+decoding packet, 1 bytes
+BUG NOT REPRODUCED: decode completed without panicking
+
+=== Second, independent channel-layout variant (6 channels, submap owning {2,4}) ===
+Confirms the fix isn't specific to the exact {2,3}-in-4-channels input that was found first
+(CONFIRMATION.md's "vary the input within the same bug class" bar):
+
+Before fix:
+thread 'main' panicked at symphonia-codec-vorbis/src/residue.rs:191:38:
+index out of bounds: the len is 0 but the index is 0
+
+After fix:
+6ch variant: completed without panicking

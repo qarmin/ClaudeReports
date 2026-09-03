@@ -1,0 +1,49 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+# patch.diff bundles the Cargo.toml + benches/imageops.rs harness hunks (rayon forwarded, plus
+# bench_resize_dynamic's FilterType::Nearest case) with this candidate's actual fix
+# (src/imageops/resize.rs's run_resize gains a third match arm - ResamplingFunction::Nearest
+# calls f() directly, bypassing ThreadPool::install() entirely, instead of routing through any
+# capped pool). apply-harness applies just the former so the bench exists for both the serial
+# baseline and the fixed build; apply-fix applies the resize.rs change on top, for the fixed
+# build only. This reproduces the "S (serial/main) vs E (this candidate's fix)" comparison from
+# RESULT.md - which found the fix does NOT recover Nearest's serial performance, landing in the
+# same overhead band as the already-regressed ungated case instead.
+test: clone apply-harness bench-serial apply-fix bench-fixed
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-harness:
+    cd clone && git apply --exclude='src/imageops/resize.rs' "{{justfile_directory()}}/patch.diff"
+
+apply-fix:
+    cd clone && git apply --include='src/imageops/resize.rs' "{{justfile_directory()}}/patch.diff"
+
+# "Serial" here means pic-scale-safe/rayon forwarding has no effect. Note this needs
+# --no-default-features (not just omitting --features rayon): the image crate's own
+# `default = ["rayon", "default-formats"]` enables its "rayon" feature (and therefore the
+# forward applied by apply-harness) even on a plain `cargo bench` with no flags at all.
+bench-serial:
+    @echo "=== S: true serial (main today, no pic-scale-safe/rayon forward) - Nearest at 400x300->32x24 ==="
+    cd clone && cargo bench --bench imageops --no-default-features --features default-formats -- "dynamic_resize/DynamicImage::resize_exact 400x300->32x24 Nearest"
+
+# "Fixed" here means the rayon feature IS enabled (so the forward hunk takes effect) and
+# resize.rs's Nearest branch skips the pool entirely - this is this candidate's actual change.
+bench-fixed:
+    @echo "=== E: this candidate's fix (Nearest skips the pool, calls f() directly) - Nearest at 400x300->32x24 ==="
+    cd clone && cargo bench --bench imageops --features rayon -- "dynamic_resize/DynamicImage::resize_exact 400x300->32x24 Nearest"
+
+clean:
+    rm -rf clone

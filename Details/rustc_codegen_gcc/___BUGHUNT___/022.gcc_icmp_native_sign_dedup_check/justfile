@@ -1,0 +1,35 @@
+# Self-contained reproduction for candidate 022 (gcc_icmp_native_sign_dedup_check).
+#
+# Status: Not reproducible - there is no patch.diff (no bug found, no fix needed). `just test`
+# clones a pristine checkout and re-runs the same investigation this candidate's RESULT.md
+# describes: compile-and-run three boundary-value/transmute-based programs through the real
+# backend (scalar/pointer int comparisons, SIMD-vector comparisons, function-pointer ordering
+# comparisons), all via `gcc_icmp`'s native comparison path (src/int.rs), and check every one
+# exits 0 (see repro/run.sh for what each step does).
+#
+# Requires this project's own toolchain to already be buildable in the environment running this
+# (see the upstream project's Readme.md "Quick start" - `./y.sh prepare` needs network access to
+# download a prebuilt libgccjit.so and to fetch rustc-dev components). Not fast: a fresh clone's
+# first `./y.sh prepare && ./y.sh build --sysroot --release` takes a few minutes.
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && cp config.example.toml config.toml
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Runs the full three-program check (scalar/pointer, SIMD, function-pointer comparisons) inside
+# the fresh clone - each program prints its own "... passed" line and exits 0 if gcc_icmp behaves
+# correctly, or panics (non-zero exit) if a comparison gives the wrong result.
+reproduce-before:
+    bash repro/run.sh clone
+
+clean:
+    rm -rf clone

@@ -1,0 +1,89 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# This candidate makes NO source-level change to `image` or `pic-scale-safe` - it only changes
+# the RUSTFLAGS used to build the same, completely unmodified checkout, to check whether an
+# AVX-512-width rebuild changes the vertical-convolution tap loop's codegen further than
+# candidate 044's AVX2 rebuild (which found 256-bit ymm ops, up from 128-bit SSE2 xmm ops in the
+# default build). There is correspondingly no `patch.diff` in this folder - see RESULT.md's
+# "Does it change behavior/output?" section.
+# `just test` builds the unmodified crate twice (default RUSTFLAGS vs.
+# `-C target-feature=+avx512f,+avx512bw,+avx512vl`) and benches both, using the same bench group
+# shape candidate 044 added (written here directly via a heredoc, not via patch.diff, since it's
+# measurement tooling, not a fix - same convention candidate 044 used for its own temporary bench).
+#
+# Requires an AVX-512-capable host (avx512f/avx512bw/avx512vl) to see the win reproduced; check
+# with `lscpu | grep avx512`. The whole point of this candidate is that this optimization is NOT
+# proposed as a portable default (see RESULT.md), so it must be opted into explicitly, here via
+# RUSTFLAGS, same as a real user would.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+test: clone add-bench build-baseline build-avx512 bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Appends a minimal criterion bench group exercising DynamicImage::resize_exact (the code path
+# that delegates to pic-scale-safe's fixed_point_vertical.rs). Kept out of patch.diff on purpose
+# (measurement tooling, not the fix under test).
+add-bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cat >> clone/benches/imageops.rs <<'RUST'
+
+    use criterion::BatchSize;
+
+    pub fn bench_resize_avx512_check(c: &mut Criterion) {
+        let src = ImageBuffer::from_fn(4032, 3024, |x, y| {
+            Rgb([x as u8, (y / 8) as u8, ((x * 13 + y) % 256) as u8])
+        });
+        let src_dyn = DynamicImage::from(src);
+
+        let mut group = c.benchmark_group("avx512_check_resize");
+        let c = group.warm_up_time(Duration::from_secs(1)).sample_size(10);
+        c.bench_function("resize_exact 4032x3024->400x300 Lanczos3", |b| {
+            b.iter_batched(
+                || src_dyn.clone(),
+                |mut img| {
+                    img.resize_exact(400, 300, FilterType::Lanczos3);
+                    black_box(img);
+                },
+                BatchSize::LargeInput,
+            )
+        });
+    }
+
+    criterion_group!(avx512_check, bench_resize_avx512_check);
+    RUST
+    # Register the new group alongside the existing ones in the same criterion_main! call.
+    sed -i 's/^criterion_main!(\(.*\));$/criterion_main!(\1, avx512_check);/' clone/benches/imageops.rs
+
+build-baseline:
+    cd clone && cargo build --release --bench imageops
+    @echo "(baseline binary built with default RUSTFLAGS, under clone/target/release)"
+
+build-avx512:
+    cd clone && RUSTFLAGS="-C target-feature=+avx512f,+avx512bw,+avx512vl" CARGO_TARGET_DIR=target-avx512 cargo build --release --bench imageops
+    @echo "(AVX-512 binary built with RUSTFLAGS=-C target-feature=+avx512f,+avx512bw,+avx512vl, under clone/target-avx512/release)"
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    baseline_bin=$(ls -t clone/target/release/deps/imageops-* | grep -v '\.d$' | head -1)
+    avx512_bin=$(ls -t clone/target-avx512/release/deps/imageops-* | grep -v '\.d$' | head -1)
+    # taskset -c 0: a single unpinned criterion run can be swamped by unrelated system load
+    # (observed directly in candidate 044's own justfile - reproduced with taskset pinning
+    # after an unpinned run looked artificially small under load).
+    echo "=== baseline (default RUSTFLAGS, SSE2-only), pinned to core 0 ==="
+    taskset -c 0 "$baseline_bin" --bench "avx512_check_resize/resize_exact 4032x3024->400x300 Lanczos3" --exact
+    echo "=== AVX-512 (-C target-feature=+avx512f,+avx512bw,+avx512vl), pinned to core 0 ==="
+    taskset -c 0 "$avx512_bin" --bench "avx512_check_resize/resize_exact 4032x3024->400x300 Lanczos3" --exact
+
+clean:
+    rm -rf clone

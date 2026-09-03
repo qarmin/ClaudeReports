@@ -1,0 +1,74 @@
+diff --git a/internal/backends/qt/Cargo.toml b/internal/backends/qt/Cargo.toml
+index 4e8f55869..6b393ef2d 100644
+--- a/internal/backends/qt/Cargo.toml
++++ b/internal/backends/qt/Cargo.toml
+@@ -17,6 +17,8 @@ links = "i_slint_backend_qt"                   # just so we can pass metadata to
+ rtti = ["i-slint-core/rtti"]
+ default = ["enable"]
+ enable = ["dep:cpp", "dep:lyon_path", "dep:pin-project", "dep:pin-weak", "dep:qttypes", "dep:cpp_build"]
++# TEMPORARY, for candidate 116's bench probe only - reverted before the session ends.
++bench-probe = []
+ 
+ [lib]
+ path = "lib.rs"
+diff --git a/internal/backends/qt/lib.rs b/internal/backends/qt/lib.rs
+index 8140b0781..aa6fc88f4 100644
+--- a/internal/backends/qt/lib.rs
++++ b/internal/backends/qt/lib.rs
+@@ -34,6 +34,12 @@
+ mod qt_widgets;
+ #[cfg(not(no_qt))]
+ mod qt_window;
++// TEMPORARY, for candidate 116's bench probe only - reverted before the session ends.
++#[cfg(all(not(no_qt), feature = "bench-probe"))]
++pub use qt_window::{
++    BenchProbeDirectImageCache, bench_probe_cached_image_to_pixmap, bench_probe_image_to_pixmap,
++    bench_probe_init, bench_probe_new_direct_image_cache,
++};
+ 
+ mod accessible_generated;
+ mod key_generated;
+diff --git a/internal/backends/qt/qt_window.rs b/internal/backends/qt/qt_window.rs
+index 5be412f..6775d14 100644
+--- a/internal/backends/qt/qt_window.rs
++++ b/internal/backends/qt/qt_window.rs
+@@ -1651,6 +1651,39 @@ pub(crate) fn image_to_pixmap(
+     shared_image_buffer_to_pixmap(&image.render_to_buffer(source_size)?)
+ }
+ 
++// TEMPORARY, for candidate 116's bench probe only - reverted before the session ends, never
++// shipped. Lets an out-of-crate probe binary bring up QApplication before calling image_to_pixmap
++// directly.
++#[cfg(feature = "bench-probe")]
++pub fn bench_probe_init() {
++    cpp! { unsafe [] { ensure_initialized(false); } }
++}
++
++#[cfg(feature = "bench-probe")]
++pub type BenchProbeDirectImageCache = RefCell<Option<DirectImageCacheEntry>>;
++
++#[cfg(feature = "bench-probe")]
++pub fn bench_probe_new_direct_image_cache() -> BenchProbeDirectImageCache {
++    Default::default()
++}
++
++#[cfg(feature = "bench-probe")]
++pub fn bench_probe_image_to_pixmap(
++    image: &ImageInner,
++    source_size: Option<euclid::Size2D<u32, PhysicalPx>>,
++) -> Option<qttypes::QPixmap> {
++    image_to_pixmap(image, source_size)
++}
++
++#[cfg(feature = "bench-probe")]
++pub fn bench_probe_cached_image_to_pixmap(
++    cache: &BenchProbeDirectImageCache,
++    image: &ImageInner,
++    source_size: Option<euclid::Size2D<u32, PhysicalPx>>,
++) -> Option<qttypes::QPixmap> {
++    cached_image_to_pixmap(cache, image, source_size)
++}
++
+ /// Same per-source caching `femtovg`'s `TextureCache`/skia's `cached_image` give their own
+ /// `draw_image_direct`: reuse the last rasterized `QPixmap` when both the source's `ImageCacheKey`
+ /// and the requested (scalable-source) target size still match, otherwise rasterize and store.

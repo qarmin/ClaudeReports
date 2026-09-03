@@ -1,0 +1,42 @@
+diff --git a/vello_encoding/src/image_cache.rs b/vello_encoding/src/image_cache.rs
+index 8b827d89..163509e4 100644
+--- a/vello_encoding/src/image_cache.rs
++++ b/vello_encoding/src/image_cache.rs
+@@ -98,6 +98,14 @@ impl ImageCache {
+         }
+     }
+ 
++    pub(crate) fn images_for_patchless_resolve(&self) -> Images<'_> {
++        if self.map.is_empty() {
++            Images::default()
++        } else {
++            self.images()
++        }
++    }
++
+     pub(crate) fn bump_size(&mut self) -> bool {
+         let mut new_size = self.atlas.size().width * 2;
+         while new_size <= self.max_size {
+diff --git a/vello_encoding/src/resolve.rs b/vello_encoding/src/resolve.rs
+index 2513a216..cc31848f 100644
+--- a/vello_encoding/src/resolve.rs
++++ b/vello_encoding/src/resolve.rs
+@@ -187,8 +187,17 @@ impl Resolver {
+     ) -> (Layout, Ramps<'a>, Images<'a>) {
+         let resources = &encoding.resources;
+         if resources.patches.is_empty() {
++            // This resolve has no late-bound image patches, so it has no image uploads. If
++            // previous resolves left resident images in the cache, keep reporting the atlas
++            // size so the renderer can reuse the GPU atlas those clean images sample from,
++            // instead of freeing it as if it were no longer needed.
++            self.image_cache.begin_resolve();
+             let layout = resolve_solid_paths_only(encoding, packed);
+-            return (layout, Ramps::default(), Images::default());
++            return (
++                layout,
++                Ramps::default(),
++                self.image_cache.images_for_patchless_resolve(),
++            );
+         }
+         let patch_sizes = self.resolve_patches(encoding);
+         self.resolve_pending_images();

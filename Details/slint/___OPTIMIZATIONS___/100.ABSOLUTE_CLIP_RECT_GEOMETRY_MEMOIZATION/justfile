@@ -1,0 +1,34 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench at a few depths.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Standalone bench crate in ./bench, depending on `{ path = "../clone/api/rs/slint" }`.
+# Depths above ~14 are exponential pre-patch (O(2^depth)) - keep `iters` small for the larger
+# ones or a baseline run can take minutes. See RESULT.md for the numbers this produced.
+bench:
+    cd bench && cargo build --release
+    ./bench/target/release/clip_chain_bench 5 20
+    ./bench/target/release/clip_chain_bench 12 20
+    ./bench/target/release/clip_chain_bench 18 10
+    ./bench/target/release/clip_chain_bench 20 6
+
+clean:
+    rm -rf clone bench/target

@@ -1,0 +1,36 @@
+diff --git a/rawler/src/decoders/rw2/v4decompressor.rs b/rawler/src/decoders/rw2/v4decompressor.rs
+index 2d2e2050..6b681464 100644
+--- a/rawler/src/decoders/rw2/v4decompressor.rs
++++ b/rawler/src/decoders/rw2/v4decompressor.rs
+@@ -1,4 +1,6 @@
+-use crate::{bits::LEu16, decoders::*, decompressors::decompress_strips_fn, pumps::BitPump};
++use byteorder::{ByteOrder, LittleEndian};
++
++use crate::{decoders::*, decompressors::decompress_strips_fn, pumps::BitPump};
+ 
+ pub(crate) fn decode_panasonic_v4(buf: &[u8], width: usize, height: usize, split: bool, dummy: bool) -> PixU16 {
+   decompress_strips_fn(
+@@ -9,7 +11,9 @@ pub(crate) fn decode_panasonic_v4(buf: &[u8], width: usize, height: usize, split
+     &(|out: &mut [u16], _strip, row| {
+       let skip = ((width * row * 9) + (width / 14 * 2 * row)) / 8;
+       let blocks = skip / 0x4000;
+-      let src = &buf[blocks * 0x4000..];
++      // `blocks * 0x4000` is derived from `width`/`row` alone, with no relation to the actual
++      // length of `buf` - a truncated/malformed file can make this exceed `buf.len()`.
++      let src = buf.get(blocks * 0x4000..).unwrap_or(&[]);
+       let mut pump = BitPumpPanasonic::new(src, split);
+       for _ in 0..(skip % 0x4000) {
+         pump.get_bits(8);
+@@ -76,7 +80,11 @@ impl<'a> BitPump for BitPumpPanasonic<'a> {
+     if self.split {
+       byte = (byte + 0x4000 - 0x2008) % 0x4000;
+     }
+-    let bits = LEu16(self.buffer, byte as usize + self.pos - 0x4000) as u32;
++    // `byte + self.pos - 0x4000` walks past `self.buffer`'s end for a truncated/malformed
++    // file (see `src` in `decode_panasonic_v4` above) - treat missing bytes as zero rather
++    // than panicking, same as a real dcraw-style decoder reading past a padded buffer.
++    let idx = byte as usize + self.pos - 0x4000;
++    let bits = self.buffer.get(idx..idx + 2).map(LittleEndian::read_u16).unwrap_or(0) as u32;
+     (bits >> ((self.nbits - num) & 7)) & (0x0ffffffffu32 >> (32 - num))
+   }
+ 

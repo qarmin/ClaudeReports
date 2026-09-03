@@ -1,0 +1,70 @@
+# Self-contained reproduction for candidate 006 (BGRA8->RGBA8 channel swap SIMDification).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff bundles two things: (1) a new Criterion bench group (`pixmap::bgra_to_rgba`) added
+# to the project's own already-tracked `sparse_strips/vello_bench` crate, needed to reach/measure
+# the code path, and (2) the actual fix in `sparse_strips/vello_common/src/paint.rs`. Both are
+# real diffs against the project's own source (vello_bench is a normal in-repo crate, not an
+# untracked harness), so a single patch.diff covers both and `just test` can build+bench for real
+# from a fresh clone.
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    # -c filter.lfs.*: this repo's .gitattributes wires up Git LFS for reference PNG snapshots
+    # (used only by vello_sparse_tests, not touched by this candidate); on a machine without
+    # git-lfs installed, a plain clone hard-fails at checkout instead of just leaving pointer
+    # files in place. Disabling the filter here matches what happens automatically for anyone
+    # who already has git-lfs configured with `git lfs install --skip-smudge` and is harmless
+    # for this candidate's own build/bench, which never reads those assets.
+    git -c filter.lfs.required=false -c filter.lfs.smudge= -c filter.lfs.process= clone --no-checkout {{repo_url}} clone
+    cd clone && git config filter.lfs.required false && git config filter.lfs.smudge "" && git config filter.lfs.process "" && git checkout {{base_commit}}
+
+# Build the BASELINE bench binary (unmodified scalar swap) before applying the patch.
+build-baseline:
+    cd clone && cargo build --release -p vello_bench --benches
+    cp "$(find clone/target/release/deps -maxdepth 1 -iname 'main-*' ! -name '*.d' | head -1)" ./bin_baseline_unpatched
+    # bin_baseline_unpatched has no bgra_to_rgba bench group yet (added by the patch below);
+    # this recipe exists only so `apply` + `build-patched` below produce a fair single build.
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Build the PATCHED bench binary (SIMD swap + the new bgra_to_rgba bench group) after applying.
+build-patched:
+    cd clone && cargo build --release -p vello_bench --benches
+    cp "$(find clone/target/release/deps -maxdepth 1 -iname 'main-*' ! -name '*.d' | head -1)" ./bin_patched
+
+# There is no meaningful "before" run for the new bench group (it doesn't exist before the
+# patch is applied, since it's part of the patch itself) - this reproduces the SIMD-vs-scalar
+# comparison from RESULT.md by re-deriving a scalar-only binary via a tiny local revert of just
+# the paint.rs hunk, so both binaries share the exact same bench harness.
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "=== patched (SIMD swap) ==="
+    ./bin_patched --bench 'pixmap/bgra_to_rgba' --warm-up-time 1 --measurement-time 2
+    echo ""
+    echo "=== reverting only the paint.rs fix to get a scalar-swap comparison binary ==="
+    cd clone
+    git diff --no-color -- sparse_strips/vello_common/src/paint.rs > /tmp/vello006_paint_only.diff
+    git checkout -- sparse_strips/vello_common/src/paint.rs
+    cargo build --release -p vello_bench --benches
+    cp "$(find target/release/deps -maxdepth 1 -iname 'main-*' ! -name '*.d' | head -1)" ../bin_baseline_scalar
+    git apply /tmp/vello006_paint_only.diff
+    cd ..
+    echo "=== baseline (scalar swap, same bench harness) ==="
+    ./bin_baseline_scalar --bench 'pixmap/bgra_to_rgba' --warm-up-time 1 --measurement-time 2
+    echo ""
+    echo "Compare the two 'time:' lines above. See RESULT.md for this candidate's own"
+    echo "interleaved, multi-repeat measurement methodology and noise-floor discussion -"
+    echo "single runs on a shared/loaded machine can easily swing 30-60% either way."
+
+clean:
+    rm -rf clone bin_baseline_unpatched bin_baseline_scalar bin_patched

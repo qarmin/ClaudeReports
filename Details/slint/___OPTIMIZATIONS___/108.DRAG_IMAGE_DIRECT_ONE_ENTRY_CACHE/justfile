@@ -1,0 +1,59 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# Note: fully reproducing the bench additionally needs `perf_test/` copied in manually next to
+# `clone/` - it is untracked in the main slint repo's git history (same caveat as candidate
+# 107.TEXTURE_CACHE_DRAIN_FULL_WALK's justfile), so `just clone` alone will not fetch it. This
+# candidate added a `--drag-probe` flag (a `DragArea` always in `main.slint`'s tree, gated by
+# `enabled:`) plus a `DragProbe` global (`shared.slint`) so the harness can start and hold an
+# in-window drag - the only way to reach the uncached `draw_image_direct` fallback repeatedly.
+# Full copies of the touched files are in `perf_test_fixes/`; drop them into your `perf_test/src/`
+# and `perf_test/ui/` before building if your copy predates this candidate.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Needs a display or Xvfb (`LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a`), since this candidate is
+# femtovg-specific and `draw_image_direct` has no headless (`--bench`, software-renderer) path -
+# `--drag-probe` only works with `--frames`/a real winit window (see `frames.rs`).
+bench:
+    # NOTE: the perf_test_fixes/ overlay below is now redundant - ../harness/perf_test
+    # (copied in by clone: above) is the current, cumulative perf_test source, which
+    # already includes this candidate's scene/flag additions plus everything added by
+    # later candidates. Overlaying an old snapshot on top would silently regress it, so
+    # the lines that used to do that were removed.
+    cd clone/perf_test && cargo build --release --no-default-features --features femtovg,software
+    @echo "A large (2048px) drag image, redrawn every frame while the drag stays in flight:"
+    LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a \
+        ./clone/target/release/perf_test --backend winit --renderer femtovg \
+        --mode images --drag-probe --image-size 2048 --frames 40 --size 800x600
+    @echo "For the paired before/after comparison in RESULT.md: build once per patch.diff"
+    @echo "applied/unapplied into two separate clones, then (from the main project's"
+    @echo "___OPTIMIZATIONS___/tools/, not this folder):"
+    @echo "  RUNS=9 TASKSET=3 paired_femtovg_later_frames.sh <base-bin> <patched-bin> \\"
+    @echo "      --mode images --drag-probe --image-size 2048 --frames 40 --size 800x600"
+
+clean:
+    rm -rf clone

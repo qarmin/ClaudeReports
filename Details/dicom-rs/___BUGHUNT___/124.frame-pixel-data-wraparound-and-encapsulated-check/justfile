@@ -1,0 +1,52 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# This candidate is a verification/deepening of candidate 117
+# (encoding-frame-pixel-data-native-offset-overflow), not a distinct new bug - see RESULT.md.
+# `117-fix.patch` is a verbatim copy of candidate 117's own `patch.diff`, included here only so
+# this folder can independently drive the same before/after cycle; it was not authored by this
+# candidate's own session.
+
+repo_url := "git@github.com:qarmin/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+# Full cycle: clone pristine, prove the pre-117-fix wraparound is real (release) and panics
+# (debug), apply 117's fix, prove the wraparound is gone, and check the encapsulated branch both
+# before and after (expected identical - candidate 117's patch never touches it).
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git fetch origin {{base_commit}} && git checkout {{base_commit}}
+
+# Build+run both standalone repros against the pristine clone.
+#  - `wraparound` (release): should demonstrate a genuine 64-bit wraparound-into-bounds -
+#    prints "WRAPAROUND CONFIRMED", exits 1. `wraparound` (debug): should panic with "attempt to
+#    multiply with overflow" at encoding/src/adapters.rs:272 (same site candidate 117 found).
+#  - `encapsulated_offset_table` (release): should print 4 case results, no panics, exit 0 - and
+#    should print/behave identically whether run before or after `apply` below.
+reproduce-before:
+    cd repro && cargo build --release && cargo build
+    cd repro && ./target/release/wraparound || true
+    cd repro && ./target/debug/wraparound || true
+    cd repro && ./target/release/encapsulated_offset_table
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/117-fix.patch"
+
+# Same repros again, now against the patched clone.
+#  - `wraparound` (release): should print "OK: no panic, returned None", exit 0.
+#  - `encapsulated_offset_table`: unaffected, same output as before `apply`.
+reproduce-after:
+    cd repro && cargo build --release
+    cd repro && ./target/release/wraparound || true
+    cd repro && ./target/release/encapsulated_offset_table
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

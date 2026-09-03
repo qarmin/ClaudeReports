@@ -1,0 +1,54 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into ./clone
+# (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# The bug is in fuzz/resize_plane_u16/resize_plane_u16.rs itself (a harness argument-passing
+# mistake, not a src/ bug), so repro/ embeds the exact call-site logic directly (fuzz_target!'s
+# libfuzzer-sys macro can't be invoked outside a libFuzzer-linked driver binary) and depends on the
+# real pic-scale library crate cloned here to exercise the real public API. `verify-source-*`
+# recipes grep the actual cloned fuzz harness file to confirm repro/'s embedded call-site logic
+# still matches what's really in fuzz/resize_plane_u16/resize_plane_u16.rs at each step, catching
+# drift between this repro and the real source instead of silently trusting a copy.
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone verify-source-before reproduce-before apply verify-source-after reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Confirms the pristine clone's real harness source still has the bug repro/ embeds: dst_width
+# used for BOTH the 3rd and 4th positional arguments.
+verify-source-before:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    grep -A1 "data.dst_width as usize," clone/fuzz/resize_plane_u16/resize_plane_u16.rs | head -2 | tail -1 | grep -q "data.dst_width as usize,"
+    echo "verified: clone's real fuzz/resize_plane_u16/resize_plane_u16.rs still passes dst_width for both args"
+
+# Runs the standalone repro - decodes a real libFuzzer-kept corpus file (fuzzer_found_input.bin)
+# via the real Arbitrary derive, then calls both the exact buggy and exact fixed call-site shapes
+# through the real pic-scale public API (Scaler::plan_planar_resampling16 / resample), printing
+# the actual target.size() each reaches.
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Confirms the patched clone's real harness source now uses dst_height for the 4th argument.
+verify-source-after:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    grep -A1 "data.dst_width as usize," clone/fuzz/resize_plane_u16/resize_plane_u16.rs | head -2 | tail -1 | grep -q "data.dst_height as usize,"
+    echo "verified: clone's real fuzz/resize_plane_u16/resize_plane_u16.rs now passes dst_height correctly"
+
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target

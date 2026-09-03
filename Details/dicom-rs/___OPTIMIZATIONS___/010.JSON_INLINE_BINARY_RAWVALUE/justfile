@@ -1,0 +1,52 @@
+# Self-contained reproduction for candidate 010.JSON_INLINE_BINARY_RAWVALUE.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern). Self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+#
+# patch.diff includes a Cargo.lock bump (serde_json 1.0.150 -> 1.0.151) needed for
+# RawValue::from_string_unchecked, within the crate's already-declared "1.0.96" requirement.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cp "{{justfile_directory()}}/testdata/liver.dcm" clone/
+    cp "{{justfile_directory()}}/testdata/color3d_jpeg_baseline.dcm" clone/
+    echo "=== bit-exactness check ==="
+    for f in liver color3d_jpeg_baseline; do
+        ./bin_baseline json-encode "clone/$f.dcm" 1 2>/dev/null | grep -oE 'checksum=\S+' > "/tmp/candidate010_${f}_baseline.txt"
+        ./bin_patched json-encode "clone/$f.dcm" 1 2>/dev/null | grep -oE 'checksum=\S+' > "/tmp/candidate010_${f}_patched.txt"
+        cmp "/tmp/candidate010_${f}_baseline.txt" "/tmp/candidate010_${f}_patched.txt" && echo "$f: bit-exact" || echo "$f: DIFFERS (unexpected)"
+    done
+    echo "=== liver.dcm (large InlineBinary, above threshold) - expect a ~11-12% win ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- json-encode clone/liver.dcm 300
+    echo "=== color3d (no/tiny InlineBinary, below threshold) - expect a small ~5% regression (unexplained, see RESULT.md) ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- json-encode clone/color3d_jpeg_baseline.dcm 300
+
+clean:
+    rm -rf clone bin_baseline bin_patched

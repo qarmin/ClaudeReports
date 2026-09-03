@@ -1,0 +1,68 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 3e597d1f..5f9b0c8f 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2607,9 +2607,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "serde_json"
+-version = "1.0.150"
++version = "1.0.151"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
++checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+ dependencies = [
+  "indexmap",
+  "itoa",
+diff --git a/json/Cargo.toml b/json/Cargo.toml
+index 952b20a5..252d858c 100644
+--- a/json/Cargo.toml
++++ b/json/Cargo.toml
+@@ -16,7 +16,7 @@ dicom-dictionary-std = { path = "../dictionary-std", version = "0.10" }
+ dicom-object = { path = "../object", version = "0.10" }
+ num-traits = "0.2.15"
+ serde = { version = "1.0.164", features = ["derive"] }
+-serde_json = { version = "1.0.96", features = ["preserve_order"] }
++serde_json = { version = "1.0.96", features = ["preserve_order", "raw_value"] }
+ tracing = "0.1.34"
+ 
+ [dev-dependencies]
+diff --git a/json/src/ser/value.rs b/json/src/ser/value.rs
+index c8f9cd0b..71cb895e 100644
+--- a/json/src/ser/value.rs
++++ b/json/src/ser/value.rs
+@@ -160,7 +160,33 @@ impl Serialize for InlineBinary<'_> {
+         let value = self.0.to_bytes();
+         use base64::Engine;
+         let str = base64::engine::general_purpose::STANDARD.encode(value);
+-        serializer.serialize_str(&str)
++
++        // Below this length, the extra allocation/boxing the RawValue path below needs costs
++        // more than the escape scan it avoids (measured: a real, small regression on tiny/absent
++        // inline binary content) - only worth it once there's enough content for the per-byte
++        // escape check to dominate.
++        const RAW_VALUE_MIN_LEN: usize = 64;
++        if str.len() < RAW_VALUE_MIN_LEN {
++            return serializer.serialize_str(&str);
++        }
++
++        // The base64 alphabet (`A-Za-z0-9+/=`) never contains a byte that needs JSON escaping
++        // (no quote, backslash, or control character), so wrapping it in quotes already
++        // produces a single well-formed JSON string value with no surrounding whitespace -
++        // handing that to serde_json as a `RawValue` lets it copy the bytes directly into the
++        // output instead of re-scanning every byte through `serialize_str`'s generic per-byte
++        // escape check, a real, measured hot spot for sizeable inline binary values. Using the
++        // `_unchecked` constructor (skipping `RawValue::from_string`'s own re-parse, which would
++        // otherwise cost about as much as the scan being avoided) is sound here specifically
++        // because the base64 alphabet guarantee above is unconditional, not data-dependent.
++        let mut raw = String::with_capacity(str.len() + 2);
++        raw.push('"');
++        raw.push_str(&str);
++        raw.push('"');
++        // SAFETY: `raw` is exactly `"` + base64-alphabet-only bytes + `"`, which is always a
++        // single well-formed JSON string value with no leading/trailing whitespace.
++        let raw_value = unsafe { serde_json::value::RawValue::from_string_unchecked(raw) };
++        raw_value.serialize(serializer)
+     }
+ }
+ 

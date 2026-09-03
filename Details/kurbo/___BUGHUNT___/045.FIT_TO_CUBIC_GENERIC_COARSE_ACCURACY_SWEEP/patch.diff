@@ -1,0 +1,70 @@
+diff --git a/kurbo/src/fit.rs b/kurbo/src/fit.rs
+index 1f739cb..39def30 100644
+--- a/kurbo/src/fit.rs
++++ b/kurbo/src/fit.rs
+@@ -318,10 +318,24 @@ impl CurveDist {
+         Some(max_err2)
+     }
+ 
+-    fn eval_dist(&mut self, source: &impl ParamCurveFit, c: CubicBez, acc2: f64) -> Option<f64> {
++    fn eval_dist(
++        &mut self,
++        source: &impl ParamCurveFit,
++        c: CubicBez,
++        acc2: f64,
++        long_arm: bool,
++    ) -> Option<f64> {
+         // Always compute cheaper distance, hoping for early-out.
+         let ray_dist = self.eval_ray(c, acc2)?;
+-        if !self.spicy {
++        // `eval_ray` casts one ray per source sample and takes the *nearest*
++        // intersection with the candidate; a candidate with a long control arm can
++        // swing away from the chord and back, crossing every ray close to the right
++        // point while still being visibly the wrong shape in between samples. `spicy`
++        // only reflects the *source* curve's own tangent variation, so a smooth
++        // (non-spicy) source can still produce such a candidate - fall back to the
++        // more expensive but more robust arc-length check whenever the *candidate*
++        // itself has a long control arm, not only when the source is spicy.
++        if !self.spicy && !long_arm {
+             return Some(ray_dist);
+         }
+         if self.arcparams.is_empty() {
+@@ -344,6 +358,18 @@ impl CurveDist {
+ const D_PENALTY_ELBOW: f64 = 0.65;
+ const D_PENALTY_SLOPE: f64 = 2.0;
+ 
++/// A control arm length (in units of chord length) beyond which a candidate cubic is
++/// rejected outright.
++///
++/// This bounds how expensive `eval_dist`'s more thorough arc-length check (now run for
++/// every candidate whose arm exceeds `D_PENALTY_ELBOW`, see `eval_dist`) can get: without
++/// this cap, `cubic_fit`'s quartic solver can occasionally return roots with enormous arm
++/// lengths (in the hundreds, in units of chord length), for which `CurveDist::eval_arc`'s
++/// `arclen`/`inv_arclen` calls on the resulting wildly-shaped cubic become considerably
++/// more expensive to converge. Chosen well above the `0`-`3` range observed for ordinary
++/// legitimate candidates.
++const MAX_ARM_LEN: f64 = 10.0;
++
+ /// Try fitting a line.
+ ///
+ /// This is especially useful for very short chords, in which the standard
+@@ -439,7 +465,8 @@ pub fn fit_to_cubic(
+     let mut best_err2 = None;
+     for (cand, d0, d1) in cubic_fit(th0, th1, unit_area, mx) {
+         let c = aff * cand;
+-        if let Some(err2) = curve_dist.eval_dist(source, c, acc2) {
++        let long_arm = d0 > D_PENALTY_ELBOW || d1 > D_PENALTY_ELBOW;
++        if let Some(err2) = curve_dist.eval_dist(source, c, acc2, long_arm) {
+             fn scale_f(d: f64) -> f64 {
+                 1.0 + (d - D_PENALTY_ELBOW).max(0.0) * D_PENALTY_SLOPE
+             }
+@@ -531,8 +558,7 @@ fn cubic_fit(th0: f64, th1: f64, area: f64, mx: f64) -> ArrayVec<(CubicBez, f64,
+             } else {
+                 (0.0, s0 / s01)
+             };
+-            // We could implement a maximum d value here.
+-            if d0 >= 0.0 && d1 >= 0.0 {
++            if d0 >= 0.0 && d1 >= 0.0 && d0 <= MAX_ARM_LEN && d1 <= MAX_ARM_LEN {
+                 Some((
+                     CubicBez::new(
+                         (0.0, 0.0),

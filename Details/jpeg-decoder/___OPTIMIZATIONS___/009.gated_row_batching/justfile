@@ -1,0 +1,55 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - the one exception is the shared bench_decode harness, copied in from
+# ../harness/bench_decode (see README.md's "Instrumentation added for this workspace" and
+# SKILL.md's "Bench harnesses: grow a few, don't multiply" - this candidate reuses the same
+# canonical harness every other candidate in ___OPTIMIZATIONS___ uses rather than duplicating
+# it). That relaxes "postable as a single folder with zero other setup" to "self-contained given
+# the whole ___OPTIMIZATIONS___ folder" - see README.md shape 3.
+#
+# `just test` clones jpeg-decoder at base_commit, builds a BASELINE bench_decode binary, applies
+# patch.diff, builds a PATCHED bench_decode binary, then runs both against all 4 workload images
+# so the reader doesn't have to reproduce the comparison by hand.
+
+repo_url := "https://github.com/image-rs/jpeg-decoder.git"
+base_commit := "eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c"
+harness_dir := "../harness/bench_decode"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/bench_decode
+    sed -i 's#path = "\.\./\.\./\.\."#path = ".."#' clone/bench_decode/Cargo.toml
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/bench_decode && cargo +stable build --release
+    cp clone/bench_decode/target/release/bench_decode ./bin_baseline
+
+build-patched:
+    cd clone/bench_decode && cargo +stable build --release
+    cp clone/bench_decode/target/release/bench_decode ./bin_patched
+
+# Runs each image once per binary (30 iters each, bench_decode's default) - for the full paired
+# RUNS>=9, two-batch comparison this candidate's RESULT.md is based on, use
+# ../tools/paired.sh bin_baseline bin_patched -- clone/benches/<image>.jpg directly.
+bench:
+    @echo "=== baseline (before patch) ==="
+    ./bin_baseline clone/benches/tower.jpg
+    ./bin_baseline clone/benches/tower_progressive.jpg
+    ./bin_baseline clone/benches/tower_grayscale.jpg
+    ./bin_baseline clone/benches/large_image.jpg
+    @echo "=== patched (after patch) ==="
+    ./bin_patched clone/benches/tower.jpg
+    ./bin_patched clone/benches/tower_progressive.jpg
+    ./bin_patched clone/benches/tower_grayscale.jpg
+    ./bin_patched clone/benches/large_image.jpg
+
+clean:
+    rm -rf clone bin_baseline bin_patched

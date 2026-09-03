@@ -1,0 +1,45 @@
+# Self-contained reproduction/differential-testing harness for this candidate.
+#
+# Not a crash/panic repro: `repro/` decodes tests/images/webp/extended_images/anim.webp's frame
+# index 1 (0-indexed) through image's real public streaming-reader entry point, once against
+# whichever `image-webp` version the crate is built with, and diffs it against two baked-in PNGs:
+# this repo's own checked-in reference, and a trusted third-party reference (Python
+# Pillow/libwebp's own independent decode of the same frame, captured once during this
+# candidate's investigation and shipped alongside this justfile).
+#
+# `reproduce-before` builds against the pristine pinned `image-webp 0.2.4` (matches the checked-in
+# reference exactly, diverges sharply from the trusted third-party reference). `reproduce-after`
+# swaps in `Cargo.patched.toml` (a `[patch.crates-io]` override to the upstream git rev containing
+# image-rs/image-webp#171/#178/#179) and re-runs - it now matches the trusted third-party
+# reference almost exactly (0 alpha mismatches, max rgb diff of 1 for genuinely visible pixels)
+# and diverges from this repo's own checked-in reference instead. That is the demonstration: the
+# checked-in reference PNG is stale, not PR #171.
+#
+# No patch.diff: there is nothing to fix in this repo's own source (no in-repo WebP compositing
+# code exists to patch - see candidate 014), and this candidate concluded the correct action
+# (regenerating the stale reference PNG) should wait until this repo can actually depend on an
+# image-webp release containing PR #171, rather than being done against today's still-pinned
+# 0.2.4. See RESULT.md.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+test: clone reproduce-before reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run against the pristine clone (pinned image-webp 0.2.4).
+reproduce-before:
+    cd repro && rm -f Cargo.lock && cargo run --release
+
+# Swap in the image-webp-PR171-patched Cargo.toml and re-run.
+reproduce-after:
+    cd repro && cp Cargo.toml Cargo.toml.pristine && cp Cargo.patched.toml Cargo.toml
+    cd repro && rm -f Cargo.lock && cargo run --release
+    cd repro && mv Cargo.toml.pristine Cargo.toml
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock repro/actual_output_frame_index1.png repro/Cargo.toml.pristine

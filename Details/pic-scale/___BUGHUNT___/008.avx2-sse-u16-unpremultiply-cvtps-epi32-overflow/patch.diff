@@ -1,0 +1,89 @@
+diff --git a/src/avx2/alpha_u16.rs b/src/avx2/alpha_u16.rs
+index d159f66..60e6302 100644
+--- a/src/avx2/alpha_u16.rs
++++ b/src/avx2/alpha_u16.rs
+@@ -359,6 +359,16 @@ fn avx_unpremultiply_alpha_rgba_u16_row_avx(in_place: &mut [u16], bit_depth: usi
+             _mm256_shuffle_ps::<{ shuffle(3, 3, 3, 3) }>(alphas_f32, alphas_f32),
+         );
+ 
++        // Clamp before the f32 -> i32 cast: an unclamped product can exceed i32::MAX for a
++        // small-but-nonzero alpha, which makes `_mm256_cvtps_epi32` produce the "integer
++        // indefinite" value (0x80000000). `_mm256_packus_epi32`'s unsigned saturation then
++        // collapses that to 0 instead of max_colors, and the later `_mm256_min_epu16` clamp
++        // (which only clamps from above) can't rescue it once it's already 0.
++        lo0 = _mm256_min_ps(lo0, v_scale_colors);
++        hi0 = _mm256_min_ps(hi0, v_scale_colors);
++        lo1 = _mm256_min_ps(lo1, v_scale_colors);
++        hi1 = _mm256_min_ps(hi1, v_scale_colors);
++
+         let lo_u0 = _mm256_cvtps_epi32(lo0);
+         let hi_u0 = _mm256_cvtps_epi32(hi0);
+ 
+@@ -408,6 +418,10 @@ fn avx_unpremultiply_alpha_rgba_u16_row_avx(in_place: &mut [u16], bit_depth: usi
+             _mm256_shuffle_ps::<{ shuffle(1, 1, 1, 1) }>(alphas_f32, alphas_f32),
+         );
+ 
++        // See the identical clamp in the 32-wide loop above for why this is needed.
++        lo = _mm256_min_ps(lo, v_scale_colors);
++        hi = _mm256_min_ps(hi, v_scale_colors);
++
+         let lo_u = _mm256_cvtps_epi32(lo);
+         let hi_u = _mm256_cvtps_epi32(hi);
+ 
+@@ -451,6 +465,10 @@ fn avx_unpremultiply_alpha_rgba_u16_row_avx(in_place: &mut [u16], bit_depth: usi
+             _mm256_shuffle_ps::<{ shuffle(1, 1, 1, 1) }>(alphas_f32, alphas_f32),
+         );
+ 
++        // See the identical clamp in the 32-wide loop above for why this is needed.
++        lo = _mm256_min_ps(lo, v_scale_colors);
++        hi = _mm256_min_ps(hi, v_scale_colors);
++
+         let lo_u = _mm256_cvtps_epi32(lo);
+         let hi_u = _mm256_cvtps_epi32(hi);
+ 
+diff --git a/src/sse/alpha_u16.rs b/src/sse/alpha_u16.rs
+index c286920..2e5bdd2 100644
+--- a/src/sse/alpha_u16.rs
++++ b/src/sse/alpha_u16.rs
+@@ -40,14 +40,23 @@ fn sse_unpremultiply_row_u16(
+     is_zero_mask: __m128i,
+     a_lo_f: __m128,
+     a_hi_f: __m128,
++    v_max_colors: __m128,
+ ) -> __m128i {
+     unsafe {
+         let zeros = _mm_setzero_si128();
+         let lo = _mm_unpacklo_epi16(x, zeros);
+         let hi = _mm_unpackhi_epi16(x, zeros);
+ 
+-        let new_lo = _mm_cvtps_epi32(_mm_mul_ps(_mm_cvtepi32_ps(lo), a_lo_f));
+-        let new_hi = _mm_cvtps_epi32(_mm_mul_ps(_mm_cvtepi32_ps(hi), a_hi_f));
++        // Clamp before the f32 -> i32 cast: an unclamped product can exceed i32::MAX for a
++        // small-but-nonzero alpha, which makes `_mm_cvtps_epi32` produce the "integer
++        // indefinite" value (0x80000000). `_mm_packus_epi32`'s unsigned saturation then
++        // collapses that to 0 instead of max_colors, and the later `_mm_min_epu16` clamp (which
++        // only clamps from above) can't rescue it once it's already 0.
++        let lo_scaled = _mm_min_ps(_mm_mul_ps(_mm_cvtepi32_ps(lo), a_lo_f), v_max_colors);
++        let hi_scaled = _mm_min_ps(_mm_mul_ps(_mm_cvtepi32_ps(hi), a_hi_f), v_max_colors);
++
++        let new_lo = _mm_cvtps_epi32(lo_scaled);
++        let new_hi = _mm_cvtps_epi32(hi_scaled);
+ 
+         let pixel = _mm_packus_epi32(new_lo, new_hi);
+         _mm_select_si128(is_zero_mask, x, pixel)
+@@ -140,9 +149,12 @@ impl DisassociateAlphaDefault {
+                 _mm_cvtepi32_ps(_mm_unpackhi_epi16(aaaa, _mm_setzero_si128())),
+             );
+ 
+-            let mut new_rrrr = sse_unpremultiply_row_u16(rrrr, is_zero_mask, a_lo_f, a_hi_f);
+-            let mut new_gggg = sse_unpremultiply_row_u16(gggg, is_zero_mask, a_lo_f, a_hi_f);
+-            let mut new_bbbb = sse_unpremultiply_row_u16(bbbb, is_zero_mask, a_lo_f, a_hi_f);
++            let mut new_rrrr =
++                sse_unpremultiply_row_u16(rrrr, is_zero_mask, a_lo_f, a_hi_f, v_max_colors);
++            let mut new_gggg =
++                sse_unpremultiply_row_u16(gggg, is_zero_mask, a_lo_f, a_hi_f, v_max_colors);
++            let mut new_bbbb =
++                sse_unpremultiply_row_u16(bbbb, is_zero_mask, a_lo_f, a_hi_f, v_max_colors);
+ 
+             new_rrrr = _mm_min_epu16(new_rrrr, v_max_test);
+             new_gggg = _mm_min_epu16(new_gggg, v_max_test);

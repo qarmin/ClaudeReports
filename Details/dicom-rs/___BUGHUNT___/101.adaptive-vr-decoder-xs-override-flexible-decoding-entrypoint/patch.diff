@@ -1,0 +1,105 @@
+diff --git a/encoding/src/decode/adaptive_le.rs b/encoding/src/decode/adaptive_le.rs
+index 7ec4c6f8..386939f9 100644
+--- a/encoding/src/decode/adaptive_le.rs
++++ b/encoding/src/decode/adaptive_le.rs
+@@ -311,6 +311,14 @@ where
+     fn decode_tag(&self, source: &mut S) -> Result<Tag> {
+         Decode::decode_tag(self, source)
+     }
++
++    /// Reflects the mode this decoder has locked onto (if any) as of the
++    /// most recently decoded header, since that lock only happens once the
++    /// first non-delimiter element has actually been probed.
++    #[inline]
++    fn is_implicit_vr(&self) -> bool {
++        matches!(self.state.get(), VrState::Implicit)
++    }
+ }
+ 
+ #[cfg(test)]
+diff --git a/encoding/src/decode/implicit_le.rs b/encoding/src/decode/implicit_le.rs
+index 60f0ccb2..f431ff1e 100644
+--- a/encoding/src/decode/implicit_le.rs
++++ b/encoding/src/decode/implicit_le.rs
+@@ -149,6 +149,11 @@ where
+     fn decode_tag(&self, source: &mut S) -> Result<Tag> {
+         Decode::decode_tag(self, source)
+     }
++
++    #[inline]
++    fn is_implicit_vr(&self) -> bool {
++        true
++    }
+ }
+ 
+ #[cfg(test)]
+diff --git a/encoding/src/decode/mod.rs b/encoding/src/decode/mod.rs
+index cc45933b..130cb066 100644
+--- a/encoding/src/decode/mod.rs
++++ b/encoding/src/decode/mod.rs
+@@ -614,6 +614,21 @@ pub trait DecodeFrom<S: ?Sized + Read> {
+ 
+     /// Decode a DICOM attribute tag from the given source.
+     fn decode_tag(&self, source: &mut S) -> Result<Tag>;
++
++    /// Whether the value representation of data elements decoded by this
++    /// decoder (at its current state, for decoders whose mode can change
++    /// mid-stream) is implicit, i.e. not actually present on the wire and
++    /// instead inferred from a data dictionary.
++    ///
++    /// Decoders should override this to return `true` only when the VR in a
++    /// just-decoded header was *not* read from the source. This matters for
++    /// context-dependent dictionary VRs (e.g. `Xs`, resolved based on
++    /// _Pixel Representation_): that resolution should only override the
++    /// decoded VR when it was a dictionary guess, never when the wire itself
++    /// already declared a concrete VR.
++    fn is_implicit_vr(&self) -> bool {
++        false
++    }
+ }
+ 
+ impl<S: ?Sized, T: ?Sized> DecodeFrom<S> for &T
+@@ -632,6 +647,10 @@ where
+     fn decode_tag(&self, source: &mut S) -> Result<Tag> {
+         (**self).decode_tag(source)
+     }
++
++    fn is_implicit_vr(&self) -> bool {
++        (**self).is_implicit_vr()
++    }
+ }
+ 
+ impl<S: ?Sized, T: ?Sized> DecodeFrom<S> for Box<T>
+@@ -647,6 +666,10 @@ where
+         (**self).decode_item_header(source)
+     }
+ 
++    fn is_implicit_vr(&self) -> bool {
++        (**self).is_implicit_vr()
++    }
++
+     fn decode_tag(&self, source: &mut S) -> Result<Tag> {
+         (**self).decode_tag(source)
+     }
+diff --git a/parser/src/stateful/decode.rs b/parser/src/stateful/decode.rs
+index 39e8e856..7af61709 100644
+--- a/parser/src/stateful/decode.rs
++++ b/parser/src/stateful/decode.rs
+@@ -1142,10 +1142,16 @@ where
+     /// The pixel representation affects the VR for several elements.
+     /// Returns `Some(VR::SS)` if the vr needs to be modified to SS. Returns `None`
+     /// if this element is not affected _or_ if we have Unsigned Pixel Representation.
++    ///
++    /// This resolution only applies when the decoder's VR is a dictionary guess
++    /// (implicit VR), never when the transfer syntax carries a concrete, wire-declared
++    /// VR (explicit VR) - in that case the wire's own declaration is authoritative and
++    /// must not be silently overridden.
+     fn determine_vr_based_on_pixel_representation(&self, tag: Tag) -> Option<VR> {
+         use dicom_core::dictionary::DataDictionary;
+ 
+-        if self.signed_pixeldata == Some(true)
++        if self.decoder.is_implicit_vr()
++            && self.signed_pixeldata == Some(true)
+             && StandardDataDictionary.by_tag(tag).map(|e| e.vr) == Some(VirtualVr::Xs)
+         {
+             Some(VR::SS)

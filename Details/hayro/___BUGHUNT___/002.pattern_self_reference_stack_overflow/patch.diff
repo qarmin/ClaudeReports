@@ -1,0 +1,30 @@
+diff --git a/hayro-interpret/src/pattern.rs b/hayro-interpret/src/pattern.rs
+index efe6559c..414ad449 100644
+--- a/hayro-interpret/src/pattern.rs
++++ b/hayro-interpret/src/pattern.rs
+@@ -2,7 +2,7 @@
+ 
+ use crate::cache::Cache;
+ use crate::color::{Color, ColorSpace};
+-use crate::context::{Context, InterpreterCache};
++use crate::context::{Context, InterpreterCache, MAX_NESTED_INTERPRETATION_DEPTH};
+ use crate::device::Device;
+ use crate::font::GlyphRun;
+ use crate::interpret::state::{ActiveTransferFunction, State};
+@@ -228,6 +228,16 @@ impl<'a> TilingPattern<'a> {
+         initial_transform: Affine,
+         is_stroke: bool,
+     ) -> Option<()> {
++        // A pattern's own content stream can fill/stroke with a pattern again (directly or
++        // through a cycle of patterns), and unlike `x_object::form::FormXObject::draw`, nothing
++        // else on this path calls `Context::begin_nested_interpretation` to bound that - without
++        // this check, such a self-referential pattern recurses through `interpret` ->
++        // `fill_path`/`stroke_path` -> `Renderer::set_paint` -> `TilingPattern::interpret` with
++        // no depth limit, overflowing the stack.
++        if self.nesting_depth >= MAX_NESTED_INTERPRETATION_DEPTH {
++            return None;
++        }
++
+         let state = State::new(initial_transform);
+ 
+         let mut context = Context::new_with(

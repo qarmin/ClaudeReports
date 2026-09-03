@@ -1,0 +1,57 @@
+# Self-contained reproduction for candidate 010
+# (wasm_web_start_workers_premature_ready).
+#
+# This is a JS-level bug (in the wasm-web worker bootstrap script shipped by the crate), not a
+# Rust one, so the repro is a real Chromium browser session (via Playwright) driving the actual,
+# unmodified src/pool/pool_impl/wasm_web_start_workers.js file through a real Worker thread - not
+# a hand-simulated message exchange. See repro/README (this file's own comments) for what each
+# piece does.
+#
+# Fill in repo_url/base_commit when this candidate is created (read them once with
+# `git remote get-url origin` / `git rev-parse HEAD` in the main project, at the moment
+# patch.diff is captured) - patch.diff is a diff against that exact commit and may stop applying
+# cleanly once the main branch moves on.
+
+repo_url := "https://github.com/orxfun/orx-parallel.git"
+base_commit := "b9214fbeb714e4bb8f8858676a818cef2f21b097"
+
+target_file := "src/pool/pool_impl/wasm_web_start_workers.js"
+snippet_dir := "repro/public/snippets/orx_parallel-00000000/src/pool/pool_impl"
+
+test: clone install reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+install:
+    cd repro && npm install
+
+# Copying the real file happens inline in each of reproduce-before/reproduce-after below, not as
+# a shared dependency recipe: `just` only runs a given dependency recipe once per invocation even
+# if two recipes both depend on it, which would silently skip re-syncing the now-patched file
+# before reproduce-after in a single `just test` run.
+
+# Runs the real repro against the pristine (buggy) file: real Chromium, real Worker thread, real
+# postMessage ordering. Expect BUG_CONFIRMED=true.
+reproduce-before:
+    cp clone/{{target_file}} {{snippet_dir}}/wasm_web_start_workers.js
+    cp clone/{{target_file}} {{snippet_dir}}/worker_helpers.js
+    cd repro && node run.js
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched file. Expect BUG_CONFIRMED=false (startWorkers()
+# correctly rejects instead of resolving before the worker's entrypoint check has run). The
+# "worker_helpers.js" copy here is the same unrelated-bug workaround noted in RESULT.md's "What's
+# not done" (the file's own code still self-spawns via that stale, pre-rename filename) - it does
+# not alter any of the logic under test.
+reproduce-after:
+    cp clone/{{target_file}} {{snippet_dir}}/wasm_web_start_workers.js
+    cp clone/{{target_file}} {{snippet_dir}}/worker_helpers.js
+    cd repro && node run.js
+
+clean:
+    rm -rf clone

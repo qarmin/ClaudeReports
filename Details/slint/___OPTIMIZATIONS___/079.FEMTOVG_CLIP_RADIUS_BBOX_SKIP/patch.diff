@@ -1,0 +1,77 @@
+diff --git a/internal/renderers/femtovg/itemrenderer.rs b/internal/renderers/femtovg/itemrenderer.rs
+index 6eb271c99..4d30a7337 100644
+--- a/internal/renderers/femtovg/itemrenderer.rs
++++ b/internal/renderers/femtovg/itemrenderer.rs
+@@ -138,6 +138,38 @@ fn rect_to_path(r: PhysicalRect) -> femtovg::Path {
+     rect_with_radius_to_path(r, PhysicalBorderRadius::default())
+ }
+ 
++/// Whether `bounds` (the union of a `Clip` item's children's own bounding rects, in the same
++/// coordinate space as `clip_rect`) reaches into any of the four corner squares that `radius`
++/// actually rounds off. If none of the four do, a rounded clip of `clip_rect`/`radius` and a plain
++/// rectangular clip of `clip_rect` produce identical pixels, since a rounded rect and its bounding
++/// rect only ever differ inside those corner squares.
++fn corner_box_reachable(
++    bounds: LogicalRect,
++    clip_rect: LogicalRect,
++    radius: LogicalBorderRadius,
++) -> bool {
++    let corner_touches = |x: i_slint_core::Coord, y: i_slint_core::Coord, r: i_slint_core::Coord| {
++        r > 0 as i_slint_core::Coord
++            && bounds.intersects(&LogicalRect::new(LogicalPoint::new(x, y), LogicalSize::new(r, r)))
++    };
++    corner_touches(clip_rect.origin.x, clip_rect.origin.y, radius.top_left)
++        || corner_touches(
++            clip_rect.max_x() - radius.top_right,
++            clip_rect.origin.y,
++            radius.top_right,
++        )
++        || corner_touches(
++            clip_rect.max_x() - radius.bottom_right,
++            clip_rect.max_y() - radius.bottom_right,
++            radius.bottom_right,
++        )
++        || corner_touches(
++            clip_rect.origin.x,
++            clip_rect.max_y() - radius.bottom_left,
++            radius.bottom_left,
++        )
++}
++
+ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
+     pub fn global_alpha_transparent(&self) -> bool {
+         self.state.last().unwrap().global_alpha == 0.0
+@@ -587,7 +619,23 @@ fn visit_clip(
+             return RenderingResult::ContinueRenderingWithoutChildren;
+         }
+ 
+-        if !clip_radius.is_zero() {
++        // femtovg can only scissor rectangles, so a non-zero radius normally forces rendering the
++        // children into an offscreen layer and compositing that through a rounded-rect path below.
++        // But if the children's own bounding box never reaches any of the four corners that the
++        // radius actually rounds off, a rounded clip and a plain rectangular one produce identical
++        // pixels - so skip the layer/blit and fall through to the cheap `combine_clip` path instead.
++        let radius_is_reachable = !clip_radius.is_zero()
++            && {
++                let children_bounds = i_slint_core::properties::evaluate_no_tracking(|| {
++                    i_slint_core::item_rendering::item_children_bounding_rect(
++                        item_rc,
++                        &self.window().window_adapter(),
++                    )
++                });
++                corner_box_reachable(children_bounds, clip_rect, clip_radius)
++            };
++
++        if radius_is_reachable {
+             if let Some((layer_origin, layer_image)) =
+                 i_slint_core::item_rendering::render_layer(self, item_rc)
+                 && let Some(layer_image_size) = layer_image.size()
+@@ -626,7 +674,7 @@ fn visit_clip(
+             RenderingResult::ContinueRenderingWithoutChildren
+         } else {
+             self.layer_cache.release(item_rc);
+-            self.combine_clip(clip_rect, clip_radius);
++            self.combine_clip(clip_rect, LogicalBorderRadius::zero());
+             RenderingResult::ContinueRenderingChildren
+         }
+     }

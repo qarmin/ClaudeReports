@@ -1,0 +1,42 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+# GIT_CONFIG_NOSYSTEM/GIT_CONFIG_GLOBAL=/dev/null: this repro only needs Rust source
+# (vello_encoding), not the repo's LFS binary assets - bypassing system/global git config avoids a
+# hard failure on machines that have `filter.lfs.required=true` configured but no `git-lfs` binary
+# installed.
+clone:
+    rm -rf clone
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git clone {{repo_url}} clone
+    cd clone && GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug
+# (panic: "attempt to subtract with overflow" in debug, "index out of bounds" in release).
+reproduce-before:
+    cd repro && cargo run -- 0 || true
+    cd repro && cargo run -- 1 || true
+    cd repro && cargo run -- 2
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer panic for cases 0/1, and
+# should still swap correctly for case 2.
+reproduce-after:
+    cd repro && cargo run -- 0
+    cd repro && cargo run -- 1
+    cd repro && cargo run -- 2
+
+clean:
+    rm -rf clone

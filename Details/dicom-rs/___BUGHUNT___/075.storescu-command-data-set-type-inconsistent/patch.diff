@@ -1,0 +1,45 @@
+diff --git a/storescu/src/main.rs b/storescu/src/main.rs
+index 94e720e1..b8c5b154 100644
+--- a/storescu/src/main.rs
++++ b/storescu/src/main.rs
+@@ -624,11 +624,11 @@ fn store_req_command(
+         DataElement::new(tags::MESSAGE_ID, VR::US, dicom_value!(U16, [message_id])),
+         //priority
+         DataElement::new(tags::PRIORITY, VR::US, dicom_value!(U16, [0x0000])),
+-        // data set type
++        // data set type: 0x0001 = Data Set present (any value != 0x0101)
+         DataElement::new(
+             tags::COMMAND_DATA_SET_TYPE,
+             VR::US,
+-            dicom_value!(U16, [0x0000]),
++            dicom_value!(U16, [0x0001]),
+         ),
+         // affected SOP Instance UID
+         DataElement::new(
+@@ -789,4 +789,26 @@ mod tests {
+     fn verify_cli() {
+         App::command().debug_assert();
+     }
++
++    #[test]
++    fn store_req_command_data_set_type_repro() {
++        use dicom_dictionary_std::tags;
++        let cmd = super::store_req_command("1.2.3", "4.5.6", 1);
++        let value = cmd
++            .element(tags::COMMAND_DATA_SET_TYPE)
++            .unwrap()
++            .to_int::<u16>()
++            .unwrap();
++        // C-STORE-RQ always carries a data set - per PS3.7 Table 6.3-1, only
++        // 0x0101 specifically means "no Data Set present"; any other value
++        // means "Data Set present". storescu's own sibling tools (findscu,
++        // movescu) both use 0x0001 for this exact situation (a command that
++        // carries an accompanying data set) - storescu should be consistent
++        // with them rather than using 0x0000, which some strict SCP
++        // implementations may not accept.
++        assert_ne!(
++            value, 0x0000,
++            "CommandDataSetType should not be 0x0000; should match sibling tools' 0x0001"
++        );
++    }
+ }

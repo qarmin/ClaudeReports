@@ -1,0 +1,50 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate makes NO source-level change to `image` - it is a pure profiling/disassembly
+# investigation (see RESULT.md). There is correspondingly no `patch.diff` in this folder.
+#
+# `just test` builds the unmodified crate's existing `blur`, `convert`, and `decode` benches and
+# re-runs the same `perf`/`nm` checks this candidate's RESULT.md reports, so a reader can confirm
+# the "already fully inlined, no standalone symbol" finding for themselves. Requires `perf`
+# (perf_event_paranoid <= 1) and binutils (`nm`) on the host; falls back to `nm`-only checks
+# (skipping the `perf` hot-spot ranking) if `perf` isn't available.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+test: clone build check
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build:
+    cd clone && cargo build --release --bench blur --bench convert --bench decode
+
+# Re-runs the nm checks from evidence/nm_inlining_checks.txt against the freshly built binaries.
+check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone
+    blur_bin=$(ls target/release/deps/blur-* | grep -v '\.d$' | head -1)
+    convert_bin=$(ls target/release/deps/convert-* | grep -v '\.d$' | head -1)
+    decode_bin=$(ls target/release/deps/decode-* | grep -v '\.d$' | head -1)
+    echo "=== gif blend_and_dispose_pixel: expect no standalone symbol (already inlined) ==="
+    nm --demangle "$decode_bin" | grep -i "blend_and_dispose" || echo "(none found - confirms inlined)"
+    echo
+    echo "=== cicp FromPrimitive/ColorComponentForCicp impls: expect no standalone symbols ==="
+    nm --demangle "$convert_bin" | grep -iE "expand_to_f32|clamp_from_f32|expand_rgb|expand_luma|clamp_rgb|from_primitive" || echo "(none found - confirms inlined)"
+    echo
+    echo "=== filter_1d multiply_accumulate / ToStorage::to_: expect no standalone symbols ==="
+    nm --demangle "$blur_bin" | grep -iE "multiply_accumulate|to_::<|ToStorage" || echo "(none found - confirms inlined)"
+    echo
+    echo "=== tiff interleave_planes: expect TiffDecoder::interleave_planes standalone, plus trampoline::<4,1> ==="
+    nm --demangle -S "$decode_bin" | grep -i "interleave_planes" || true
+    echo
+    echo "If perf (perf_event_paranoid <= 1) is available, reproduce the hot-spot ranking with e.g.:"
+    echo "  taskset -c 2 perf record -F 999 --call-graph dwarf -o /tmp/perf_blur.data -- ./$blur_bin --bench --profile-time 5 \"gaussian blur: sigma 7.0\" --exact"
+    echo "  perf report -i /tmp/perf_blur.data --stdio --no-children --percent-limit 0.5"
+
+clean:
+    rm -rf clone

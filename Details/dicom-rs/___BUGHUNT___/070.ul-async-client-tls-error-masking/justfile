@@ -1,0 +1,31 @@
+# Self-contained reproduction for this candidate.
+#
+# Real end-to-end reproduction (per CONFIRMATION.md section 11): uses `dicom-ul`'s own real,
+# public async client API (`ClientAssociationOptions::establish_async`) as the real affected
+# entry point, driven by a genuinely separate tokio task acting as a garbled peer, over a real
+# loopback TCP socket.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should exit 1 (bug reproduced:
+# the real client misreports the failure as a TLS issue).
+reproduce-before:
+    cd repro && cargo run; test "$?" -eq 1 && echo "(exit 1 expected here: bug reproduced)"; true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Confirm the fix: repro now exits 0 (the real client correctly reports a non-TLS error).
+reproduce-after:
+    cd repro && cargo run
+
+clean:
+    rm -rf clone

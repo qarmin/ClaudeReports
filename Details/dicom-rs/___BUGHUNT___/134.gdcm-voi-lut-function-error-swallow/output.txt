@@ -1,0 +1,71 @@
+$ just test    # real captured output, base commit df2b9e42, 2026-09-01
+# (cargo compilation progress/warning noise elided; nothing else edited)
+
+rm -rf clone
+git clone https://github.com/Enet4/dicom-rs.git clone
+Cloning into 'clone'...
+cd clone && git fetch origin df2b9e4236298efa3fa37a1f360fc4bf284d586a && git checkout df2b9e4236298efa3fa37a1f360fc4bf284d586a
+From https://github.com/Enet4/dicom-rs
+ * branch              df2b9e4236298efa3fa37a1f360fc4bf284d586a -> FETCH_HEAD
+Note: switching to 'df2b9e4236298efa3fa37a1f360fc4bf284d586a'.
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+  git switch -c <new-branch-name>
+Or undo this operation with:
+  git switch -
+Turn off this advice by setting config variable advice.detachedHead to false
+HEAD is now at df2b9e42 Merge pull request #821 from youdie006/fix/812-json-sq-primitive-panic
+cd repro && cargo run --release -q; echo "(exit code $?; non-zero is expected here)"
+decode path under test: pixeldata/src/lib.rs (gdcm feature OFF)
+case A: VOILUTFunction present, zero-length (legal 'unspecified')
+  parsed value: Primitive(Empty)
+  decode_pixel_data() = Err(Could not get attribute `VOILUTFunction`)
+  BUG: a legal empty Type 3 VOILUTFunction makes the whole decode fail
+case B: VOILUTFunction present, declared VR=US with a numeric value (malformed)
+  parsed value: Primitive(U16([7]))
+  decode_pixel_data() = Err(Could not get attribute `VOILUTFunction`)  <- correctly reported
+RESULT: this decode path mishandles at least one of the two cases (see BUG above)
+(exit code 1; non-zero is expected here)
+cd repro && cargo run --release -q --features gdcm; echo "(exit code $?; non-zero is expected here)"
+decode path under test: pixeldata/src/gdcm.rs (gdcm feature ON)
+case A: VOILUTFunction present, zero-length (legal 'unspecified')
+  parsed value: Primitive(Empty)
+  decode_pixel_data() = Ok, voi_lut_function() = Ok(None)
+case B: VOILUTFunction present, declared VR=US with a numeric value (malformed)
+  parsed value: Primitive(U16([7]))
+  decode_pixel_data() = Ok, voi_lut_function() = Ok(None)
+  BUG: the conversion error was swallowed - the image is rendered as if no VOI LUT function had been specified at all (falls back to VoiLutFunction::Linear)
+RESULT: this decode path mishandles at least one of the two cases (see BUG above)
+(exit code 1; non-zero is expected here)
+cd clone && git apply "/home/rafal/Projekty/Obce/dicom-rs/.claude/worktrees/agent-a7baf473f654fe446/___BUGHUNT___/134.gdcm-voi-lut-function-error-swallow/patch.diff"
+cd repro && cargo run --release -q
+decode path under test: pixeldata/src/lib.rs (gdcm feature OFF)
+case A: VOILUTFunction present, zero-length (legal 'unspecified')
+  parsed value: Primitive(Empty)
+  decode_pixel_data() = Ok, voi_lut_function() = Ok(None)
+case B: VOILUTFunction present, declared VR=US with a numeric value (malformed)
+  parsed value: Primitive(U16([7]))
+  decode_pixel_data() = Err(Could not get attribute `VOILUTFunction`)  <- correctly reported
+RESULT: both cases behave correctly on this decode path
+cd repro && cargo run --release -q --features gdcm
+decode path under test: pixeldata/src/gdcm.rs (gdcm feature ON)
+case A: VOILUTFunction present, zero-length (legal 'unspecified')
+  parsed value: Primitive(Empty)
+  decode_pixel_data() = Ok, voi_lut_function() = Ok(None)
+case B: VOILUTFunction present, declared VR=US with a numeric value (malformed)
+  parsed value: Primitive(U16([7]))
+  decode_pixel_data() = Err(Could not get attribute `VOILUTFunction`)  <- correctly reported
+RESULT: both cases behave correctly on this decode path
+
+$ # repeatability: patch reverted in ./clone, each decode path run 3 more times
+$ for i in 1 2 3; do cargo run --release -q | tail -1; cargo run --release -q --features gdcm | tail -1; done
+RESULT: this decode path mishandles at least one of the two cases (see BUG above)
+RESULT: this decode path mishandles at least one of the two cases (see BUG above)
+RESULT: this decode path mishandles at least one of the two cases (see BUG above)
+RESULT: this decode path mishandles at least one of the two cases (see BUG above)
+RESULT: this decode path mishandles at least one of the two cases (see BUG above)
+RESULT: this decode path mishandles at least one of the two cases (see BUG above)
+# (6/6 = 3 runs x 2 decode paths, all reproducing)

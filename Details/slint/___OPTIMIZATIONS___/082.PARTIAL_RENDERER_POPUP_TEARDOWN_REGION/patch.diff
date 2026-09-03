@@ -1,0 +1,200 @@
+diff --git a/internal/core/partial_renderer.rs b/internal/core/partial_renderer.rs
+index 9de941ab7..ec6e6a380 100644
+--- a/internal/core/partial_renderer.rs
++++ b/internal/core/partial_renderer.rs
+@@ -826,6 +826,10 @@ pub struct PartialRenderingState {
+     force_dirty: RefCell<DirtyRegion>,
+     /// Force a redraw in the next frame, no matter what's dirty. Use only as a last resort.
+     force_screen_refresh: Cell<bool>,
++    /// Set by a caller that already knows (and has marked, via `mark_dirty_region`) the exact
++    /// screen region of a subtree it is about to destroy, so the next `free_graphics_resources`
++    /// call doesn't need to fall back to `force_screen_refresh`. See `mark_teardown_region_known`.
++    teardown_region_known: Cell<bool>,
+ }
+ 
+ impl PartialRenderingState {
+@@ -884,9 +888,28 @@ pub fn free_graphics_resources(&self, items: &mut dyn Iterator<Item = Pin<ItemRe
+             item.cached_rendering_data_offset().release(&mut self.partial_cache.borrow_mut());
+         }
+ 
+-        // We don't have a way to determine the screen region of the delete items, what's in the cache is relative. So
+-        // as a last resort, refresh everything.
+-        self.force_screen_refresh.set(true)
++        if !self.teardown_region_known.take() {
++            // We don't have a way to determine the screen region of the delete items, what's in the cache is relative. So
++            // as a last resort, refresh everything.
++            self.force_screen_refresh.set(true)
++        }
++    }
++
++    /// Call this after already marking (via [`Self::mark_dirty_region`]) the exact on-screen
++    /// region of a subtree that is about to be destroyed, so the very next
++    /// [`Self::free_graphics_resources`] call for that subtree's items skips the usual
++    /// "unknown region, refresh the whole screen" fallback. Must be followed by
++    /// [`Self::clear_teardown_region_known`] right after the subtree is actually dropped, in
++    /// case the drop turns out not to be synchronous (e.g. another strong reference kept it
++    /// alive a bit longer) - otherwise this flag could linger and wrongly suppress a full
++    /// refresh for a later, unrelated teardown that really does need one.
++    pub fn mark_teardown_region_known(&self) {
++        self.teardown_region_known.set(true);
++    }
++
++    /// See [`Self::mark_teardown_region_known`].
++    pub fn clear_teardown_region_known(&self) {
++        self.teardown_region_known.set(false);
+     }
+ 
+     /// Clears the partial rendering cache. Use this for example when the entire underlying window surface changes.
+diff --git a/internal/core/renderer.rs b/internal/core/renderer.rs
+index d7e12bc55..67d524236 100644
+--- a/internal/core/renderer.rs
++++ b/internal/core/renderer.rs
+@@ -258,6 +258,12 @@ fn free_graphics_resources(
+     /// Example: when a PopupWindow disappears, the region under the popup needs to be redrawn
+     fn mark_dirty_region(&self, _region: crate::partial_renderer::DirtyRegion) {}
+ 
++    /// See [`crate::partial_renderer::PartialRenderingState::mark_teardown_region_known`].
++    fn mark_teardown_region_known(&self) {}
++
++    /// See [`crate::partial_renderer::PartialRenderingState::clear_teardown_region_known`].
++    fn clear_teardown_region_known(&self) {}
++
+     #[cfg(all(feature = "std", not(feature = "shared-parley")))] // FIXME: just because of the Error
+     /// This function can be used to register a custom TrueType font with Slint,
+     /// for use with the `font-family` property. The provided slice must be a valid TrueType
+diff --git a/internal/core/window.rs b/internal/core/window.rs
+index e10664b32..48d9a0a42 100644
+--- a/internal/core/window.rs
++++ b/internal/core/window.rs
+@@ -48,6 +48,7 @@ fn previous_focus_item(item: ItemRc) -> ItemRc {
+ 
+ /// The window kind when creating a new child window
+ #[repr(C)]
++#[derive(Copy, Clone)]
+ pub enum WindowKind {
+     /// Tooltip
+     ToolTip,
+@@ -2131,7 +2132,16 @@ pub fn show_native_popup_menu(
+     // Close the popup associated with the given popup window.
+     // The parent's `is-open` property is reset to false when `current_popup` is dropped (see the
+     // `Drop` impl for `PopupWindow`), which every close path eventually does.
+-    fn close_popup_impl(&self, current_popup: &PopupWindow) {
++    //
++    // Takes `current_popup` by value (rather than the previous `&PopupWindow`) and explicitly
++    // drops it here, right after marking the exact region it covered as dirty: that lets us
++    // bracket the drop with `mark_teardown_region_known`/`clear_teardown_region_known` so the
++    // partial renderer can skip its usual "unknown region, refresh the whole screen" fallback
++    // for this specific teardown (see `PartialRenderingState::free_graphics_resources`) - the
++    // exact screen region a closing `ChildWindow` popup covered is already known here, before
++    // its `ItemTreeRc` (and thus its cached geometry) goes away.
++    fn close_popup_impl(&self, current_popup: PopupWindow) {
++        let mut region_known = false;
+         match &current_popup.location {
+             PopupWindowLocation::ChildWindow(offset) => {
+                 // Refresh the area that was previously covered by the popup.
+@@ -2144,7 +2154,9 @@ fn close_popup_impl(&self, current_popup: &PopupWindow) {
+                 if !popup_region.is_empty() {
+                     let window_adapter = self.window_adapter();
+                     window_adapter.renderer().mark_dirty_region(popup_region.into());
++                    window_adapter.renderer().mark_teardown_region_known();
+                     window_adapter.request_redraw();
++                    region_known = true;
+                 }
+             }
+             PopupWindowLocation::TopLevel(adapter) => {
+@@ -2154,6 +2166,14 @@ fn close_popup_impl(&self, current_popup: &PopupWindow) {
+         if let Some(focus) = current_popup.focus_item_in_parent.upgrade() {
+             self.set_focus_item(&focus, true, FocusReason::PopupActivation);
+         }
++        drop(current_popup);
++        if region_known {
++            // Defensive: clears the flag even if `current_popup`'s `ItemTreeRc` didn't actually
++            // reach refcount 0 above (e.g. some other strong reference kept it alive a bit
++            // longer) - otherwise a stale flag could wrongly suppress a full refresh for a
++            // later, unrelated teardown that really needs one.
++            self.window_adapter().renderer().clear_teardown_region_known();
++        }
+     }
+ 
+     /// Removes the popup matching the given ID.
+@@ -2164,8 +2184,9 @@ pub fn close_popup(&self, popup_id: NonZeroU32) {
+         if let Some(popup_index) = maybe_index {
+             let p = active_popups.remove(popup_index);
+             drop(active_popups);
+-            self.close_popup_impl(&p);
+-            if matches!(p.window_kind, WindowKind::Menu) {
++            let window_kind = p.window_kind;
++            self.close_popup_impl(p);
++            if matches!(window_kind, WindowKind::Menu) {
+                 // close all sub-menus
+                 while self
+                     .active_popups
+@@ -2174,7 +2195,7 @@ pub fn close_popup(&self, popup_id: NonZeroU32) {
+                     .is_some_and(|p| matches!(p.window_kind, WindowKind::Menu))
+                 {
+                     let p = self.active_popups.borrow_mut().remove(popup_index);
+-                    self.close_popup_impl(&p);
++                    self.close_popup_impl(p);
+                 }
+             }
+         }
+@@ -2183,7 +2204,7 @@ pub fn close_popup(&self, popup_id: NonZeroU32) {
+     /// Close all active popups.
+     pub fn close_all_popups(&self) {
+         for popup in self.active_popups.take() {
+-            self.close_popup_impl(&popup);
++            self.close_popup_impl(popup);
+         }
+     }
+ 
+@@ -2191,7 +2212,7 @@ pub fn close_all_popups(&self) {
+     pub fn close_top_popup(&self) {
+         let popup = self.active_popups.borrow_mut().pop();
+         if let Some(popup) = popup {
+-            self.close_popup_impl(&popup);
++            self.close_popup_impl(popup);
+         }
+     }
+ 
+diff --git a/internal/renderers/skia/lib.rs b/internal/renderers/skia/lib.rs
+index 667c89fd2..f1780fa54 100644
+--- a/internal/renderers/skia/lib.rs
++++ b/internal/renderers/skia/lib.rs
+@@ -902,6 +902,18 @@ fn mark_dirty_region(&self, region: DirtyRegion) {
+         }
+     }
+ 
++    fn mark_teardown_region_known(&self) {
++        if let Some(partial_rendering_state) = self.partial_rendering_state() {
++            partial_rendering_state.mark_teardown_region_known();
++        }
++    }
++
++    fn clear_teardown_region_known(&self) {
++        if let Some(partial_rendering_state) = self.partial_rendering_state() {
++            partial_rendering_state.clear_teardown_region_known();
++        }
++    }
++
+     fn supports_transformations(&self) -> bool {
+         true
+     }
+diff --git a/internal/renderers/software/lib.rs b/internal/renderers/software/lib.rs
+index 17f31b231..9d479d897 100644
+--- a/internal/renderers/software/lib.rs
++++ b/internal/renderers/software/lib.rs
+@@ -1141,6 +1141,14 @@ fn mark_dirty_region(&self, region: DirtyRegion) {
+         self.partial_rendering_state.mark_dirty_region(region);
+     }
+ 
++    fn mark_teardown_region_known(&self) {
++        self.partial_rendering_state.mark_teardown_region_known();
++    }
++
++    fn clear_teardown_region_known(&self) {
++        self.partial_rendering_state.clear_teardown_region_known();
++    }
++
+     fn register_bitmap_font(&self, font_data: &'static i_slint_core::graphics::BitmapFont) {
+         fonts::register_bitmap_font(font_data);
+     }

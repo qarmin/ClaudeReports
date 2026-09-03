@@ -1,0 +1,52 @@
+# Self-contained reproduction for candidate 016 (open GitHub PR #661:
+# worksheet_range_region/worksheet_range_region_ref column/row projection).
+#
+# `patch.diff` is captured from tafia/calamine PR #661 (branch feat/region-projected-reads,
+# commit 22e43ae), rebased/cherry-picked onto base_commit below (the PR's own branch point,
+# d206c9b, is several commits behind base_commit - src/xlsx/mod.rs and src/xlsb/mod.rs had
+# drifted, so a plain PR-diff download does NOT apply cleanly to base_commit; this patch.diff
+# already contains that resolution, generated with `git cherry-pick` + manual conflict
+# resolution in src/utils.rs and tests/test.rs, both trivial "insert alongside" conflicts, no
+# semantic changes made beyond the upstream PR's own content).
+#
+# The bench used here is a standalone crate (bench/) since worksheet_range_region doesn't
+# exist pre-patch, so it can't reuse the project's own examples/benches for a baseline build -
+# see bench/src/main.rs's own header comment for why it only builds against a patched tree.
+# "Baseline" here therefore means the SAME binary's own "full" mode (`.., ..` - equivalent to
+# the pre-existing worksheet_range_ref/worksheet_range, verified bit-exact against it in
+# RESULT.md), not a separately-built pre-patch binary, since there is no pre-patch equivalent
+# API to build a baseline binary from.
+
+repo_url := "https://github.com/tafia/calamine"
+base_commit := "5c02e86e99ec5c1fb1dcc15e64c2bbaf19bff60d"
+
+test: clone apply build bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply --binary "{{justfile_directory()}}/patch.diff"
+
+build:
+    cp -r "{{justfile_directory()}}/bench" ./bench_build
+    sed -i 's|path = "\.\."|path = "../clone"|' ./bench_build/Cargo.toml
+    cd bench_build && cargo build --release
+
+bench:
+    @echo "=== full (equivalent to pre-existing worksheet_range_ref/worksheet_range) ==="
+    ./bench_build/target/release/region_probe full "{{justfile_directory()}}/testdata/big_300k_rows.xlsx" Data
+    @echo "=== col1 (project 1 of 8 columns, all rows) ==="
+    ./bench_build/target/release/region_probe col1 "{{justfile_directory()}}/testdata/big_300k_rows.xlsx" Data
+    @echo "=== row1k (all columns, first 1000 of 300000 rows - exercises early-break) ==="
+    ./bench_build/target/release/region_probe row1k "{{justfile_directory()}}/testdata/big_300k_rows.xlsx" Data
+    @echo "=== tiny (1 column, first 1000 rows - closest to the linked polars issue's shape) ==="
+    ./bench_build/target/release/region_probe tiny "{{justfile_directory()}}/testdata/big_300k_rows.xlsx" Data
+
+test-suite:
+    cd clone && cargo test --release
+
+clean:
+    rm -rf clone bench_build

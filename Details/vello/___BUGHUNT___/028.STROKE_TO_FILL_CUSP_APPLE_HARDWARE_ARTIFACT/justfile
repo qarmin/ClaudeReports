@@ -1,0 +1,42 @@
+# Self-contained reproduction/diagnostic for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# Status is "Not reproducible" for this candidate (see RESULT.md) - the reported artifact is
+# specific to Apple/Metal's `fastMathEnabled` shader compiler behavior, which is not present in
+# this sandbox. No patch.diff exists (there is nothing to patch - a plain scalar f32 Rust
+# implementation was never shown to misbehave), so this justfile only runs the two diagnostics
+# that were actually tried; there is no reproduce-after/apply step.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone reproduce-before gpu-check
+
+clone:
+    rm -rf clone
+    # The `-c filter.lfs.*` overrides let this clone/checkout succeed without a working
+    # `git-lfs` install (this candidate never touches the LFS-tracked snapshot PNGs, so a
+    # no-op smudge filter is fine).
+    git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false \
+        clone {{repo_url}} clone
+    cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false \
+        checkout {{base_commit}}
+
+# Approach 1: real production CPU-shader pipeline (vello::Scene::stroke -> Resolver::resolve ->
+# vello_shaders::cpu::flatten), the exact near-cusp cubic from `tricky_strokes`, across and beyond
+# the issue reporter's own affected scale range. Expected: no crash, no non-finite output, no
+# reproduction (matches the reporter's own finding that the artifact is absent on CPU shaders).
+reproduce-before:
+    cd repro && cargo run --release
+
+# Approach 2: real GPU-shader dispatch (the actual `flatten.wgsl` compute shader, naga-compiled to
+# real SPIR-V) via whatever Vulkan/GL adapter is available, compared pixel-by-pixel against the
+# CPU fallback. Requires a Vulkan adapter (a real GPU, or a software one like SwiftShader/lavapipe)
+# - prints a clear message and exits cleanly if none is found, rather than failing the whole run.
+gpu-check:
+    cd repro && cargo run --release --bin gpu_check
+
+clean:
+    rm -rf clone repro/target repro/out repro/Cargo.lock

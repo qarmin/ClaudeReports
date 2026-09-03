@@ -1,0 +1,61 @@
+# Self-contained verification for candidate 019 (decompress_chunked_fn_zero_chunksize_panic).
+#
+# Status: Not reproducible (as a reachable bug - see RESULT.md). `decompress_chunked_fn` does
+# panic when called directly with chunksize=0 (see output.txt section 1), but the entire codebase
+# has exactly one real caller, and it can never pass 0. This justfile clones the pristine repo and
+# re-runs both checks: the isolated direct-call panic, and the trace proving the one real caller's
+# chunksize argument is restricted to two fixed nonzero constants. No patch.diff exists for this
+# candidate - nothing to apply/fix.
+
+repo_url := "https://github.com/dnglab/dnglab.git"
+base_commit := "ac975f5d1b3362feb3974811db6cc5a37a77b02b"
+
+test: clone reproduce
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Re-runs the same two checks captured in output.txt:
+#   1. decompress_chunked_fn panics in isolation on a direct chunksize=0 call (temporary unit test,
+#      added and removed again by this recipe - it never lands in the cloned tree permanently).
+#   2. the whole-repo grep + source trace showing the one real caller (decode_panasonic_v5) can
+#      only ever pass one of two fixed, nonzero chunksize constants (10240 or 9216), regardless of
+#      any file content.
+reproduce:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone
+    MOD_RS="rawler/src/decompressors/mod.rs"
+    MARKER='  fn test_decompress_lines_output_dimensions() {'
+    if ! grep -qF "$MARKER" "$MOD_RS"; then
+      echo "marker not found, cannot inject temporary test" >&2
+      exit 1
+    fi
+    python3 - "$MOD_RS" << 'PY'
+    import sys
+    path = sys.argv[1]
+    with open(path) as f:
+        content = f.read()
+    addition = "\n  #[test]\n  #[should_panic]\n  fn test_decompress_chunked_fn_zero_chunksize_panics() {\n    let closure = |_chunk: &mut [u16], _chunk_id: usize| {};\n    let _ = decompress_chunked_fn::<u16, _>(1024, 4, 0, false, &closure);\n  }\n}\n"
+    # Replace the final closing brace of the `mod tests { ... }` block with the addition.
+    idx = content.rfind("}\n")
+    content = content[:idx] + addition
+    with open(path, "w") as f:
+        f.write(content)
+    PY
+    echo "=== 1. decompress_chunked_fn panics in isolation on chunksize=0 (direct API call) ==="
+    cargo test -p rawler --lib decompress_chunked_fn_zero_chunksize -- --nocapture 2>&1 | grep -E "panicked at|test result"
+    git checkout -- "$MOD_RS"
+    echo ""
+    echo "=== 2. decompress_chunked_fn has exactly one real caller in the whole repo ==="
+    grep -rn "decompress_chunked_fn" --include=*.rs . | grep -v target
+    echo ""
+    echo "=== 3. That caller's chunksize argument is restricted to two fixed nonzero constants ==="
+    echo "pixels_per_block for bps=12: $((1024*10))"
+    echo "pixels_per_block for bps=14: $((1024*9))"
+    echo "(any other bps hits unreachable!() before reaching decompress_chunked_fn - see rawler/src/decoders/rw2/v5decompressor.rs)"
+
+clean:
+    rm -rf clone

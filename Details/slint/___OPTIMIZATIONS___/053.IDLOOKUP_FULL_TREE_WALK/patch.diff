@@ -1,0 +1,215 @@
+diff --git a/internal/compiler/lookup.rs b/internal/compiler/lookup.rs
+index 60bd5a651..ea1670c20 100644
+--- a/internal/compiler/lookup.rs
++++ b/internal/compiler/lookup.rs
+@@ -341,47 +341,106 @@ fn for_each_entry<R>(
+ }
+ 
+ struct IdLookup;
+-impl LookupObject for IdLookup {
+-    fn for_each_entry<R>(
+-        &self,
+-        ctx: &LookupCtx,
++impl IdLookup {
++    /// Same traversal as the `for_each_entry` fallback below: visits `root` and its
++    /// descendants, not crossing into a nested `repeated` (`for`/`if`) scope - those are
++    /// looked up separately, rooted at the specific repeated element in `component_scope`.
++    fn visit_root<R>(
++        root: &ElementRc,
+         f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
+     ) -> Option<R> {
+-        fn visit<R>(
+-            root: &ElementRc,
+-            f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
+-        ) -> Option<R> {
+-            if !root.borrow().id.is_empty()
+-                && let Some(r) =
+-                    f(&root.borrow().id, Expression::ElementReference(Rc::downgrade(root)).into())
+-            {
++        if !root.borrow().id.is_empty()
++            && let Some(r) =
++                f(&root.borrow().id, Expression::ElementReference(Rc::downgrade(root)).into())
++        {
++            return Some(r);
++        }
++        for x in &root.borrow().children {
++            if x.borrow().repeated.is_some() {
++                continue;
++            }
++            if let Some(r) = Self::visit_root(x, f) {
+                 return Some(r);
+             }
+-            for x in &root.borrow().children {
++        }
++        None
++    }
++
++    /// The id -> element map for the scope rooted at `root`, built once per `root` and
++    /// cached on its enclosing `Component` (keyed by `root`'s address, since a component
++    /// can have several such scope roots - itself, plus one per `for`/`if`). Only valid
++    /// as long as ids/tree shape don't change after it's built; see `id_lookup_cache`'s
++    /// doc comment on `Component` for who is responsible for invalidating it.
++    fn id_map_for(root: &ElementRc) -> Rc<std::collections::HashMap<SmolStr, crate::object_tree::ElementWeak>>
++    {
++        let enclosing = root
++            .borrow()
++            .enclosing_component
++            .upgrade()
++            .expect("element must belong to a component during id lookup");
++        if let Some(map) = enclosing.id_lookup_cache.borrow().get(&by_address::ByAddress(root.clone()))
++        {
++            return map.clone();
++        }
++        fn collect(root: &ElementRc, map: &mut std::collections::HashMap<SmolStr, crate::object_tree::ElementWeak>) {
++            let id = root.borrow().id.clone();
++            if !id.is_empty() {
++                map.entry(id).or_insert_with(|| Rc::downgrade(root));
++            }
++            let children = root.borrow().children.clone();
++            for x in &children {
+                 if x.borrow().repeated.is_some() {
+                     continue;
+                 }
+-                if let Some(r) = visit(x, f) {
+-                    return Some(r);
+-                }
++                collect(x, map);
+             }
+-            None
+         }
++        let mut map = std::collections::HashMap::new();
++        collect(root, &mut map);
++        let map = Rc::new(map);
++        enclosing
++            .id_lookup_cache
++            .borrow_mut()
++            .insert(by_address::ByAddress(root.clone()), map.clone());
++        map
++    }
++}
++impl LookupObject for IdLookup {
++    fn for_each_entry<R>(
++        &self,
++        ctx: &LookupCtx,
++        f: &mut impl FnMut(&SmolStr, LookupResult) -> Option<R>,
++    ) -> Option<R> {
+         for e in ctx.component_scope.iter().rev() {
+             if e.borrow().repeated.is_some()
+-                && let Some(r) = visit(e, f)
++                && let Some(r) = Self::visit_root(e, f)
+             {
+                 return Some(r);
+             }
+         }
+         if let Some(root) = ctx.component_scope.first()
+-            && let Some(r) = visit(root, f)
++            && let Some(r) = Self::visit_root(root, f)
+         {
+             return Some(r);
+         }
+         None
+     }
+-    // TODO: hash based lookup
++
++    fn lookup(&self, ctx: &LookupCtx, name: &SmolStr) -> Option<LookupResult> {
++        for e in ctx.component_scope.iter().rev() {
++            if e.borrow().repeated.is_some()
++                && let Some(elem) = Self::id_map_for(e).get(name)
++            {
++                return Some(Expression::ElementReference(elem.clone()).into());
++            }
++        }
++        if let Some(root) = ctx.component_scope.first()
++            && let Some(elem) = Self::id_map_for(root).get(name)
++        {
++            return Some(Expression::ElementReference(elem.clone()).into());
++        }
++        None
++    }
+ }
+ 
+ /// In-scope properties, or model
+diff --git a/internal/compiler/object_tree.rs b/internal/compiler/object_tree.rs
+index aa6afe007..b384b0026 100644
+--- a/internal/compiler/object_tree.rs
++++ b/internal/compiler/object_tree.rs
+@@ -530,6 +530,18 @@ pub struct Component {
+ 
+     /// True if this component is imported from an external library.
+     pub from_library: Cell<bool>,
++
++    /// Cache for `IdLookup` (see lookup.rs): maps a scope root element (this component's
++    /// own `root_element`, or a `repeated` element acting as a nested `for`/`if` id scope)
++    /// to the id -> element map for the subtree reachable from it. A component can have
++    /// several such roots, hence the outer map keyed by the root's address.
++    ///
++    /// Only ever populated during expression resolution (`passes::resolving`), which runs
++    /// before any pass mutates element ids (`unique_id::assign_unique_id`, `windows::ensure_window`,
++    /// `inlining`) - those clear it defensively, but as of this writing none of them run
++    /// before resolution reads it.
++    pub id_lookup_cache:
++        RefCell<std::collections::HashMap<by_address::ByAddress<ElementRc>, Rc<std::collections::HashMap<SmolStr, ElementWeak>>>>,
+ }
+ 
+ impl Component {
+diff --git a/internal/compiler/passes/inlining.rs b/internal/compiler/passes/inlining.rs
+index 80e997a4c..ce65ac677 100644
+--- a/internal/compiler/passes/inlining.rs
++++ b/internal/compiler/passes/inlining.rs
+@@ -700,6 +700,7 @@ fn duplicate_sub_component(
+         private_properties: Default::default(),
+         inherits_popup_window: core::cell::Cell::new(false),
+         from_library: core::cell::Cell::new(false),
++        id_lookup_cache: Default::default(),
+     };
+ 
+     let new_component = Rc::new(new_component);
+diff --git a/internal/compiler/passes/unique_id.rs b/internal/compiler/passes/unique_id.rs
+index e32b775ef..5bab362c0 100644
+--- a/internal/compiler/passes/unique_id.rs
++++ b/internal/compiler/passes/unique_id.rs
+@@ -22,6 +22,9 @@ pub fn assign_unique_id(doc: &Document) {
+ }
+ 
+ fn assign_unique_id_in_component(component: &Rc<Component>, count: &mut u32) {
++    // Ids are about to change; drop `lookup::IdLookup`'s per-root id caches so a later
++    // (re-)resolution pass never reads a stale mapping.
++    component.id_lookup_cache.borrow_mut().clear();
+     recurse_elem_including_sub_components(component, &(), &mut |elem, _| {
+         *count += 1;
+         let mut elem_mut = elem.borrow_mut();
+@@ -47,6 +50,7 @@ fn assign_unique_id_in_component(component: &Rc<Component>, count: &mut u32) {
+ fn rename_globals(doc: &Document, mut count: u32) {
+     for g in &doc.used_types.borrow().globals {
+         count += 1;
++        g.id_lookup_cache.borrow_mut().clear();
+         let mut root = g.root_element.borrow_mut();
+         if matches!(&root.base_type, ElementType::Builtin(_)) {
+             // builtin global keeps its name
+diff --git a/internal/compiler/passes/windows.rs b/internal/compiler/passes/windows.rs
+index 39ef48ddf..062a91b0c 100644
+--- a/internal/compiler/passes/windows.rs
++++ b/internal/compiler/passes/windows.rs
+@@ -35,6 +35,10 @@ pub fn ensure_window(
+ 
+     let win_elem = component.root_element.clone();
+ 
++    // The root element's id is about to move to `new_root` below; drop `lookup::IdLookup`'s
++    // per-root id cache so a later (re-)resolution pass never reads a stale mapping.
++    component.id_lookup_cache.borrow_mut().clear();
++
+     // the old_root becomes the Window
+     let mut win_elem_mut = win_elem.borrow_mut();
+     let new_root = Element {
+diff --git a/internal/compiler/typeloader.rs b/internal/compiler/typeloader.rs
+index 75f8dd112..1ebde4f62 100644
+--- a/internal/compiler/typeloader.rs
++++ b/internal/compiler/typeloader.rs
+@@ -393,6 +393,7 @@ pub(crate) fn create_component(
+                 root_constraints,
+                 root_element,
+                 from_library: core::cell::Cell::new(false),
++                id_lookup_cache: Default::default(),
+             }
+         });
+         self.keep_alive.push((component.clone(), result.clone()));

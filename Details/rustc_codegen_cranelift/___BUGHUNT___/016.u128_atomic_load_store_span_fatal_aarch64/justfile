@@ -1,0 +1,101 @@
+# Self-contained reproduction for candidate 016: `atomic_load`/`atomic_store` on a 128bit integer
+# are a `span_fatal` in cg_clif, so `core` cannot be codegened for any target whose
+# `target_has_atomic = "128"` holds - i.e. cg_clif cannot target aarch64 (or s390x, or
+# x86_64-apple-darwin) out of tree at all.
+#
+# Nothing here reaches outside this folder: `just clone` fetches cg_clif into ./clone (gitignored)
+# and builds it. `just test` is the full cycle: clone, build cg_clif, show the hard error, apply
+# patch.diff, rebuild, show it is gone.
+#
+# To point the reproduce recipes at an existing cg_clif checkout instead of ./clone:
+#   CLIF_ROOT=/path/to/rustc_codegen_cranelift just before
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+clif := env_var_or_default("CLIF_ROOT", justfile_directory() / "clone")
+
+# Targets that set `target_has_atomic = "128"` (so `core` instantiates the 128bit atomics) plus
+# x86_64-unknown-linux-gnu, which does not - the control.
+broken_targets := "aarch64-unknown-linux-gnu s390x-unknown-linux-gnu x86_64-apple-darwin"
+control_target := "x86_64-unknown-linux-gnu"
+
+test:
+    @test -z "${CLIF_ROOT:-}" || { echo "run 'just test' without CLIF_ROOT set - it builds ./clone"; exit 2; }
+    just clone
+    just build-clif
+    @echo "=== BEFORE the patch ==="
+    -just before
+    just apply
+    just build-clif
+    @echo "=== AFTER the patch ==="
+    just after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-clif:
+    cd {{clif}} && ./y.sh prepare
+    cd {{clif}} && ./y.sh build
+
+# Everything that demonstrates the bug, against whatever ./clone (or $CLIF_ROOT) currently is.
+before: cross aarch64-core host
+after: cross aarch64-core host atomic-u128
+
+# Build `core` for each affected target with plain rustc (the oracle: always succeeds) and with
+# cg_clif. Unpatched, every 128bit-atomic target dies with "128bit atomics not yet supported".
+cross:
+    #!/usr/bin/env bash
+    for target in {{broken_targets}} {{control_target}}; do
+        for side in llvm clif; do
+            rm -rf repro/target-$side
+            if [ "$side" = llvm ]; then
+                ( cd repro && CARGO_TARGET_DIR=target-llvm cargo build -Zbuild-std=core --target $target )
+            else
+                ( cd repro && CARGO_TARGET_DIR=target-clif {{clif}}/dist/cargo-clif build -Zbuild-std=core --target $target )
+            fi
+            printf '>>> %-30s %-5s exit %d\n' "$target" "$side" "$?"
+        done
+    done
+
+# aarch64 is *also* blocked by a second, unrelated cg_clif bug: `codegen_f16_f128`'s `CMP_RESULT_TY`
+# is picked with `#[cfg(target_arch)]`, i.e. from the *host*, so cross-compiling x86_64 -> aarch64
+# declares `__gttf2` returning I64 where compiler_builtins defines it returning I32. That kills
+# `compiler_builtins`, not `core`, so `--keep-going` still shows whether `core` itself codegened.
+aarch64-core:
+    rm -rf repro/target-clif
+    -cd repro && CARGO_TARGET_DIR=target-clif {{clif}}/dist/cargo-clif build -Zbuild-std=core --target aarch64-unknown-linux-gnu --keep-going
+    @echo ">>> aarch64 core rlib produced by cg_clif:"
+    @find repro/target-clif -name 'libcore-*.rlib' -printf '    %p (%s bytes)\n' || true
+    @find repro/target-clif -name 'libcore-*.rlib' -printf x | grep -q x && echo ">>> core FOR AARCH64 COMPILED" || echo ">>> core for aarch64 did NOT compile"
+
+# The same bug on the host, as a *runnable* program: `atomic_load`/`atomic_store` on u128/i128 over
+# 14 boundary values. `-Ctarget-cpu=native` is what lets LLVM compile it at opt-level 0 (and, after
+# the patch, is what lets Cranelift's cmpxchg16b-gated x64 lowering kick in).
+host:
+    #!/usr/bin/env bash
+    set -u
+    cd repro
+    ulimit -c 0
+    rm -f /tmp/a128_llvm /tmp/a128_clif /tmp/a128_llvm.out /tmp/a128_clif.out
+    rustc -Ctarget-cpu=native -Copt-level=0 --edition 2021 -o /tmp/a128_llvm atomic128_load_store.rs || exit 1
+    /tmp/a128_llvm > /tmp/a128_llvm.out; echo "llvm run exit $?"
+    {{clif}}/dist/rustc-clif -Ctarget-cpu=native -Copt-level=0 --edition 2021 -o /tmp/a128_clif atomic128_load_store.rs
+    echo "clif compile exit $?"
+    test -x /tmp/a128_clif && { /tmp/a128_clif > /tmp/a128_clif.out; echo "clif run exit $?"; } \
+        || { : > /tmp/a128_clif.out; echo "clif produced no binary"; }
+    diff /tmp/a128_llvm.out /tmp/a128_clif.out && echo "host: LLVM and cg_clif agree" || echo "host: DIFFERENT"
+
+# Only meaningful after the patch: a real `core::sync::atomic::AtomicU128` user, built for a target
+# that has 128bit atomics. Before the patch `core` itself does not build, so this cannot even start.
+atomic-u128:
+    rm -rf repro/target-clif
+    cd repro && CARGO_TARGET_DIR=target-clif {{clif}}/dist/cargo-clif build -Zbuild-std=core --features atomic_u128 --target s390x-unknown-linux-gnu
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+clean:
+    rm -rf clone repro/target-llvm repro/target-clif

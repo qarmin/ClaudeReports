@@ -1,0 +1,64 @@
+Captured output of `repro/` (standalone crate, real hayro-interpret + hayro-syntax public API,
+`interpret_page` + a real `Device` driving the real `/JPXDecode` filter), run 3x against the
+pristine tree (base_commit 5a5f0e247c970df948505ee0bb36e2df2504bf86) and 3x again after applying
+patch.diff. `--release` build throughout.
+
+=== BEFORE fix (3/3 runs abort) ===
+
+--- run 1 ---
+built PoC PDF: 800 bytes (embedded JPEG2000 codestream: 111 bytes, declares 100000x100000, 2 components)
+interpreting page (real /JPXDecode filter, real interpret_page + Device, no target-dimension hint - if there is no total-sample-count cap before eager allocation, this is where an 80 GB allocation is attempted)...
+memory allocation of 80000000000 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit: 134 (SIGABRT)
+
+--- run 2 ---
+built PoC PDF: 800 bytes (embedded JPEG2000 codestream: 111 bytes, declares 100000x100000, 2 components)
+interpreting page (real /JPXDecode filter, real interpret_page + Device, no target-dimension hint - if there is no total-sample-count cap before eager allocation, this is where an 80 GB allocation is attempted)...
+memory allocation of 80000000000 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit: 134 (SIGABRT)
+
+--- run 3 ---
+built PoC PDF: 800 bytes (embedded JPEG2000 codestream: 111 bytes, declares 100000x100000, 2 components)
+interpreting page (real /JPXDecode filter, real interpret_page + Device, no target-dimension hint - if there is no total-sample-count cap before eager allocation, this is where an 80 GB allocation is attempted)...
+memory allocation of 80000000000 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit: 134 (SIGABRT)
+
+=== AFTER fix (patch.diff applied, 3/3 runs complete cleanly) ===
+
+--- run 1 ---
+built PoC PDF: 800 bytes (embedded JPEG2000 codestream: 111 bytes, declares 100000x100000, 2 components)
+interpreting page (real /JPXDecode filter, real interpret_page + Device, no target-dimension hint - if there is no total-sample-count cap before eager allocation, this is where an 80 GB allocation is attempted)...
+did not reproduce - page interpreted without aborting
+exit: 0
+
+--- run 2 ---
+built PoC PDF: 800 bytes (embedded JPEG2000 codestream: 111 bytes, declares 100000x100000, 2 components)
+interpreting page (real /JPXDecode filter, real interpret_page + Device, no target-dimension hint - if there is no total-sample-count cap before eager allocation, this is where an 80 GB allocation is attempted)...
+did not reproduce - page interpreted without aborting
+exit: 0
+
+--- run 3 ---
+built PoC PDF: 800 bytes (embedded JPEG2000 codestream: 111 bytes, declares 100000x100000, 2 components)
+interpreting page (real /JPXDecode filter, real interpret_page + Device, no target-dimension hint - if there is no total-sample-count cap before eager allocation, this is where an 80 GB allocation is attempted)...
+did not reproduce - page interpreted without aborting
+exit: 0
+
+=== Separate observation: same PoC PDF via the top-level `hayro::render` entry point ===
+
+Driving the identical PoC PDF through the full `hayro` crate's own top-level `render()` (which
+passes a CTM-derived `target_dimension` hint into `RasterImage::with_rgba`, unlike the
+`interpret_page`/`Device`-with-`None` path used by `repro/`) does NOT abort the same way within
+30 seconds - it appears to hang/thrash instead (killed by `timeout 30`, exit 124/143, no crash
+message). This was not chased further (see RESULT.md "What's not done"): the hint computation in
+`hayro/src/image.rs::draw_pdf_image` (`target_width = (transform * Point::new(image.width() as
+f64, 0.0)).to_vec2().length()`) multiplies the placement matrix's scale by the image's *raw
+pixel width* rather than dividing by it, so for this PoC's `cm 100 0 0 100 50 50` placement the
+resulting `target_width` (~100 * 100000 = 10,000,000) ends up far larger than the native
+100000px width regardless of how small the image is actually drawn on the page - meaning the
+resolution-skip optimization essentially never downscales in this code path, and the full
+100000x100000 decode is requested here too. It manifests as a slow-not-abort in this particular
+run rather than a clean allocator failure; this is noted as a related but distinct observation
+and was not root-caused as its own candidate this session.

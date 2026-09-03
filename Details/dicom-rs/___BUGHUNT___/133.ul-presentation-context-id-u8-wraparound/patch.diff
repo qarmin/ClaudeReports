@@ -1,0 +1,52 @@
+diff --git a/ul/src/association/client.rs b/ul/src/association/client.rs
+index b0487895..ffc83b25 100644
+--- a/ul/src/association/client.rs
++++ b/ul/src/association/client.rs
+@@ -44,6 +44,12 @@ pub type AsyncTlsStream = tokio_rustls::client::TlsStream<tokio::net::TcpStream>
+ 
+ pub use crate::association::CloseSocket;
+ 
++/// The maximum number of presentation contexts which can be proposed in one association request.
++///
++/// PS3.8 identifies each presentation context by an odd 8-bit value,
++/// so only 128 distinct identifiers exist.
++pub const MAX_PRESENTATION_CONTEXTS: usize = 128;
++
+ /// Helper function to establish a TCP client connection
+ fn tcp_connection<T>(ae_address: &AeAddr<T>, opts: &SocketOptions) -> Result<TcpStream>
+ where
+@@ -757,6 +763,16 @@ impl<'a> ClientAssociationOptions<'a> {
+             crate::association::MissingAbstractSyntaxSnafu
+         );
+ 
++        // each proposed context is identified on the wire by an odd u8,
++        // so more than 128 of them cannot be told apart by the peer
++        ensure!(
++            presentation_contexts.len() <= MAX_PRESENTATION_CONTEXTS,
++            crate::association::TooManyPresentationContextsSnafu {
++                count: presentation_contexts.len(),
++                max: MAX_PRESENTATION_CONTEXTS,
++            }
++        );
++
+         // choose called AE title
+         let called_ae_title: &str = match (&called_ae_title, ae_title) {
+             (Some(aec), Some(aet)) => {
+diff --git a/ul/src/association/mod.rs b/ul/src/association/mod.rs
+index 66d0c2cb..81f527fc 100644
+--- a/ul/src/association/mod.rs
++++ b/ul/src/association/mod.rs
+@@ -60,6 +60,13 @@ pub enum Error {
+     /// missing abstract syntax to begin negotiation
+     MissingAbstractSyntax { backtrace: Backtrace },
+ 
++    #[snafu(display("too many presentation contexts to propose: {count} (the maximum is {max})"))]
++    TooManyPresentationContexts {
++        count: usize,
++        max: usize,
++        backtrace: Backtrace,
++    },
++
+     /// could not convert to socket address
+     ToAddress {
+         source: std::io::Error,

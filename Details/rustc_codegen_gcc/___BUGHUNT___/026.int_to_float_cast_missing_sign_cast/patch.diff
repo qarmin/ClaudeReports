@@ -1,0 +1,23 @@
+diff --git a/src/int.rs b/src/int.rs
+index 4e4b911..a625ee0 100644
+--- a/src/int.rs
++++ b/src/int.rs
+@@ -949,6 +949,18 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
+     ) -> RValue<'gcc> {
+         let value_type = value.get_type();
+         if self.is_native_int_type_or_bool(value_type) {
++            // NOTE: GCC's native int-to-float cast follows `value`'s *declared* GCC type sign,
++            // not the `signed` flag the caller (`uitofp`/`sitofp`) asked for - force it to match
++            // before casting, the same way `division_operation`/`gcc_lshr`/`gcc_ashr` already do
++            // for their own native operations, so a value whose GCC type ends up with the
++            // "wrong" sign (e.g. via a pointer-to-integer transmute) still converts correctly.
++            let value = if signed && !value_type.is_signed(self) {
++                self.context.new_cast(None, value, value_type.to_signed(self))
++            } else if !signed && value_type.is_signed(self) {
++                self.context.new_cast(None, value, value_type.to_unsigned(self))
++            } else {
++                value
++            };
+             return self.context.new_cast(None, value, dest_typ);
+         }
+ 

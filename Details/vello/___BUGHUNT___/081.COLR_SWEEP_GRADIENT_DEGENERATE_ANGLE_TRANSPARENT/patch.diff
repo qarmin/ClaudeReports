@@ -1,0 +1,54 @@
+diff --git a/vello/src/scene.rs b/vello/src/scene.rs
+index 70542df7..ee210c25 100644
+--- a/vello/src/scene.rs
++++ b/vello/src/scene.rs
+@@ -1175,20 +1175,38 @@ fn conv_brush(
+         skrifa::color::Brush::SweepGradient {
+             c0,
+             start_angle,
+-            end_angle,
++            mut end_angle,
+             color_stops,
+             extend,
+-        } => Brush::Gradient(
+-            // TODO: This is upside-down, see
+-            // https://github.com/linebender/vello/pull/1221
+-            Gradient::new_sweep(
+-                conv_point(c0),
+-                start_angle.to_radians(),
+-                end_angle.to_radians(),
++        } => {
++            if start_angle == end_angle {
++                // skrifa's COLR paint-graph traversal forwards a degenerate (equal-angle) sweep
++                // gradient to us whenever the font's PaintSweepGradient has startAngle ==
++                // endAngle with Extend::Pad (see OpenType COLR spec, "sweep gradients": this is a
++                // valid, real construct, not a font error). `peniko`'s gradient encoding treats
++                // an equal-angle sweep as fully degenerate and renders it fully transparent
++                // instead of a solid color, so nudge the end angle by a small artificial offset
++                // to keep the gradient non-degenerate - matching glifo's identical workaround for
++                // the same skrifa-forwarded case (see glifo/src/colr.rs). Note: this needs to be
++                // bigger than glifo's own 0.01 degree nudge - vello_encoding's own degenerate
++                // check (`encode_sweep_gradient`'s `SKIA_DEGENERATE_THRESHOLD`) compares angles
++                // converted to a turn fraction (degrees / 360), so a 0.01 degree nudge (turn
++                // fraction ~2.8e-5) is still below that check's ~3.05e-5 threshold and would still
++                // collapse to fully transparent.
++                end_angle += 0.1;
++            }
++            Brush::Gradient(
++                // TODO: This is upside-down, see
++                // https://github.com/linebender/vello/pull/1221
++                Gradient::new_sweep(
++                    conv_point(c0),
++                    start_angle.to_radians(),
++                    end_angle.to_radians(),
++                )
++                .with_extend(conv_extend(extend))
++                .with_stops(ColorStopsConverter(color_stops, cpal, foreground_brush)),
+             )
+-            .with_extend(conv_extend(extend))
+-            .with_stops(ColorStopsConverter(color_stops, cpal, foreground_brush)),
+-        ),
++        }
+     }
+ }
+ 

@@ -1,0 +1,91 @@
+diff --git a/src/sort/sort_slice.rs b/src/sort/sort_slice.rs
+index 0981c1d6..c956fb5a 100644
+--- a/src/sort/sort_slice.rs
++++ b/src/sort/sort_slice.rs
+@@ -88,34 +88,65 @@ impl<T: Ord> MergeSubTask<T> {
+         }
+ 
+         // Standard merge
++        //
++        // `dst` covers the same absolute address range that `src_a`/`src_b` occupy in the other
++        // buffer, and that whole range must always end up holding exactly one copy of every
++        // element assigned to this task - a comparison (`T::lt`) can panic partway through the
++        // loop below, and if unwinding left `dst` with only a *prefix* written, the untouched
++        // suffix would still hold this same range's pre-task content (a valid permutation on its
++        // own, but not a subset complementary to the just-written prefix), corrupting the owning
++        // slice with duplicated and lost elements once it is eventually dropped. `MergeGuard`'s
++        // `Drop` closes that hole unconditionally (no further comparisons) on both the normal and
++        // unwind paths, so `dst`'s range is always fully populated.
+         unsafe {
+-            let mut ptr_a = self.src_a;
+-            let end_a = self.src_a.add(self.len_a);
+-            let mut ptr_b = self.src_b;
+-            let end_b = self.src_b.add(self.len_b);
+-            let mut out = self.dst;
+-
+-            while ptr_a < end_a && ptr_b < end_b {
+-                match *ptr_b < *ptr_a {
++            struct MergeGuard<T> {
++                ptr_a: *const T,
++                end_a: *const T,
++                ptr_b: *const T,
++                end_b: *const T,
++                out: *mut T,
++            }
++
++            impl<T> Drop for MergeGuard<T> {
++                #[inline]
++                fn drop(&mut self) {
++                    unsafe {
++                        let rem_a = self.end_a.offset_from(self.ptr_a) as usize;
++                        if rem_a > 0 {
++                            core::ptr::copy_nonoverlapping(self.ptr_a, self.out, rem_a);
++                            self.out = self.out.add(rem_a);
++                        }
++                        let rem_b = self.end_b.offset_from(self.ptr_b) as usize;
++                        if rem_b > 0 {
++                            core::ptr::copy_nonoverlapping(self.ptr_b, self.out, rem_b);
++                        }
++                    }
++                }
++            }
++
++            let mut guard = MergeGuard {
++                ptr_a: self.src_a,
++                end_a: self.src_a.add(self.len_a),
++                ptr_b: self.src_b,
++                end_b: self.src_b.add(self.len_b),
++                out: self.dst,
++            };
++
++            while guard.ptr_a < guard.end_a && guard.ptr_b < guard.end_b {
++                match *guard.ptr_b < *guard.ptr_a {
+                     true => {
+-                        core::ptr::copy_nonoverlapping(ptr_b, out, 1);
+-                        ptr_b = ptr_b.add(1);
++                        core::ptr::copy_nonoverlapping(guard.ptr_b, guard.out, 1);
++                        guard.ptr_b = guard.ptr_b.add(1);
+                     }
+                     false => {
+-                        core::ptr::copy_nonoverlapping(ptr_a, out, 1);
+-                        ptr_a = ptr_a.add(1);
++                        core::ptr::copy_nonoverlapping(guard.ptr_a, guard.out, 1);
++                        guard.ptr_a = guard.ptr_a.add(1);
+                     }
+                 }
+-                out = out.add(1);
+-            }
+-
+-            if ptr_a < end_a {
+-                let rem = end_a.offset_from(ptr_a) as usize;
+-                core::ptr::copy_nonoverlapping(ptr_a, out, rem);
+-            } else if ptr_b < end_b {
+-                let rem = end_b.offset_from(ptr_b) as usize;
+-                core::ptr::copy_nonoverlapping(ptr_b, out, rem);
++                guard.out = guard.out.add(1);
+             }
++            // `guard`'s Drop (normal scope exit here, or unwind above) finishes copying
++            // whichever side, if any, still has elements left.
+         }
+     }
+ }

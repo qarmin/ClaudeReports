@@ -1,0 +1,36 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+#
+# This candidate is a measurement/diagnosis, not a performance fix: patch.diff reapplies
+# candidate 002's deinterleave-based SIMD rewrite (needed so the functions under
+# investigation exist) plus a temporary `#[cfg(test)] mod suspect_investigation` with
+# four `#[ignore]`d tests that isolate candidate 002/008's remaining suspects.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the diagnostic tests.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# No standalone bench crate needed - the diagnostic tests live directly inside
+# hayro-jpeg2000's own test binary (they call private functions under investigation),
+# so they're run via `cargo test`, single-core-pinned like the rest of this workspace's
+# measurements. `--test-threads=1` keeps the paired timing rounds uncontended.
+bench:
+    cd clone && taskset -c 2 cargo test -p hayro-jpeg2000 --release --lib -- --ignored --nocapture --test-threads=1 suspect_ print_detected_level
+
+clean:
+    rm -rf clone

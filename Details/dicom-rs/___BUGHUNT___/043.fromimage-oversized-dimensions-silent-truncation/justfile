@@ -1,0 +1,43 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# NOTE on this candidate's shape: the confirmed bug is in fromimage/src/main.rs, a binary-only
+# crate with no library target - repro/ can't call its private update_from_img function directly
+# the way other candidates' repro/ crates call into a library. Instead, repro/ replicates the
+# exact vulnerable computation from the real source (see comments in repro/src/main.rs) using only
+# public dicom-core/dicom-object/image APIs. The dynamic before/after verification of the real
+# patched function was done during the investigation via a temporary in-tree unit test (2 passed/1
+# failed before the fix, 3 passed/0 failed after - see RESULT.md) - not preserved in patch.diff,
+# which is fix-only. `reproduce-after` here instead confirms the patched fromimage crate builds
+# cleanly.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - demonstrates the
+# same silent Columns/PixelData mismatch update_from_img produces (non-zero
+# exit: bug reproduced).
+reproduce-before:
+    cd repro && cargo run; test "$?" -ne 0 && echo "(non-zero exit expected here: bug reproduced)"; true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Confirm the patched fromimage crate still builds cleanly after the fix.
+reproduce-after:
+    cd clone && cargo build -p dicom-fromimage
+
+clean:
+    rm -rf clone

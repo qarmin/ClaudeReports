@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# This candidate is an independent verification of candidate 114
+# (pixeldata-get-from-per-frame-misaligned-gap-index), not a distinct new bug - see RESULT.md.
+# `114-fix.patch` is a verbatim copy of candidate 114's own `patch.diff`, included here only so
+# this folder can independently drive the same before/after cycle; it was not authored by this
+# candidate's own session.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+# Full cycle: clone pristine, prove rescale()/window() silently misapply frame 0's real values to
+# every frame, apply 114's fix, prove they now correctly fall back to the documented defaults.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git fetch origin {{base_commit}} && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should print
+# "decoded.rescale() = [Rescale { slope: 1.0, intercept: 10.0 }]",
+# "decoded.window() = Some([WindowLevel { width: 50.0, center: 100.0 }])", and both BUG lines as
+# "true", exiting non-zero.
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/114-fix.patch"
+
+# Same repro again, now against the patched clone - should print
+# "decoded.rescale() = [Rescale { slope: 1.0, intercept: 0.0 }]", "decoded.window() = None", and
+# both BUG lines as "false", exiting 0.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

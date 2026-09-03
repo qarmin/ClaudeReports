@@ -1,0 +1,40 @@
+Captured output of `cargo run --release` in repro/ against the real `image` crate source, before
+and after applying patch.diff. (Built here against the working-tree checkout at base_commit
+44ce9226c541dd2b11897b9ef07156a28871cdb7 via a temporary local path dependency; the candidate's own
+justfile reproduces this from a fresh `git clone` + `git checkout` of that same commit.)
+
+=== BEFORE (pristine, unpatched thumbnail_sample_block) ===
+Thumbnail huge-block-splitting uniform-color check (alpha-bearing types):
+  LumaA8  600x600 -> 1x1: expected [137, 200], got [255, 255]
+  Rgba8   600x600 -> 1x1: expected [10, 20, 250, 255], got [23, 45, 255, 255]
+  Rgba16  600x600 -> 1x1: expected [1000, 2000, 60000, 65535], got [2250, 4500, 65535, 65535]
+  Rgba32F 600x600 -> 1x1: expected [0.1, 0.5, 0.9, 0.3], got [0.22500001, 1.125, 2.0249999, 0.675]
+  Rgba8   300x1000 -> thumbnail(1,3) = (1, 3): all pixels == [91, 5, 6, 255]? false
+REPRODUCED: thumbnailing a uniform-color source through the real public DynamicImage::thumbnail/thumbnail_exact API did not preserve that color for one or more alpha-bearing pixel types - the huge-block STEP_SIZE-splitting divisor in thumbnail_sample_block undercounts sub-blocks whenever a dimension isn't an exact multiple of 256.
+(exit code 1)
+
+=== AFTER (patch.diff applied) ===
+Thumbnail huge-block-splitting uniform-color check (alpha-bearing types):
+  LumaA8  600x600 -> 1x1: expected [137, 200], got [137, 200]
+  Rgba8   600x600 -> 1x1: expected [10, 20, 250, 255], got [10, 20, 250, 255]
+  Rgba16  600x600 -> 1x1: expected [1000, 2000, 60000, 65535], got [1000, 2000, 60000, 65535]
+  Rgba32F 600x600 -> 1x1: expected [0.1, 0.5, 0.9, 0.3], got [0.1, 0.5, 0.9, 0.3]
+  Rgba8   300x1000 -> thumbnail(1,3) = (1, 3): all pixels == [91, 5, 6, 255]? true
+Not reproduced: every thumbnail preserved the uniform source color.
+(exit code 0)
+
+=== Repeatability (main-tree in-tree scratch test, unpatched, 3/3 identical runs) ===
+Run 1:
+LumaA8 600x600 -> 1x1: expected [137, 200], got [255, 255]
+Rgba8 600x600 -> 1x1: expected [10, 20, 250, 255], got [23, 45, 255, 255]
+Rgba16 600x600 -> 1x1: expected [1000, 2000, 60000, 65535], got [2250, 4500, 65535, 65535]
+Rgba32F 600x600 -> 1x1: expected [0.1, 0.5, 0.9, 0.3], got [0.22500001, 1.125, 2.0249999, 0.675]
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 331 filtered out
+Run 2: identical output, FAILED.
+Run 3: identical output, FAILED.
+
+=== Project test suite (cargo test --lib) ===
+Before fix (pristine): test result: ok. 331 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+After fix (patched):   test result: ok. 331 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+The existing suite (including thumbnail_huge_block, which only checks for overflow panics, not
+pixel-value correctness) does not catch this bug either way - unaffected by the fix.

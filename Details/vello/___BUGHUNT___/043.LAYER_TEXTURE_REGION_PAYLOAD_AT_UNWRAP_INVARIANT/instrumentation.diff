@@ -1,0 +1,182 @@
+diff --git a/sparse_strips/vello_hybrid/src/draw.rs b/sparse_strips/vello_hybrid/src/draw.rs
+index 47b78803..02c49c9b 100644
+--- a/sparse_strips/vello_hybrid/src/draw.rs
++++ b/sparse_strips/vello_hybrid/src/draw.rs
+@@ -881,4 +881,18 @@ mod tests {
+             [1, 2]
+         );
+     }
++
++    #[test]
++    #[should_panic(expected = "TryFromIntError")]
++    fn candidate_043_payload_at_positive_control_panics_when_invariant_violated() {
++        // Directly demonstrates that violating the documented invariant ("only sample values
++        // that are within the layer bbox") does make `payload_at` panic, as the comment warns -
++        // confirming the fuzz/manual-construction tests in `schedule_tests.rs` were exercising a
++        // check that actually bites when the invariant is broken.
++        let region = layer(RectU16::new(20, 20, 30, 30));
++
++        // x = 10 is less than layer_bbox.x0 = 20, so shift.0 = 0 - 20 = -20, and
++        // 10 + (-20) = -10, which does not fit in a u16 -> `unwrap()` panics.
++        let _ = region.payload_at(10, 25);
++    }
+ }
+diff --git a/sparse_strips/vello_hybrid/src/schedule/schedule_tests.rs b/sparse_strips/vello_hybrid/src/schedule/schedule_tests.rs
+index bbae1a2d..fd4e37fc 100644
+--- a/sparse_strips/vello_hybrid/src/schedule/schedule_tests.rs
++++ b/sparse_strips/vello_hybrid/src/schedule/schedule_tests.rs
+@@ -916,3 +916,154 @@ fn blend_is_constrained_to_parent_clip_bbox() {
+     // This must not panic.
+     let _ = crate::blend::GpuBlendInstance::new(blend, None, SizeU16::new(64));
+ }
++
++#[test]
++fn candidate_043_fuzz_layer_texture_region_payload_at() {
++    // Simple xorshift PRNG, no external dependency needed.
++    struct Rng(u64);
++    impl Rng {
++        fn next(&mut self) -> u64 {
++            let mut x = self.0;
++            x ^= x << 13;
++            x ^= x >> 7;
++            x ^= x << 17;
++            self.0 = x;
++            x
++        }
++        fn range(&mut self, lo: u32, hi: u32) -> u32 {
++            lo + (self.next() as u32) % (hi - lo + 1)
++        }
++        fn f64_range(&mut self, lo: f64, hi: f64) -> f64 {
++            lo + (self.next() as f64 / u64::MAX as f64) * (hi - lo)
++        }
++        fn bool(&mut self) -> bool {
++            self.next() & 1 == 0
++        }
++    }
++
++    let mut rng = Rng(0x1234_5678_9ABC_DEF0u64);
++
++    for iter in 0..500_000u32 {
++        // NOTE: deliberately not probing canvas sizes near `u16::MAX` here - that hits a
++        // different, already-acknowledged panic in
++        // `vello_common::util::RectExt::snap_to_tile_coordinates` (own comment: "This method
++        // will panic if we have a viewport of size u16::MAX and draw at the very edge"),
++        // unrelated to this candidate's `LayerTextureRegion::payload_at` suspect.
++        let (canvas_w, canvas_h) = (rng.range(1, 96) as u16, rng.range(1, 96) as u16);
++        let mut case = SceneCase::new(canvas_w, canvas_h);
++
++        let depth = rng.range(0, 7);
++        fn build(case: &mut SceneCase, rng: &mut Rng, canvas_w: u16, canvas_h: u16, depth: u32) {
++            let n_draws = rng.range(0, 3);
++            for _ in 0..n_draws {
++                let x0 = rng.f64_range(-20.0, canvas_w as f64 + 20.0);
++                let y0 = rng.f64_range(-20.0, canvas_h as f64 + 20.0);
++                let w = rng.f64_range(0.0, 40.0);
++                let h = rng.f64_range(0.0, 40.0);
++                let alpha = rng.f64_range(0.0, 1.0) as f32;
++                case.draw(Rect::new(x0, y0, x0 + w, y0 + h), alpha);
++            }
++
++            if depth == 0 {
++                return;
++            }
++
++            let has_clip = rng.range(0, 2) != 0;
++            let clip = if has_clip {
++                // Bias towards clip rects that touch/exceed the canvas edges exactly, since
++                // that's where `layer_bbox`/`target_bbox` intersections are tightest.
++                let x0 = rng.f64_range(-20.0, canvas_w as f64 + 20.0);
++                let y0 = rng.f64_range(-20.0, canvas_h as f64 + 20.0);
++                let w = rng.f64_range(0.0, 60.0);
++                let h = rng.f64_range(0.0, 60.0);
++                Some(Rect::new(x0, y0, x0 + w, y0 + h))
++            } else {
++                None
++            };
++            let blend_mode = match rng.range(0, 3) {
++                0 => None,
++                1 => Some(BlendMode::new(Mix::Multiply, Compose::SrcOver)),
++                _ => Some(BlendMode::new(Mix::Normal, Compose::Clear)),
++            };
++            let opacity_variant = rng.range(0, 4);
++            // Vary opacity by wrapping the layer in an extra opacity-only push when requested -
++            // `layer_with` itself doesn't take opacity, so fold it in via `push_opacity_layer`
++            // immediately inside the clip/blend layer.
++            let opacity = match opacity_variant {
++                0 => Some(0.0_f32),
++                1 => Some(1.0_f32),
++                2 => Some(rng.f64_range(0.0, 1.0) as f32),
++                _ => None,
++            };
++
++            case.layer_with(clip, blend_mode, None, |case| {
++                if let Some(opacity) = opacity {
++                    case.scene.push_opacity_layer(opacity);
++                    build(case, rng, canvas_w, canvas_h, depth - 1);
++                    case.scene.pop_layer();
++                } else {
++                    build(case, rng, canvas_w, canvas_h, depth - 1);
++                }
++            });
++        }
++        build(&mut case, &mut rng, canvas_w, canvas_h, depth);
++
++        let texture_size = rng.range(4, 64) as u16;
++        let max_textures = rng.range(1, 8) as usize;
++        let use_depth_buffer = rng.bool();
++
++        // A panic here (e.g. from `LayerTextureRegion::payload_at`'s `u16::try_from(..).unwrap()`)
++        // will simply abort the test with the panic message; since `rng` is seeded
++        // deterministically, the failing `iter` can be pinned down by narrowing the loop bound.
++        let _ = iter;
++        let _ = case.schedule(
++            RootTarget::UserSurface,
++            SizeU16::new(texture_size),
++            max_textures,
++            use_depth_buffer,
++        );
++    }
++}
++
++#[test]
++fn candidate_043_layer_bbox_touches_target_edges() {
++    // Layer clip rect exactly touching the right/bottom edge of a small canvas, with a tiny
++    // texture atlas (forces the layer's texture allocation to start away from (0,0) inside the
++    // page and to be tightly packed against page/canvas boundaries).
++    let mut case = SceneCase::new(16, 16);
++    case.layer_with(Some(Rect::new(8.0, 8.0, 16.0, 16.0)), None, None, |case| {
++        case.draw(Rect::new(8.0, 8.0, 16.0, 16.0), 0.5);
++    });
++    let _ = case.schedule(RootTarget::UserSurface, SizeU16::new(8), 8, true);
++    let _ = case.schedule(RootTarget::UserSurface, SizeU16::new(8), 8, false);
++    let _ = case.schedule(RootTarget::AtlasLayer, SizeU16::new(8), 8, true);
++}
++
++#[test]
++fn candidate_043_asymmetric_clip_with_isolated_blend_and_nested_layers() {
++    let mut case = SceneCase::new(40, 24);
++    case.layer_with(
++        Some(Rect::new(4.0, 20.0, 36.0, 24.0)),
++        Some(BlendMode::new(Mix::Normal, Compose::Clear)),
++        None,
++        |case| {
++            case.draw(Rect::new(0.0, 0.0, 40.0, 24.0), 0.5);
++            case.layer_with(Some(Rect::new(30.0, 22.0, 40.0, 24.0)), None, None, |case| {
++                case.draw(Rect::new(28.0, 20.0, 40.0, 24.0), 0.7);
++            });
++        },
++    );
++    let _ = case.schedule(RootTarget::UserSurface, SizeU16::new(12), 4, true);
++}
++
++#[test]
++fn candidate_043_layer_bbox_starts_at_nonzero_origin_only() {
++    // Layer whose clip keeps only a 1-tile sliver at the far corner of the canvas, so
++    // `layer_bbox.x0`/`y0` are as large as possible relative to the canvas, maximizing the
++    // magnitude of the negative `geometry_shift` used by `payload_at`.
++    let mut case = SceneCase::new(64, 64);
++    case.layer_with(Some(Rect::new(60.0, 60.0, 64.0, 64.0)), None, None, |case| {
++        case.draw(Rect::new(60.0, 60.0, 64.0, 64.0), 1.0);
++    });
++    let _ = case.schedule(RootTarget::UserSurface, SizeU16::new(4), 8, true);
++}

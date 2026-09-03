@@ -1,0 +1,57 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+#
+# WARNING: patch.diff, once applied, produces a build that SEGFAULTS on ordinary use (see
+# RESULT.md - it registers a self-referential PropertyTracker's dependency against its own
+# address, then moves it). `just bench` below reproduces that crash on the very first frame.
+# This is expected and is the candidate's central finding, not a repro-script bug.
+#
+# Note: fully reproducing the bench additionally needs `perf_test/` copied in manually next
+# to `clone/` - it is untracked in the main slint repo's git history, so `just clone` alone
+# will not fetch it.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Reproduces the crash from RESULT.md (expected - see WARNING above) and, once past that on a
+# scene that never grows the tree beyond the 600_000-entry pre-reserved slab capacity the patch
+# also adds, the headline numbers.
+bench:
+    cd clone/perf_test && cargo build --profile rdebug --bin perf_test
+    ./clone/target/rdebug/perf_test --bench --mode scroll --count 100000 --row-style layout --scroll-step 0 --frames 20
+    @echo "For the paired before/after comparison in RESULT.md: build once per patch.diff"
+    @echo "applied/unapplied into two separate clones (and optionally a third with candidate"
+    @echo "065's patch.diff for the three-way comparison), then:"
+    @echo "  RUNS=9 FRAMES=20 taskset -c 2 tools/paired.sh <base-bin> <patched-bin> -- --mode scroll --count 100000 --row-style layout --scroll-step 0"
+    @echo "  RUNS=9 FRAMES=20 tools/paired.sh <base-bin> <patched-bin> -- --mode scroll --count 100000 --row-style layout --scroll-step 0   # multi-core"
+    @echo "  RUNS=9 FRAMES=20 taskset -c 2 tools/paired.sh <base-bin> <patched-bin> -- --mode scroll --count 100000 --row-style layout"
+    @echo "  RUNS=9 FRAMES=20 taskset -c 2 tools/paired.sh <base-bin> <patched-bin> -- --mode scroll --count 100000 --row-style flat"
+    @echo "  RUNS=9 FRAMES=20 taskset -c 2 tools/paired.sh <base-bin> <patched-bin> -- --mode scroll --count 100000 --row-style bare"
+
+clean:
+    rm -rf clone

@@ -1,0 +1,45 @@
+diff --git a/internal/core/model/repeater.rs b/internal/core/model/repeater.rs
+index fd63be294..d07d821b9 100644
+--- a/internal/core/model/repeater.rs
++++ b/internal/core/model/repeater.rs
+@@ -527,6 +527,10 @@ pub struct RepeaterTracker<T: RepeatedItemTree> {
+     /// Only used for the list view to track if the scrollbar has changed and item needs to be laid out again.
+     #[pin]
+     listview_geometry_tracker: crate::properties::PropertyTracker,
++    /// Reused across calls to `ensure_children_instantiated` to avoid a fresh
++    /// `Vec` allocation every frame; always left empty (capacity retained)
++    /// between calls.
++    instantiate_scratch: RefCell<Vec<ItemTreeRc<T>>>,
+ }
+ 
+ impl<T: RepeatedItemTree> ModelChangeListener for RepeaterTracker<T> {
+@@ -627,6 +631,7 @@ fn default() -> Self {
+                 "i_slint_core::Repeater::instance_generation",
+             ),
+             listview_geometry_tracker: Default::default(),
++            instantiate_scratch: Default::default(),
+         }
+     }
+ }
+@@ -700,12 +705,20 @@ pub fn ensure_updated(self: Pin<&Self>, init: impl Fn() -> ItemTreeRc<C>) -> boo
+     }
+ 
+     /// Recurse into child instances to ensure they are instantiated.
++    ///
++    /// The instances are cloned out of a reused scratch buffer (instead of a
++    /// fresh `Vec` collected every call) so that `ensure_item_tree_instantiated`,
++    /// which may run arbitrary reentrant code, never runs while `self.0.inner`
++    /// is borrowed.
+     fn ensure_children_instantiated(&self) -> bool {
+         let mut changed = false;
+-        for instance in self.instances_vec() {
++        let mut scratch = self.0.instantiate_scratch.take();
++        scratch.extend(self.0.inner.borrow().instances.iter().filter_map(|x| x.1.clone()));
++        for instance in scratch.drain(..) {
+             changed |=
+                 crate::item_tree::ensure_item_tree_instantiated(&vtable::VRc::into_dyn(instance));
+         }
++        *self.0.instantiate_scratch.borrow_mut() = scratch;
+         changed
+     }
+ 

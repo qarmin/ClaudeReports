@@ -1,0 +1,79 @@
+diff --git a/benches/imageops.rs b/benches/imageops.rs
+index d1b33ebe..70d8b842 100644
+--- a/benches/imageops.rs
++++ b/benches/imageops.rs
+@@ -1,6 +1,6 @@
+ use std::{hint::black_box, time::Duration};
+ 
+-use criterion::{criterion_group, criterion_main, Criterion};
++use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+ use image::{
+     imageops::{self, FilterType},
+     math::Rect,
+@@ -70,6 +70,16 @@ pub fn bench_imageops(c: &mut Criterion) {
+     c.bench_function("rotate270", |b| {
+         b.iter(|| imageops::rotate270(&src));
+     });
++    c.bench_function("rotate180_in_place", |b| {
++        b.iter_batched(
++            || src.clone(),
++            |mut img| {
++                imageops::rotate180_in_place(&mut img);
++                img
++            },
++            BatchSize::LargeInput,
++        );
++    });
+ 
+     c.bench_function("unsharpen", |b| {
+         b.iter(|| imageops::unsharpen(&src, 2.0, 0));
+diff --git a/src/imageops/affine.rs b/src/imageops/affine.rs
+index 10bf8f44..7da31e5c 100644
+--- a/src/imageops/affine.rs
++++ b/src/imageops/affine.rs
+@@ -168,6 +168,25 @@ where
+         )));
+     }
+ 
++    // Fast path: if the source exposes a canonical packed-row view (true for the common
++    // `ImageBuffer<P, Vec<S>>` case, and always for `destination`), flipping vertically is just
++    // reversing row order, i.e. one `copy_from_slice` per row instead of per-pixel get/put.
++    let pix_stride = usize::from(<I::Pixel as Pixel>::CHANNEL_COUNT);
++    if let Some(view) = image.to_pixel_view() {
++        let (sw, sh) = view.strides_wh();
++        if sw == pix_stride {
++            let row_len = w0 as usize * pix_stride;
++            let samples: &[_] = view.samples();
++            let dest = destination.subpixels_mut();
++            for y in 0..h0 as usize {
++                let src_row = &samples[y * sh..][..row_len];
++                let dst_row = &mut dest[(h0 as usize - 1 - y) * row_len..][..row_len];
++                dst_row.copy_from_slice(src_row);
++            }
++            return Ok(());
++        }
++    }
++
+     for y in 0..h0 {
+         for x in 0..w0 {
+             let p = image.get_pixel(x, y);
+@@ -181,6 +200,19 @@ where
+ pub fn rotate180_in_place<I: GenericImage>(image: &mut I) {
+     let (width, height) = image.dimensions();
+ 
++    // Fast path: rotating 180 degrees maps pixel index `i` to `width*height - 1 - i`, i.e. it is
++    // exactly a reversal of the flattened pixel sequence. If the image exposes a canonical
++    // packed, row-major view with no gaps between rows (true for `ImageBuffer<P, Vec<S>>`), do
++    // that reversal directly on the pixel slice instead of a per-pixel double loop.
++    if let Some(mut view) = image.to_pixel_view_mut() {
++        let (_, w, h) = view.flat().strides_cwh();
++        let pix_stride = usize::from(<I::Pixel as Pixel>::CHANNEL_COUNT);
++        if w == pix_stride && h == width as usize * pix_stride {
++            <I::Pixel as Pixel>::pixels_from_channels_mut(view.image_mut_slice()).reverse();
++            return;
++        }
++    }
++
+     for y in 0..height / 2 {
+         for x in 0..width {
+             let p = image.get_pixel(x, y);

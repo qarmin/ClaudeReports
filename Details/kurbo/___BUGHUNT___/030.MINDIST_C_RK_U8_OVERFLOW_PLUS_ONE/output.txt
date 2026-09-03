@@ -1,0 +1,102 @@
+All output captured from ad-hoc `#[test]` fns temporarily added to
+kurbo/src/mindist.rs's own `mod tests` (inside a git worktree, reverted afterward - see RESULT.md).
+Base commit: ca273499e3e48bd2de6f02aa8e99a148984e45f3
+
+=== Approach 1: real end-to-end call, debug build (debug-assertions=true, overflow-checks=true) ===
+$ cargo test -p kurbo --lib mindist::tests::test_candidate_030_degree255_upsilon_overflow -- --nocapture
+
+running 1 test
+
+thread 'mindist::tests::test_candidate_030_degree255_upsilon_overflow' panicked at kurbo/src/mindist.rs:176:18:
+attempt to multiply with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test mindist::tests::test_candidate_030_degree255_upsilon_overflow ... FAILED
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 187 filtered out; finished in 0.00s
+
+  -> Panics at line 176 (`for r in 0..=2 * n` inside `S()`), the already-confirmed candidate 006
+     `2 * n` u8-multiplication overflow - NOT at line 196/204 (`upsilon + 1`/`varsigma + 1`) that
+     this candidate names. The debug build never reaches C_rk/A_r for n=255 at all.
+
+=== Approach 1b: same real end-to-end call, release build (overflow-checks=false) ===
+$ cargo test -p kurbo --release --lib mindist::tests::test_candidate_030_degree255_upsilon_overflow -- --nocapture
+
+running 1 test
+test mindist::tests::test_candidate_030_degree255_upsilon_overflow has been running for over 60 seconds
+candidate_030 result = (NaN, 0.5, 0.5)
+test mindist::tests::test_candidate_030_degree255_upsilon_overflow ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 187 filtered out; finished in 181.95s
+
+  -> No panic anywhere (`u8` wraps silently in release, no overflow-checks). Returns a NaN, wrong
+     result (from choose()'s independent u32 overflow, candidate 019) - but critically, no addition
+     overflow at the `upsilon + 1`/`varsigma + 1` lines either, matching the exhaustive math check
+     below (max upsilon ever reachable is 254).
+
+=== Approach 2: manual boundary-value construction, exhaustive over all n in 0..=255 ===
+(pure math check, run standalone, not part of the Rust build - see RESULT.md for the derivation)
+
+$ python3 - <<'EOF'
+maxu = 0
+worst = None
+for n in range(256):
+    two_n = (2*n) % 256  # matches u8 wrapping-mul semantics used in release builds
+    max_r_Drk = two_n - 1 if two_n > 0 else -1   # exclusive range used in min_dist_param's own loops
+    max_r_S = two_n                               # inclusive range used in S()
+    for max_r in (max_r_Drk, max_r_S):
+        if max_r < 0:
+            continue
+        upsilon = min(max_r, n)
+        if upsilon > maxu:
+            maxu = upsilon
+            worst = (n, max_r, upsilon)
+print("max upsilon ever reachable:", maxu, "at (n, max_r, upsilon) =", worst)
+EOF
+max upsilon ever reachable: 254 at (n, max_r, upsilon) = (255, 254, 254)
+
+  -> Every real call site passes `r`/`k` values generated from a range bounded by `2 * n`/`2 * m`
+     computed in that *same* `n`/`m`'s `u8` arithmetic, so `r.min(n)` (`upsilon`) can never reach
+     255 - the wraparound of `2 * n` structurally caps it at 254, and `254 + 1 = 255` fits `u8`
+     cleanly. So `upsilon + 1` (or `varsigma + 1`) can never actually overflow through any call path
+     that starts at `min_dist_param`/`S`/`D_rk`.
+
+=== Approach 3: direct out-of-band call to the private `C_rk` helper, bypassing the r/k-generating loops ===
+$ cargo test -p kurbo --lib mindist::tests::test_candidate_030_direct_crk_call_r255_n255 -- --nocapture
+
+running 1 test
+
+thread 'mindist::tests::test_candidate_030_direct_crk_call_r255_n255' panicked at kurbo/src/mindist.rs:196:21:
+attempt to add with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test mindist::tests::test_candidate_030_direct_crk_call_r255_n255 ... FAILED
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 189 filtered out; finished in 0.00s
+
+  -> Confirms the *line itself* (`kurbo/src/mindist.rs:196`, `upsilon + 1`) is mechanically capable
+     of overflowing if `C_rk` is ever invoked directly with r=255 on a 256-control-point curve
+     (n=255) - but `C_rk`'s only real (non-test) caller is `D_rk` (mindist.rs:235), which is itself
+     only ever called from `S()` and the two loops inside `min_dist_param`, both of which are
+     bounded by `2 * n`/`2 * m` per Approach 2 above. There is no legitimate call path that reaches
+     `C_rk`/`A_r` with r or k = 255 while n or m = 255 simultaneously.
+
+=== Approach 4: sweep of degree (n) from 1 to 255 through the real `min_dist_param` entry point ===
+$ cargo test -p kurbo --lib mindist::tests::test_candidate_030_max_reachable_upsilon_all_n -- --nocapture
+
+running 1 test
+n_plus_1=2 -> Ok((998001.0, 0.5, 0.5))
+n_plus_1=4 -> Ok((994009.0, 0.5, 0.5))
+n_plus_1=8 -> Ok((986049.0, 0.5, 0.5))
+n_plus_1=16 -> Ok((970225.0, 0.5, 0.5))
+thread '...' panicked at kurbo/src/mindist.rs:252:9:
+attempt to multiply with overflow
+n_plus_1=32 -> Err(Any { .. })
+... (n_plus_1 = 32, 64, 128 all panic at mindist.rs:252, `choose()`'s u32 overflow, candidate 019)
+thread '...' panicked at kurbo/src/mindist.rs:176:18:
+attempt to multiply with overflow
+n_plus_1=129 -> Err(Any { .. })
+... (n_plus_1 = 129, 200, 255, 256 all panic at mindist.rs:176, `2 * n` u8 overflow, candidate 006)
+test mindist::tests::test_candidate_030_max_reachable_upsilon_all_n ... ok
+
+  -> Across the entire supported degree range (n = 1..=255), every debug-assertions run panics
+     either at `choose()`'s u32 overflow (candidate 019, first, around n ~ 15-31) or at the `2 * n`
+     u8 overflow (candidate 006, from n = 128 up) - never once at `upsilon + 1`/`varsigma + 1`.

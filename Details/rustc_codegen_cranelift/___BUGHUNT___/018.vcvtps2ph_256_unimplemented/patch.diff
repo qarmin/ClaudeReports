@@ -1,0 +1,65 @@
+diff --git a/src/intrinsics/llvm_x86.rs b/src/intrinsics/llvm_x86.rs
+index 136e9896..cfb5fbe4 100644
+--- a/src/intrinsics/llvm_x86.rs
++++ b/src/intrinsics/llvm_x86.rs
+@@ -1346,6 +1346,60 @@ fn select4(
+             );
+         }
+ 
++        "llvm.x86.vcvtps2ph.256" => {
++            // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_cvtps_ph
++            intrinsic_args!(fx, args => (a, _imm8); intrinsic);
++
++            let imm8 =
++                if let Some(imm8) = crate::constant::mir_operand_get_const_val(fx, &args[1].node) {
++                    imm8
++                } else {
++                    fx.tcx
++                        .dcx()
++                        .span_fatal(span, "Index argument for `_mm256_cvtps_ph` is not a constant");
++                };
++
++            let imm8 = imm8.to_u32();
++
++            // Cranelift has no 256bit vector type, so run the 128bit instruction on each half of
++            // the input and concatenate the two 4x f16 results. Using the same instruction as the
++            // `.128` variant keeps the rounding/denormal behaviour identical.
++            let mut res_halves = [None; 2];
++            for (half, res_half) in res_halves.iter_mut().enumerate() {
++                let a_half = a.value_typed_lane(fx, fx.tcx.types.u128, half as u64).load_scalar(fx);
++                let half_place = CPlace::new_stack_slot(fx, ret.layout());
++
++                codegen_inline_asm_inner(
++                    fx,
++                    &[InlineAsmTemplatePiece::String(
++                        format!("vcvtps2ph xmm0, xmm0, {imm8}").into(),
++                    )],
++                    &[CInlineAsmOperand::InOut {
++                        reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm0)),
++                        _late: true,
++                        in_value: a_half,
++                        out_place: Some(half_place),
++                    }],
++                    InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
++                );
++
++                *res_half = Some(
++                    half_place
++                        .to_cvalue(fx)
++                        .value_typed_lane(fx, fx.tcx.types.u64, 0)
++                        .load_scalar(fx),
++                );
++            }
++
++            for (half, res_half) in res_halves.into_iter().enumerate() {
++                ret.place_typed_lane(fx, fx.tcx.types.u64, half as u64).to_ptr().store(
++                    fx,
++                    res_half.unwrap(),
++                    MemFlagsData::trusted(),
++                );
++            }
++        }
++
+         _ => {
+             fx.tcx
+                 .dcx()

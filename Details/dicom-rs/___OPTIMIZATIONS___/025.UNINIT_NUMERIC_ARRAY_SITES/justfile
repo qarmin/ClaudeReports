@@ -1,0 +1,48 @@
+# Self-contained reproduction for candidate 025.UNINIT_NUMERIC_ARRAY_SITES.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern). Self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+# This candidate's own result is inconclusive (no consistent change, a third outcome after two
+# earlier contradictory ones in candidate 009) - this justfile exists so that claim itself is
+# independently reproducible, not just asserted.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cp "{{justfile_directory()}}/testdata/liver.dcm" clone/
+    echo "=== bit-exactness check ==="
+    ./bin_baseline parse clone/liver.dcm 1 > /tmp/candidate025_baseline.txt
+    ./bin_patched parse clone/liver.dcm 1 > /tmp/candidate025_patched.txt
+    diff <(grep -oE 'checksum=0x[0-9a-f]+' /tmp/candidate025_baseline.txt) \
+         <(grep -oE 'checksum=0x[0-9a-f]+' /tmp/candidate025_patched.txt) \
+        && echo "checksums match: bit-exact" || echo "DIFFERS (unexpected)"
+    echo "=== liver.dcm, parse mode (~24us/iter) - expect NO consistent change (a fourth, still-inconclusive outcome) ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- parse clone/liver.dcm 2000
+
+clean:
+    rm -rf clone bin_baseline bin_patched

@@ -1,0 +1,57 @@
+diff --git a/src/decoder/lossless.rs b/src/decoder/lossless.rs
+index cd00476..fe3cb10 100644
+--- a/src/decoder/lossless.rs
++++ b/src/decoder/lossless.rs
+@@ -107,32 +107,41 @@ impl<R: Read> Decoder<R> {
+ 
+         if scan.predictor_selection == Predictor::Ra {
+             for (i, _component) in components.iter().enumerate() {
++                let diffs = &differences[i];
++                let result_row = &mut results[i];
++
+                 // calculate the top left pixel
+-                let diff = differences[i][0];
++                let diff = diffs[0];
+                 let prediction = 1 << (frame.precision - scan.point_transform - 1) as i32;
+-                let result = ((prediction + diff) & 0xFFFF) as u16; // modulo 2^16
+-                let result = result << scan.point_transform;
+-                results[i][0] = result;
++                let first = ((prediction + diff) & 0xFFFF) as u16; // modulo 2^16
++                let first = first << scan.point_transform;
++                result_row[0] = first;
+ 
+                 // calculate leftmost column, using top pixel as predictor
+-                let mut previous = result;
++                let mut previous = first;
+                 for mcu_y in 1..height {
+-                    let diff = differences[i][mcu_y * width];
++                    let diff = diffs[mcu_y * width];
+                     let prediction = previous as i32;
+                     let result = ((prediction + diff) & 0xFFFF) as u16; // modulo 2^16
+                     let result = result << scan.point_transform;
+-                    results[i][mcu_y * width] = result;
++                    result_row[mcu_y * width] = result;
+                     previous = result;
+                 }
+ 
+-                // calculate rows, using left pixel as predictor
++                // calculate rows, using left pixel as predictor. `previous` carries the just-
++                // computed left neighbour forward in a register instead of reading it back out
++                // of `result_row`, and both slices are indexed directly (not through the
++                // Vec<Vec<u16>> outer index `i` on every element access).
+                 for mcu_y in 0..height {
++                    let row_start = mcu_y * width;
++                    let mut previous = result_row[row_start];
+                     for mcu_x in 1..width {
+-                        let diff = differences[i][mcu_y * width + mcu_x];
+-                        let prediction = results[i][mcu_y * width + mcu_x - 1] as i32;
++                        let diff = diffs[row_start + mcu_x];
++                        let prediction = previous as i32;
+                         let result = ((prediction + diff) & 0xFFFF) as u16; // modulo 2^16
+                         let result = result << scan.point_transform;
+-                        results[i][mcu_y * width + mcu_x] = result;
++                        result_row[row_start + mcu_x] = result;
++                        previous = result;
+                     }
+                 }
+             }

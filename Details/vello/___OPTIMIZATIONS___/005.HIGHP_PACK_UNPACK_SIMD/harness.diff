@@ -1,0 +1,101 @@
+diff --git a/sparse_strips/vello_bench/src/fine/pack.rs b/sparse_strips/vello_bench/src/fine/pack.rs
+index b555b769..f5eeaa6e 100644
+--- a/sparse_strips/vello_bench/src/fine/pack.rs
++++ b/sparse_strips/vello_bench/src/fine/pack.rs
+@@ -7,7 +7,8 @@ use vello_common::fearless_simd::Simd;
+ use vello_common::geometry::RectU16;
+ use vello_common::pixmap::PixmapMut;
+ use vello_common::tile::Tile;
+-use vello_cpu::fine::{Fine, FineKernel};
++use vello_cpu::Level;
++use vello_cpu::fine::{F32Kernel, Fine, FineKernel};
+ use vello_cpu::region::Region;
+ use vello_dev_macros::vello_bench;
+ 
+@@ -16,6 +17,86 @@ const TILE_BUFFER_SIZE: usize = BENCH_WIDTH as usize * Tile::HEIGHT as usize * 4
+ pub fn pack(c: &mut Criterion) {
+     pack_block(c);
+     unpack_block(c);
++    pack_block_f32(c);
++    unpack_block_f32(c);
++}
++
++// The `#[vello_bench]` macro only instantiates the `u8` (`U8Kernel`) pipeline by default (the
++// `f32`/`F32Kernel` variants are deliberately commented out there to keep the default bench run
++// short - see `vello_dev_macros::bench`). `pack`/`unpack` are exactly the two functions candidate
++// 005 (`___OPTIMIZATIONS___/005.*`) targets in the `F32Kernel`/highp path, so they're benched here
++// directly against every available SIMD level, without touching the shared macro (and therefore
++// without re-enabling `f32` variants for every other `#[vello_bench]`-annotated function).
++fn pack_block_f32_inner<S: Simd>(b: &mut Bencher<'_>, simd: S) {
++    let fine = Fine::<S, F32Kernel>::new(simd, BENCH_WIDTH);
++    let mut buf = vec![0; TILE_BUFFER_SIZE];
++
++    b.iter(|| {
++        let mut pixmap = PixmapMut::new(BENCH_WIDTH, Tile::HEIGHT, &mut buf).unwrap();
++        let mut region = Region::new(&mut pixmap, RectU16::new(0, 0, BENCH_WIDTH, Tile::HEIGHT));
++        fine.pack(&mut region);
++
++        std::hint::black_box(&buf);
++    });
++}
++
++fn unpack_block_f32_inner<S: Simd>(b: &mut Bencher<'_>, simd: S) {
++    let mut fine = Fine::<S, F32Kernel>::new(simd, BENCH_WIDTH);
++    let mut buf = vec![0; TILE_BUFFER_SIZE];
++
++    b.iter(|| {
++        let mut pixmap = PixmapMut::new(BENCH_WIDTH, Tile::HEIGHT, &mut buf).unwrap();
++        let mut region = Region::new(&mut pixmap, RectU16::new(0, 0, BENCH_WIDTH, Tile::HEIGHT));
++        fine.unpack(0, &mut region);
++
++        std::hint::black_box(&fine);
++    });
++}
++
++pub fn pack_block_f32(c: &mut Criterion) {
++    #[cfg(target_arch = "aarch64")]
++    if let Some(neon) = Level::new().as_neon() {
++        c.bench_function("fine/pack/pack_block_f32_neon", |b| {
++            pack_block_f32_inner(b, neon);
++        });
++    }
++
++    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
++    if let Some(sse4_2) = Level::new().as_sse4_2() {
++        c.bench_function("fine/pack/pack_block_f32_sse4_2", |b| {
++            pack_block_f32_inner(b, sse4_2);
++        });
++    }
++
++    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
++    if let Some(avx2) = Level::new().as_avx2() {
++        c.bench_function("fine/pack/pack_block_f32_avx2", |b| {
++            pack_block_f32_inner(b, avx2);
++        });
++    }
++}
++
++pub fn unpack_block_f32(c: &mut Criterion) {
++    #[cfg(target_arch = "aarch64")]
++    if let Some(neon) = Level::new().as_neon() {
++        c.bench_function("fine/pack/unpack_block_f32_neon", |b| {
++            unpack_block_f32_inner(b, neon);
++        });
++    }
++
++    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
++    if let Some(sse4_2) = Level::new().as_sse4_2() {
++        c.bench_function("fine/pack/unpack_block_f32_sse4_2", |b| {
++            unpack_block_f32_inner(b, sse4_2);
++        });
++    }
++
++    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
++    if let Some(avx2) = Level::new().as_avx2() {
++        c.bench_function("fine/pack/unpack_block_f32_avx2", |b| {
++            unpack_block_f32_inner(b, avx2);
++        });
++    }
+ }
+ 
+ #[vello_bench]

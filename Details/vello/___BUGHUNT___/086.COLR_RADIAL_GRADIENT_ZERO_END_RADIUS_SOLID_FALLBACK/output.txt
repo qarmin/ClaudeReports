@@ -1,0 +1,59 @@
+Real captured output of `repro/` (`colr_radial_gradient_zero_end_radius_repro`), release build,
+against this workspace's checkout of base_commit 7516831426fb70f36d62c521c5477f6a7265b36a.
+
+=== BEFORE (pristine glifo/src/colr.rs, `r1 <= 0.0`) - run 1/3 ===
+radial gradient with r0=100,r1=0 (zero end-radius cone), glyph 96: vello_cpu (reference) opaque pixels = 40000, distinct colors = 1 / classic vello (GPU) opaque pixels = 6982, distinct colors = 133
+REPRODUCED - for the exact same real, spec-legal COLRv1 PaintRadialGradient (r0=100, r1=0, distinct centers), vello_cpu (reference, via glifo) renders a flat solid fill (1 distinct colors) while classic vello's real GPU render is a real gradient (133 distinct colors) - the two independent conv_brush/ColorPainter COLR paint-graph conversions disagree on what this construct should look like
+exit=1
+
+=== BEFORE - run 2/3 ===
+radial gradient with r0=100,r1=0 (zero end-radius cone), glyph 96: vello_cpu (reference) opaque pixels = 40000, distinct colors = 1 / classic vello (GPU) opaque pixels = 6982, distinct colors = 133
+REPRODUCED - for the exact same real, spec-legal COLRv1 PaintRadialGradient (r0=100, r1=0, distinct centers), vello_cpu (reference, via glifo) renders a flat solid fill (1 distinct colors) while classic vello's real GPU render is a real gradient (133 distinct colors) - the two independent conv_brush/ColorPainter COLR paint-graph conversions disagree on what this construct should look like
+exit=1
+
+=== BEFORE - run 3/3 ===
+radial gradient with r0=100,r1=0 (zero end-radius cone), glyph 96: vello_cpu (reference) opaque pixels = 40000, distinct colors = 1 / classic vello (GPU) opaque pixels = 6982, distinct colors = 133
+REPRODUCED - for the exact same real, spec-legal COLRv1 PaintRadialGradient (r0=100, r1=0, distinct centers), vello_cpu (reference, via glifo) renders a flat solid fill (1 distinct colors) while classic vello's real GPU render is a real gradient (133 distinct colors) - the two independent conv_brush/ColorPainter COLR paint-graph conversions disagree on what this construct should look like
+exit=1
+
+reference_vello_cpu_BEFORE_FIX.png: flat solid green covering the whole 200x200 canvas (1 distinct
+color) - see that file in this candidate folder.
+classic_vello_gpu.png: a real cone-shaped gradient (green -> white -> red wedge), unaffected by
+this candidate's fix since it exercises classic vello's conv_brush, not glifo - see that file in
+this candidate folder.
+
+=== AFTER (patched glifo/src/colr.rs, `r1 < 0.0`) - run 1/3 ===
+radial gradient with r0=100,r1=0 (zero end-radius cone), glyph 96: vello_cpu (reference) opaque pixels = 6930, distinct colors = 131 / classic vello (GPU) opaque pixels = 6982, distinct colors = 133
+did not reproduce - both renderers agree on flat-vs-gradient for this glyph (reference colors=131, classic vello (GPU) colors=133)
+exit=0
+
+=== AFTER - run 2/3 ===
+radial gradient with r0=100,r1=0 (zero end-radius cone), glyph 96: vello_cpu (reference) opaque pixels = 6930, distinct colors = 131 / classic vello (GPU) opaque pixels = 6982, distinct colors = 133
+did not reproduce - both renderers agree on flat-vs-gradient for this glyph (reference colors=131, classic vello (GPU) colors=133)
+exit=0
+
+=== AFTER - run 3/3 ===
+radial gradient with r0=100,r1=0 (zero end-radius cone), glyph 96: vello_cpu (reference) opaque pixels = 6930, distinct colors = 131 / classic vello (GPU) opaque pixels = 6982, distinct colors = 133
+did not reproduce - both renderers agree on flat-vs-gradient for this glyph (reference colors=131, classic vello (GPU) colors=133)
+exit=0
+
+reference_vello_cpu_AFTER_FIX.png: now a real cone-shaped gradient, visually matching
+classic_vello_gpu.png (near-identical pixel/color counts: 6930 vs 6982 opaque pixels, 131 vs 133
+distinct colors - the small remaining difference is ordinary antialiasing noise between the two
+independent rasterizers, not a flat-vs-gradient disagreement).
+
+=== Project test suite (cargo test --workspace --lib --release, this repo's whole workspace) ===
+BEFORE fix: 441 passed; 0 failed; 1 ignored (across all workspace crates' unit tests)
+AFTER fix:  441 passed; 0 failed; 1 ignored (identical - no regression)
+
+=== vello_sparse_tests COLR snapshot test (informational only - see RESULT.md) ===
+`cargo test -p vello_sparse_tests --release --test tests glyphs_colr_test_glyphs`
+BEFORE fix: 0 passed; 10 failed; 2 ignored - every glyphs_colr_test_glyphs_* variant panics with
+  `Unsupported(UnsupportedError { format: Unknown, kind: Format(Unknown) })` while decoding the
+  reference PNG.
+AFTER fix:  0 passed; 10 failed; 2 ignored - byte-for-byte identical failure set/messages.
+Root cause of these particular failures (both before and after, unrelated to this candidate's
+fix): this environment never pulled git-lfs content, so
+`sparse_strips/vello_sparse_tests/snapshots/glyphs_colr_test_glyphs*.png` are still raw git-lfs
+pointer text files, not real PNGs, so `image::load_from_memory` fails before any pixel comparison
+against this candidate's fix ever runs.

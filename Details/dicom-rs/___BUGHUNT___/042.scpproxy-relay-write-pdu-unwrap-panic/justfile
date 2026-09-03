@@ -1,0 +1,38 @@
+# Self-contained reproduction for this candidate.
+#
+# Real end-to-end reproduction (per CONFIRMATION.md section 11): runs the actual
+# `dicom-scpproxy` binary as a subprocess, relaying to a genuine fake SCP built on
+# `dicom-ul`'s own real server association API, and a genuinely separate process connects to
+# the real scpproxy over a real loopback TCP socket to send a real (deliberately non-compliant)
+# ASSOCIATE-RQ, then checks whether the real scpproxy process survives.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone build-before reproduce-before apply build-after reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-before:
+    cargo build --manifest-path clone/Cargo.toml -p dicom-scpproxy
+    cargo build --manifest-path repro/Cargo.toml
+
+# Should exit 1 (bug reproduced: the real scpproxy process crashes).
+reproduce-before:
+    ./repro/target/debug/repro clone/target/debug/dicom-scpproxy; test "$?" -eq 1 && echo "(exit 1 expected here: bug reproduced)"; true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-after:
+    cargo build --manifest-path clone/Cargo.toml -p dicom-scpproxy
+
+# Should exit 0 (the real scpproxy process survives and keeps serving new connections).
+reproduce-after:
+    ./repro/target/debug/repro clone/target/debug/dicom-scpproxy
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

@@ -1,0 +1,59 @@
+diff --git a/object/src/mem.rs b/object/src/mem.rs
+index f403b109..7b7e47a6 100644
+--- a/object/src/mem.rs
++++ b/object/src/mem.rs
+@@ -357,6 +357,14 @@ impl InMemDicomObject<StandardDataDictionary> {
+     }
+ }
+ 
++/// Checks whether `s` only contains characters permitted by PS3.5 6.2's UI (Unique Identifier)
++/// VR character repertoire (digits, '.', and padding), the same check used when reading a UID
++/// value directly out of the file meta group.
++fn is_uid_conformant(s: &str) -> bool {
++    s.chars()
++        .all(|c| c == '.' || c.is_ascii_digit() || c == '\0' || c.is_ascii_whitespace())
++}
++
+ impl<D> FileDicomObject<InMemDicomObject<D>>
+ where
+     D: DataDictionary,
+@@ -647,22 +655,29 @@ where
+             // if Media Storage SOP Class UID is empty attempt to infer from SOP Class UID
+             if meta.media_storage_sop_class_uid().is_empty() {
+                 if let Some(elem) = obj.get(tags::SOP_CLASS_UID) {
+-                    meta.media_storage_sop_class_uid = elem
+-                        .value()
+-                        .to_str()
+-                        .context(ParseSopAttributeSnafu)?
+-                        .to_string();
++                    let value = elem.value().to_str().context(ParseSopAttributeSnafu)?;
++                    // Only infer a value that is actually a conformant UID (PS3.5 6.2's UI VR
++                    // character repertoire): the file meta group's own UID fields have a
++                    // restricted repertoire that the main data set's SOP Class UID is not
++                    // guaranteed to uphold, and copying a non-conformant value here would
++                    // silently produce a non-conformant file meta group. Leave it empty (the
++                    // same fallback already used when the data set has no SOP Class UID at all)
++                    // rather than propagate a value that fails this basic check.
++                    if is_uid_conformant(&value) {
++                        meta.media_storage_sop_class_uid = value.to_string();
++                    }
+                 }
+             }
+ 
+             // if Media Storage SOP Instance UID is empty attempt to infer from SOP Instance UID
+             if meta.media_storage_sop_instance_uid().is_empty() {
+                 if let Some(elem) = obj.get(tags::SOP_INSTANCE_UID) {
+-                    meta.media_storage_sop_instance_uid = elem
+-                        .value()
+-                        .to_str()
+-                        .context(ParseSopAttributeSnafu)?
+-                        .to_string();
++                    let value = elem.value().to_str().context(ParseSopAttributeSnafu)?;
++                    // see the comment above for Media Storage SOP Class UID: the same
++                    // conformance check is needed here for the same reason.
++                    if is_uid_conformant(&value) {
++                        meta.media_storage_sop_instance_uid = value.to_string();
++                    }
+                 }
+             }
+ 

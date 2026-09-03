@@ -1,0 +1,88 @@
+=== `cargo build --release` (repro/, against clone at base_commit 7516831426fb70f36d62c521c5477f6a7265b36a) ===
+Finished `release` profile [optimized] target(s) in 21.48s
+(clean build, only pre-existing upstream lint-expectation warnings unrelated to this candidate)
+
+=== `./target/release/pipeline_checks`, run 1/3 (VK_ICD_FILENAMES=<swiftshader>, WGPU_BACKEND=vulkan, RUST_BACKTRACE=1) ===
+=== Part 1: historical CPU-shim assertion-failure reports (vello#378, vello#775) ===
+vello#378 near-horizontal-huge-span: rendered OK, no panic
+vello#775 tile-boundary-snap: rendered OK, no panic
+
+=== Part 2: sibling bump-allocator overflow demonstration (why path_tiling.rs's own write is masked) ===
+
+thread 'main' (610310) panicked at /home/rafal/Projekty/Obce/vello/___BUGHUNT___/047.PATH_TILING_CPU_SHIM_ASSERT_AND_INDEX_WRITE/clone/vello_shaders/src/cpu/tile_alloc.rs:52:13:
+index out of bounds: the len is 2097152 but the index is 2097152
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::panicking::panic_bounds_check
+   3: vello_shaders::cpu::tile_alloc::tile_alloc
+   4: <vello::wgpu_engine::WgpuEngine>::run_recording
+   5: <vello::Renderer>::render_to_texture
+   6: pipeline_checks::try_render_scene::{closure#0}
+   7: pollster::block_on::<pipeline_checks::main::{closure#0}>
+   8: pipeline_checks::main
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+2a: 1000 full-canvas diagonals (tile_alloc.rs tiles-buffer overflow): PANICKED (see stderr above for the real backtrace)
+
+thread 'main' (610310) panicked at /home/rafal/Projekty/Obce/vello/___BUGHUNT___/047.PATH_TILING_CPU_SHIM_ASSERT_AND_INDEX_WRITE/clone/vello_shaders/src/cpu/path_count.rs:150:13:
+index out of bounds: the len is 2097152 but the index is 2097152
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::panicking::panic_bounds_check
+   3: vello_shaders::cpu::path_count::path_count
+   4: <vello::wgpu_engine::WgpuEngine>::run_recording
+   5: <vello::Renderer>::render_to_texture
+   6: pipeline_checks::try_render_scene::{closure#0}
+   7: pipeline_checks::try_render_path::{closure#0}
+   8: pollster::block_on::<pipeline_checks::main::{closure#0}>
+   9: pipeline_checks::main
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+2b: one path, 2500 full-diagonal lines (path_count.rs seg_counts-buffer overflow): PANICKED (see stderr above for the real backtrace)
+
+Done. See RESULT.md for why these panics land in tile_alloc.rs/path_count.rs and not in path_tiling.rs itself, and `search` (this same folder's other binary) for the offline float-precision search over path_tiling.rs's own assert invariant.
+
+=== `./target/release/pipeline_checks`, runs 2/3 and 3/3 (repeated, identical outcome) ===
+--- run 2 ---
+vello#378 near-horizontal-huge-span: rendered OK, no panic
+vello#775 tile-boundary-snap: rendered OK, no panic
+2a: 1000 full-canvas diagonals (tile_alloc.rs tiles-buffer overflow): PANICKED (see stderr above for the real backtrace)
+2b: one path, 2500 full-diagonal lines (path_count.rs seg_counts-buffer overflow): PANICKED (see stderr above for the real backtrace)
+--- run 3 ---
+vello#378 near-horizontal-huge-span: rendered OK, no panic
+vello#775 tile-boundary-snap: rendered OK, no panic
+2a: 1000 full-canvas diagonals (tile_alloc.rs tiles-buffer overflow): PANICKED (see stderr above for the real backtrace)
+2b: one path, 2500 full-diagonal lines (path_count.rs seg_counts-buffer overflow): PANICKED (see stderr above for the real backtrace)
+
+=== `./target/release/search` (offline pure-math brute force over path_tiling.rs's own coarse-raster formula, fix left ENABLED - 9 magnitudes x up to 2,000,000 trials each, biased toward near-grid-aligned/near-axis-aligned lines) ===
+real	0m2.605s
+done mag=1, found so far=0
+done mag=16, found so far=0
+done mag=100, found so far=0
+done mag=1000, found so far=0
+done mag=10000, found so far=0
+done mag=100000, found so far=0
+done mag=1000000, found so far=0
+done mag=10000000, found so far=0
+done mag=30000000, found so far=0
+total found: 0
+
+=== Sanity check: the same search harness with the ROBUST_EPSILON/ONE_MINUS_ULP fix temporarily commented out (proves the harness's violation-detection logic is real, not silently broken - run separately in a scratch copy, not part of this folder's own `search.rs`) ===
+VIOLATION mag=1 trial=687216 p0=Vec2 { x: 0.0, y: 0.0 } p1=Vec2 { x: 103.03385, y: 5.9973594e-8 } seg_within_line=6 tile_p0=Vec2 { x: 0.0, y: 16.0 } tile_p1=Vec2 { x: -8.966148, y: 16.0 }
+VIOLATION mag=1 trial=788748 p0=Vec2 { x: -0.0, y: 0.0 } p1=Vec2 { x: 79.841995, y: 3.4297927e-6 } seg_within_line=4 tile_p0=Vec2 { x: 0.0, y: 16.0 } tile_p1=Vec2 { x: -0.15800476, y: 16.000004 }
+... (6 violations at mag=1, 6 more at mag=16, 7 more at mag=100 and mag=1000, all found within
+    the first ~2M trials per magnitude - i.e. the harness reliably finds violations once the real
+    fix is disabled, at the same magnitudes where the fix-enabled run above found none)
+done mag=1, found so far=6
+done mag=16, found so far=12
+done mag=100, found so far=19
+
+=== Additional exploratory evidence gathered this session (not part of `repro/`, but informing "What's not done") ===
+A full-pipeline, real-`Scene`-driven, use_cpu:true sweep of ~1200 randomized near-degenerate
+paths at translation magnitudes 10..3e5 (mimicking vello#378/#775/#1139's reported inputs, with
+jitter in [1e-4, 1e-1] and near-axis-aligned/near-diagonal short edges) produced 0 panics and 0
+`Err(..)` results - see this candidate's RESULT.md "What was tried" table for the exact
+construction. A separate sweep systematically varying magnitude/epsilon/scale across ~320
+hand-constructed near-grid-aligned "slice" shapes found 14 panics, but every one was in
+vello_shaders/src/cpu/path_count.rs:146 (a distinct, sibling bump-allocator-index bug, also noted
+under "What's not done"), not in path_tiling.rs.

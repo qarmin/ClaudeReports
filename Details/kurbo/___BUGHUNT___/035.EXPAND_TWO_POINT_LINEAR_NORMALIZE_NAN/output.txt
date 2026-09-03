@@ -1,0 +1,60 @@
+=== Run 1: `just test` against a fresh clone of git@github.com:linebender/kurbo.git @ ca273499e3e48bd2de6f02aa8e99a148984e45f3 (release build) ===
+$ just test
+rm -rf clone
+git clone https://github.com/linebender/kurbo.git clone
+Cloning into 'clone'...
+cd clone && git checkout ca273499e3e48bd2de6f02aa8e99a148984e45f3
+HEAD is now at ca27349 ci: Update to stable Rust 1.97.1, typos 1.48.0 (#596)
+cd repro && cargo run --release
+   Compiling arrayvec v0.7.8
+   Compiling smallvec v1.16.0
+   Compiling polycool v0.4.0 (.../clone/polycool)
+   Compiling kurbo v0.13.1 (.../clone/kurbo)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 1.05s
+     Running `target/release/repro`
+== Single, headline case: exact cusp at t=0.35 (collinear tangents) ==
+cusp_t=0.35   q0=Vec2 { x: 1.0, y: 0.0 } q2=Vec2 { x: 1.0, y: 0.0 } exact_cusp=true -> NaN in output: false
+  expanded = BezPath([MoveTo((0.0, 1.0)), LineTo((0.26739926739926734, 1.0)), LineTo((-0.7326007326007327, 0.0)), LineTo((-0.7326007326007327, 5.0)), LineTo((0.26739926739926734, 4.0)), LineTo((0.0, 4.0)), LineTo((1.0, 5.0)), LineTo((1.0, 0.0)), LineTo((0.0, 1.0)), ClosePath])
+
+== Broader sweep: ~1000 candidate cusp locations x 4 tangent-direction pairs ==
+tested 3836 locations (367 were genuine bit-exact-zero-derivative cusps, i.e. cases where normalize() really did compute 0.0/0.0 = NaN internally), NaN reached the output in 0 of them
+
+did not reproduce - no NaN in any output, across all cases tried
+
+=== Run 2: repeat run, same clone/build, `cd repro && cargo run --release` ===
+    Finished `release` profile [optimized] target(s) in 0.82s
+     Running `target/release/repro`
+== Single, headline case: exact cusp at t=0.35 (collinear tangents) ==
+cusp_t=0.35   q0=Vec2 { x: 1.0, y: 0.0 } q2=Vec2 { x: 1.0, y: 0.0 } exact_cusp=true -> NaN in output: false
+  expanded = BezPath([MoveTo((0.0, 1.0)), LineTo((0.26739926739926734, 1.0)), LineTo((-0.7326007326007327, 0.0)), LineTo((-0.7326007326007327, 5.0)), LineTo((0.26739926739926734, 4.0)), LineTo((0.0, 4.0)), LineTo((1.0, 5.0)), LineTo((1.0, 0.0)), LineTo((0.0, 1.0)), ClosePath])
+
+== Broader sweep: ~1000 candidate cusp locations x 4 tangent-direction pairs ==
+tested 3836 locations (367 were genuine bit-exact-zero-derivative cusps, i.e. cases where normalize() really did compute 0.0/0.0 = NaN internally), NaN reached the output in 0 of them
+
+did not reproduce - no NaN in any output, across all cases tried
+
+=== Supplementary evidence: instrumented build showing the internal mechanism ===
+Temporarily added `eprintln!` to `two_point_linear` in the working checkout (kurbo/src/expand.rs,
+reverted afterwards - not part of the shipped repro) to observe the actual per-sample values for
+the single collinear headline case (cusp at t=0.35, q0=q2=(1,0)):
+
+DEBUG two_point_linear s0=TwoPointSample { a_n: NaN, b_n: NaN, c_n: NaN } s1=TwoPointSample { a_n: 0.0, b_n: 0.0, c_n: 0.0 } det=NaN
+DEBUG two_point_linear soln=None p1xp0=-0 p2xp1=0
+expanded path: BezPath([MoveTo((0.0, 1.0)), LineTo((0.2673992673992674, 1.0)), LineTo((-0.7326007326007327, 0.0)), LineTo((-0.7326007326007327, 1.0)), LineTo((0.2673992673992674, 0.0)), LineTo((0.0, 0.0)), LineTo((1.0, 1.0)), LineTo((1.0, 0.0)), LineTo((0.0, 1.0)), ClosePath])
+
+This confirms directly: the t=0.35 sample (s0) really did produce all-NaN a_n/b_n/c_n internally
+(i.e. `normalize()` really did divide 0.0/0.0 there), but `det` (computed from s0.a_n/s0.b_n and
+s1.a_n/s1.b_n) became NaN as a consequence, and `two_point_linear`'s own explicit check
+(`det.abs().partial_cmp(&1e-12) != Some(Ordering::Greater)`, which treats an unordered/NaN
+comparison as failure) caught it and returned `None`, so `do_cubic` fell back to `do_line(p3)`
+instead of emitting the NaN control points into the output.
+
+=== Also checked directly: q.eval(0.35) and q.eval(0.65) via the public CubicBez API ===
+(standalone check, same collinear cubic as the headline case)
+q0=(1.0, 0.0) q1=(-1.1978021978021978, 0.0) q2=(1.0, 0.0)
+t=0    deriv=(1.0, 0.0)                    hypot=1
+t=0.35 deriv=(0.0, 0.0)                    hypot=0                      <- exact zero, normalize() = NaN
+t=0.5  deriv=(-0.09890109890109888, 0.0)   hypot=0.09890109890109888
+t=0.65 deriv=(5.551115123125783e-17, 0.0)  hypot=5.551115123125783e-17  <- tiny but nonzero, normalize() is a valid unit vector, no NaN
+t=1    deriv=(1.0, 0.0)                    hypot=1

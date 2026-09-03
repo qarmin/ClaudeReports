@@ -1,0 +1,36 @@
+diff --git a/hayro-jpeg2000/src/j2c/decode.rs b/hayro-jpeg2000/src/j2c/decode.rs
+index 43a62556..eab56559 100644
+--- a/hayro-jpeg2000/src/j2c/decode.rs
++++ b/hayro-jpeg2000/src/j2c/decode.rs
+@@ -99,6 +99,16 @@ pub(crate) fn decode<'a>(
+     Ok(())
+ }
+ 
++// Sanity ceiling on the total number of samples (summed across all components) that
++// `reset` will eagerly allocate. This is checked against the *actual* dimensions about to
++// be allocated (i.e. after any `target_resolution`-driven downscaling has already reduced
++// `image_width()`/`image_height()`), not the codestream's raw declared `Xsiz`/`Ysiz` - so a
++// legitimately huge image decoded at a requested lower resolution is unaffected, only an
++// (attacker-controlled) request that would actually eagerly allocate this much memory is
++// rejected. Chosen to match the same order of magnitude already used for the equivalent
++// `hayro-ccitt`/`DCTDecode` guards elsewhere in this project.
++const MAX_TOTAL_SAMPLE_COUNT: usize = 64_000_000 * 4;
++
+ /// A decoder context for decoding JPEG2000 images.
+ #[derive(Default)]
+ pub struct DecoderContext<'a> {
+@@ -117,6 +127,14 @@ impl DecoderContext<'_> {
+         let sample_count = (header.size_data.image_width() as usize)
+             .checked_mul(header.size_data.image_height() as usize)
+             .ok_or(ValidationError::ImageTooLarge)?;
++        let total_sample_count = sample_count
++            .checked_mul(initial_tile.component_infos.len())
++            .ok_or(ValidationError::ImageTooLarge)?;
++
++        if total_sample_count > MAX_TOTAL_SAMPLE_COUNT {
++            bail!(ValidationError::ImageTooLarge);
++        }
++
+         // TODO: SIMD Buffers should be reused across runs!
+         for info in &initial_tile.component_infos {
+             self.channel_data.push(ComponentData {

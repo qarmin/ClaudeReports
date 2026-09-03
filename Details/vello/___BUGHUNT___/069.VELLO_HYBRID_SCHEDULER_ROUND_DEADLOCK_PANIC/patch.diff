@@ -1,0 +1,341 @@
+diff --git a/sparse_strips/vello_hybrid/src/lib.rs b/sparse_strips/vello_hybrid/src/lib.rs
+index 1a262912..6a31c50e 100644
+--- a/sparse_strips/vello_hybrid/src/lib.rs
++++ b/sparse_strips/vello_hybrid/src/lib.rs
+@@ -131,6 +131,17 @@ pub enum RenderError {
+     /// An intermediate texture allocation failed.
+     #[error(transparent)]
+     IntermediateTexture(#[from] IntermediateTextureError),
++    /// The scene's layer graph could not be scheduled within a bounded number of rendering
++    /// rounds.
++    ///
++    /// This indicates an extremely large or deeply/widely nested layer graph combined with a
++    /// small intermediate texture size, such that the scheduler could not find a compatible
++    /// round for some operation within `max_rounds` attempts.
++    #[error("scene requires more than {max_rounds} scheduling rounds")]
++    SchedulingLimitExceeded {
++        /// The maximum number of scheduling rounds the scheduler is willing to consider.
++        max_rounds: usize,
++    },
+     // TODO: Consider expanding `RenderError` to replace some `.unwrap` and `.expect`.
+ }
+ 
+diff --git a/sparse_strips/vello_hybrid/src/schedule/mod.rs b/sparse_strips/vello_hybrid/src/schedule/mod.rs
+index a5585b4f..060bb557 100644
+--- a/sparse_strips/vello_hybrid/src/schedule/mod.rs
++++ b/sparse_strips/vello_hybrid/src/schedule/mod.rs
+@@ -368,7 +368,7 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+                 |builder| {
+                     builder.push_layer_fill(layer.sample_region, 1.0, None, self.strip_storage);
+                 },
+-            );
++            )?;
+ 
+             // Once the blit back is done, we can release the temporary layer.
+             self.clear_and_release_allocation(layer.allocation, draw_point.round, rounds);
+@@ -379,7 +379,7 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+                 // First submit all the draws. Note that unlike for layers, it's fine to submit
+                 // the draws before scheduling the child node. This is because the root target is
+                 // _already_ allocated, so we don't need to ensure lazy allocation here.
+-                self.push_draws(&cmd.draws, &mut state, rounds);
++                self.push_draws(&cmd.draws, &mut state, rounds)?;
+ 
+                 // Next, we schedule the layer node. This might trigger advances to our current
+                 // base round.
+@@ -388,7 +388,7 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+                 // Finally, we also schedule the layer sampling operation. It's guaranteed to be
+                 // a simple layer, since we know for sure that the root isn't a blend target.
+                 if let Some(child) = child {
+-                    self.compose_simple_layer(child.props, child.layer, &mut state, rounds);
++                    self.compose_simple_layer(child.props, child.layer, &mut state, rounds)?;
+                 }
+             }
+         };
+@@ -415,7 +415,7 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+             let target = self.ensure_layer_target(&mut layer)?;
+ 
+             // Now schedule the draws.
+-            self.push_draws(&cmd.draws, &mut target.schedule_state, rounds);
++            self.push_draws(&cmd.draws, &mut target.schedule_state, rounds)?;
+ 
+             // And optionally the composition of the child layer node.
+             if let Some(child) = child {
+@@ -453,7 +453,7 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+ 
+             // Now find the _actual_ schedule point that corresponds to a round that matches our
+             // requirements for texture bindings.
+-            filter_point = rounds.bind_at_or_after(filter_point, textures.round_bindings());
++            filter_point = rounds.bind_at_or_after(filter_point, textures.round_bindings())?;
+ 
+             rounds.ensure_exists(filter_point.round);
+             rounds.round_mut(filter_point.round).push_filter_op(
+@@ -572,9 +572,9 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+         draws: &core::ops::Range<u32>,
+         state: &mut TargetScheduleState<T>,
+         rounds: &mut Rounds,
+-    ) {
++    ) -> Result<(), RenderError> {
+         if draws.is_empty() {
+-            return;
++            return Ok(());
+         }
+ 
+         rounds.build_draw(
+@@ -587,7 +587,9 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+                     builder.push_draw(draw, self.strip_storage, self.paint_resolver);
+                 }
+             },
+-        );
++        )?;
++
++        Ok(())
+     }
+ 
+     /// Compose a rendered child into a parent layer.
+@@ -602,7 +604,7 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+         let opacity = child_props.opacity;
+ 
+         if blend_mode == BlendMode::default() {
+-            self.compose_simple_layer(child_props, child_layer, parent_state, rounds);
++            self.compose_simple_layer(child_props, child_layer, parent_state, rounds)?;
+ 
+             return Ok(());
+         }
+@@ -647,7 +649,7 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+             // texture is actually currently bound. Therefore, find a compatible round at or after
+             // that point.
+             let bindings = RoundBindings::new(child_layer.allocation.region.target);
+-            let point = rounds.bind_at_or_after(SchedulePoint::start(round), bindings);
++            let point = rounds.bind_at_or_after(SchedulePoint::start(round), bindings)?;
+ 
+             self.clear_and_release_allocation(child_layer.allocation, point.round, rounds);
+ 
+@@ -703,7 +705,7 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+             // And we must have reached the blend stage.
+             .after(blend_stage);
+         // Then, simply find the next round that matches binds the parent and child texture.
+-        blend_point = rounds.bind_at_or_after(blend_point, blend_binding);
++        blend_point = rounds.bind_at_or_after(blend_point, blend_binding)?;
+ 
+         rounds.ensure_exists(blend_point.round);
+         rounds.round_mut(blend_point.round).push_blend_op(
+@@ -735,7 +737,7 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+         child_layer: ScheduledLayer,
+         parent_state: &mut TargetScheduleState<T>,
+         rounds: &mut Rounds,
+-    ) {
++    ) -> Result<(), RenderError> {
+         // Schedule the actual layer fill command.
+         let draw_point = rounds.build_draw(
+             parent_state,
+@@ -749,7 +751,7 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+                     self.strip_storage,
+                 );
+             },
+-        );
++        )?;
+ 
+         // Now that the child layer has been composited into the parent, don't forget to release
+         // the child layer at the end of this round, since its rendered representation does not
+@@ -757,6 +759,8 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+         self.clear_and_release_allocation(child_layer.allocation, draw_point.round, rounds);
+ 
+         // The parent's ready state is already updated by `build_draw`.
++
++        Ok(())
+     }
+ 
+     /// Schedule an allocation to be cleared and released after the given round.
+@@ -932,7 +936,7 @@ impl Rounds {
+         draw_buffers: &mut DrawBuffers,
+         sampled_layer: Option<&ScheduledLayer>,
+         f: impl FnOnce(&mut DrawBuilder<'_, T>),
+-    ) -> SchedulePoint {
++    ) -> Result<SchedulePoint, RenderError> {
+         let sampled_layer_round_bindings = sampled_layer
+             .map_or_else(RoundBindings::default, |layer| {
+                 RoundBindings::new(layer.sample_region.texture.target)
+@@ -951,7 +955,7 @@ impl Rounds {
+             |layer| state.next_draw_after(layer.ready),
+         );
+         // While also ensuring the chosen round has a compatible texture binding.
+-        draw_point = self.bind_at_or_after(draw_point, round_bindings);
++        draw_point = self.bind_at_or_after(draw_point, round_bindings)?;
+         state.ready = draw_point;
+         self.ensure_exists(draw_point.round);
+         let target_round = self.round_mut(draw_point.round);
+@@ -960,7 +964,7 @@ impl Rounds {
+         let mut builder = DrawBuilder::new(target_draw, draw_buffers, &mut state.draw_state);
+         f(&mut builder);
+ 
+-        draw_point
++        Ok(draw_point)
+     }
+ }
+ 
+diff --git a/sparse_strips/vello_hybrid/src/schedule/round.rs b/sparse_strips/vello_hybrid/src/schedule/round.rs
+index 610a3f99..c09b0ec6 100644
+--- a/sparse_strips/vello_hybrid/src/schedule/round.rs
++++ b/sparse_strips/vello_hybrid/src/schedule/round.rs
+@@ -32,7 +32,7 @@ use crate::target::{
+     LayerTextureRegion, RootTarget, RoundBindings, TextureParity, TextureRegion,
+ };
+ use crate::util::{RangedSlice, Ranges, VecExt};
+-use crate::{GpuStrip, blend::BlendStrip};
++use crate::{GpuStrip, RenderError, blend::BlendStrip};
+ use alloc::vec::Vec;
+ use core::ops::Range;
+ use vello_common::geometry::RectU16;
+@@ -92,18 +92,18 @@ impl Rounds {
+         &mut self,
+         mut point: SchedulePoint,
+         requirement: RoundBindings,
+-    ) -> SchedulePoint {
+-        // This should be more than enough for any sane scene. If it turns out not, we
+-        // can always just remove the guard since, _in theory_, it should never be possible
+-        // to trigger an endless loop.
++    ) -> Result<SchedulePoint, RenderError> {
++        // This should be more than enough for any sane scene. An extremely large or deeply/widely
++        // nested layer graph combined with a small intermediate texture size can still exhaust
++        // this many rounds without hitting an actual logic bug, so this is reported to the caller
++        // as an error rather than treated as an invariant violation.
+         const MAX_ROUNDS: usize = 40_000;
+ 
+         loop {
+-            // This shouldn't ever happen, unless there is some kind of logic bug. But better
+-            // to panic at some point than loop on forever.
+-            // TODO: Turn this into an error once we have refactored error handling.
+             if point.round > MAX_ROUNDS {
+-                panic!("possible deadlock in scheduler detected");
++                return Err(RenderError::SchedulingLimitExceeded {
++                    max_rounds: MAX_ROUNDS,
++                });
+             }
+ 
+             self.ensure_exists(point.round);
+@@ -115,7 +115,7 @@ impl Rounds {
+             if let Some(binding) = round.texture_binding.merge(requirement) {
+                 round.texture_binding = binding;
+ 
+-                return point;
++                return Ok(point);
+             }
+ 
+             // Otherwise, keep looking.
+@@ -662,7 +662,9 @@ mod tests {
+         let mut rounds = Rounds::default();
+         let mut buffers = ScheduleBuffers::default();
+         let bindings = filter_op(10).textures.round_bindings();
+-        let point = rounds.bind_at_or_after(SchedulePoint::start(0), bindings);
++        let point = rounds
++            .bind_at_or_after(SchedulePoint::start(0), bindings)
++            .unwrap();
+ 
+         rounds.round_mut(point.round).push_filter_op(
+             TextureParity::Even,
+@@ -710,15 +712,21 @@ mod tests {
+         let even_page_3 = RoundBindings::new(layer_id(TextureParity::Even, 3));
+ 
+         // First round gets assigned even page 1.
+-        assert_eq!(rounds.bind_at_or_after(requested, even_page_1), requested);
++        assert_eq!(
++            rounds.bind_at_or_after(requested, even_page_1).unwrap(),
++            requested
++        );
+ 
+         // First round gets assigned odd page 2.
+-        assert_eq!(rounds.bind_at_or_after(requested, odd_page_2), requested);
++        assert_eq!(
++            rounds.bind_at_or_after(requested, odd_page_2).unwrap(),
++            requested
++        );
+ 
+         // First round already has even page binding, so we much advance
+         // to next round.
+         assert_eq!(
+-            rounds.bind_at_or_after(requested, even_page_3),
++            rounds.bind_at_or_after(requested, even_page_3).unwrap(),
+             SchedulePoint {
+                 round: 1,
+                 ..requested
+@@ -748,10 +756,16 @@ mod tests {
+         let odd_page_2 = RoundBindings::new(layer_id(TextureParity::Odd, 2));
+         let odd_page_4 = RoundBindings::new(layer_id(TextureParity::Odd, 4));
+ 
+-        assert_eq!(rounds.bind_at_or_after(requested, even_page_1), requested);
+-        assert_eq!(rounds.bind_at_or_after(requested, odd_page_2), requested);
+         assert_eq!(
+-            rounds.bind_at_or_after(requested, odd_page_4),
++            rounds.bind_at_or_after(requested, even_page_1).unwrap(),
++            requested
++        );
++        assert_eq!(
++            rounds.bind_at_or_after(requested, odd_page_2).unwrap(),
++            requested
++        );
++        assert_eq!(
++            rounds.bind_at_or_after(requested, odd_page_4).unwrap(),
+             SchedulePoint {
+                 round: 1,
+                 ..requested
+@@ -777,21 +791,27 @@ mod tests {
+             stage: RoundStage::RootDraw,
+         };
+ 
+-        rounds.bind_at_or_after(
+-            point(0),
+-            RoundBindings::new(layer_id(TextureParity::Even, 0)),
+-        );
++        rounds
++            .bind_at_or_after(
++                point(0),
++                RoundBindings::new(layer_id(TextureParity::Even, 0)),
++            )
++            .unwrap();
+ 
+-        rounds.bind_at_or_after(
+-            point(1),
+-            RoundBindings::new(layer_id(TextureParity::Even, 1)),
+-        );
++        rounds
++            .bind_at_or_after(
++                point(1),
++                RoundBindings::new(layer_id(TextureParity::Even, 1)),
++            )
++            .unwrap();
+ 
+         assert_eq!(
+-            rounds.bind_at_or_after(
+-                point(0),
+-                RoundBindings::new(layer_id(TextureParity::Even, 2)),
+-            ),
++            rounds
++                .bind_at_or_after(
++                    point(0),
++                    RoundBindings::new(layer_id(TextureParity::Even, 2)),
++                )
++                .unwrap(),
+             point(2)
+         );
+         assert_eq!(rounds.rounds.len(), 3);
+diff --git a/sparse_strips/vello_hybrid/src/schedule/schedule_tests.rs b/sparse_strips/vello_hybrid/src/schedule/schedule_tests.rs
+index bbae1a2d..5d7d154b 100644
+--- a/sparse_strips/vello_hybrid/src/schedule/schedule_tests.rs
++++ b/sparse_strips/vello_hybrid/src/schedule/schedule_tests.rs
+@@ -916,3 +916,16 @@ fn blend_is_constrained_to_parent_clip_bbox() {
+     // This must not panic.
+     let _ = crate::blend::GpuBlendInstance::new(blend, None, SizeU16::new(64));
+ }
++
++#[test]
++fn deadlock_probe() {
++    const CHILDREN: usize = 3;
++    let depth = 11_usize;
++    let mut case = SceneCase::new(8, 8);
++    add_tree(&mut case, depth, CHILDREN);
++    let result = case.schedule(RootTarget::UserSurface, SizeU16::new(8), 1000, true);
++    assert!(matches!(
++        result,
++        Err(RenderError::SchedulingLimitExceeded { max_rounds: 40_000 })
++    ));
++}

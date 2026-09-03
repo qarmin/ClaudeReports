@@ -1,0 +1,114 @@
+diff --git a/src/inline_asm.rs b/src/inline_asm.rs
+index d4d64cb3..9908beee 100644
+--- a/src/inline_asm.rs
++++ b/src/inline_asm.rs
+@@ -567,7 +567,7 @@ fn generate_asm_wrapper(&self, asm_name: &str) -> String {
+                 .zip(self.stack_slots_clobber.iter().copied())
+                 .filter_map(|(r, s)| r.zip(s))
+             {
+-                Self::save_register(&mut generated_asm, self.arch, reg, slot);
++                self.save_register(&mut generated_asm, reg, slot);
+             }
+         }
+ 
+@@ -578,7 +578,7 @@ fn generate_asm_wrapper(&self, asm_name: &str) -> String {
+             .zip(self.stack_slots_input.iter().copied())
+             .filter_map(|(r, s)| r.zip(s))
+         {
+-            Self::restore_register(&mut generated_asm, self.arch, reg, slot);
++            self.restore_register(&mut generated_asm, reg, slot);
+         }
+ 
+         if is_x86 && self.options.contains(InlineAsmOptions::ATT_SYNTAX) {
+@@ -673,7 +673,7 @@ fn generate_asm_wrapper(&self, asm_name: &str) -> String {
+                 .zip(self.stack_slots_output.iter().copied())
+                 .filter_map(|(r, s)| r.zip(s))
+             {
+-                Self::save_register(&mut generated_asm, self.arch, reg, slot);
++                self.save_register(&mut generated_asm, reg, slot);
+             }
+ 
+             // Restore clobbered registers
+@@ -683,7 +683,7 @@ fn generate_asm_wrapper(&self, asm_name: &str) -> String {
+                 .zip(self.stack_slots_clobber.iter().copied())
+                 .filter_map(|(r, s)| r.zip(s))
+             {
+-                Self::restore_register(&mut generated_asm, self.arch, reg, slot);
++                self.restore_register(&mut generated_asm, reg, slot);
+             }
+ 
+             Self::epilogue(&mut generated_asm, self.arch);
+@@ -776,12 +776,19 @@ fn epilogue_noreturn(generated_asm: &mut String, arch: InlineAsmArch) {
+         }
+     }
+ 
+-    fn save_register(
+-        generated_asm: &mut String,
+-        arch: InlineAsmArch,
+-        reg: InlineAsmReg,
+-        offset: Size,
+-    ) {
++    /// `mov` cannot access AVX-512 mask registers; `kmov` is needed instead. `kmovq` requires
++    /// avx512bw - without it rustc restricts kreg operands to at most 16 bits, so the narrower
++    /// `kmovw` (avx512f) preserves everything that can be in the register.
++    fn kreg_mov(&self) -> &'static str {
++        if self.tcx.asm_target_features(self.enclosing_def_id).contains(&sym::avx512bw) {
++            "kmovq"
++        } else {
++            "kmovw"
++        }
++    }
++
++    fn save_register(&self, generated_asm: &mut String, reg: InlineAsmReg, offset: Size) {
++        let arch = self.arch;
+         match arch {
+             InlineAsmArch::X86_64 => {
+                 match reg {
+@@ -799,6 +806,16 @@ fn save_register(
+                         write!(generated_asm, "    {mov} [rbx+0x{:x}], {name}", offset.bytes())
+                             .unwrap();
+                     }
++                    InlineAsmReg::X86(reg)
++                        if matches!(
++                            reg.reg_class(),
++                            X86InlineAsmRegClass::kreg | X86InlineAsmRegClass::kreg0
++                        ) =>
++                    {
++                        let mov = self.kreg_mov();
++                        write!(generated_asm, "    {mov} [rbx+0x{:x}], ", offset.bytes()).unwrap();
++                        reg.emit(generated_asm, InlineAsmArch::X86_64, None).unwrap();
++                    }
+                     _ => {
+                         write!(generated_asm, "    mov [rbx+0x{:x}], ", offset.bytes()).unwrap();
+                         reg.emit(generated_asm, InlineAsmArch::X86_64, None).unwrap();
+@@ -826,12 +843,8 @@ fn save_register(
+         }
+     }
+ 
+-    fn restore_register(
+-        generated_asm: &mut String,
+-        arch: InlineAsmArch,
+-        reg: InlineAsmReg,
+-        offset: Size,
+-    ) {
++    fn restore_register(&self, generated_asm: &mut String, reg: InlineAsmReg, offset: Size) {
++        let arch = self.arch;
+         match arch {
+             InlineAsmArch::X86_64 => {
+                 match reg {
+@@ -848,6 +861,15 @@ fn restore_register(
+                         let mov = if name.starts_with("xmm") { "movups" } else { "vmovups" };
+                         write!(generated_asm, "    {mov} {name}").unwrap();
+                     }
++                    InlineAsmReg::X86(reg)
++                        if matches!(
++                            reg.reg_class(),
++                            X86InlineAsmRegClass::kreg | X86InlineAsmRegClass::kreg0
++                        ) =>
++                    {
++                        write!(generated_asm, "    {} ", self.kreg_mov()).unwrap();
++                        reg.emit(generated_asm, InlineAsmArch::X86_64, None).unwrap()
++                    }
+                     _ => {
+                         generated_asm.push_str("    mov ");
+                         reg.emit(generated_asm, InlineAsmArch::X86_64, None).unwrap()

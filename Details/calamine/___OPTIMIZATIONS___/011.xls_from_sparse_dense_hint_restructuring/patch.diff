@@ -1,0 +1,260 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index e869c49..0b6188f 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -158,6 +158,11 @@ impl fmt::Display for CellErrorType {
+     }
+ }
+ 
++/// Maximum number of cells [`DenseRangeBuilder`] will pre-allocate on the strength of a
++/// file-declared dimension hint alone - bounds the allocation attempt a wrong or
++/// attacker-controlled hint could otherwise request.
++pub(crate) const MAX_DENSE_RANGE_CELLS: usize = 100_000_000;
++
+ /// Dimensions info
+ #[derive(Debug, Default, PartialEq, Eq, Hash, Ord, PartialOrd, Copy, Clone)]
+ pub struct Dimensions {
+@@ -1445,6 +1450,147 @@ impl<T: CellType> Range<T> {
+     }
+ }
+ 
++/// Builds a [`Range`] from cells discovered one at a time, interleaved with unrelated records in
++/// a single-pass parser (XLS's per-sheet BIFF record loop, which can't collect a dedicated
++/// `Vec<Cell<T>>` up front the way XLSX/XLSB's cell-only stream does). Writes straight into a
++/// dense buffer pre-sized from an optional file-declared dimension hint, avoiding [`Range::from_sparse()`]'s
++/// sparse-then-dense double allocation for the common case where that hint is accurate.
++///
++/// Never trusts the hint for correctness: every cell is bounds-checked as it's pushed. If a cell
++/// ever falls outside the hint (a wrong/mismatched/absent `Dimensions` record), this reconstructs
++/// a sparse `Vec<Cell<T>>` from whatever the dense buffer already holds and falls back to
++/// [`Range::from_sparse()`]'s exact behavior for the remaining pushes.
++pub(crate) struct DenseRangeBuilder<T: CellType> {
++    dense: Option<DenseRangeState<T>>,
++    sparse: Vec<Cell<T>>,
++    max_cells: usize,
++}
++
++struct DenseRangeState<T> {
++    dims: Dimensions,
++    cols: usize,
++    grid: Vec<T>,
++    any: bool,
++    row_lo: u32,
++    row_hi: u32,
++    col_lo: u32,
++    col_hi: u32,
++}
++
++impl<T: CellType> DenseRangeBuilder<T> {
++    pub(crate) fn new(max_cells: usize) -> Self {
++        DenseRangeBuilder {
++            dense: None,
++            sparse: Vec::new(),
++            max_cells,
++        }
++    }
++
++    /// Only takes effect the first time it's called, before any cell has been pushed - a real
++    /// BIFF8 `Dimensions` record always precedes cell records, so this is the only case that
++    /// matters; a hint arriving late or twice is silently ignored rather than risking dropping
++    /// already-buffered sparse cells.
++    pub(crate) fn set_dims_hint(&mut self, dims: Dimensions) {
++        if self.dense.is_some() || !self.sparse.is_empty() {
++            return;
++        }
++        if dims.end.0 < dims.start.0 || dims.end.1 < dims.start.1 {
++            return;
++        }
++        let cols = (dims.end.1 - dims.start.1) as usize + 1;
++        let rows = (dims.end.0 - dims.start.0) as usize + 1;
++        let len = cols.saturating_mul(rows);
++        if len == 0 || len > self.max_cells {
++            self.sparse.reserve(len.min(self.max_cells));
++            return;
++        }
++        self.dense = Some(DenseRangeState {
++            dims,
++            cols,
++            grid: vec![T::default(); len],
++            any: false,
++            row_lo: u32::MAX,
++            row_hi: 0,
++            col_lo: u32::MAX,
++            col_hi: 0,
++        });
++    }
++
++    pub(crate) fn push(&mut self, cell: Cell<T>) {
++        let Some(d) = self.dense.as_mut() else {
++            self.sparse.push(cell);
++            return;
++        };
++        let (r, c) = cell.pos;
++        if r < d.dims.start.0 || r > d.dims.end.0 || c < d.dims.start.1 || c > d.dims.end.1 {
++            self.bail_to_sparse(cell);
++            return;
++        }
++        let idx = (r - d.dims.start.0) as usize * d.cols + (c - d.dims.start.1) as usize;
++        d.grid[idx] = cell.val;
++        d.any = true;
++        d.row_lo = min(d.row_lo, r);
++        d.row_hi = max(d.row_hi, r);
++        d.col_lo = min(d.col_lo, c);
++        d.col_hi = max(d.col_hi, c);
++    }
++
++    fn bail_to_sparse(&mut self, mismatched: Cell<T>) {
++        let d = self.dense.take().expect("dense state present, checked by caller");
++        self.sparse
++            .reserve(d.grid.iter().filter(|v| **v != T::default()).count() + 1);
++        for (idx, v) in d.grid.into_iter().enumerate() {
++            if v != T::default() {
++                let pos = (
++                    d.dims.start.0 + (idx / d.cols) as u32,
++                    d.dims.start.1 + (idx % d.cols) as u32,
++                );
++                self.sparse.push(Cell { pos, val: v });
++            }
++        }
++        self.sparse.push(mismatched);
++    }
++
++    pub(crate) fn finish(self) -> Range<T> {
++        let Some(d) = self.dense else {
++            return Range::from_sparse(self.sparse);
++        };
++        if !d.any {
++            return Range::empty();
++        }
++        if d.row_lo == d.dims.start.0
++            && d.row_hi == d.dims.end.0
++            && d.col_lo == d.dims.start.1
++            && d.col_hi == d.dims.end.1
++        {
++            return Range {
++                start: d.dims.start,
++                end: d.dims.end,
++                inner: d.grid,
++            };
++        }
++        // Declared dims were looser than the actual used range (e.g. trailing empty rows/cols
++        // within the declared box) - crop into a tightly-sized buffer matching from_sparse()'s
++        // own bounding-box semantics, then drop the larger `grid`.
++        let crop_rows = (d.row_hi - d.row_lo) as usize + 1;
++        let crop_cols = (d.col_hi - d.col_lo) as usize + 1;
++        let mut cropped = vec![T::default(); crop_rows.saturating_mul(crop_cols)];
++        for r in 0..crop_rows {
++            let abs_row = d.row_lo + r as u32;
++            let src_row = (abs_row - d.dims.start.0) as usize;
++            let src_start = src_row * d.cols + (d.col_lo - d.dims.start.1) as usize;
++            let dst_start = r * crop_cols;
++            cropped[dst_start..dst_start + crop_cols]
++                .clone_from_slice(&d.grid[src_start..src_start + crop_cols]);
++        }
++        Range {
++            start: (d.row_lo, d.col_lo),
++            end: (d.row_hi, d.col_hi),
++            inner: cropped,
++        }
++    }
++}
++
+ impl<T: CellType + fmt::Display> Range<T> {
+     /// Get headers for a `Range`.
+     ///
+@@ -2392,3 +2538,4 @@ where
+     let data = Data::deserialize(deserializer)?;
+     Ok(data.as_datetime().ok_or_else(|| data.to_string()))
+ }
++
+diff --git a/src/xls.rs b/src/xls.rs
+index 50925c6..9e19928 100644
+--- a/src/xls.rs
++++ b/src/xls.rs
+@@ -19,8 +19,8 @@ use crate::utils::read_usize;
+ use crate::utils::{push_column, read_f64, read_i16, read_i32, read_u16, read_u32};
+ use crate::vba::VbaProject;
+ use crate::{
+-    Cell, CellErrorType, Data, Dimensions, HeaderRow, Metadata, Range, Reader, Sheet, SheetType,
+-    SheetVisible,
++    Cell, CellErrorType, Data, DenseRangeBuilder, Dimensions, HeaderRow, Metadata, Range, Reader,
++    Sheet, SheetType, SheetVisible, MAX_DENSE_RANGE_CELLS,
+ };
+ 
+ #[derive(Debug)]
+@@ -605,7 +605,7 @@ impl<RS: Read + Seek> Xls<RS> {
+         for (pos, name) in sheet_names {
+             let sh = &stream[pos..];
+             let records = RecordIter { stream: sh };
+-            let mut cells = Vec::new();
++            let mut cells = DenseRangeBuilder::new(MAX_DENSE_RANGE_CELLS);
+             let mut formulas = Vec::new();
+             let mut fmla_pos = (0, 0);
+             let mut merge_cells = Vec::new();
+@@ -634,10 +634,7 @@ impl<RS: Read + Seek> Xls<RS> {
+                     }
+                     // 512: Dimensions
+                     0x0200 => {
+-                        let Dimensions { start, end } = parse_dimensions(r.data)?;
+-                        let rows = (end.0 - start.0 + 1) as usize;
+-                        let cols = (end.1 - start.1 + 1) as usize;
+-                        cells.reserve(rows.saturating_mul(cols));
++                        cells.set_dims_hint(parse_dimensions(r.data)?);
+                     }
+                     //0x0201 => cells.push(parse_blank(r.data)?), // 513: Blank
+                     0x0203 => cells.push(parse_number(r.data, &self.formats, self.is_1904)?), // 515: Number
+@@ -650,8 +647,16 @@ impl<RS: Read + Seek> Xls<RS> {
+                         cells.push(Cell::new(fmla_pos, val));
+                     }
+                     0x027E => cells.push(parse_rk(r.data, &self.formats, self.is_1904)?), // 638: Rk
+-                    0x00FD => cells.extend(parse_label_sst(r.data, &strings)?), // LabelSst
+-                    0x00BD => parse_mul_rk(r.data, &mut cells, &self.formats, self.is_1904)?, // 189: MulRk
++                    0x00FD => {
++                        if let Some(c) = parse_label_sst(r.data, &strings)? {
++                            cells.push(c);
++                        }
++                    } // LabelSst
++                    0x00BD => {
++                        for c in parse_mul_rk(r.data, &self.formats, self.is_1904)? {
++                            cells.push(c);
++                        }
++                    } // 189: MulRk
+                     0x00E5 => parse_merge_cells(r.data, &mut merge_cells)?, // 229: Merge Cells
+                     0x000A => break,                                        // 10: EOF,
+                     0x0006 => {
+@@ -694,7 +699,7 @@ impl<RS: Read + Seek> Xls<RS> {
+                     _ => (),
+                 }
+             }
+-            let range = Range::from_sparse(cells);
++            let range = cells.finish();
+             let formula = Range::from_sparse(formulas);
+             sheets.insert(
+                 name,
+@@ -939,10 +944,9 @@ fn parse_merge_cells(r: &[u8], merge_cells: &mut Vec<Dimensions>) -> Result<(),
+ 
+ fn parse_mul_rk(
+     r: &[u8],
+-    cells: &mut Vec<Cell<Data>>,
+     formats: &[CellFormat],
+     is_1904: bool,
+-) -> Result<(), XlsError> {
++) -> Result<Vec<Cell<Data>>, XlsError> {
+     if r.len() < 6 {
+         return Err(XlsError::Len {
+             typ: "rk",
+@@ -963,10 +967,10 @@ fn parse_mul_rk(
+         });
+     }
+ 
+-    for (col, rk) in (col_first as u32..).zip(r[4..r.len() - 2].chunks(6)) {
+-        cells.push(Cell::new((row as u32, col), rk_num(rk, formats, is_1904)));
+-    }
+-    Ok(())
++    Ok((col_first as u32..)
++        .zip(r[4..r.len() - 2].chunks(6))
++        .map(|(col, rk)| Cell::new((row as u32, col), rk_num(rk, formats, is_1904)))
++        .collect())
+ }
+ 
+ fn rk_num(rk: &[u8], formats: &[CellFormat], is_1904: bool) -> Data {

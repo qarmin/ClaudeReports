@@ -1,0 +1,57 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in,
+# except for the one canonical `bench_decode` harness copy at ___OPTIMIZATIONS___/harness/
+# (see README.md's "Instrumentation added for this workspace" - kept as a single copy reused by
+# every candidate rather than duplicated per-candidate). That relaxes "postable as a single
+# folder with zero other setup" to "self-contained given the whole ___OPTIMIZATIONS___ folder",
+# per README.md.
+
+repo_url := "https://github.com/image-rs/jpeg-decoder.git"
+base_commit := "eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c"
+harness_dir := "../harness/bench_decode"
+
+# Full cycle: clone at the pinned commit, build a BASELINE binary before touching anything,
+# apply the patch, build a PATCHED binary, then run both and print both results so the reader
+# doesn't have to reproduce the comparison by hand.
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/bench_decode
+    sed -i 's#path = "\.\./\.\./\.\."#path = ".."#' clone/bench_decode/Cargo.toml
+
+build-baseline:
+    cd clone/bench_decode && cargo +stable build --release
+    cp clone/bench_decode/target/release/bench_decode ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    find clone/src -name '*.rs' -exec touch {} +
+    cd clone/bench_decode && cargo +stable build --release
+    cp clone/bench_decode/target/release/bench_decode ./bin_patched
+
+# Prints min/p50/... for baseline then patched on the primary benchmark image (lossless,
+# Ra predictor, 3072x2048, 3 components) plus two secondary lossless images spanning
+# different bit depths/component counts, per RESULT.md's measured set.
+bench:
+    @echo "=== baseline (before patch): jpeg_lossless_sel1-rgb.jpg (primary) ==="
+    ./bin_baseline clone/tests/reftest/images/lossless/1/jpeg_lossless_sel1-rgb.jpg 20
+    @echo "=== patched (after patch): jpeg_lossless_sel1-rgb.jpg (primary) ==="
+    ./bin_patched  clone/tests/reftest/images/lossless/1/jpeg_lossless_sel1-rgb.jpg 20
+    @echo "=== baseline: MR4.jpg (secondary, 1-component, 12-bit) ==="
+    ./bin_baseline clone/tests/reftest/images/lossless/2/MR4.jpg 60
+    @echo "=== patched: MR4.jpg (secondary, 1-component, 12-bit) ==="
+    ./bin_patched  clone/tests/reftest/images/lossless/2/MR4.jpg 60
+    @echo "=== baseline: jpeg_lossless_sel1-8bit.jpg (secondary, 1-component, 8-bit) ==="
+    ./bin_baseline clone/tests/reftest/images/lossless/1/jpeg_lossless_sel1-8bit.jpg 40
+    @echo "=== patched: jpeg_lossless_sel1-8bit.jpg (secondary, 1-component, 8-bit) ==="
+    ./bin_patched  clone/tests/reftest/images/lossless/1/jpeg_lossless_sel1-8bit.jpg 40
+
+clean:
+    rm -rf clone bin_baseline bin_patched

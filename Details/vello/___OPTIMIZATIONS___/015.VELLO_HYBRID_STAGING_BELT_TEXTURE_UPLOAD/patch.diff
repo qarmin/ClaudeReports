@@ -1,0 +1,321 @@
+diff --git a/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs b/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
+index 9521829f..01e8b82d 100644
+--- a/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
++++ b/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
+@@ -324,6 +324,8 @@ impl Renderer {
+         resources.after_render(self, |renderer, rect| {
+             clear_atlas_region(queue, renderer, rect);
+         });
++        // Belt chunks written to above must be unmapped before the caller submits `encoder`.
++        self.programs.staging_belt.finish();
+         result
+     }
+ 
+@@ -425,6 +427,9 @@ impl Renderer {
+             &mut self.programs.resources.stub_atlas_bind_group,
+         );
+ 
++        // Belt chunks written to above must be unmapped before submitting `encoder` below.
++        self.programs.staging_belt.finish();
++
+         // Submit immediately so the atlas content is committed before subsequent
+         // render() calls overwrite the shared alpha/config/paint resources.
+         queue.submit(Some(encoder.finish()));
+@@ -497,9 +502,10 @@ impl Renderer {
+         self.programs.prepare(
+             device,
+             queue,
++            encoder,
+             &mut self.gradient_cache,
+             &self.encoded_paints,
+-            &mut scene.strip_storage.borrow_mut().alphas,
++            &scene.strip_storage.borrow().alphas,
+             render_size,
+             &self.paint_idxs,
+             &self.schedule_storage.filter_context,
+@@ -1016,6 +1022,56 @@ struct Programs {
+     encoded_paints_data: Vec<u8>,
+     /// Scratch buffer for staging filter data texture data.
+     filter_data: Vec<u8>,
++    /// Staging belt for recycling temporary upload buffers across frames.
++    staging_belt: wgpu::util::StagingBelt,
++}
++
++/// Upload `data` into a 2D `texture` through the staging belt.
++fn upload_texture_via_belt(
++    staging_belt: &mut wgpu::util::StagingBelt,
++    encoder: &mut CommandEncoder,
++    texture: &Texture,
++    data: &[u8],
++    bytes_per_texel: u32,
++) {
++    if data.is_empty() {
++        return;
++    }
++
++    let texture_width = texture.width();
++    let bytes_per_row = texture_width * bytes_per_texel;
++    let rows_needed = (data.len() as u32).div_ceil(bytes_per_row);
++    let buffer_size = u64::from(rows_needed) * u64::from(bytes_per_row);
++
++    // Data is never empty, so buffer_size is never zero.
++    let size = wgpu::BufferSize::new(buffer_size).unwrap();
++    let alignment = wgpu::BufferSize::new(bytes_per_texel.into()).unwrap();
++    let slice = staging_belt.allocate(size, alignment);
++    let mut view = slice.get_mapped_range_mut();
++    view.slice(..data.len()).copy_from_slice(data);
++    drop(view);
++
++    encoder.copy_buffer_to_texture(
++        wgpu::TexelCopyBufferInfo {
++            buffer: slice.buffer(),
++            layout: wgpu::TexelCopyBufferLayout {
++                offset: slice.offset(),
++                bytes_per_row: Some(bytes_per_row),
++                rows_per_image: None,
++            },
++        },
++        wgpu::TexelCopyTextureInfo {
++            texture,
++            mip_level: 0,
++            origin: wgpu::Origin3d::ZERO,
++            aspect: wgpu::TextureAspect::All,
++        },
++        Extent3d {
++            width: texture_width,
++            height: rows_needed,
++            depth_or_array_layers: 1,
++        },
++    );
+ }
+ 
+ /// Contains all GPU resources needed for rendering
+@@ -1805,6 +1861,10 @@ impl Programs {
+             resources,
+             encoded_paints_data,
+             filter_data,
++            // See `wgpu::util::StagingBelt::new`'s own guidance on chunk size: bigger than the
++            // largest single write, but not so large it wastes memory given we upload a handful
++            // of differently-sized buffers per frame. 4MB is a reasonable middle ground.
++            staging_belt: wgpu::util::StagingBelt::new(device.clone(), 4 * 1024 * 1024),
+             render_size: RenderSize {
+                 width: render_target_config.width,
+                 height: render_target_config.height,
+@@ -2244,26 +2304,30 @@ impl Programs {
+         &mut self,
+         device: &Device,
+         queue: &Queue,
++        encoder: &mut CommandEncoder,
+         gradient_cache: &mut GradientRampCache,
+         encoded_paints: &[GpuEncodedPaint],
+-        alphas: &mut Vec<u8>,
++        alphas: &[u8],
+         new_render_size: &RenderSize,
+         paint_idxs: &[u32],
+         filter_context: &FilterContext,
+     ) {
++        // Recall chunks used by the previous frame now that its submission has completed.
++        self.staging_belt.recall();
++
+         let resource_texture_dimension_2d = self.resources.resource_texture_dimension_2d;
+         self.maybe_resize_alphas_tex(device, resource_texture_dimension_2d, alphas.len());
+         self.maybe_resize_encoded_paints_tex(device, resource_texture_dimension_2d, paint_idxs);
+         self.maybe_resize_filter_tex(device, resource_texture_dimension_2d, filter_context);
+         self.maybe_update_config_buffer(queue, resource_texture_dimension_2d, new_render_size);
+ 
+-        self.upload_alpha_texture(queue, alphas);
+-        self.upload_encoded_paints_texture(queue, encoded_paints);
+-        self.upload_filter_texture(queue, filter_context);
++        self.upload_alpha_texture(encoder, alphas);
++        self.upload_encoded_paints_texture(encoder, encoded_paints);
++        self.upload_filter_texture(encoder, filter_context);
+ 
+         if gradient_cache.has_changed() {
+             self.maybe_resize_gradient_tex(device, resource_texture_dimension_2d, gradient_cache);
+-            self.upload_gradient_texture(queue, gradient_cache);
++            self.upload_gradient_texture(encoder, gradient_cache);
+             gradient_cache.mark_synced();
+         }
+     }
+@@ -2562,144 +2626,67 @@ impl Programs {
+     }
+ 
+     /// Upload alpha data to the texture.
+-    fn upload_alpha_texture(&mut self, queue: &Queue, alphas: &mut Vec<u8>) {
+-        if alphas.is_empty() {
+-            return;
+-        }
+-
+-        let texture_width = self.resources.alphas_texture.width();
+-        let texture_height = self.resources.alphas_texture.height();
+-        let total_size = texture_width as usize * texture_height as usize * 16;
+-
+-        let original_len = alphas.len();
+-
+-        // Temporarily pad the length of the alphas to the texture size before uploading.
+-        alphas.resize(total_size, 0);
+-
+-        queue.write_texture(
+-            wgpu::TexelCopyTextureInfo {
+-                texture: &self.resources.alphas_texture,
+-                mip_level: 0,
+-                origin: wgpu::Origin3d::ZERO,
+-                aspect: wgpu::TextureAspect::All,
+-            },
++    fn upload_alpha_texture(&mut self, encoder: &mut CommandEncoder, alphas: &[u8]) {
++        upload_texture_via_belt(
++            &mut self.staging_belt,
++            encoder,
++            &self.resources.alphas_texture,
+             alphas,
+-            wgpu::TexelCopyBufferLayout {
+-                offset: 0,
+-                // 16 bytes per RGBA32Uint texel (4 u32s × 4 bytes each), which is equivalent to
+-                // a bit shift of 4.
+-                bytes_per_row: Some(texture_width << 4),
+-                rows_per_image: Some(texture_height),
+-            },
+-            Extent3d {
+-                width: texture_width,
+-                height: texture_height,
+-                depth_or_array_layers: 1,
+-            },
++            // 16 bytes per RGBA32Uint texel (4 u32s × 4 bytes each).
++            16,
+         );
+-
+-        // Truncate back to the original size.
+-        alphas.truncate(original_len);
+     }
+ 
+     /// Upload encoded paints to the texture.
+-    fn upload_encoded_paints_texture(&mut self, queue: &Queue, encoded_paints: &[GpuEncodedPaint]) {
+-        let encoded_paints_texture = &self.resources.encoded_paints_texture;
+-        let encoded_paints_texture_width = encoded_paints_texture.width();
+-        let encoded_paints_texture_height = encoded_paints_texture.height();
+-
++    fn upload_encoded_paints_texture(
++        &mut self,
++        encoder: &mut CommandEncoder,
++        encoded_paints: &[GpuEncodedPaint],
++    ) {
+         GpuEncodedPaint::serialize_to_buffer(encoded_paints, &mut self.encoded_paints_data);
+-        queue.write_texture(
+-            wgpu::TexelCopyTextureInfo {
+-                texture: encoded_paints_texture,
+-                mip_level: 0,
+-                origin: wgpu::Origin3d::ZERO,
+-                aspect: wgpu::TextureAspect::All,
+-            },
++        upload_texture_via_belt(
++            &mut self.staging_belt,
++            encoder,
++            &self.resources.encoded_paints_texture,
+             &self.encoded_paints_data,
+-            wgpu::TexelCopyBufferLayout {
+-                offset: 0,
+-                // 16 bytes per RGBA32Uint texel (4 u32s × 4 bytes each), equivalent to bit shift of 4
+-                bytes_per_row: Some(encoded_paints_texture_width << 4),
+-                rows_per_image: Some(encoded_paints_texture_height),
+-            },
+-            Extent3d {
+-                width: encoded_paints_texture_width,
+-                height: encoded_paints_texture_height,
+-                depth_or_array_layers: 1,
+-            },
++            // 16 bytes per RGBA32Uint texel (4 u32s × 4 bytes each).
++            16,
+         );
+     }
+ 
+-    fn upload_filter_texture(&mut self, queue: &Queue, filter_context: &FilterContext) {
++    fn upload_filter_texture(&mut self, encoder: &mut CommandEncoder, filter_context: &FilterContext) {
+         if filter_context.is_empty() {
+             return;
+         }
+ 
+-        let filter_texture = &self.resources.filter_data_texture;
+-        let width = filter_texture.width();
+-        let height = filter_texture.height();
+-
+         filter_context.serialize_to_buffer(&mut self.filter_data);
+-        queue.write_texture(
+-            wgpu::TexelCopyTextureInfo {
+-                texture: filter_texture,
+-                mip_level: 0,
+-                origin: wgpu::Origin3d::ZERO,
+-                aspect: wgpu::TextureAspect::All,
+-            },
++        upload_texture_via_belt(
++            &mut self.staging_belt,
++            encoder,
++            &self.resources.filter_data_texture,
+             &self.filter_data,
+-            wgpu::TexelCopyBufferLayout {
+-                offset: 0,
+-                bytes_per_row: Some(width << 4),
+-                rows_per_image: Some(height),
+-            },
+-            Extent3d {
+-                width,
+-                height,
+-                depth_or_array_layers: 1,
+-            },
++            // 16 bytes per RGBA32Uint texel (4 u32s × 4 bytes each).
++            16,
+         );
+     }
+ 
+     /// Upload gradient data to the texture.
+-    fn upload_gradient_texture(&mut self, queue: &Queue, gradient_cache: &mut GradientRampCache) {
+-        let gradient_texture = &self.resources.gradient_texture;
+-        let gradient_texture_width = gradient_texture.width();
+-        let gradient_texture_height = gradient_texture.height();
+-
++    fn upload_gradient_texture(
++        &mut self,
++        encoder: &mut CommandEncoder,
++        gradient_cache: &mut GradientRampCache,
++    ) {
+         // Upload the gradient LUT data
+         if !gradient_cache.is_empty() {
+-            let total_capacity = (gradient_texture_width * gradient_texture_height * 4) as usize;
+-
+-            // Take ownership of the luts to avoid copying, then resize for texture padding
+-            let mut luts = gradient_cache.take_luts();
+-            let old_luts_len = luts.len();
+-            luts.resize(total_capacity, 0);
+-
+-            queue.write_texture(
+-                wgpu::TexelCopyTextureInfo {
+-                    texture: gradient_texture,
+-                    mip_level: 0,
+-                    origin: wgpu::Origin3d::ZERO,
+-                    aspect: wgpu::TextureAspect::All,
+-                },
++            let luts = gradient_cache.take_luts();
++            upload_texture_via_belt(
++                &mut self.staging_belt,
++                encoder,
++                &self.resources.gradient_texture,
+                 &luts,
+-                wgpu::TexelCopyBufferLayout {
+-                    offset: 0,
+-                    // 4 bytes per RGBA8 pixel
+-                    bytes_per_row: Some(gradient_texture_width << 2),
+-                    rows_per_image: Some(gradient_texture_height),
+-                },
+-                Extent3d {
+-                    width: gradient_texture_width,
+-                    height: gradient_texture_height,
+-                    depth_or_array_layers: 1,
+-                },
++                // 4 bytes per RGBA8 pixel.
++                4,
+             );
+-
+-            // Restore the luts back to the cache
+-            luts.truncate(old_luts_len);
+             gradient_cache.restore_luts(luts);
+         }
+     }

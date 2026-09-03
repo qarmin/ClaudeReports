@@ -1,0 +1,66 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# The subject here is a *compiler backend*, so "run the repro" means: build repro/ twice - once
+# with plain rustc/LLVM (the oracle) and once with the freshly built cg_clif from ./clone - run
+# both binaries, and compare. repro/ is self-checking against the Intel-documented semantics, so
+# the cg_clif binary exits non-zero on its own when the backend miscompiles.
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone build-clif reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# ~2-5 min cold. Produces clone/dist/{cargo-clif,rustc-clif} plus a cg_clif-built sysroot.
+build-clif:
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build
+
+# The LLVM oracle. Uses the same pinned nightly the clone does, so std is identical.
+llvm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd repro
+    echo "===== LLVM (plain rustc) ====="
+    cargo run --target-dir target-llvm 2>/dev/null
+    echo "LLVM exit: $?"
+
+# Build+run the standalone repro with the cg_clif in ./clone - should demonstrate the bug.
+# `ulimit -c 0` stops the crashing repro from dumping a core file (unmasked indices walk off the
+# vector's stack slot, so this often segfaults rather than merely printing wrong values).
+reproduce-before: llvm
+    #!/usr/bin/env bash
+    ulimit -c 0
+    cd repro
+    echo "===== cg_clif (clone/dist/cargo-clif) ====="
+    set +e
+    ../clone/dist/cargo-clif run --target-dir target-clif 2>/dev/null
+    echo "cg_clif exit: $?"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && ./y.sh build
+
+# Same repro again, now against the patched clone - must print PASS and exit 0.
+reproduce-after:
+    #!/usr/bin/env bash
+    ulimit -c 0
+    cd repro
+    echo "===== cg_clif, patched ====="
+    set +e
+    ../clone/dist/cargo-clif run --target-dir target-clif 2>/dev/null
+    echo "cg_clif exit: $?"
+
+clean:
+    rm -rf clone repro/target-llvm repro/target-clif

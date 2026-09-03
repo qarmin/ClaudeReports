@@ -1,0 +1,95 @@
+diff --git a/kurbo/src/mindist.rs b/kurbo/src/mindist.rs
+index 3c741aa..0d9c8c2 100644
+--- a/kurbo/src/mindist.rs
++++ b/kurbo/src/mindist.rs
+@@ -34,6 +34,35 @@ pub(crate) fn min_dist_param(
+     epsilon: f64,
+     best_alpha: Option<f64>,
+ ) -> (f64, f64, f64) {
++    min_dist_param_rec(bez1, bez2, u, v, epsilon, best_alpha, 0)
++}
++
++// The subdivision recursion's only termination check is `(umax - umin).abs() < epsilon` /
++// `(vmax - vmin).abs() < epsilon`, both driven directly by the caller-supplied, otherwise
++// unclamped `epsilon`. A non-positive `epsilon` (0.0 in particular) makes that check
++// unsatisfiable no matter how small the interval gets, so recursion never terminates on its own
++// and the stack overflows; a merely very small (but positive) `epsilon` can independently make
++// this degenerate for near-parallel/near-symmetric input curves, where each level's own pruning
++// (`is_outside` / the boundary checks below) fails to rule out any of the 4 children, giving
++// ~2-4x work per extra level of depth - so flooring `epsilon` alone still leaves a caller-solvable
++// path to an effectively-unbounded runtime (verified: a floored epsilon of 1e-9 alone still ran
++// past 180s on two near-parallel `Line`s). `depth` is this function's own hard backstop,
++// independent of `epsilon`'s value entirely: once reached, subdivision stops immediately, exactly
++// like the epsilon check succeeding, bounding both stack depth and total node count regardless of
++// what epsilon is. `MAX_DEPTH` is deliberately deep enough that it is *never* the limiting factor
++// for any sane epsilon (default/test-suite accuracies are 1e-3 to 0.5, i.e. depth well under 10)
++// - it only kicks in for the same degenerate inputs that would otherwise crash or hang.
++#[allow(clippy::too_many_arguments)]
++fn min_dist_param_rec(
++    bez1: &[Vec2],
++    bez2: &[Vec2],
++    u: (f64, f64),
++    v: (f64, f64),
++    epsilon: f64,
++    best_alpha: Option<f64>,
++    depth: u32,
++) -> (f64, f64, f64) {
++    const MAX_DEPTH: u32 = 12;
+     assert!(!bez1.is_empty() && !bez2.is_empty());
+     let n = u8::try_from(bez1.len() - 1).expect("At most 256 control points");
+     let m = u8::try_from(bez2.len() - 1).expect("At most 256 control points");
+@@ -54,7 +83,7 @@ pub(crate) fn min_dist_param(
+         }
+     }
+ 
+-    if (umax - umin).abs() < epsilon || (vmax - vmin).abs() < epsilon {
++    if (umax - umin).abs() < epsilon || (vmax - vmin).abs() < epsilon || depth >= MAX_DEPTH {
+         return (alpha, umid, vmid);
+     }
+ 
+@@ -123,37 +152,41 @@ pub(crate) fn min_dist_param(
+ 
+     // Subdivide
+     let results = [
+-        min_dist_param(
++        min_dist_param_rec(
+             bez1,
+             bez2,
+             (umin, new_umid),
+             (vmin, new_vmid),
+             epsilon,
+             Some(alpha),
++            depth + 1,
+         ),
+-        min_dist_param(
++        min_dist_param_rec(
+             bez1,
+             bez2,
+             (umin, new_umid),
+             (new_vmid, vmax),
+             epsilon,
+             Some(alpha),
++            depth + 1,
+         ),
+-        min_dist_param(
++        min_dist_param_rec(
+             bez1,
+             bez2,
+             (new_umid, umax),
+             (vmin, new_vmid),
+             epsilon,
+             Some(alpha),
++            depth + 1,
+         ),
+-        min_dist_param(
++        min_dist_param_rec(
+             bez1,
+             bez2,
+             (new_umid, umax),
+             (new_vmid, vmax),
+             epsilon,
+             Some(alpha),
++            depth + 1,
+         ),
+     ];
+ 

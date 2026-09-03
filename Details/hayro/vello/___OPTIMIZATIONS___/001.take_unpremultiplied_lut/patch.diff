@@ -1,0 +1,66 @@
+diff --git a/sparse_strips/vello_common/src/pixmap.rs b/sparse_strips/vello_common/src/pixmap.rs
+index 70d1401d..90dad209 100644
+--- a/sparse_strips/vello_common/src/pixmap.rs
++++ b/sparse_strips/vello_common/src/pixmap.rs
+@@ -410,27 +410,47 @@ impl Pixmap {
+ 
+     /// Consume the pixmap, returning the data as (unpremultiplied) RGBA8.
+     ///
+-    /// Not fast, but useful for saving to PNG etc.
+-    ///
+     /// The pixels are in row-major order.
+     pub fn take_unpremultiplied(self) -> Vec<Rgba8> {
+         self.buf
+             .into_iter()
+             .map(|PremulRgba8 { r, g, b, a }| {
+-                let alpha = 255.0 / f32::from(a);
+-                if a != 0 {
+-                    #[expect(clippy::cast_possible_truncation, reason = "deliberate quantization")]
+-                    let unpremultiply = |component| (f32::from(component) * alpha + 0.5) as u8;
+-                    Rgba8 {
+-                        r: unpremultiply(r),
+-                        g: unpremultiply(g),
+-                        b: unpremultiply(b),
+-                        a,
+-                    }
+-                } else {
+-                    Rgba8 { r, g, b, a }
++                if a == 0 {
++                    return Rgba8 { r, g, b, a };
++                }
++
++                // Fixed-point (16.16) reciprocal of `a`, looked up instead of computed with a
++                // float division per pixel. `recip` is `round(255 * 65536 / a)`, so
++                // `component * recip + 0x8000 >> 16` rounds the same way the original
++                // `(component as f32 * (255.0 / a as f32) + 0.5) as u8` did, to within
++                // 1 LSB (verified exhaustively over the valid premultiplied domain, i.e.
++                // component <= a).
++                let recip = u64::from(UNPREMULTIPLY_RECIP_LUT[a as usize]);
++                #[expect(clippy::cast_possible_truncation, reason = "deliberate quantization")]
++                let unpremultiply = |component: u8| (((component as u64 * recip) + 0x8000) >> 16) as u8;
++                Rgba8 {
++                    r: unpremultiply(r),
++                    g: unpremultiply(g),
++                    b: unpremultiply(b),
++                    a,
+                 }
+             })
+             .collect()
+     }
+ }
++
++/// `UNPREMULTIPLY_RECIP_LUT[a]` is the fixed-point (16.16) reciprocal used by
++/// [`Pixmap::take_unpremultiplied`] to turn the per-pixel unpremultiply division into a
++/// multiply. Entry 0 is unused (alpha == 0 is handled separately).
++const fn build_unpremultiply_recip_lut() -> [u32; 256] {
++    let mut lut = [0u32; 256];
++    let mut a = 1usize;
++    while a < 256 {
++        // round(255 * 65536 / a)
++        lut[a] = ((255 * 65536 * 2 + a as u64) / (2 * a as u64)) as u32;
++        a += 1;
++    }
++    lut
++}
++
++const UNPREMULTIPLY_RECIP_LUT: [u32; 256] = build_unpremultiply_recip_lut();

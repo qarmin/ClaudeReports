@@ -1,0 +1,82 @@
+=== cargo test --lib --features nightly_f16 bughunt (new remainder-vs-scalar-with-tolerance tests, f32/f16/u16 backends) ===
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /home/rafal/Projekty/Obce/pic-scale/pic-scale-js/Cargo.toml
+workspace: /home/rafal/Projekty/Obce/pic-scale/Cargo.toml
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (target/debug/build/pic-scale/39658edff0067a9c/out/pic_scale-39658edff0067a9c)
+
+running 6 tests
+test avx2::alpha_f32::bughunt_remainder_tests::avx2_f32_remainder_matches_scalar_within_tolerance ... ok
+test sse::alpha_f32::bughunt_remainder_tests::sse_f32_remainder_matches_scalar_within_tolerance ... ok
+test avx2::alpha_f16::bughunt_remainder_tests::avx2_f16_remainder_matches_scalar_within_tolerance ... ok
+test sse::alpha_u16::bughunt_remainder_tests::sse_u16_remainder_matches_scalar_within_tolerance ... ok
+test avx2::alpha_u16::bughunt_remainder_tests::avx2_u16_remainder_matches_scalar_within_tolerance ... ok
+test sse::alpha_f16::bughunt_remainder_tests::sse_f16_remainder_matches_scalar_within_tolerance ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 0.03s
+
+
+=== cargo test --lib --features nightly_f16 remainder (includes the extended exact-match u8 remainder tests) ===
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /home/rafal/Projekty/Obce/pic-scale/pic-scale-js/Cargo.toml
+workspace: /home/rafal/Projekty/Obce/pic-scale/Cargo.toml
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (target/debug/build/pic-scale/39658edff0067a9c/out/pic_scale-39658edff0067a9c)
+
+running 8 tests
+test sse::alpha_u8::tests::sse_premultiply_remainder_matches_scalar_reference ... ok
+test avx2::alpha_f32::bughunt_remainder_tests::avx2_f32_remainder_matches_scalar_within_tolerance ... ok
+test avx2::alpha_u8::tests::avx2_premultiply_remainder_matches_scalar_reference ... ok
+test sse::alpha_f32::bughunt_remainder_tests::sse_f32_remainder_matches_scalar_within_tolerance ... ok
+test avx2::alpha_f16::bughunt_remainder_tests::avx2_f16_remainder_matches_scalar_within_tolerance ... ok
+test sse::alpha_u16::bughunt_remainder_tests::sse_u16_remainder_matches_scalar_within_tolerance ... ok
+test avx2::alpha_u16::bughunt_remainder_tests::avx2_u16_remainder_matches_scalar_within_tolerance ... ok
+test sse::alpha_f16::bughunt_remainder_tests::sse_f16_remainder_matches_scalar_within_tolerance ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 75 filtered out; finished in 0.03s
+
+
+=== full test suite (default features + nightly_f16), before/after this candidate's temporary tests ===
+test avx2::alpha_u16::bughunt_remainder_tests::avx2_u16_remainder_matches_scalar_within_tolerance ... ok
+test sse::alpha_u16::bughunt_remainder_tests::sse_u16_remainder_matches_scalar_within_tolerance ... ok
+test scaler::tests::check_rgba8_resizing_both ... ok
+test math::lanczos::tests::is_symmetric_within_the_support ... ok
+test sse::alpha_f16::bughunt_remainder_tests::sse_f16_remainder_matches_scalar_within_tolerance ... ok
+test math::sphinx::tests::has_no_discontinuity ... ok
+test scaler::tests::check_rgba8_resizing_alpha ... ok
+
+test result: ok. 83 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+
+=== earlier probe (exact-equality version of the same tests, before switching to tolerance-based
+comparison): confirms mismatches are a pre-existing SIMD/scalar precision difference, NOT a
+remainder-drop, since it also reproduces at width=16 (an exact multiple of the 16-lane main-loop
+chunk size, so the remainder path in avx2/alpha_u16.rs's Avx2PremultiplyExecutorAnyBit is never
+even reached) ===
+
+Exact-equality run across widths 1..200, bit_depth in {10,12,16} (first failure only, panics on
+first mismatch):
+  thread 'avx2::alpha_f32::...avx2_f32_remainder_matches_scalar' panicked:
+    assertion `left == right` failed: unpremultiply width=1
+      left:  [0.651, 0.84, 0.71299994, 0.798]
+      right: [0.65099996, 0.84, 0.71299994, 0.798]
+  thread 'sse::alpha_f32::...sse_f32_remainder_matches_scalar' panicked:
+    assertion `left == right` failed: unpremultiply width=4
+      left:  [..., 0.955, ...]  right: [..., 0.95400006, ...]   (single-ULP-class drift)
+  thread 'sse::alpha_u16::...sse_u16_remainder_matches_scalar' panicked:
+    assertion `left == right` failed: premultiply width=18 bit_depth=16
+      left:  [..., 44444, ...]  right: [..., 44445, ...]         (off by 1 LSB out of 65535)
+  thread 'avx2::alpha_u16::...avx2_u16_remainder_matches_scalar' panicked:
+    assertion `left == right` failed: premultiply width=37 bit_depth=16
+      left:  [..., 30158, ...]  right: [..., 30157, ...]         (off by 1 LSB out of 65535)
+
+Targeted probe: width fixed at 16 (16*4=64 elements, 64/16=4 exact chunks of the AVX2 u16 main
+loop, so the as_chunks::<16>() remainder is empty and Avx2PremultiplyExecutorAnyBit::premultiply's
+"if !rem.is_empty()" buffer branch is provably never entered), bit_depth=16, 5000 independent
+random seeds, exact-equality against the scalar reference:
+  panicked at src/avx2/alpha_u16.rs: mismatches=144 first=Some((16, 16))
+  (144 of 5000 random pixel buffers - 2.88% - showed a +/-1 LSB divergence with zero remainder
+  bytes involved at all, proving the divergence is a main-loop f32-reciprocal-vs-exact-integer-
+  division precision artifact of `Avx2PremultiplyExecutorAnyBit`/`Sse41PremultiplyExecutorAny`,
+  unrelated to `as_chunks`/remainder handling. Logged as a new IDEAS.md suspect, not this
+  candidate's bug.)

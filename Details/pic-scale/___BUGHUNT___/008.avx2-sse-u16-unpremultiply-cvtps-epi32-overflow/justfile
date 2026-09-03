@@ -1,0 +1,39 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./repro/clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g. attached
+# to a GitHub issue) and `just test` still works, with no dependency on the main project checkout
+# this candidate was originally found in.
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+# reproduce-before is expected to exit 1 (bug present) - prefixed with `-` so the chain continues
+# on to apply/reproduce-after instead of stopping there.
+test: clone
+    -just reproduce-before
+    just apply
+    just reproduce-after
+
+clone:
+    rm -rf repro/clone
+    git clone {{repo_url}} repro/clone
+    cd repro/clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug (nonzero
+# exit, "REPRODUCED" printed, the cvtps_epi32-overflow signature hit in both AVX2 and SSE).
+reproduce-before:
+    cd repro && ./compare.sh
+
+apply:
+    cd repro/clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer demonstrate the bug (exit 0,
+# "did not reproduce" printed).
+reproduce-after:
+    cd repro && ./compare.sh
+
+clean:
+    rm -rf repro/clone repro/simd/target repro/scalar/target repro/sse/target

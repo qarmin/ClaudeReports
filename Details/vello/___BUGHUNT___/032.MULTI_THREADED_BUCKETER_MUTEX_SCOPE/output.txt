@@ -1,0 +1,102 @@
+=== Approach 1: type-system proof that RenderContext (and therefore MultiThreadedDispatcher /
+=== Mutex<CommandBucketer>) can never be shared across threads (repro/, via `just test`) ===
+
+rm -rf clone
+git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false clone https://github.com/linebender/vello.git clone
+Cloning into 'clone'...
+cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false checkout 7516831426fb70f36d62c521c5477f6a7265b36a
+Note: switching to '7516831426fb70f36d62c521c5477f6a7265b36a'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at 75168314 Remove some Vello-Classic-specific info from the root README (#1698)
+cd repro && cargo run --release
+   Compiling vello_common v0.2.0 (/tmp/candidate032_verify/clone/sparse_strips/vello_common)
+   Compiling glifo v0.3.0 (/tmp/candidate032_verify/clone/glifo)
+   Compiling vello_cpu v0.2.0 (/tmp/candidate032_verify/clone/sparse_strips/vello_cpu)
+   Compiling repro v0.1.0 (/tmp/candidate032_verify/repro)
+    Finished `release` profile [optimized] target(s) in 14.22s
+     Running `target/release/repro`
+confirmed: vello_cpu::RenderContext is NOT Sync (assert_not_impl_any! compiled clean) -> no two threads can ever share a `&RenderContext`/`&MultiThreadedDispatcher`, so the suspected second-caller contention path on `bucketer` cannot exist through safe Rust.
+
+=== repeat run (2/2) ===
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running `target/release/repro`
+confirmed: vello_cpu::RenderContext is NOT Sync (assert_not_impl_any! compiled clean) -> no two threads can ever share a `&RenderContext`/`&MultiThreadedDispatcher`, so the suspected second-caller contention path on `bucketer` cannot exist through safe Rust.
+
+=== (supporting) earlier ad-hoc check: trying assert_sync::<vello_cpu::RenderContext>() (the
+=== inverse claim) fails to compile with the exact reason - confirms the assert_not_impl_any!
+=== above is checking the right thing, not vacuously "passing" ===
+
+error[E0277]: `(dyn vello_cpu::dispatch::Dispatcher + 'static)` cannot be shared between threads safely
+   --> sparse_strips/vello_cpu/examples/sync_check.rs:5:19
+    |
+  5 |     assert_sync::<vello_cpu::RenderContext>();
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^ `(dyn vello_cpu::dispatch::Dispatcher + 'static)` cannot be shared between threads safely
+    |
+    = help: the trait `Sync` is not implemented for `(dyn vello_cpu::dispatch::Dispatcher + 'static)`
+    = note: required for `std::ptr::Unique<(dyn vello_cpu::dispatch::Dispatcher + 'static)>` to implement `Sync`
+note: required because it appears within the type `Box<(dyn vello_cpu::dispatch::Dispatcher + 'static)>`
+   --> /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/boxed.rs:234:12
+note: required because it appears within the type `RenderContext`
+   --> sparse_strips/vello_cpu/src/render.rs:157:12
+157 | pub struct RenderContext {
+    |            ^^^^^^^^^^^^^
+note: required by a bound in `assert_sync`
+
+=== Approach 2: `cargo clippy -- -W clippy::significant_drop_tightening` on vello_cpu
+=== (multithreading feature) - confirms the lint the candidate cites actually fires here, and
+=== nowhere else on the same field ===
+
+    = note: `#[warn(clippy::manual_filter)]` on by default
+
+warning: temporary with significant `Drop` can be early dropped
+   --> sparse_strips/vello_cpu/src/dispatch/multi_threaded.rs:398:17
+    |
+397 |       ) {
+    |  _______-
+398 | |         let mut bucketer = self.bucketer.lock().unwrap();
+    | |                 ^^^^^^^^
+399 | |         let filters = FilterContext::new(0);
+400 | |         bucketer.reset(RectU16::new(0, 0, scene_width, scene_height));
+...   |
+456 | |         self.alpha_storage.init(alpha_slots);
+457 | |     }
+    | |_____- temporary `bucketer` is currently being dropped at the end of its contained scope
+    |
+
+=== Approach 3: whole-workspace grep for every `.lock()` call and every reference to `bucketer`
+=== - only one call site locks `self.bucketer` (multi_threaded.rs:398); the other three `.lock()`
+=== calls in the same file (lines 914/925/935) are on `MaybePresent<T>::value`, an unrelated
+=== generic Arc<Mutex<T>> wrapper used for `alpha_storage`/`filter_paints`-style handoff, not the
+=== bucketer. No other crate in the workspace references `MultiThreadedDispatcher`, and nothing
+=== wraps `RenderContext` in `Arc`/`unsafe impl Sync` anywhere. ===
+
+$ grep -n ".lock()" sparse_strips/vello_cpu/src/dispatch/multi_threaded.rs
+398:        let mut bucketer = self.bucketer.lock().unwrap();
+914:        let mut locked = self.value.lock().unwrap();
+925:        let mut lock = self.value.lock().unwrap();
+935:        let mut locked = self.value.lock().unwrap();
+
+$ grep -rln "MultiThreadedDispatcher" --include=*.rs sparse_strips/
+sparse_strips/vello_cpu/src/render.rs
+sparse_strips/vello_cpu/src/dispatch/multi_threaded.rs
+
+$ grep -rn "unsafe impl.*Sync\|unsafe impl.*Send" --include=*.rs sparse_strips/ | grep -i "dispatch\|RenderContext\|bucketer"
+(no matches)
+
+$ grep -rn "Arc<RenderContext>\|Arc::new(RenderContext" --include=*.rs .
+(no matches)

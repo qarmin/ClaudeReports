@@ -1,0 +1,51 @@
+# Ideas
+
+Unchecked suspects only - see `SUMMARY.md` for what's already been investigated.
+
+Last GitHub issue/PR checked for inspiration: **#1869** (repo: linebender/vello)
+
+## Backlog (not yet investigated)
+
+Consumed top-to-bottom by default when a session isn't given a specific target - see `SKILL.md`.
+
+| Added | Suspect | Why it looks suspicious | Source |
+|---|---|---|---|
+| <date or session marker> | <file:line / function> | <heuristic match / static-analysis output / issue-triage lead / noticed while working on candidate N> | <HEURISTICS.md / clippy / ___ISSUES___/bugs/ / candidate #N> |
+| 2026-09-02 | Open-ended glifo unwrap()/expect() sweep on skrifa/read-fonts Result/Option | risk map states the vein "almost certainly recurs elsewhere... not yet swept"; prior sweeps (039, 040, 042, 044, 062, 088) done but framed as still open-ended - any specific untried call site is a fresh lead | ~/.claude/skills/bug-hunt/projects/vello.md (risk map, glifo paragraph) |
+<!-- Three leads below were claimed as 095, 096 and 097 in the same session they were added (vello/src/scene.rs conv_brush vs glifo/src/colr.rs ColorPainter LinearGradient/Solid diff, follow-up to 081/086; GPU-vs-CPU differential harness glyph/text, dashed strokes, blurred rounded rects unswept coverage gap; vello_hybrid wgpu backend general under-exploration for device-limit/resource-exhaustion bugs); see SUMMARY.md once investigated. -->
+<!-- One submitted idea was deduplicated out at append time because it exactly matches an already-completed investigation: sparse_strips/vello_common/src/filter/gaussian_blur.rs plan_decimated_blur's `while remaining_variance > 4.0` decimation loop never terminating for an overflowed/infinite variance == 078.EXTRACT_SCALES_UNBOUNDED_UPPER_CLAMP_OVERFLOW (Confirmed) - same root cause (extract_scales's unclamped f32 overflow to +inf feeding the same non-converging loop), already reproduced end-to-end via the real public RenderContext API. -->
+<!-- Three leads below were claimed as 092, 093 and 094 in the same session they were added (sparse_strips/vello_common/src/strip_generator.rs render_with_clip GenerationMode::ReplaceAfter truncates strips but never truncates alphas; sparse_strips/vello_sparse_shaders bicubic_sample/external_bicubic_sample still applying Extend once-too-early, unfixed sibling of confirmed 009; sparse_strips/vello_common/src/tile.rs make_tiles_analytic_aa_impl/MSAA variant silent per-path line truncation at MAX_LINES_PER_PATH only guarded by debug_assert); see SUMMARY.md once investigated. -->
+<!-- Three leads below were claimed as 089, 090 and 091 in the same session they were added; see SUMMARY.md once investigated. -->
+<!-- Three leads were claimed as 086, 087 and 088 in the same session they were added (vello/src/scene.rs conv_brush vs glifo/src/colr.rs ColorPainter RadialGradient/LinearGradient/Solid divergence; vello_shaders/src/cpu/*.rs bump-allocated 'lines'/'blend_spill' buffers missing BumpAllocators::failed check; glifo/src/**/*.rs unwrap()/expect() on skrifa/read-fonts Result/Option general sweep); see SUMMARY.md once investigated. -->
+<!-- One submitted idea was deduplicated out at append time because it exactly matches an already-completed investigation: sparse_strips/vello_cpu/src/filter/shift.rs process_offset_pixel should_clear negative-offset i32->u16 sign-loss cast == 054.OFFSET_PIXELS_NEGATIVE_SHIFT_U16_WRAPAROUND_STALE_PIXELS (Confirmed). Three other submitted ideas were claimed as 083, 084 and 085 in the same session they were added (sparse_strips/vello_cpu/src/coarse/depth.rs bucket-coordinate u16 multiplication overflow; sparse_strips/vello_cpu/src/coarse/bucketer.rs bucket_commands unbounded recursion; vello_shaders/src/cpu/clip_leaf.rs clip_leaf_main stack.pop().unwrap() on unmatched end-clip); see SUMMARY.md once investigated. -->
+
+<!-- Three leads below were claimed as 080, 081 and 082 in the same session they were added; see SUMMARY.md once investigated. -->
+
+<!-- Three leads below were claimed as 077, 078 and 079 in the same session they were added; see SUMMARY.md once investigated. -->
+
+<!-- Three leads below were claimed as 074, 075 and 076 in the same session they were added; see SUMMARY.md once investigated. -->
+
+<!-- Two leads below were claimed as 072 and 073 in the same session they were added; see SUMMARY.md once investigated. -->
+
+<!-- Three leads below were claimed as 069, 070 and 071 in the same session they were added; see SUMMARY.md once investigated. -->
+
+<!-- Three new leads below were claimed as 066, 067 and 068 in the same session they were added; see SUMMARY.md once investigated. One other submitted idea was deduplicated out at append time because it exactly matches an already-completed investigation: vello_encoding/src/resolve.rs resolve_patches exact-equality uniform-scale check (transform.matrix[0] == transform.matrix[3] && ...) == 036.GLYPH_HINT_UNIFORM_SCALE_FLOAT_EQ (Confirmed). A fifth submitted idea (vello_shaders/src/cpu bump-allocator writes in tile_alloc.rs/path_count.rs/binning.rs lacking a bump.failed mirror) was folded into the 066 claim rather than kept as a separate backlog row, since it builds directly on panics already reproduced (but not given their own Confirmed writeup) inside 047.PATH_TILING_CPU_SHIM_ASSERT_AND_INDEX_WRITE/RESULT.md. -->
+
+<!-- Three new leads below were claimed as 063, 064 and 065 in the same session they were added; see SUMMARY.md once investigated. -->
+
+<!-- Three new leads below were claimed as 060, 061 and 062 in the same session they were added; see SUMMARY.md once investigated. One other submitted idea was deduplicated out at append time because it exactly matches an already-completed investigation: sparse_strips/vello_cpu/src/filter/shift.rs process_offset_pixel should_clear negative-offset i32->u16 sign-loss cast (offset/drop-shadow filter leaving stale pixels) == 054.OFFSET_PIXELS_NEGATIVE_SHIFT_U16_WRAPAROUND_STALE_PIXELS (Confirmed). -->
+
+<!-- Three new leads below were claimed as 052, 053 and 054 in the same session they were added; see SUMMARY.md once investigated. -->
+
+<!-- Two new leads below were claimed as 042 and 043 in the same session they were added; see SUMMARY.md once investigated. Three other submitted ideas were deduplicated out at append time because they exactly match already-completed investigations: glifo/src/renderer.rs calculate_raster_metrics u16 truncation == 030.GLIFO_RASTER_METRICS_U16_TRUNCATION (Confirmed); vello_encoding/src/resolve.rs uniform-scale float_cmp == 036.GLYPH_HINT_UNIFORM_SCALE_FLOAT_EQ (Confirmed); sparse_strips/vello_common/src/tile.rs make_tiles_msaa corner float_cmp == 002.TILE_MSAA_CORNER_FLOAT_CMP (Not reproducible). -->
+
+<!-- Two more new leads below were claimed as 044 and 045 in the same session they were added; see SUMMARY.md once investigated. Three other submitted ideas were deduplicated out at append time because they exactly match already-completed investigations: sparse_strips/vello_common/src/tile.rs make_tiles_msaa needs_clamping tautology == 001.tile_msaa_needs_clamping_tautology (Confirmed); sparse_strips/vello_common/src/util.rs extract_scales f32-precision NaN silently absorbed by .max() == 019.EXTRACT_SCALES_NAN_MAX_ABSORB (Confirmed); glifo/src/renderer.rs calculate_raster_metrics u16/i16 truncating casts == 030.GLIFO_RASTER_METRICS_U16_TRUNCATION (Confirmed). -->
+
+<!-- Three more new leads below were claimed as 046, 047 and 048 in the same session they were added; see SUMMARY.md once investigated. One other submitted idea was deduplicated out at append time because it exactly matches an already-completed investigation: sparse_strips/vello_common/src/record.rs CommandRecorder::pop_layer bare `self.layer_stack.pop().unwrap()` == 031.RECORD_POP_LAYER_STACK_UNDERFLOW (Confirmed). The three rows that were here (ClipState::pop_root_viewport frames.pop(); path_tiling.rs path_tiling_main assert+index write; scene.rs DrawColorGlyphs::push_layer Mix blend mode mapping) were removed on 2026-09-01 as stale duplicates: they were investigated and written up as 046.CLIP_STATE_POP_ROOT_VIEWPORT_FRAMES_UNDERFLOW (Not reproducible), 047.PATH_TILING_CPU_SHIM_ASSERT_AND_INDEX_WRITE (Not reproducible) and 048.COLR_BLEND_MODE_INCOMPLETE_MAPPING (Confirmed) respectively, but the rows were never deleted from this backlog after being claimed. -->
+
+<!-- Three new leads below were claimed as 049, 050 and 051 in the same session they were added; see SUMMARY.md once investigated. Three other submitted ideas were deduplicated out at append time because they exactly match already-completed investigations: vello_encoding/src/resolve.rs resolve_patches exact-equality uniform-scale check == 036.GLYPH_HINT_UNIFORM_SCALE_FLOAT_EQ (Confirmed); sparse_strips/vello_common/src/util.rs extract_scales NaN silently absorbed by .max() floor == 019.EXTRACT_SCALES_NAN_MAX_ABSORB (Confirmed); vello/src/scene.rs DrawColorGlyphs::push_layer COLRv1 Mix blend modes collapsing to Compose::SrcOver == 048.COLR_BLEND_MODE_INCOMPLETE_MAPPING (Confirmed). -->
+
+<!-- Two new leads below were claimed as 055 and 056 in the same session they were added; see SUMMARY.md once investigated. One other submitted idea was deduplicated out at append time because it exactly matches an already-completed investigation: sparse_strips/vello_cpu/src/filter/shift.rs process_offset_pixel should_clear negative-offset i32->u16 sign-loss cast == 054.OFFSET_PIXELS_NEGATIVE_SHIFT_U16_WRAPAROUND_STALE_PIXELS (Confirmed). -->
+
+<!-- Three new leads were claimed as 057, 058 and 059 in the same session they were added; see SUMMARY.md once investigated. One other submitted idea was deduplicated out at append time because it exactly matches an already-completed investigation: sparse_strips/vello_cpu/src/filter/shift.rs process_offset_pixel should_clear negative-offset i32->u16 sign-loss cast == 054.OFFSET_PIXELS_NEGATIVE_SHIFT_U16_WRAPAROUND_STALE_PIXELS (Confirmed). The three rows were left in the backlog table by mistake after being claimed; they were removed from the table on 2026-09-01 (still uninvestigated at removal time - see 057.TRANSFERFUNCTION_TABLE_DISCRETE_MIN_LENGTH_UNCHECKED, 058.GRADIENT_RAMP_CACHE_COMPACT_LUTS_PREFIX_SUM_UNDERFLOW, 059.HIGHP_BLEND_MASK_BOUNDS_U16_ADD_INCONSISTENT_WITH_FINE_MASK_U32_WIDENING once written up). -->
+

@@ -1,0 +1,52 @@
+Captured output from `just test` (repo_url overridden to a local clone of the working checkout,
+base_commit 44ce9226c541dd2b11897b9ef07156a28871cdb7, to avoid a redundant GitHub fetch during
+verification - the real GitHub URL is what's baked into justfile for standalone use).
+
+`just test` = clone (pristine checkout) -> reproduce-before -> apply patch.diff -> reproduce-after:
+
+cd repro && cargo run --release || true
+   Compiling image v0.25.9 (.../003.VERTICAL_SAMPLE_PLUS_ONE_BIAS/clone)
+   Compiling repro v0.1.0 (.../003.VERTICAL_SAMPLE_PLUS_ONE_BIAS/repro)
+    Finished `release` profile [optimized] target(s) in 3.86s
+     Running `target/release/repro`
+Uniform-color resize through image::imageops::resize (public API):
+  4x4 -> 2x2 (Triangle): pixel(0,0) = Rgb([101, 101, 101]) (expected [100,100,100])
+  10x10 -> 3x3 (Lanczos3): pixel(0,0) = Rgb([51, 51, 51]) (expected [50,50,50])
+  8x6 -> 8x3 (Lanczos3): pixel(0,0) = Rgb([51, 51, 51]) (expected [50,50,50])
+  1x100 -> 1x10 (Lanczos3): pixel(0,0) = Rgb([51, 51, 51]) (expected [50,50,50])
+BUG REPRODUCED: expected every output pixel to equal the uniform input value (normalized filter weights sum to 1), but at least one deviated - see src/imageops/sample.rs's vertical_sample accumulator init.
+cd clone && git apply ".../003.VERTICAL_SAMPLE_PLUS_ONE_BIAS/patch.diff"
+cd repro && cargo run --release
+   Compiling image v0.25.9 (.../003.VERTICAL_SAMPLE_PLUS_ONE_BIAS/clone)
+   Compiling repro v0.1.0 (.../003.VERTICAL_SAMPLE_PLUS_ONE_BIAS/repro)
+    Finished `release` profile [optimized] target(s) in 3.94s
+     Running `target/release/repro`
+Uniform-color resize through image::imageops::resize (public API):
+  4x4 -> 2x2 (Triangle): pixel(0,0) = Rgb([100, 100, 100]) (expected [100,100,100])
+  10x10 -> 3x3 (Lanczos3): pixel(0,0) = Rgb([50, 50, 50]) (expected [50,50,50])
+  8x6 -> 8x3 (Lanczos3): pixel(0,0) = Rgb([50, 50, 50]) (expected [50,50,50])
+  1x100 -> 1x10 (Lanczos3): pixel(0,0) = Rgb([50, 50, 50]) (expected [50,50,50])
+Not reproduced on this build (see RESULT.md for the affected version).
+
+---
+
+`just test` was run twice in full (repeatability): both runs produced byte-identical
+before/after output (BUG REPRODUCED before, Not reproduced after) - 2/2.
+
+Earlier, before building the standalone repro/, the same exact scenario (uniform 4x4 100-valued
+Rgb<u8> resized to 2x2 with FilterType::Triangle via image::imageops::resize) was reproduced
+directly in the main project's own working tree, against the pristine (unpatched) src/imageops/sample.rs,
+using a scratch `cargo run --release --example` (deleted before this candidate folder was written):
+
+Uniform 100-valued 4x4 source, resized to 2x2 with FilterType::Triangle:
+  pixel (0,0) = Rgb([101, 101, 101])
+  pixel (1,0) = Rgb([101, 101, 101])
+  pixel (0,1) = Rgb([101, 101, 101])
+  pixel (1,1) = Rgb([101, 101, 101])
+BUG REPRODUCED: expected uniform 100, got a biased value.
+
+That exact run was repeated 3/3 identical in release, 1/1 in debug (debug-assertions build) -
+all four identical. Combined with the two full `just test` runs above (2/2), and the project's
+own test suite (331/331 passing both before and after, meaning no existing test in this crate
+currently catches this bug - see RESULT.md), this is a deterministic, 100%-repeatable logic bug
+with no layout/seed/timing dependence.

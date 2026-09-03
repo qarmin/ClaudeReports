@@ -1,0 +1,50 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# repo_url/base_commit read via `git remote get-url origin` / `git rev-parse HEAD` in the main
+# project, at the moment patch.diff was captured - patch.diff is a diff against that exact commit
+# and may stop applying cleanly once the main branch moves on.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+# The -c overrides (not a persistent git config change) skip git-lfs smudging for this clone
+# only: this repo's LFS-tracked assets are unrelated snapshot PNGs, not anything this repro needs,
+# and environments without the git-lfs binary installed would otherwise fail the whole checkout
+# (the post-checkout hook aborts if it can't find the git-lfs binary at all).
+clone:
+    rm -rf clone
+    git -c filter.lfs.smudge= -c filter.lfs.process= -c filter.lfs.required=false clone {{repo_url}} clone
+    cd clone && git -c filter.lfs.smudge= -c filter.lfs.process= -c filter.lfs.required=false checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone in a DEBUG build (default `cargo run`
+# profile). Should print "REPRODUCED - width_height packing silently corrupts for width/height
+# >= 65536" and exit non-zero, with several "CORRUPTED" lines showing decoded width/height that
+# don't match what was actually encoded. The leading `-` tells `just` not to abort the `test`
+# chain on this recipe's expected-nonzero exit code (0 = did not reproduce, non-zero = reproduced,
+# same convention repro_template.rs documents).
+reproduce-before:
+    -cd repro && cargo run
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone (still a DEBUG build) - should print
+# "did not reproduce" and exit 0: every out-of-range case now hits the fix's `debug_assert!` and
+# is reported as "PANICKED (debug_assert caught the out-of-range dimensions)" instead of silently
+# producing a corrupted packed value. See output.txt for the release-build behavior too (the
+# `debug_assert!` compiles out, but the value is now clamped to a bounded, deterministic maximum
+# instead of wrapping to an arbitrary value that can alias a different, legitimately-sized image).
+reproduce-after:
+    cd repro && cargo run
+
+clean:
+    rm -rf clone

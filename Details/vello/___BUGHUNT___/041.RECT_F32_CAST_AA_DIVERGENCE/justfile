@@ -1,0 +1,35 @@
+# Self-contained reproduction for candidate 041 (fill_rect's f64->f32 cast in rect.rs vs.
+# fill_path's flattening pipeline). Status: Not reproducible - see RESULT.md. No patch.diff exists
+# for this candidate, so this justfile only has a `reproduce-before` step (per the template's own
+# instructions for that case).
+#
+# `repo_url`/`base_commit` were read via `git remote get-url origin` / `git rev-parse HEAD` in the
+# main project at investigation time.
+#
+# Note: this environment's git-lfs binary is missing, which makes a plain `git clone`/`git
+# checkout` of this repo fail on its LFS-tracked PNG test snapshots. The repro below never touches
+# those files, so the clone step disables the LFS filter outright (`-c filter.lfs.*`) to stay
+# robust regardless of whether git-lfs is installed on the machine running this.
+
+# https (not the ssh form `git remote get-url origin` actually returns) so `just clone` works
+# without an ssh key/agent configured.
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false clone {{repo_url}} clone
+    cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone. Prints (1) whether fill_path's
+# flattening pipeline actually keeps rect coordinates in f64 longer than fill_rect's fast path
+# (it doesn't - both downcast to f32 with the same expression), (2) a curated differential sweep
+# of fill_rect vs fill_path(rect.to_path(eps)) over sub-pixel positions/sizes/near-u16::MAX
+# coordinates, and (3) a seeded random fuzz sweep, all comparing every rendered pixel.
+reproduce-before:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

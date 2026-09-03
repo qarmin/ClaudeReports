@@ -1,0 +1,199 @@
+diff --git a/ul/src/association/client.rs b/ul/src/association/client.rs
+index b0487895..22053cef 100644
+--- a/ul/src/association/client.rs
++++ b/ul/src/association/client.rs
+@@ -1139,6 +1139,10 @@ where
+         self.acceptor_max_pdu_length
+     }
+ 
++    fn strict(&self) -> bool {
++        self.strict
++    }
++
+     fn presentation_contexts(&self) -> &[PresentationContextNegotiated] {
+         &self.presentation_contexts
+     }
+@@ -1704,6 +1708,10 @@ impl<S> Association for AsyncClientAssociation<S> {
+         self.acceptor_max_pdu_length
+     }
+ 
++    fn strict(&self) -> bool {
++        self.strict
++    }
++
+     fn presentation_contexts(&self) -> &[PresentationContextNegotiated] {
+         &self.presentation_contexts
+     }
+diff --git a/ul/src/association/mod.rs b/ul/src/association/mod.rs
+index 66d0c2cb..9e16ec47 100644
+--- a/ul/src/association/mod.rs
++++ b/ul/src/association/mod.rs
+@@ -292,6 +292,11 @@ pub trait Association {
+     /// for client objects.
+     fn peer_max_pdu_length(&self) -> u32;
+ 
++    /// Retrieve whether this association was configured to
++    /// reject incoming PDUs (including P-Data-TF) whose declared
++    /// length exceeds `local_max_pdu_length()`.
++    fn strict(&self) -> bool;
++
+     /// Obtain a view of the negotiated presentation contexts.
+     fn presentation_contexts(&self) -> &[PresentationContextNegotiated];
+ 
+@@ -530,8 +535,9 @@ pub trait SyncAssociation<S: std::io::Read + std::io::Write + CloseSocket>:
+     /// receives more data PDUs once the bytes collected are consumed.
+     fn receive_pdata(&mut self) -> PDataReader<'_, &mut S> {
+         let max_pdu_length = self.local_max_pdu_length();
++        let strict = self.strict();
+         let (socket, read_buffer) = self.get_mut();
+-        PDataReader::new(socket, max_pdu_length, read_buffer)
++        PDataReader::new(socket, max_pdu_length, read_buffer).strict(strict)
+     }
+ }
+ 
+@@ -613,8 +619,9 @@ pub trait AsyncAssociation<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unp
+     /// receives more data PDUs once the bytes collected are consumed.
+     fn receive_pdata(&mut self) -> PDataReader<'_, &mut S> {
+         let max_pdu_length = self.local_max_pdu_length();
++        let strict = self.strict();
+         let (socket, read_buffer) = self.get_mut();
+-        PDataReader::new(socket, max_pdu_length, read_buffer)
++        PDataReader::new(socket, max_pdu_length, read_buffer).strict(strict)
+     }
+ }
+ 
+diff --git a/ul/src/association/pdata.rs b/ul/src/association/pdata.rs
+index dcb4eb20..7d383807 100644
+--- a/ul/src/association/pdata.rs
++++ b/ul/src/association/pdata.rs
+@@ -249,6 +249,7 @@ pub struct PDataReader<'a, R> {
+     max_pdu_length: u32,
+     last_pdu: bool,
+     read_buffer: &'a mut BytesMut,
++    strict: bool,
+ }
+ 
+ impl<'a, R> PDataReader<'a, R> {
+@@ -262,9 +263,23 @@ impl<'a, R> PDataReader<'a, R> {
+             max_pdu_length,
+             last_pdu: false,
+             read_buffer: remaining,
++            strict: true,
+         }
+     }
+ 
++    /// Set whether incoming P-Data-TF PDUs are rejected
++    /// when their declared length exceeds `max_pdu_length`
++    /// (as negotiated for this association).
++    ///
++    /// This is enabled (`true`) by default, matching the default used for
++    /// other kinds of incoming PDU (see `ClientAssociationOptions`/
++    /// `ServerAssociationOptions`'s own `strict` option, which this should
++    /// normally be kept in sync with).
++    pub fn strict(mut self, strict: bool) -> Self {
++        self.strict = strict;
++        self
++    }
++
+     /// Declare no intention to read more PDUs from the remote node.
+     ///
+     /// Attempting to read more bytes
+@@ -290,7 +305,7 @@ where
+             let mut reader = BufReader::new(&mut self.stream);
+             let msg = loop {
+                 let mut buf = Cursor::new(&self.read_buffer[..]);
+-                match read_pdu(&mut buf, self.max_pdu_length, false)
++                match read_pdu(&mut buf, self.max_pdu_length, self.strict)
+                     .map_err(std::io::Error::other)?
+                 {
+                     Some(pdu) => {
+@@ -673,12 +688,13 @@ pub mod non_blocking {
+                     ref mut stream,
+                     ref mut read_buffer,
+                     max_pdu_length,
++                    strict,
+                     ..
+                 } = &mut *self;
+                 let mut reader = BufReader::new(stream);
+                 let msg = loop {
+                     let mut buf = Cursor::new(&read_buffer[..]);
+-                    match read_pdu(&mut buf, max_pdu_length, false)
++                    match read_pdu(&mut buf, max_pdu_length, strict)
+                         .map_err(std::io::Error::other)?
+                     {
+                         Some(pdu) => {
+@@ -765,6 +781,48 @@ mod tests {
+     type Result<T, E = Box<dyn std::error::Error + Send + Sync + 'static>> =
+         std::result::Result<T, E>;
+ 
++    #[test]
++    fn repro_pdatareader_ignores_negotiated_max_pdu_length() {
++        // Simulate a peer sending a single P-Data-TF PDU whose PDV payload is far
++        // larger than the max_pdu_length this side negotiated for the association.
++        let oversized_len = 50_000usize;
++        let pdu = Pdu::PData {
++            data: vec![PDataValue {
++                presentation_context_id: 1,
++                value_type: PDataValueType::Data,
++                is_last: true,
++                data: vec![0xABu8; oversized_len],
++            }],
++        };
++
++        let mut wire = vec![];
++        write_pdu(&mut wire, &pdu).expect("write_pdu should succeed");
++        println!("encoded PDU size: {} bytes", wire.len());
++
++        // The smallest legal negotiated max_pdu_length (PS3.8's own protocol minimum),
++        // as would come out of association negotiation with a conservative peer.
++        let negotiated_max_pdu_length: u32 = MINIMUM_PDU_SIZE;
++
++        let mut read_buffer = BytesMut::new();
++        let mut reader = PDataReader::new(
++            std::io::Cursor::new(wire.as_slice()),
++            negotiated_max_pdu_length,
++            &mut read_buffer,
++        );
++
++        let mut out = vec![0u8; oversized_len];
++        let n = std::io::Read::read(&mut reader, &mut out).expect("PDataReader::read should not error");
++
++        println!(
++            "PDataReader accepted {n} bytes of PDV payload despite a negotiated              max_pdu_length of {negotiated_max_pdu_length} - the whole {oversized_len}-byte              P-Data-TF PDU (far larger than max_pdu_length) was read and parsed without any              rejection."
++        );
++
++        assert!(
++            n > negotiated_max_pdu_length as usize,
++            "expected to demonstrate that PDataReader accepts PDUs larger than the              negotiated max_pdu_length (n={n}, max_pdu_length={negotiated_max_pdu_length})"
++        );
++    }
++
+     #[test]
+     fn test_write_pdata_and_finish() {
+         let presentation_context_id = 12;
+diff --git a/ul/src/association/server.rs b/ul/src/association/server.rs
+index 0e5a5113..778352dc 100644
+--- a/ul/src/association/server.rs
++++ b/ul/src/association/server.rs
+@@ -1335,6 +1335,10 @@ where
+         self.requestor_max_pdu_length
+     }
+ 
++    fn strict(&self) -> bool {
++        self.strict
++    }
++
+     /// Obtain the remote DICOM node's application entity title.
+     fn peer_ae_title(&self) -> &str {
+         &self.client_ae_title
+@@ -1721,6 +1725,10 @@ where
+         self.requestor_max_pdu_length
+     }
+ 
++    fn strict(&self) -> bool {
++        self.strict
++    }
++
+     /// Obtain a view of the negotiated presentation contexts.
+     fn presentation_contexts(&self) -> &[PresentationContextNegotiated] {
+         &self.presentation_contexts

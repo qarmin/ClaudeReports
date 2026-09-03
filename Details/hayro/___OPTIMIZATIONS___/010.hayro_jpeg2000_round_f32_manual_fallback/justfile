@@ -1,0 +1,30 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# repo_url/base_commit read at the moment patch.diff was captured (`git remote get-url origin` /
+# `git rev-parse HEAD` in the main project).
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Uses the project's own hayro-bench jpx_decode_bench example against a real JPX-bearing PDF
+# already checked into the repo (hayro-tests/pdfs/load/issue391.pdf) - no bench/ subfolder needed.
+bench:
+    cd clone && cargo build --release -p hayro-bench --bin jpx_decode_bench
+    taskset -c 2 ./clone/target/release/jpx_decode_bench clone/hayro-tests/pdfs/load/issue391.pdf --iterations 200
+
+clean:
+    rm -rf clone

@@ -1,0 +1,38 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone at the pinned commit, build a baseline bench, apply the patch, build a
+# patched bench, run both and print both results.
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-baseline:
+    cd bench && cargo build --release
+    cp bench/target/release/bench_glyph_batching_overlap_aware ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    # force a rebuild of the patched source under the same bench binary name
+    rm -rf bench/target
+
+build-patched:
+    cd bench && cargo build --release
+    cp bench/target/release/bench_glyph_batching_overlap_aware ./bin_patched
+
+bench:
+    @echo "=== baseline (before patch) ==="
+    ./bin_baseline 300
+    @echo "=== patched (after patch, overlap-aware batching) ==="
+    ./bin_patched 300
+
+clean:
+    rm -rf clone bench/target bin_baseline bin_patched

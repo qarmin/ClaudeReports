@@ -1,0 +1,53 @@
+# Self-contained reproduction for candidate 014.UNINIT_STRING_BUFFER.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern). Self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+#
+# Note: this candidate's fix was also verified with Miri (cargo +nightly miri test -p
+# dicom-parser --lib, MIRIFLAGS=-Zmiri-disable-isolation) against the real checkout - not
+# reproduced by this justfile (Miri needs a source checkout, not just the harness binary).
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cp "{{justfile_directory()}}/testdata/seq_10k.dcm" clone/
+    cp "{{justfile_directory()}}/testdata/liver.dcm" clone/
+    echo "=== bit-exactness check ==="
+    for f in seq_10k liver; do
+        ./bin_baseline dump "clone/$f.dcm" > "/tmp/candidate014_${f}_baseline.raw"
+        ./bin_patched dump "clone/$f.dcm" > "/tmp/candidate014_${f}_patched.raw"
+        cmp "/tmp/candidate014_${f}_baseline.raw" "/tmp/candidate014_${f}_patched.raw" && echo "$f: bit-exact" || echo "$f: DIFFERS (unexpected)"
+    done
+    echo "=== seq_10k.dcm (20,000 small strings) parse - expect a ~4% win ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- parse clone/seq_10k.dcm 100
+    echo "=== liver.dcm parse - expect a ~5-6% win ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- parse clone/liver.dcm 2000
+
+clean:
+    rm -rf clone bin_baseline bin_patched

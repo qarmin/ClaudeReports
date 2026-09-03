@@ -1,0 +1,141 @@
+=== plain LLVM rustc, x86_64-unknown-linux-gnu, WITHOUT +cmpxchg16b ===
+error: linking with `cc` failed: exit status: 1
+  |
+  = note:  "cc" "-m64" "/tmp/repro032/rustcZN9wQC/symbols.o" "<2 object files omitted>" "-Wl,--as-needed" "-Wl,-Bstatic" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib/{libstd-*,libpanic_unwind-*,libobject-*,libmemchr-*,libaddr2line-*,libgimli-*,libcfg_if-*,librustc_demangle-*,libstd_detect-*,libhashbrown-*,librustc_std_workspace_alloc-*,libminiz_oxide-*,libadler2-*,libunwind-*,liblibc-*,librustc_std_workspace_core-*,liballoc-*,libcore-*,libcompiler_builtins-*}.rlib" "-Wl,-Bdynamic" "-lgcc_s" "-lutil" "-lrt" "-lpthread" "-lm" "-ldl" "-lc" "-L" "/tmp/repro032/rustcZN9wQC/raw-dylibs" "-B<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld" "-fuse-ld=lld" "-Wl,--eh-frame-hdr" "-Wl,-z,noexecstack" "-L" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib" "-o" "/tmp/repro032/llvm_no_feat" "-Wl,--gc-sections" "-pie" "-Wl,-z,relro,-z,now" "-nodefaultlibs"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: rust-lld: error: undefined symbol: __atomic_compare_exchange_16
+          >>> referenced by atomic128.b66ab9aa19dd0408-cgu.0
+          >>>               /tmp/repro032/llvm_no_feat.atomic128.b66ab9aa19dd0408-cgu.0.rcgu.o:(atomic128::main)
+          
+          rust-lld: error: undefined symbol: __atomic_fetch_add_16
+          >>> referenced by atomic128.b66ab9aa19dd0408-cgu.0
+          >>>               /tmp/repro032/llvm_no_feat.atomic128.b66ab9aa19dd0408-cgu.0.rcgu.o:(atomic128::main)
+          collect2: error: ld returned 1 exit status
+          
+
+error: aborting due to 1 previous error
+
+exit=1
+
+=== plain LLVM rustc, x86_64-unknown-linux-gnu, WITH +cmpxchg16b ===
+exit=0
+cmpxchg: old=1 ok=true x=2
+fetch_add: prev=10 y=15
+OK
+
+=== AtomicU128 unavailable on this target regardless of backend ===
+#![feature(core_intrinsics)]
+#![allow(internal_features)]
+use std::intrinsics::{atomic_cxchg, AtomicOrdering};
+
+fn main() {
+    let mut x: u128 = 1;
+    let (old, ok) = unsafe {
+        atomic_cxchg::<u128, { AtomicOrdering::SeqCst }, { AtomicOrdering::SeqCst }>(
+            &mut x as *mut u128,
+            1u128,
+            2u128,
+        )
+    };
+    println!("old={} ok={} x={}", old, ok, x);
+}
+error: invalid character '.' in crate name: `main.rs`
+  |
+  = note: crate names may only contain alphanumeric characters or underscores
+  = help: you might have meant to use `--crate-name=main_rs`
+
+error: aborting due to 1 previous error
+
+=== cg_gcc, x86_64-unknown-linux-gnu, WITHOUT +cmpxchg16b (pre-fix HEAD) ===
+(shown here for the record; captured live during the session - see below for the identical live run against this exact checkout)
+
+=== AtomicU128 is unavailable on x86_64-unknown-linux-gnu, on ANY backend (real bar to the candidate's literal repro) ===
+#![feature(integer_atomics)]
+use std::sync::atomic::{AtomicU128, Ordering};
+
+fn main() {
+    let a = AtomicU128::new(1);
+    let r = a.compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst);
+    println!("{:?}", r);
+}
+--- plain host rustc/LLVM ---
+error[E0432]: unresolved import `std::sync::atomic::AtomicU128`
+ --> /tmp/repro032/atomicu128_check.rs:2:25
+  |
+2 | use std::sync::atomic::{AtomicU128, Ordering};
+  |                         ^^^^^^^^^^ no `AtomicU128` in `sync::atomic`
+  |
+help: a similar name exists in the module
+  |
+2 - use std::sync::atomic::{AtomicU128, Ordering};
+2 + use std::sync::atomic::{AtomicU8, Ordering};
+  |
+
+error[E0635]: unknown feature `integer_atomics`
+ --> /tmp/repro032/atomicu128_check.rs:1:12
+  |
+1 | #![feature(integer_atomics)]
+  |            ^^^^^^^^^^^^^^^
+
+error: aborting due to 2 previous errors
+
+Some errors have detailed explanations: E0432, E0635.
+For more information about an error, try `rustc --explain E0432`.
+--- rustc -Z unstable-options --print target-spec-json --target x86_64-unknown-linux-gnu | grep max-atomic-width ---
+  "max-atomic-width": 64,
+
+=== cg_gcc (this backend), PATCHED tree, WITH -C target-feature=+cmpxchg16b ===
+$ CHANNEL=release ./y.sh rustc repro/atomic128.rs -o /tmp/repro032/after -C target-feature=+cmpxchg16b
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `/home/rafal/Projekty/Obce/rustc_codegen_gcc/build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+compile exit=0
+cmpxchg: old=1 ok=true x=2
+fetch_add: prev=10 y=15
+OK
+run exit=0
+
+=== cg_gcc (this backend), PATCHED tree, WITHOUT the feature (expected: still falls back to the libcall and fails the same way as pre-fix - correct, matches LLVM's own behavior without the feature) ===
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `/home/rafal/Projekty/Obce/rustc_codegen_gcc/build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+error: linking with `cc` failed: exit status: 1
+  |
+  = note:  "cc" "-m64" "/tmp/repro032/rustcQEGEYw/symbols.o" "<2 object files omitted>" "-Wl,--as-needed" "-Wl,-Bstatic" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib/{libstd,libpanic_unwind-*,libobject-*,libmemchr-*,libaddr2line-*,libgimli-*,libcfg_if-*,librustc_demangle-*,libstd_detect-*,libhashbrown-*,librustc_std_workspace_alloc-*,libminiz_oxide-*,libadler2-*,libunwind-*,liblibc-*,librustc_std_workspace_core-*,liballoc-*,libcore-*,libcompiler_builtins-*}.rlib" "-Wl,-Bdynamic" "-lgcc_s" "-lutil" "-lrt" "-lpthread" "-lm" "-ldl" "-lc" "-L" "/tmp/repro032/rustcQEGEYw/raw-dylibs" "-B<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld" "-B/home/rafal/.rustup/toolchains/nightly-2026-08-04-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld" "-fuse-ld=lld" "-Wl,--eh-frame-hdr" "-Wl,-z,noexecstack" "-L" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib" "-o" "/tmp/repro032/after_nofeat" "-Wl,--gc-sections" "-pie" "-Wl,-z,relro,-z,now" "-nodefaultlibs"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: rust-lld: error: undefined symbol: __atomic_compare_exchange_16
+          >>> referenced by fake.c
+          >>>               /tmp/repro032/after_nofeat.atomic128.b66ab9aa19dd0408-cgu.0.rcgu.o:(atomic128::main)
+          
+          rust-lld: error: undefined symbol: __atomic_fetch_add_16
+          >>> referenced by fake.c
+          >>>               /tmp/repro032/after_nofeat.atomic128.b66ab9aa19dd0408-cgu.0.rcgu.o:(atomic128::main)
+          collect2: error: ld returned 1 exit status
+          
+
+error: aborting due to 1 previous error
+
+compile exit=1
+
+=== cg_gcc (this backend), UNPATCHED tree (HEAD 4cd7da5), WITH -C target-feature=+cmpxchg16b (this is the pre-fix state the candidate reports) ===
+$ CHANNEL=release ./y.sh rustc repro/atomic128.rs -o /tmp/repro032/before -C target-feature=+cmpxchg16b
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `/home/rafal/Projekty/Obce/rustc_codegen_gcc/build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+error: linking with `cc` failed: exit status: 1
+  |
+  = note:  "cc" "-m64" "/tmp/repro032/rustcMTE4MR/symbols.o" "<2 object files omitted>" "-Wl,--as-needed" "-Wl,-Bstatic" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib/{libstd,libpanic_unwind-*,libobject-*,libmemchr-*,libaddr2line-*,libgimli-*,libcfg_if-*,librustc_demangle-*,libstd_detect-*,libhashbrown-*,librustc_std_workspace_alloc-*,libminiz_oxide-*,libadler2-*,libunwind-*,liblibc-*,librustc_std_workspace_core-*,liballoc-*,libcore-*,libcompiler_builtins-*}.rlib" "-Wl,-Bdynamic" "-lgcc_s" "-lutil" "-lrt" "-lpthread" "-lm" "-ldl" "-lc" "-L" "/tmp/repro032/rustcMTE4MR/raw-dylibs" "-B<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld" "-B/home/rafal/.rustup/toolchains/nightly-2026-08-04-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld" "-fuse-ld=lld" "-Wl,--eh-frame-hdr" "-Wl,-z,noexecstack" "-L" "<sysroot>/lib/rustlib/x86_64-unknown-linux-gnu/lib" "-o" "/tmp/repro032/before" "-Wl,--gc-sections" "-pie" "-Wl,-z,relro,-z,now" "-nodefaultlibs"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: rust-lld: error: undefined symbol: __atomic_compare_exchange_16
+          >>> referenced by fake.c
+          >>>               /tmp/repro032/before.atomic128.b66ab9aa19dd0408-cgu.0.rcgu.o:(atomic128::main)
+          
+          rust-lld: error: undefined symbol: __atomic_fetch_add_16
+          >>> referenced by fake.c
+          >>>               /tmp/repro032/before.atomic128.b66ab9aa19dd0408-cgu.0.rcgu.o:(atomic128::main)
+          collect2: error: ld returned 1 exit status
+          
+
+error: aborting due to 1 previous error
+
+compile exit=1

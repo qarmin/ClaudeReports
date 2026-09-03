@@ -1,0 +1,74 @@
+# Self-contained reproduction for this candidate.
+#
+# Re-measures candidate 006's Data::String -> Arc<str> patch layered on top of candidate 017's
+# from_sparse_dense_hint patch (both against the same base_commit). patch.diff in this folder is
+# the two combined into one diff (017's patch.diff, plus candidate 006's patch mechanically
+# adapted where it conflicts with 017's rewritten worksheet_range_ref() - see this folder's
+# RESULT.md "How the patches were combined" for exactly what was adapted and why it's mechanical,
+# not new logic).
+#
+# Three variants are built: baseline (neither patch), 017-alone, and 017+006 (this candidate's own
+# patch.diff) - so the reader can see both "what 017 alone does" and "what 006 adds on top",
+# exactly as this candidate's own RESULT.md reports them per format.
+#
+# Uses the `rss_probe` harness from ../harness/rss_probe (untracked in the main calamine repo -
+# see ../README.md) - self-contained given the whole ___OPTIMIZATIONS___ folder kept together.
+# The XLSB fixture (testdata/big_300k_rows.xlsb) is a synthetic-but-real-format-shaped file this
+# session built (see testdata/FIXTURE_NOTES.md, copied from candidate 010) - not downloadable, so
+# it is committed into this folder directly rather than fetched by `clone:`.
+
+repo_url := "https://github.com/tafia/calamine.git"
+base_commit := "5c02e86e99ec5c1fb1dcc15e64c2bbaf19bff60d"
+harness_dir := "../harness/rss_probe"
+patch_017 := "../017.apply_from_sparse_dense_hint_patches_007_011_013/patch.diff"
+
+test: clone build-baseline apply-017 build-017 apply-006-on-017 build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/rss_probe
+    curl -sL -o clone/big_300k_rows.xlsx https://test-files.sheetjs.com/8-by-300000-cells.xlsx
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_baseline
+
+# 017-alone: apply candidate 017's own patch on the pristine clone, build, snapshot the binary,
+# then revert so apply-006-on-017 below starts from the same pristine state 017 itself started
+# from (git apply is not idempotent/additive - it must see the pristine tree, not an
+# already-patched one, for the "clone" step's own base_commit checkout to still be meaningful for
+# both apply steps).
+apply-017:
+    cd clone && git apply "{{justfile_directory()}}/{{patch_017}}"
+
+build-017:
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_017only
+    cd clone && git checkout -- .
+
+apply-006-on-017:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_017plus006
+
+bench:
+    @echo "=== XLSB (heavy shared-string reuse) - expect: baseline high, 017 lower, 017+006 lowest ==="
+    ./rss_probe_baseline range testdata/big_300k_rows.xlsb
+    ./rss_probe_017only range testdata/big_300k_rows.xlsb
+    ./rss_probe_017plus006 range testdata/big_300k_rows.xlsb
+    @echo "=== XLS (real file) - expect: baseline high, 017 slightly lower, 017+006 much lower ==="
+    ./rss_probe_baseline range clone/tests/adhocallbabynames1996to2016.xls
+    ./rss_probe_017only range clone/tests/adhocallbabynames1996to2016.xls
+    ./rss_probe_017plus006 range clone/tests/adhocallbabynames1996to2016.xls
+    @echo "=== XLSX (real file) - expect: baseline high, 017 much lower, 017+006 REGRESSES back to baseline (see RESULT.md) ==="
+    ./rss_probe_baseline range clone/big_300k_rows.xlsx
+    ./rss_probe_017only range clone/big_300k_rows.xlsx
+    ./rss_probe_017plus006 range clone/big_300k_rows.xlsx
+
+clean:
+    rm -rf clone rss_probe_baseline rss_probe_017only rss_probe_017plus006

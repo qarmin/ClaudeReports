@@ -1,0 +1,52 @@
+# Self-contained reproduction for candidate 040.INMEMFRAGMENT_ALLOC_COUNT_INVESTIGATION.
+#
+# Re-applies candidate 001's own patch.diff unchanged (see RESULT.md - no new library source
+# change here; this candidate root-causes that candidate's own Ir-vs-wall-clock gap via a new
+# write-only-alloc-count harness mode, --features diag-alloccount). Uses dicom-rs's own
+# bench_pipeline harness (untracked in the main repo - see SKILL.md's "shape 3" pattern),
+# self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+#
+# NOTE on valgrind (used manually for the massif half of this investigation, not by `just test`):
+# this box's default `ulimit -n` is absurdly high (2147483572) and makes valgrind fail outright
+# with "Private file creation failed" - run under `ulimit -n 1048576` (or similar) first if
+# reproducing the massif half by hand.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched genfixtures bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+    rm -rf clone/___OPTIMIZATIONS___/harness/bench_pipeline/target
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --features diag-alloccount
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --features diag-alloccount
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+genfixtures:
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/testdata/color3d_jpeg_baseline.dcm ./color3d_jpeg_baseline.dcm
+
+bench:
+    @echo "=== baseline (before patch), write-only-alloc-count ==="
+    ./bin_baseline write-only-alloc-count color3d_jpeg_baseline.dcm 3
+    @echo "=== patched (after patch), write-only-alloc-count ==="
+    ./bin_patched write-only-alloc-count color3d_jpeg_baseline.dcm 3
+    @echo "(expect: allocs/iter drops by exactly this fixture's NumberOfFrames, 120 - see RESULT.md;"
+    @echo " the massif peak-heap-bytes half of this investigation is not automated here, run"
+    @echo " 'valgrind --tool=massif' manually per RESULT.md if reproducing that part)"
+
+clean:
+    rm -rf clone bin_baseline bin_patched color3d_jpeg_baseline.dcm

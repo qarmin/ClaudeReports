@@ -1,0 +1,89 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 378b39e1..2af16524 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -100,9 +100,7 @@ tiff = ["dep:tiff"]
+ webp = ["dep:image-webp"]
+ 
+ # Other features
+-# TODO: add pic-scale-safe rayon in the next breaking release,
+-# see https://github.com/image-rs/image/pull/2639#discussion_r2508356543
+-rayon = ["dep:rayon", "ravif?/threading", "exr?/rayon"] # Enables multi-threading
++rayon = ["dep:rayon", "ravif?/threading", "exr?/rayon", "pic-scale-safe/rayon"] # Enables multi-threading
+ nasm = ["ravif?/asm"] # Enables use of nasm by rav1e (requires nasm to be installed)
+ color_quant = ["dep:color_quant"] # Enables color quantization
+ avif-native = ["dep:mp4parse", "dep:dav1d"] # Enable native dependency libdav1d
+diff --git a/benches/imageops.rs b/benches/imageops.rs
+index d1b33ebe..f6121549 100644
+--- a/benches/imageops.rs
++++ b/benches/imageops.rs
+@@ -1,6 +1,6 @@
+ use std::{hint::black_box, time::Duration};
+ 
+-use criterion::{criterion_group, criterion_main, Criterion};
++use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+ use image::{
+     imageops::{self, FilterType},
+     math::Rect,
+@@ -123,5 +123,60 @@ pub fn bench_resize(c: &mut Criterion) {
+     }
+ }
+ 
+-criterion_group!(benches, bench_imageops, bench_resize);
++// Unlike `bench_resize` above (which calls the standalone `imageops::resize` free function, a
++// separate, older implementation that never touches pic-scale-safe), this exercises
++// `DynamicImage::resize_exact`, which delegates to the `pic-scale-safe` crate
++// (see `src/imageops/resize.rs`) - the code path affected by the `rayon` feature forwarding.
++// Two output sizes are compared: a large one (400x300, plenty of parallel work per prior
++// measurement) and a small one (64x48, closer to an icon/thumbnail output) to check whether
++// pic-scale-safe's unconditional `par_chunks_exact`/`par_chunks_exact_mut` dispatch (no minimum
++// row-count gate) costs more in thread-pool dispatch overhead than it saves at a small size.
++pub fn bench_resize_dynamic(c: &mut Criterion) {
++    let src = ImageBuffer::from_fn(4032, 3024, |x, y| {
++        // "random" pixel values
++        Rgb([x as u8, (y / 8) as u8, ((x * 13 + y) % 256) as u8])
++    });
++    let src_dyn = DynamicImage::from(src);
++
++    let mut group = c.benchmark_group("dynamic_resize");
++    let c = group.warm_up_time(Duration::from_secs(1)).sample_size(10);
++
++    for (w, h) in [(400u32, 300u32), (64, 48)] {
++        for filter in [FilterType::Lanczos3, FilterType::Triangle] {
++            c.bench_function(
++                &format!("DynamicImage::resize_exact 4032x3024->{w}x{h} {filter:?}"),
++                |b| {
++                    b.iter_batched(
++                        || src_dyn.clone(),
++                        |mut img| img.resize_exact(w, h, filter),
++                        BatchSize::LargeInput,
++                    );
++                },
++            );
++        }
++    }
++
++    // A small-source case: unlike the 4032x3024->64x48 case above (still a large amount of total
++    // convolution work because the horizontal pass scans every one of the 3024 source rows
++    // regardless of output height), this represents a small image being downscaled to an icon,
++    // where the *total* work is small enough that thread-dispatch overhead might dominate.
++    let small_src = ImageBuffer::from_fn(400, 300, |x, y| {
++        Rgb([x as u8, (y / 8) as u8, ((x * 13 + y) % 256) as u8])
++    });
++    let small_src_dyn = DynamicImage::from(small_src);
++    for filter in [FilterType::Lanczos3, FilterType::Triangle] {
++        c.bench_function(
++            &format!("DynamicImage::resize_exact 400x300->32x24 {filter:?}"),
++            |b| {
++                b.iter_batched(
++                    || small_src_dyn.clone(),
++                    |mut img| img.resize_exact(32, 24, filter),
++                    BatchSize::LargeInput,
++                );
++            },
++        );
++    }
++}
++
++criterion_group!(benches, bench_imageops, bench_resize, bench_resize_dynamic);
+ criterion_main!(benches);

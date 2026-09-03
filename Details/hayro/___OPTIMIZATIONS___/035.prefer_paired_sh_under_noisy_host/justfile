@@ -1,0 +1,60 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+#
+# This candidate is a measurement-methodology demonstration, not a new fix: `patch.diff` is
+# byte-identical to candidates 007/012/018/019/029 (the `Tf`-resolution-cache fix). What's new
+# here is `paired_adapted.sh` (a copy of `../tools/paired.sh` with its `run()` adapted to this
+# bench's `render() time: ... p50=...ms` output) and the `paired` recipe below, which alternates
+# baseline/patched invocations instead of the naive "build once, run twice per variant" approach
+# used by candidates 007/012/018 - see ../RESULT.md for why that distinction mattered this
+# session (a genuinely noisy, fluctuating host at measurement time).
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone at the pinned commit, build a baseline binary, apply the patch, build a
+# patched binary, then compare them BOTH the naive way and via paired.sh so the reader can see
+# the contrast directly.
+test: clone build-baseline apply build-patched naive paired
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-baseline:
+    cd bench && cargo build --release
+    cp bench/target/release/bench_textfont_cache_real_200_300_tf ./baseline_bin
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd bench && cargo build --release
+    cp bench/target/release/bench_textfont_cache_real_200_300_tf ./patched_bin
+
+# Naive comparison: build once, run twice per variant (candidates 007/012/018's original
+# methodology) - trustworthy on a quiet host, misleading on a noisy/fluctuating one.
+naive:
+    @echo "=== naive: baseline run 1 ==="
+    ./baseline_bin 300
+    @echo "=== naive: baseline run 2 ==="
+    ./baseline_bin 300
+    @echo "=== naive: patched run 1 ==="
+    ./patched_bin 300
+    @echo "=== naive: patched run 2 ==="
+    ./patched_bin 300
+
+# Paired comparison: alternate baseline/patched invocations and count wins - see
+# ../tools/paired.sh's own header and MEASUREMENT.md section 2b. RUNS=15 by default, override
+# with `just paired 21`.
+paired runs="15":
+    RUNS={{runs}} ./paired_adapted.sh ./baseline_bin ./patched_bin -- 100
+
+clean:
+    rm -rf clone bench/target bench/Cargo.lock baseline_bin patched_bin

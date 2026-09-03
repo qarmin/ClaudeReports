@@ -1,0 +1,82 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate re-applies candidate 027.JSON_TAG_HEX_FASTPATH's exact patch (patch.diff here is
+# a byte-for-byte copy of that candidate's own patch.diff - no new source change was made, this
+# candidate only re-measures and disassembles) to try to root-cause 027's own documented
+# liver.dcm regression. See RESULT.md: the regression did not reproduce in this session (3 fresh
+# paired-comparison rounds all showed the patch as a ~10% WIN on liver.dcm, not a regression).
+#
+# Like candidate 027/031, this candidate's harness (bench_pipeline) is untracked in the main
+# dicom-rs repo, so this justfile is self-contained only *given the whole ___OPTIMIZATIONS___
+# folder kept together* - it copies the canonical harness copy from ../harness/bench_pipeline
+# into ./clone as part of `clone:` (see SKILL.md's "Bench harnesses: grow a few, don't multiply").
+#
+# `just test` clones dicom-rs at the pinned commit, builds baseline + patched bench binaries,
+# runs the paired timing/correctness re-check on liver.dcm, and dumps disassembly of the
+# per-element tag-serialization hot path (`collect_map`/`serialize_entry` specializations for
+# DicomJson<Tag>) for both binaries into ./asm_out/ so the size/inlining claim in RESULT.md can be
+# independently re-checked from a fresh clone. Requires `objdump`/`nm`/`c++filt` (binutils) and
+# `taskset` (util-linux) on PATH.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench disasm
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    rm -rf clone/___bench_pipeline
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___bench_pipeline
+    sed -i 's#\.\./\.\./\.\./#../#g' clone/___bench_pipeline/Cargo.toml
+
+build-baseline:
+    cd clone/___bench_pipeline && cargo build --release
+    cp clone/___bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___bench_pipeline && cargo build --release
+    cp clone/___bench_pipeline/target/release/bench ./bin_patched
+
+testfile := "clone/___bench_pipeline/testdata/liver.dcm"
+
+bench:
+    @echo "=== correctness: same checksum baseline vs patched? ==="
+    ./bin_baseline json-encode {{testfile}} 1
+    ./bin_patched json-encode {{testfile}} 1
+    @echo "=== single-core timing (taskset -c 0), baseline then patched ==="
+    taskset -c 0 ./bin_baseline json-encode {{testfile}} 5000
+    taskset -c 0 ./bin_patched json-encode {{testfile}} 5000
+    @echo "=== multi-core (unpinned) timing, baseline then patched ==="
+    ./bin_baseline json-encode {{testfile}} 5000
+    ./bin_patched json-encode {{testfile}} 5000
+    @echo "NOTE: see RESULT.md - across 3 independent rounds this session, patched measured"
+    @echo "faster, not slower, contradicting candidate 027's own documented liver.dcm regression."
+    @echo "Re-run this a few times / use tools/paired.sh for a real paired comparison before"
+    @echo "drawing a conclusion from a single invocation of this recipe."
+
+# Dumps full objdump disassembly of both binaries and extracts the tag-serialization hot-path
+# symbols so the size/inlining claim in RESULT.md can be re-checked without hand-locating
+# addresses again.
+disasm:
+    mkdir -p asm_out
+    nm -S ./bin_baseline | c++filt | grep 'serialize_entry::<dicom_json.*header::Tag>' > asm_out/base_symbols.txt || true
+    nm -S ./bin_patched | c++filt | grep 'serialize_entry::<dicom_json.*header::Tag>' > asm_out/patch_symbols.txt || true
+    nm -S ./bin_baseline | c++filt > asm_out/base_syms_sized.txt
+    nm -S ./bin_patched | c++filt > asm_out/patch_syms_sized.txt
+    objdump -d -C ./bin_baseline > asm_out/baseline_full.s
+    objdump -d -C ./bin_patched > asm_out/patched_full.s
+    @echo "grep asm_out/base_syms_sized.txt / patch_syms_sized.txt for"
+    @echo "'collect_map<...DicomJson<Tag>...>' and 'serialize_entry<...DicomJson<Tag>...>' to find"
+    @echo "the addresses+sizes to compare (baseline serialize_entry: 0xca bytes, out-of-line call"
+    @echo "to a separate DicomJson<Tag>::serialize symbol; patched serialize_entry: 0x16e bytes,"
+    @echo "hex-table logic inlined directly in - see RESULT.md and this folder's own"
+    @echo "asm_out/base_serialize_entry.asm / patch_serialize_entry.asm for the pre-extracted diff)."
+
+clean:
+    rm -rf clone asm_out bin_baseline bin_patched

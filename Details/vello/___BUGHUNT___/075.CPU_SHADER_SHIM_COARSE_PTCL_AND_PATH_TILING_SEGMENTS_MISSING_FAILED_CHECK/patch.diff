@@ -1,0 +1,74 @@
+diff --git a/vello_shaders/src/cpu/coarse.rs b/vello_shaders/src/cpu/coarse.rs
+index 566ce6f7..06c50a9a 100644
+--- a/vello_shaders/src/cpu/coarse.rs
++++ b/vello_shaders/src/cpu/coarse.rs
+@@ -28,6 +28,9 @@ const TILE_HEIGHT: u32 = 16;
+ const PTCL_INCREMENT: u32 = 256;
+ const PTCL_HEADROOM: u32 = 2;
+ 
++// Mirrors `shader/shared/bump.wgsl`'s `STAGE_COARSE`.
++const STAGE_COARSE: u32 = 0x10;
++
+ // Modeled in the WGSL as private-scoped variables
+ struct TileState {
+     cmd_offset: u32,
+@@ -55,17 +58,31 @@ impl TileState {
+             let ptcl_dyn_start =
+                 config.width_in_tiles * config.height_in_tiles * PTCL_INITIAL_ALLOC;
+             let chunk_size = PTCL_INCREMENT.max(size + PTCL_HEADROOM);
+-            let new_cmd = ptcl_dyn_start + bump.ptcl;
++            let mut new_cmd = ptcl_dyn_start + bump.ptcl;
+             bump.ptcl += chunk_size;
+-            ptcl[self.cmd_offset as usize] = CMD_JUMP;
+-            ptcl[self.cmd_offset as usize + 1] = new_cmd;
++            // Mirrors `coarse.wgsl`'s `alloc_cmd`: a claim that would push past the buffer's
++            // fixed capacity resets to slot 0 and reports failure, instead of handing out an
++            // offset that would index past `ptcl`'s end (unlike WGSL storage buffers, a plain
++            // Rust slice has no implicit bounds-check fallback for this).
++            if new_cmd + PTCL_INCREMENT > config.ptcl_size {
++                new_cmd = 0;
++                bump.failed |= STAGE_COARSE;
++            }
++            if let Some(slot) = ptcl.get_mut(self.cmd_offset as usize) {
++                *slot = CMD_JUMP;
++            }
++            if let Some(slot) = ptcl.get_mut(self.cmd_offset as usize + 1) {
++                *slot = new_cmd;
++            }
+             self.cmd_offset = new_cmd;
+             self.cmd_limit = new_cmd + (PTCL_INCREMENT - PTCL_HEADROOM);
+         }
+     }
+ 
+     fn write(&mut self, ptcl: &mut [u32], offset: u32, value: u32) {
+-        ptcl[(self.cmd_offset + offset) as usize] = value;
++        if let Some(slot) = ptcl.get_mut((self.cmd_offset + offset) as usize) {
++            *slot = value;
++        }
+     }
+ 
+     fn write_path(
+@@ -379,10 +396,21 @@ fn coarse_main(
+             }
+ 
+             if bin_tile_x + tile_x < width_in_tiles && bin_tile_y + tile_y < height_in_tiles {
+-                ptcl[tile_state.cmd_offset as usize] = CMD_END;
++                // `tile_state.cmd_offset`/`blend_offset` can still index past `ptcl`'s end here
++                // even when `alloc_cmd`'s own capacity check above never fired (e.g. a canvas
++                // with enough tiles that a tile's *initial*, unconditionally-assigned cursor -
++                // `TileState::new`'s `tile_ix * PTCL_INITIAL_ALLOC` - is already past
++                // `config.ptcl_size`). The real GPU shader has the identical gap, silently
++                // masked there by wgpu/naga's own storage-buffer bounds checks; a plain Rust
++                // slice has no such implicit fallback, so it's made explicit here instead.
++                if let Some(slot) = ptcl.get_mut(tile_state.cmd_offset as usize) {
++                    *slot = CMD_END;
++                }
+                 let scratch_size =
+                     (max_blend_depth.saturating_sub(BLEND_STACK_SPLIT)) * TILE_WIDTH * TILE_HEIGHT;
+-                ptcl[blend_offset as usize] = bump.blend;
++                if let Some(slot) = ptcl.get_mut(blend_offset as usize) {
++                    *slot = bump.blend;
++                }
+                 bump.blend += scratch_size;
+             }
+         }

@@ -1,0 +1,62 @@
+diff --git a/benches/imageops.rs b/benches/imageops.rs
+index d1b33ebe..b6b0f373 100644
+--- a/benches/imageops.rs
++++ b/benches/imageops.rs
+@@ -1,10 +1,10 @@
+ use std::{hint::black_box, time::Duration};
+ 
+-use criterion::{criterion_group, criterion_main, Criterion};
++use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+ use image::{
+     imageops::{self, FilterType},
+     math::Rect,
+-    DynamicImage, GrayImage, ImageBuffer, Rgb,
++    DynamicImage, GrayImage, ImageBuffer, Rgb, Rgba,
+ };
+ 
+ pub fn bench_imageops(c: &mut Criterion) {
+@@ -90,6 +90,25 @@ pub fn bench_imageops(c: &mut Criterion) {
+         let palette = &[(1, 2, 3); 256];
+         b.iter(|| src_gray.expand_palette(black_box(palette), black_box(None)));
+     });
++
++    // Exercises DynamicImage's GenericImageView/GenericImage get_pixel/put_pixel shims (called
++    // once per pixel in overlay's hot loop) with a partially-transparent top image, so the blend
++    // actually mixes colors instead of just overwriting.
++    let src_dyn_rgba = src_dyn.to_rgba8();
++    let src_dyn_rgba = DynamicImage::from(src_dyn_rgba);
++    let overlay_top = DynamicImage::from(ImageBuffer::from_fn(300, 300, |x, y| {
++        Rgba([x as u8, y as u8, ((x * 3 + y) % 256) as u8, 180])
++    }));
++    c.bench_function("dyn image overlay", |b| {
++        b.iter_batched(
++            || src_dyn_rgba.clone(),
++            |mut bottom| {
++                imageops::overlay(&mut bottom, &overlay_top, 100, 100);
++                bottom
++            },
++            BatchSize::LargeInput,
++        );
++    });
+ }
+ 
+ pub fn bench_resize(c: &mut Criterion) {
+diff --git a/src/images/dynimage.rs b/src/images/dynimage.rs
+index 594325dd..1cf0de8a 100644
+--- a/src/images/dynimage.rs
++++ b/src/images/dynimage.rs
+@@ -1751,12 +1751,14 @@ impl GenericImageView for DynamicImage {
+         dynamic_map!(*self, ref p, p.dimensions())
+     }
+ 
++    #[inline(always)]
+     fn get_pixel(&self, x: u32, y: u32) -> color::Rgba<u8> {
+         dynamic_map!(*self, ref p, p.get_pixel(x, y).to_rgba().into_color())
+     }
+ }
+ 
+ impl GenericImage for DynamicImage {
++    #[inline]
+     fn put_pixel(&mut self, x: u32, y: u32, pixel: color::Rgba<u8>) {
+         match *self {
+             DynamicImage::ImageLuma8(ref mut p) => p.put_pixel(x, y, pixel.to_luma()),

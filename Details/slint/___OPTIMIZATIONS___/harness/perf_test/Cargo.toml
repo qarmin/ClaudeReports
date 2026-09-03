@@ -1,0 +1,142 @@
+[package]
+name = "slint-perf-test"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+publish = false
+
+[[bin]]
+name = "perf_test"
+path = "src/main.rs"
+
+# Writes the image assets the `images` scene needs. Generated rather than committed: a repository
+# should not carry binary blobs nobody can regenerate or diff.
+[[bin]]
+name = "make_assets"
+path = "src/bin/make_assets.rs"
+
+# Measures whether the image cache can hold an image at all (plan item B1).
+[[bin]]
+name = "image_probe"
+path = "src/bin/image_probe.rs"
+
+# Measures the per-tick cost of holding many timers (plan item E2).
+[[bin]]
+name = "timer_probe"
+path = "src/bin/timer_probe.rs"
+
+# Measures what a property read costs - the unit every "ns per item" figure is made of.
+[[bin]]
+name = "property_probe"
+path = "src/bin/property_probe.rs"
+
+# Correctness probe for candidate 070.VERTICALLAYOUT_TEXT_ORIENTATION_QUERY's font-metrics
+# NoWrap-height fast path: hashes rendered pixels across styling variations so a future change to
+# that fast path (or the font metrics it reads) can be checked against a saved-good hash.
+[[bin]]
+name = "orientation_probe"
+path = "src/bin/orientation_probe.rs"
+
+[features]
+# The software renderer is always in: the headless benchmark (--bench) uses it.
+default = ["femtovg", "software", "alloc-stats", "alloc-profile"]
+# Count allocations so --bench can report them per frame.
+alloc-stats = []
+# Sampling allocation profiler (--alloc-profile), pulls in `backtrace`.
+alloc-profile = ["alloc-stats", "dep:backtrace"]
+# Counts dependency registrations and duplicates (candidate 08). Distorts timings.
+# NOTE 2026-08-23: this used to forward to i-slint-core/dep-stats, a feature that only ever
+# existed as a temporary local patch to internal/core/Cargo.toml during the original
+# investigation session, reverted once that session ended (see the old skill's "revert
+# temporary instrumentation" discipline). The dangling forward broke even a default build
+# (cargo validates the full feature graph at resolution time, not just activated features),
+# discovered while re-verifying candidates against updated slint/femtovg. Left as a no-op
+# placeholder rather than restored, since restoring it means re-patching i-slint-core again.
+dep-stats = []
+# Replace glibc malloc with mimalloc to measure how much of a frame is allocator cost
+# (candidate 07). Mutually exclusive with the counting allocator, so it also turns off
+# `alloc-stats`-based numbers: use `--no-default-features --features femtovg,software,mimalloc`.
+mimalloc = ["dep:mimalloc"]
+# Renderers; select at runtime with `--renderer <name>` or SLINT_BACKEND=winit-<name>.
+femtovg = ["slint/renderer-femtovg"]
+skia = ["slint/renderer-skia", "dep:i-slint-renderer-skia", "dep:bytemuck"]
+skia-opengl = ["slint/renderer-skia-opengl"]
+skia-vulkan = ["slint/renderer-skia-vulkan"]
+software = ["slint/renderer-software"]
+# Backends; winit is always compiled in, Qt needs Qt 5.15+ installed.
+qt = ["slint/backend-qt"]
+all-renderers = ["femtovg", "skia", "software"]
+# Accessibility is off by default here (it builds an AccessKit tree over the item tree, which is
+# exactly the kind of per-item cost these measurements are about). This turns it on so the cost
+# can be measured rather than assumed.
+accessibility = ["slint/accessibility"]
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Accessibility is deliberately off: it costs a lot on large lists and would
+# distort the measurements.
+slint = { version = "=1.18.0", path = "../api/rs/slint", default-features = false, features = [
+  "compat-1-2",
+  "std",
+  "backend-winit",
+] }
+
+backtrace = { version = "0.3", optional = true }
+mimalloc = { version = "0.1", optional = true, default-features = false }
+
+# `testing` exposes the shaped-text cache counters, which is the only way to tell whether
+# scrolling re-shapes text. Enabled through the software renderer used by --bench.
+i-slint-renderer-software = { version = "=1.18.0", path = "../internal/renderers/software", features = [
+  "testing",
+] }
+
+# Headless Skia harness (`--skia-bench`): drives `SkiaRenderer` + `SoftwareSurface` directly,
+# bypassing winit entirely - see perf_test/src/skia_headless.rs for why (the winit `--frames`
+# path's `set_rendering_notifier` unconditionally disables Skia's partial rendering, so it can
+# never reach the dirty-region clip code this mode exists to measure).
+i-slint-renderer-skia = { version = "=1.18.0", path = "../internal/renderers/skia", optional = true }
+bytemuck = { version = "1.13.1", optional = true }
+
+# Dependency-registration counters for ___OPTIMIZATIONS___/08. Instrumentation only: it puts a
+# HashSet insert on every registration, so timings from this build are meaningless.
+# Dependency-registration counters for ___OPTIMIZATIONS___/08. Instrumentation only: it puts a
+# HashSet insert on every registration, so timings from this build are meaningless.
+i-slint-core = { version = "=1.18.0", path = "../internal/core", features = ["testing"] }
+
+[build-dependencies]
+slint-build = { version = "=1.18.0", path = "../api/rs/build" }
+
+# Own workspace: this project patches femtovg, which must not affect the
+# repository's library workspace.
+[workspace]
+
+# Use the femtovg checkout next to this project instead of the crates.io release.
+[patch.crates-io]
+femtovg = { path = "../femtovg" }
+
+# WARNING: keep every `[profile.*]` setting below identical to the repository
+# root workspace's Cargo.toml, so the dependencies that are not affected by the
+# femtovg patch are reused from the shared `target/` directory instead of rebuilt.
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
+[profile.dev.package.resvg]
+opt-level = 3
+[profile.dev.package.usvg]
+opt-level = 3
+[profile.dev.package.tiny-skia]
+opt-level = 3
+[profile.dev.package.rgb]
+opt-level = 3
+
+# Release optimizations plus full debug info: the profile to profile with.
+[profile.rdebug]
+inherits = "release"
+debug = "full"
+debug-assertions = false
+overflow-checks = false
+strip = "none"
+incremental = false

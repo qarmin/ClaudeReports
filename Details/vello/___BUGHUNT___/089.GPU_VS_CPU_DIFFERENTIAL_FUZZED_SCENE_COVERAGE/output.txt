@@ -1,0 +1,101 @@
+Candidate 089 - real captured output from running harness/compare_gpu_cpu_fuzz.rs (a randomly
+generated scene corpus, driven by a deterministic xorshift64* PRNG, fed through the project's own
+real `vello_tests::compare_gpu_cpu_sync` GPU-vs-CPU FLIP differential comparison, patched per
+candidate 065's already-recorded fix) against a real `wgpu::Device`, in this sandbox's software
+rasterizer backends (no real GPU hardware available here - see RESULT.md).
+
+All commands below were run from the worktree with harness/compare_gpu_cpu_fuzz.rs copied to
+vello_tests/tests/compare_gpu_cpu_fuzz.rs and harness/065_fix_needed_for_harness.patch applied to
+vello_tests/src/compare.rs.
+
+====================================================================
+Run A - Vulkan/SwiftShader, seed_base=1, count=250 (Area) / count=100 (Msaa16), no worst-mean
+tracking (an earlier revision of the harness before worst-mean tracking was added)
+Command: VK_ICD_FILENAMES=/tmp/swiftshader_icd/vk_swiftshader_icd.json WGPU_BACKEND=vulkan \
+  cargo test --release -p vello_tests --test compare_gpu_cpu_fuzz -- --ignored --nocapture
+====================================================================
+running 2 tests
+test fuzz_sweep_area has been running for over 60 seconds
+test fuzz_sweep_msaa16 has been running for over 60 seconds
+ran 100 fuzzed scenes starting at seed 1, 0 failures
+test fuzz_sweep_msaa16 ... ok
+ran 250 fuzzed scenes starting at seed 1, 0 failures
+test fuzz_sweep_area ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 451.25s
+
+====================================================================
+Run B - GL/llvmpipe, seed_base=1000, count=150 (Area) / count=50 (Msaa16), no worst-mean tracking
+Command: WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1 \
+  cargo test --release -p vello_tests --test compare_gpu_cpu_fuzz -- --ignored --nocapture
+====================================================================
+running 2 tests
+ran 50 fuzzed scenes starting at seed 1000, 0 failures
+test fuzz_sweep_msaa16 ... ok
+ran 150 fuzzed scenes starting at seed 1000, 0 failures
+test fuzz_sweep_area ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 50.10s
+
+====================================================================
+Run C - GL/llvmpipe, seed_base=5000, count=3000 (Area) / count=500 (Msaa16), no worst-mean
+tracking (largest single sweep run this session)
+Command: WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1 \
+  cargo test --release -p vello_tests --test compare_gpu_cpu_fuzz -- --ignored --nocapture
+====================================================================
+running 2 tests
+test fuzz_sweep_area has been running for over 60 seconds
+test fuzz_sweep_msaa16 has been running for over 60 seconds
+ran 500 fuzzed scenes starting at seed 5000, 0 failures
+test fuzz_sweep_msaa16 ... ok
+ran 3000 fuzzed scenes starting at seed 5000, 0 failures
+test fuzz_sweep_area ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 874.29s
+
+====================================================================
+Run D - Vulkan/SwiftShader, seed_base=1, count=200 (Area) / count=80 (Msaa16), WITH worst-mean
+tracking (harness updated to also report the single worst FLIP mean seen, not just failures) -
+this is the exact harness/compare_gpu_cpu_fuzz.rs shipped in this candidate folder
+Command: VK_ICD_FILENAMES=/tmp/swiftshader_icd/vk_swiftshader_icd.json WGPU_BACKEND=vulkan \
+  cargo test --release -p vello_tests --test compare_gpu_cpu_fuzz -- --ignored --nocapture
+====================================================================
+running 2 tests
+test fuzz_sweep_area has been running for over 60 seconds
+test fuzz_sweep_msaa16 has been running for over 60 seconds
+ran 80 fuzzed scenes starting at seed 1, 0 failures, worst=Some((38, 0.00018324674))
+test fuzz_sweep_msaa16 ... ok
+ran 200 fuzzed scenes starting at seed 1, 0 failures, worst=Some((146, 0.0005684644))
+test fuzz_sweep_area ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 263.63s
+
+====================================================================
+Run E - GL/llvmpipe, seed_base=1, count=200 (Area) / count=80 (Msaa16), WITH worst-mean tracking
+(same seeds as Run D, different backend - same random scenes, cross-checked against a second real
+wgpu backend)
+Command: WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1 \
+  cargo test --release -p vello_tests --test compare_gpu_cpu_fuzz -- --ignored --nocapture
+====================================================================
+running 2 tests
+ran 80 fuzzed scenes starting at seed 1, 0 failures, worst=Some((67, 2.3458195e-5))
+test fuzz_sweep_msaa16 ... ok
+ran 200 fuzzed scenes starting at seed 1, 0 failures, worst=Some((186, 9.752518e-5))
+test fuzz_sweep_area ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 48.87s
+
+====================================================================
+Summary across all 5 runs
+====================================================================
+Total (scene, AA-config, backend) comparisons run: 350 (A) + 200 (B) + 3500 (C) + 280 (D) + 280 (E)
+= 4610 real GPU-vs-CPU differential renders via a real `wgpu::Device` (SwiftShader software
+Vulkan, and Mesa llvmpipe software GL), covering 4050 distinct (seed, AA-config) combinations
+(seeds 1-250, 1000-1150, 5000-8000 for AaConfig::Area; seeds 1-100, 1000-1050, 5000-5500 for
+AaConfig::Msaa16), zero divergences above the project's own 0.01 FLIP-mean acceptance threshold in
+any of them. The two runs with worst-mean tracking (D, E) show the worst FLIP mean observed among
+200+80 random scenes was 0.00057 (Vulkan/SwiftShader) and 0.0001 (GL/llvmpipe) - both roughly
+15-100x below the 0.01 threshold, and both far below candidate 082's closest hand-authored-example
+result (`mmark`, 0.0095-0.0098) - i.e. these randomly generated scenes (simple shapes/gradients/
+strokes/clips composed from a small PRNG-driven grammar) are, if anything, easier for the GPU and
+CPU renderers to agree on than the hand-authored example scenes already swept in 082, not harder.

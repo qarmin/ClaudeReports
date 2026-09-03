@@ -1,0 +1,43 @@
+=== BEFORE (pristine df2b9e42, bug present) ===
+$ cargo run --release
+wire bytes (21 total): [28, 00, 06, 01, 55, 53, 03, 00, 01, 02, 03, 10, 00, 10, 00, 50, 4e, 02, 00, 41, 42]
+parse error (Display): Could not read data set token
+parse error (Debug, truncated): ReadToken { source: ReadHeader { source: DecodeElementHeader { position: 11, source: ReadLength { backtrace: Backtrace [{ fn: "<dicom_encoding::decode::ReadLengthSnafu as snafu::IntoError<dicom_encoding::decode::Error>>::into_error" }, { fn: "<dicom_encoding::decode::explicit_le::ExplicitVRLittleEndianDecoder as dicom_encoding::decode::Decode>::decode_header::<std::io::buffered::bufreader::BufRead
+REPRODUCED - the malformed length was not rejected at its own element; instead, parsing failed later while trying to interpret leftover, unconsumed bytes as a new element header - proof that the stream cursor desynchronized from the decoder's own position bookkeeping
+$ echo "exit code: $?"
+exit code: 1
+
+Note the mechanism: elem1 declares VR=US, length=3 (odd, not a multiple of the 2-byte US element
+size). `n = len >> 1 = 1`, so the decoder reads only 1*2=2 bytes from the stream for elem1's
+value - but `self.position += len as u64` advances the decoder's own position bookkeeping by the
+full declared 3. The 3rd, never-consumed byte (0x03) is then misread as the first byte of the
+*next* element's header (elem2, a completely well-formed `(0010,0010) PN "AB"`), which is why the
+failure surfaces as `DecodeElementHeader { position: 11, ... ReadLength { ... UnexpectedEof } }` -
+an opaque error blamed on the position/header of elem2, giving no indication that elem1's odd
+length was the real, root cause.
+
+Reproduced identically on 3/3 repeat runs (deterministic, fixed input, no randomness in this
+code path): same wire bytes, same error shape, same exit code, every time.
+
+=== AFTER (patched tree, `parser/src/stateful/decode.rs` fix applied) ===
+$ touch src/main.rs && cargo run --release
+wire bytes (21 total): [28, 00, 06, 01, 55, 53, 03, 00, 01, 02, 03, 10, 00, 10, 00, 50, 4e, 02, 00, 41, 42]
+parse error (Display): Could not read data set token
+parse error (Debug, truncated): ReadToken { source: ReadValue { len: 3, tag: Tag(0x0028, 0x0106), source: InvalidValueLength { tag: Tag(0x0028, 0x0106), position: 8, len: 3, multiple_of: 2, backtrace: Backtrace [{ fn: "<dicom_parser::stateful::decode::StatefulDecoder<alloc::boxed::Box<dyn dicom_encoding::decode::DecodeFrom<std::io::buffered::bufreader::BufReader<&[u8]>>>, std::io::buffered::bufreader::BufReader<&[u8]>>>::read_va
+FIXED - the malformed length was rejected immediately and specifically, with no corruption of the unrelated, well-formed second element
+$ echo "exit code: $?"
+exit code: 0
+
+Post-fix, the same malformed length is rejected exactly where it occurs (`InvalidValueLength` at
+tag (0028,0106), position 8 - the element's own declared length, not elem2's header position 11)
+with a clear, specific, and correct error - elem2's own well-formed bytes are never touched or
+misinterpreted.
+
+=== Project test suite (parser/src/stateful/decode.rs fix, applied then reverted) ===
+cargo test -p dicom-parser -p dicom-object --lib
+  before: 49 passed, 0 failed (dicom-parser) / 75 passed, 0 failed (dicom-object)
+  after:  49 passed, 0 failed (dicom-parser) / 75 passed, 0 failed (dicom-object)  (identical)
+
+cargo test --workspace --lib
+  before: 351 passed, 0 failed, 2 ignored
+  after:  351 passed, 0 failed, 2 ignored  (identical - zero regressions)

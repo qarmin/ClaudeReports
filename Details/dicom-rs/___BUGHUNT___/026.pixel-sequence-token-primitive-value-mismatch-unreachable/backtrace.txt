@@ -1,0 +1,26 @@
+=== reproduce-before (pristine tree) ===
+
+thread 'main' (182790) panicked at /home/rafal/Projekty/Obce/dicom-rs/parser/src/dataset/mod.rs:644:77:
+internal error: entered unreachable code
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::panicking::panic
+   3: <dicom_parser::dataset::DataElementTokens<...> as core::iter::traits::iterator::Iterator>::next
+   4: <dicom_parser::dataset::DataElementTokens<...> as core::iter::traits::iterator::Iterator>::collect::<VecDeque<DataToken>>
+   5: <dicom_object::tokens::InMemObjectTokens<...> as core::iter::traits::iterator::Iterator>::next
+   6: <dicom_object::mem::InMemDicomObject>::write_dataset_with_ts_cs::<&mut alloc::vec::Vec<u8>>
+   7: repro::main
+REPRODUCED - panicked while writing: internal error: entered unreachable code
+
+Confirms the panic is `DataElementTokens::next`'s `PixelSequenceStart` branch
+(parser/src/dataset/mod.rs:644), reached when an element has the exact tag/VR/undefined-length
+combination that `impl From<DataElementHeader> for DataToken` (line 117-129) uses to recognize
+encapsulated pixel data - `(VR::OB, Tag(0x7fe0, 0x0010))` with an undefined length - but whose
+actual stored `Value` is `Primitive` (or `Sequence`) rather than `PixelSequence`. This is
+reachable by constructing a `DataElement` directly with that tag/VR/length combination and any
+ordinary primitive value, then writing the containing object.
+
+=== after the fix (same input, same command) ===
+
+did not reproduce - write succeeded

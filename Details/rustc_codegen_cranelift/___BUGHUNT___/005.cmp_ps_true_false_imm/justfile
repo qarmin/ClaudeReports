@@ -1,0 +1,57 @@
+# Self-contained reproduction for candidate 005.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing here reaches outside the folder it lives in.
+#
+# Unlike a library candidate, the subject is a *compiler backend*, so `clone` has to build
+# cg_clif itself (./y.sh prepare + ./y.sh build, a few minutes cold). repro/ is then compiled
+# twice: once with plain cargo (LLVM = the oracle) and once with clone/dist/cargo-clif.
+#
+# `reproduce-before` is EXPECTED TO FAIL: cg_clif ICEs while codegening repro/, so the recipe
+# ends with a non-zero exit and `-` is used so `just test` continues on to `apply`.
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+export CARGO_TARGET_DIR := justfile_directory() / "clone/repro-target"
+
+# Full cycle: clone + build pristine cg_clif, prove the ICE, apply the fix, prove it is gone.
+test: clone oracle reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build
+
+# LLVM reference output - all-zero lanes for _CMP_FALSE_*, all-ones lanes for _CMP_TRUE_*.
+oracle:
+    @echo '##### LLVM (plain cargo, opt-level 0) - the oracle'
+    ulimit -c 0 && cd repro && cargo run -q
+
+# cg_clif on the pristine clone: ICEs with "not yet implemented" at
+# src/intrinsics/llvm_x86.rs:232 / :236, so repro/ never even links.
+reproduce-before:
+    @echo '##### cg_clif PRISTINE - expected to ICE (non-zero exit is the bug)'
+    -ulimit -c 0 && cd repro && "{{justfile_directory()}}/clone/dist/cargo-clif" run -q
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && ./y.sh build
+
+# cg_clif on the patched clone: must build, run, and print exactly what `oracle` printed.
+reproduce-after:
+    @echo '##### cg_clif PATCHED - must match the oracle output above'
+    ulimit -c 0 && cd repro && "{{justfile_directory()}}/clone/dist/cargo-clif" run -q
+
+# Optional wider check: all 32 predicate immediates x {_mm_cmp_ps, _mm_cmp_pd}, LLVM vs cg_clif.
+# Run it after `clone` (pristine -> 8 ICEs) and again after `apply` (-> identical=64).
+sweep:
+    CLIF_ROOT="{{justfile_directory()}}/clone" \
+    DIFFCHECK="{{justfile_directory()}}/tools/diffcheck.sh" \
+        python3 "{{justfile_directory()}}/tools/cmp_imm_sweep.py" \
+            "{{justfile_directory()}}/clone/cmp_sweep" --only=ps,pd
+
+clean:
+    rm -rf clone repro/target

@@ -1,0 +1,325 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 9f5a8821..d842b375 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -4595,6 +4595,7 @@ dependencies = [
+  "bytemuck",
+  "log",
+  "naga",
++ "peniko",
+  "thiserror 2.0.18",
+  "vello_encoding",
+ ]
+diff --git a/vello_shaders/Cargo.toml b/vello_shaders/Cargo.toml
+index e2cbe23a..c2b2cee6 100644
+--- a/vello_shaders/Cargo.toml
++++ b/vello_shaders/Cargo.toml
+@@ -40,3 +40,6 @@ log = { workspace = true, optional = true }
+ naga = { workspace = true, features = ["wgsl-in"] }
+ thiserror = { workspace = true }
+ log = { workspace = true }
++
++[dev-dependencies]
++peniko = { workspace = true, default-features = true }
+diff --git a/vello_shaders/examples/bench_flatten.rs b/vello_shaders/examples/bench_flatten.rs
+new file mode 100644
+index 00000000..e656cc4e
+--- /dev/null
++++ b/vello_shaders/examples/bench_flatten.rs
+@@ -0,0 +1,236 @@
++// Copyright 2026 the Vello Authors
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++//! Benchmark harness for the `vello_shaders` CPU mirror of the `flatten` compute shader
++//! (`vello_shaders/src/cpu/flatten.rs`, mirroring `vello_shaders/shader/flatten.wgsl`).
++//!
++//! Built to check candidate 009 (a LINETO fast path skipping the Euler-spiral fit
++//! machinery for already-straight segments, see linebender/vello#1633): a line-heavy,
++//! GIS/vector-map-style scene of many straight polylines, both filled and stroked (the
++//! stroke case runs the offset-curve flatten twice per segment).
++//!
++//! Runs entirely on the CPU (no GPU/wgpu device needed) by driving the `pathtag_reduce`
++//! -> `pathtag_scan` -> `flatten` CPU shader chain directly, using `vello_encoding` to
++//! build and pack a real scene encoding the same way the real renderer would.
++//!
++//! Usage:
++//!   bench_flatten <fill|stroke> [n_paths=2000] [segs_per_path=48] [iters=30] [expected_hash_hex]
++//!
++//! If expected_hash_hex is given, iteration 0 must produce that hash or the run aborts.
++//! Iteration N>0 must always produce the same hash as iteration 0, otherwise the run aborts.
++
++use std::cell::RefCell;
++use std::env;
++use std::process;
++use std::time::Instant;
++
++use peniko::Fill;
++use peniko::kurbo::{BezPath, Stroke};
++use vello_encoding::{
++    BumpAllocators, Encoding, Layout, LineSoup, PathBbox, PathMonoid, RenderConfig, Transform,
++    resolve_solid_paths_only,
++};
++use vello_shaders::cpu::{CpuBinding, flatten, pathtag_reduce, pathtag_scan};
++
++fn fnv1a64(bytes: &[u8]) -> u64 {
++    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
++    for &b in bytes {
++        h ^= b as u64;
++        h = h.wrapping_mul(0x0000_0100_0000_01B3);
++    }
++    h
++}
++
++/// A deterministic zig-zag polyline, standing in for a GIS/vector-map style road/border
++/// segment: many short, dead-straight `LineTo`s in a row, no curves.
++fn build_polyline(n_segs: usize, ox: f64, oy: f64) -> BezPath {
++    let mut path = BezPath::new();
++    path.move_to((ox, oy));
++    for i in 0..n_segs {
++        let x = ox + (i as f64 + 1.0) * 7.3;
++        let y = oy + if i % 2 == 0 { 11.0 } else { -11.0 };
++        path.line_to((x, y));
++    }
++    path
++}
++
++fn build_scene(is_fill: bool, n_paths: usize, segs_per_path: usize) -> (Layout, Vec<u8>) {
++    let mut encoding = Encoding::new();
++    for p in 0..n_paths {
++        let ox = (p as f64) * ((segs_per_path as f64) * 7.3 + 40.0);
++        let shape = build_polyline(segs_per_path, ox, 0.0);
++        encoding.encode_transform(Transform::IDENTITY);
++        if is_fill {
++            encoding.encode_fill_style(Fill::NonZero);
++        } else {
++            let _ = encoding.encode_stroke_style(&Stroke::new(3.0));
++        }
++        encoding.encode_shape(&shape, is_fill);
++    }
++    let mut packed = Vec::new();
++    let layout = resolve_solid_paths_only(&encoding, &mut packed);
++    (layout, packed)
++}
++
++/// Drives the real `pathtag_reduce` -> `pathtag_scan` -> `flatten` CPU shader chain
++/// (the one-level scan path - the bench scene is kept well under the size where the
++/// real renderer would switch to the two-level large-scan path) and returns a hash of
++/// the resulting `LineSoup` + `PathBbox` output.
++fn run_flatten(layout: &Layout, packed: &[u8]) -> u64 {
++    let render_config = RenderConfig::new(layout, 4096, 4096, &peniko::Color::BLACK);
++    assert!(
++        !render_config.workgroup_counts.use_large_path_scan,
++        "bench scene too large for the simple one-level pathtag scan this harness drives"
++    );
++
++    let config_bytes = bytemuck::bytes_of(&render_config.gpu).to_vec();
++
++    let reduce_wg = render_config.workgroup_counts.path_reduce.0.max(1);
++    let scan_wg = render_config.workgroup_counts.path_scan.0.max(1);
++    let flatten_wg = render_config.workgroup_counts.flatten.0.max(1);
++
++    let reduced_buf = RefCell::new(vec![0_u8; reduce_wg as usize * size_of::<PathMonoid>()]);
++    let tag_monoids_buf =
++        RefCell::new(vec![0_u8; scan_wg as usize * 256 * size_of::<PathMonoid>()]);
++    let path_bboxes_buf =
++        RefCell::new(vec![0_u8; layout.n_paths as usize * size_of::<PathBbox>()]);
++    let bump_buf = RefCell::new(vec![0_u8; size_of::<BumpAllocators>()]);
++    let lines_buf = RefCell::new(vec![
++        0_u8;
++        render_config.buffer_sizes.lines.len() as usize
++            * size_of::<LineSoup>()
++    ]);
++
++    pathtag_reduce(
++        reduce_wg,
++        &[
++            CpuBinding::Buffer(&config_bytes),
++            CpuBinding::Buffer(packed),
++            CpuBinding::BufferRW(&reduced_buf),
++        ],
++    );
++
++    pathtag_scan(
++        scan_wg,
++        &[
++            CpuBinding::Buffer(&config_bytes),
++            CpuBinding::Buffer(packed),
++            CpuBinding::BufferRW(&reduced_buf),
++            CpuBinding::BufferRW(&tag_monoids_buf),
++        ],
++    );
++
++    flatten(
++        flatten_wg,
++        &[
++            CpuBinding::Buffer(&config_bytes),
++            CpuBinding::Buffer(packed),
++            CpuBinding::BufferRW(&tag_monoids_buf),
++            CpuBinding::BufferRW(&path_bboxes_buf),
++            CpuBinding::BufferRW(&bump_buf),
++            CpuBinding::BufferRW(&lines_buf),
++        ],
++    );
++
++    let bump: BumpAllocators = *bytemuck::from_bytes(&bump_buf.borrow());
++    let lines_all_bytes = lines_buf.borrow();
++    let lines_all: &[LineSoup] = bytemuck::cast_slice(&lines_all_bytes);
++    assert!(
++        (bump.lines as usize) <= lines_all.len(),
++        "bump allocator overflowed the lines buffer - grow it"
++    );
++    let lines_used: &[LineSoup] = &lines_all[..bump.lines as usize];
++
++    let mut h = fnv1a64(bytemuck::cast_slice(lines_used));
++    // Fold in path_bboxes too, so a fast path that changed bbox accumulation would also
++    // be caught (it shouldn't - bbox derives from the same emitted points either way).
++    h ^= fnv1a64(bytemuck::cast_slice(&path_bboxes_buf.borrow()[..]));
++    h = h.wrapping_mul(0x100_0000_01B3);
++    h ^= bump.lines as u64;
++    h
++}
++
++fn main() {
++    let mut args = env::args().skip(1);
++    let mode = args.next().unwrap_or_else(|| {
++        eprintln!(
++            "usage: bench_flatten <fill|stroke> [n_paths=2000] [segs_per_path=48] [iters=30] [expected_hash_hex]"
++        );
++        process::exit(1);
++    });
++    let is_fill = match mode.as_str() {
++        "fill" => true,
++        "stroke" => false,
++        other => {
++            eprintln!("unknown mode {other:?}, expected \"fill\" or \"stroke\"");
++            process::exit(1);
++        }
++    };
++    let n_paths: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(2000);
++    let segs_per_path: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(48);
++    let iters: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(30);
++    let expected_hash: Option<u64> =
++        args.next().and_then(|s| u64::from_str_radix(&s, 16).ok());
++
++    let (layout, packed) = build_scene(is_fill, n_paths, segs_per_path);
++
++    let mut times_us: Vec<u64> = Vec::with_capacity(iters);
++    let mut first_hash: Option<u64> = None;
++
++    for i in 0..iters {
++        let t0 = Instant::now();
++        let h = std::hint::black_box(run_flatten(
++            std::hint::black_box(&layout),
++            std::hint::black_box(&packed),
++        ));
++        let us = t0.elapsed().as_micros() as u64;
++
++        match first_hash {
++            None => {
++                first_hash = Some(h);
++                if let Some(exp) = expected_hash {
++                    assert_eq!(h, exp, "iter {i} hash {h:016x} != expected {exp:016x}");
++                }
++            }
++            Some(prev) => assert_eq!(
++                h, prev,
++                "iter {i} hash {h:016x} differs from iter 0 {prev:016x}"
++            ),
++        }
++        times_us.push(us);
++    }
++
++    let hash = first_hash.unwrap();
++    let warmup = (iters / 10).max(1).min(iters - 1);
++    let stable: Vec<u64> = {
++        let mut s = times_us[warmup..].to_vec();
++        s.sort_unstable();
++        s
++    };
++    let n = stable.len();
++    let min = stable[0];
++    let p50 = stable[n / 2];
++    let p95 = stable[(n * 95) / 100];
++    let mean = stable.iter().sum::<u64>() / n as u64;
++    let max = stable[n - 1];
++
++    println!("mode       = {mode}");
++    println!("n_paths    = {n_paths}");
++    println!("segs/path  = {segs_per_path}");
++    println!("iters      = {iters} (warmup discarded = {warmup})");
++    println!("hash       = {hash:016x}  (STABLE across all iters)");
++    println!("min        = {:8.3} ms", min as f64 / 1000.0);
++    println!("p50        = {:8.3} ms", p50 as f64 / 1000.0);
++    println!("mean       = {:8.3} ms", mean as f64 / 1000.0);
++    println!("p95        = {:8.3} ms", p95 as f64 / 1000.0);
++    println!("max        = {:8.3} ms", max as f64 / 1000.0);
++    println!();
++    print!("raw_us     = [");
++    for (i, t) in times_us.iter().enumerate() {
++        if i > 0 {
++            print!(", ");
++        }
++        print!("{t}");
++    }
++    println!("]");
++}
+diff --git a/vello_shaders/src/cpu/flatten.rs b/vello_shaders/src/cpu/flatten.rs
+index 26e42493..b57edfc7 100644
+--- a/vello_shaders/src/cpu/flatten.rs
++++ b/vello_shaders/src/cpu/flatten.rs
+@@ -248,6 +248,20 @@ fn flatten_euler(
+         return;
+     }
+ 
++    // Fast path for a real LINETO: the degree-raised cubic is exactly collinear (zero
++    // curvature), so the general loop below always converges on its first iteration to a
++    // single output line equal to the chord (see #1633) - skip the Euler-spiral fit
++    // (CubicParams/EulerParams, the espc integral, ...) and emit that line directly.
++    if cubic.is_line {
++        let (l0, l1) = if offset >= 0. {
++            (t_start, t_end)
++        } else {
++            (t_end, t_start)
++        };
++        output_line_with_transform(path_ix, l0, l1, &transform, line_ix, lines, bbox);
++        return;
++    }
++
+     let tol: f32 = 0.25;
+     let mut t0_u: u32 = 0;
+     let mut dt: f32 = 1.;
+@@ -576,6 +590,10 @@ struct CubicPoints {
+     p1: Vec2,
+     p2: Vec2,
+     p3: Vec2,
++    /// Whether this cubic is a degree-raised `LINETO` (a real one, or a synthetic closing
++    /// line for a stroked subpath's cap marker) - i.e. `p0..p3` are exactly collinear, so
++    /// flattening it can skip the Euler-spiral fit entirely (see #1633).
++    is_line: bool,
+ }
+ 
+ fn read_path_segment(tag: &PathTagData, is_stroke: bool, pathdata: &[u32]) -> CubicPoints {
+@@ -615,6 +633,8 @@ fn read_path_segment(tag: &PathTagData, is_stroke: bool, pathdata: &[u32]) -> Cu
+         seg_type = PATH_TAG_LINETO;
+     }
+ 
++    let is_line = seg_type == PATH_TAG_LINETO;
++
+     // Degree-raise
+     if seg_type == PATH_TAG_LINETO {
+         p3 = p1;
+@@ -626,7 +646,13 @@ fn read_path_segment(tag: &PathTagData, is_stroke: bool, pathdata: &[u32]) -> Cu
+         p1 = p1.mix(p0, 1.0 / 3.0);
+     }
+ 
+-    CubicPoints { p0, p1, p2, p3 }
++    CubicPoints {
++        p0,
++        p1,
++        p2,
++        p3,
++        is_line,
++    }
+ }
+ 
+ struct NeighboringSegment {

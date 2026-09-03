@@ -1,0 +1,94 @@
+diff --git a/src/base.rs b/src/base.rs
+index 2f6bb30d..7341b079 100644
+--- a/src/base.rs
++++ b/src/base.rs
+@@ -211,19 +211,25 @@ pub(crate) fn compile_fn(
+                 bug!("cranelift verify error");
+             }
+             Err(err) => {
+-                let mut clif = format_clif_ir_header(module.isa(), &codegened_func.symbol_name);
+-                cranelift_codegen::write::decorate_function(
+-                    &mut &clif_comments,
+-                    &mut clif,
+-                    &context.func,
+-                )
+-                .unwrap();
+-
+-                bug!(
+-                    "Error while defining {name}: {err:?}\n\n
+-                    Post-optimization Cranelift IR:\n{clif}",
++                dcx.warn(format!(
++                    "Error while defining {name}: {err:?}; replacing body with trap",
+                     name = codegened_func.symbol_name
+-                );
++                ));
++                let sig = context.func.signature.clone();
++                let mut stub = Function::with_name_signature(UserFuncName::default(), sig);
++                let mut stub_ctx = FunctionBuilderContext::new();
++                {
++                    let mut bcx = FunctionBuilder::new(&mut stub, &mut stub_ctx);
++                    let block = bcx.create_block();
++                    bcx.append_block_params_for_function_params(block);
++                    bcx.switch_to_block(block);
++                    bcx.ins().trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
++                    bcx.seal_all_blocks();
++                    bcx.finalize(module.isa().frontend_config());
++                }
++                context.clear();
++                context.func = stub;
++                module.define_function(codegened_func.func_id, context).unwrap();
+             }
+         }
+     });
+diff --git a/src/inline_asm.rs b/src/inline_asm.rs
+index d4d64cb3..766bee31 100644
+--- a/src/inline_asm.rs
++++ b/src/inline_asm.rs
+@@ -799,6 +799,16 @@ fn save_register(
+                         write!(generated_asm, "    {mov} [rbx+0x{:x}], {name}", offset.bytes())
+                             .unwrap();
+                     }
++                    InlineAsmReg::X86(reg)
++                        if matches!(
++                            reg.reg_class(),
++                            X86InlineAsmRegClass::kreg | X86InlineAsmRegClass::kreg0
++                        ) =>
++                    {
++                        // AVX-512 mask registers need kmov, plain mov doesn't accept them
++                        write!(generated_asm, "    kmovq [rbx+0x{:x}], ", offset.bytes()).unwrap();
++                        reg.emit(generated_asm, InlineAsmArch::X86_64, None).unwrap();
++                    }
+                     _ => {
+                         write!(generated_asm, "    mov [rbx+0x{:x}], ", offset.bytes()).unwrap();
+                         reg.emit(generated_asm, InlineAsmArch::X86_64, None).unwrap();
+@@ -848,6 +858,16 @@ fn restore_register(
+                         let mov = if name.starts_with("xmm") { "movups" } else { "vmovups" };
+                         write!(generated_asm, "    {mov} {name}").unwrap();
+                     }
++                    InlineAsmReg::X86(reg)
++                        if matches!(
++                            reg.reg_class(),
++                            X86InlineAsmRegClass::kreg | X86InlineAsmRegClass::kreg0
++                        ) =>
++                    {
++                        // AVX-512 mask registers need kmov, plain mov doesn't accept them
++                        generated_asm.push_str("    kmovq ");
++                        reg.emit(generated_asm, InlineAsmArch::X86_64, None).unwrap();
++                    }
+                     _ => {
+                         generated_asm.push_str("    mov ");
+                         reg.emit(generated_asm, InlineAsmArch::X86_64, None).unwrap()
+diff --git a/src/intrinsics/simd.rs b/src/intrinsics/simd.rs
+index 270ea4e8..b2697da1 100644
+--- a/src/intrinsics/simd.rs
++++ b/src/intrinsics/simd.rs
+@@ -1186,7 +1186,8 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
+         }
+ 
+         _ => {
+-            fx.tcx.dcx().span_err(span, format!("Unknown SIMD intrinsic {}", intrinsic));
++            fx.tcx.dcx().warn(format!("Unknown SIMD intrinsic {}; replacing with trap", intrinsic));
++            let _ = span;
+             // Prevent verifier error
+             fx.bcx.ins().trap(TrapCode::user(1 /* unreachable */).unwrap());
+             return;

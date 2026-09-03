@@ -1,0 +1,58 @@
+Captured via `just clone && just reproduce-before && just apply && just reproduce-after`
+in this candidate's own folder (fresh clone of linebender/vello at
+7516831426fb70f36d62c521c5477f6a7265b36a), --release build.
+
+=== reproduce-before (pristine code) ===
+
+$ cd repro && cargo run --release --bin repro
+[... build output omitted ...]
+     Running `target/release/repro`
+
+thread 'main' (577743) panicked at /home/.../clone/glifo/src/glyph.rs:1419:59:
+called `Result::unwrap()` on an `Err` value: InvalidCollectionIndex(1)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - panicked: called `Result::unwrap()` on an `Err` value: InvalidCollectionIndex(1)
+
+$ cd repro && cargo run --release --bin variant_garbage
+[... build output omitted ...]
+     Running `target/release/variant_garbage`
+
+thread 'main' (578752) panicked at /home/.../clone/glifo/src/glyph.rs:1419:59:
+called `Result::unwrap()` on an `Err` value: InvalidSfnt(0)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - panicked: called `Result::unwrap()` on an `Err` value: InvalidSfnt(0)
+
+=== apply (patch.diff applied to the clone) ===
+
+$ cd clone && git apply ".../patch.diff"
+(no output - applied cleanly)
+
+=== reproduce-after (patched code) ===
+
+$ cd repro && cargo run --release --bin repro
+[... build output omitted ...]
+     Running `target/release/repro`
+did not reproduce - fill_glyphs completed normally on FontData with out-of-range index
+
+$ cd repro && cargo run --release --bin variant_garbage
+[... build output omitted ...]
+     Running `target/release/variant_garbage`
+did not reproduce - fill_glyphs completed normally on garbage bytes
+
+=== Repeat-run check (debug + release, both binaries, working tree at same commit) ===
+
+5/5 runs of `repro` (4 release + 1 debug) panicked identically with
+`InvalidCollectionIndex(1)` at glifo/src/glyph.rs:1419:59, before the patch.
+1/1 additional run of `variant_garbage` panicked with `InvalidSfnt(0)` at the same line,
+before the patch. All panics disappeared after the patch, re-run 1/1 for both binaries
+in this exact clone/apply/reproduce-after sequence above, and separately confirmed 3+
+more times in the working scratch copy used during investigation.
+
+=== Project test suite (against a plain git worktree of the main project, not this clone) ===
+
+cargo test -p glifo:
+  before patch: 22 passed; 0 failed; 0 ignored
+  after patch:  22 passed; 0 failed; 0 ignored
+
+cargo test -p vello_cpu (after patch only, for broader coverage of the public glyph_run API path):
+  81 passed; 0 failed; 0 ignored (+ 1 doctest passed)

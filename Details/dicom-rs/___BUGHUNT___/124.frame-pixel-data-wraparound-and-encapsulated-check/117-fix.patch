@@ -1,0 +1,42 @@
+diff --git a/encoding/src/adapters.rs b/encoding/src/adapters.rs
+index 3a114218..99f188b1 100644
+--- a/encoding/src/adapters.rs
++++ b/encoding/src/adapters.rs
+@@ -263,15 +263,29 @@ pub trait PixelDataObject {
+                 // special case of 1 bit per sample:
+                 // include starting byte even it leading bits are outside the frame
+                 // and include next byte if it ends outside frame boundary
+-                let (start, end) = if bits_allocated == 1 {
+-                    let samples_per_frame = rows as usize * columns as usize;
+-                    let start = frame as usize * samples_per_frame / 8;
+-                    let end = ((frame as usize + 1) * samples_per_frame).div_ceil(8);
+-                    (start, end)
++                //
++                // `rows`/`columns`/`frame_size` come from attacker-controlled DICOM
++                // attributes and `frame` is an unchecked caller-supplied index - their
++                // product can exceed `usize::MAX` for individually-legal values (see
++                // Enet4/dicom-rs#817), so every multiplication/addition here must be
++                // checked and treated as "no such frame" rather than trusted to fit.
++                let bounds = if bits_allocated == 1 {
++                    let samples_per_frame = (rows as usize).checked_mul(columns as usize)?;
++                    let start = (frame as usize)
++                        .checked_mul(samples_per_frame)
++                        .map(|n| n / 8)?;
++                    let end = (frame as usize)
++                        .checked_add(1)?
++                        .checked_mul(samples_per_frame)?
++                        .div_ceil(8);
++                    Some((start, end))
+                 } else {
+-                    let start = frame as usize * frame_size;
+-                    let end = start + frame_size;
+-                    (start, end)
++                    (frame as usize)
++                        .checked_mul(frame_size)
++                        .and_then(|start| Some((start, start.checked_add(frame_size)?)))
++                };
++                let Some((start, end)) = bounds else {
++                    return None;
+                 };
+                 if end <= pixel_data.len() {
+                     match pixel_data {

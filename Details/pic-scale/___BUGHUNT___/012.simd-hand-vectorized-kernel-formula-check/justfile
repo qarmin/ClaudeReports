@@ -1,0 +1,38 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate found no source bug (Status: Not reproducible) - the thing it was looking for
+# (a hand-vectorized re-implementation of a src/math/*.rs kernel formula anywhere under
+# src/avx2, src/avx512, src/sse, src/neon) does not exist in the source tree at all. There is
+# no patch.diff and no repro/ crate. What this justfile reproduces is the structural evidence
+# behind that result - see RESULT.md/output.txt for the full commentary.
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+test: clone check-generate-weights-callers check-filter-weights-consumers check-kernel-fn-names check-transcendental-calls
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# generate_weights (the one function that actually evaluates a kernel formula) is only ever
+# called from within src/math/weights.rs itself.
+check-generate-weights-callers:
+    cd clone && grep -rn "generate_weights" src/
+
+# Every SIMD backend consumes the FilterWeights struct (precomputed data) as a plain parameter.
+check-filter-weights-consumers:
+    cd clone && grep -rln "FilterWeights" src/avx2 src/avx512 src/sse src/neon | wc -l
+    cd clone && find src/avx2 src/avx512 src/sse src/neon -name "*.rs" | wc -l
+
+# No SIMD file defines a function named after any of the 15 kernel formulas.
+check-kernel-fn-names:
+    cd clone && ( grep -rn "fn gaussian\|fn lanczos\|fn kaiser\|fn welch\|fn bartlett\|fn blackman\|fn hann\|fn hamming\|fn hanning\|fn cubic\|fn quadric\|fn spline\|fn lagrange\|fn bohman\|fn sphinx\|fn bc_spline" src/avx2 src/avx512 src/sse src/neon || echo "(no matches, as expected)" )
+
+# No SIMD file performs any transcendental-math computation a kernel formula would need.
+check-transcendental-calls:
+    cd clone && ( grep -rn "consts::PI\|\.exp(\|\.cos(\|\.sin(\|\.sqrt(\|f_jincpi\|f_sincpi\|bessel" src/avx2 src/avx512 src/sse src/neon || echo "(no matches, as expected)" )
+
+clean:
+    rm -rf clone

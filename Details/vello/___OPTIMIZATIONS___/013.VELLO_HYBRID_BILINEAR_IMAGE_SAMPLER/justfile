@@ -1,0 +1,56 @@
+# Self-contained reproduction for candidate 013 (VELLO_HYBRID_BILINEAR_IMAGE_SAMPLER).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored). `bench/` is a standalone crate that depends on the clone via a
+# relative path, per SKILL.md shape 2 ("no suitable existing benchmark").
+#
+# `just test` requires a real (or software/CPU-emulated, e.g. Mesa llvmpipe or SwiftShader)
+# Vulkan/Metal/DX12/GL adapter reachable by wgpu - it will fail loudly with "no adapter
+# found" in an environment with neither a GPU nor a software Vulkan/GL driver installed.
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone build-baseline build-patched bench
+
+clone:
+    rm -rf clone
+    # Skip Git LFS smudging: the repo uses LFS only for test-snapshot PNGs, which this bench
+    # never touches, and requiring a `git-lfs` install just to build vello_hybrid/vello_common
+    # would be an unnecessary dependency for reproducing this candidate.
+    git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false \
+        clone {{repo_url}} clone
+    cd clone \
+        && git config filter.lfs.smudge cat \
+        && git config filter.lfs.process "" \
+        && git config filter.lfs.required false \
+        && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Baseline: bench crate built WITHOUT the `fast_path` feature, so it exercises the existing
+# manual-bilinear `set_paint(Image)` path (this is what `manual` mode always used, even
+# post-patch - see bench/src/main.rs's own comment on why the mode is a build-time feature,
+# not a runtime flag).
+build-baseline:
+    cd bench && cargo build --release
+    cp bench/target/release/gpu_image_bench ./bin_baseline
+
+# Patched: apply patch.diff (adds `Scene::draw_image`, the GPU-native bilinear fast path),
+# then build the bench crate WITH the `fast_path` feature.
+build-patched: apply
+    cd bench && cargo build --release --features fast_path
+    cp bench/target/release/gpu_image_bench ./bin_patched
+
+bench:
+    @echo "=== baseline: manual bilinear (set_paint(Image), quality=Medium) ==="
+    ./bin_baseline manual
+    @echo "=== patched: GPU-native bilinear (Scene::draw_image) ==="
+    ./bin_patched fast
+    @echo ""
+    @echo "Compare gpu_image_bench_manual.png / gpu_image_bench_fast.png for the characterized"
+    @echo "edge-fade-vs-edge-clamp visual difference described in RESULT.md."
+
+clean:
+    rm -rf clone bin_baseline bin_patched bench/target gpu_image_bench_manual.png gpu_image_bench_fast.png

@@ -1,0 +1,81 @@
+diff --git a/benches/imageops.rs b/benches/imageops.rs
+index d1b33ebe..bdea18b8 100644
+--- a/benches/imageops.rs
++++ b/benches/imageops.rs
+@@ -1,10 +1,10 @@
+ use std::{hint::black_box, time::Duration};
+ 
+-use criterion::{criterion_group, criterion_main, Criterion};
++use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+ use image::{
+     imageops::{self, FilterType},
+     math::Rect,
+-    DynamicImage, GrayImage, ImageBuffer, Rgb,
++    DynamicImage, GrayImage, ImageBuffer, Rgb, Rgba,
+ };
+ 
+ pub fn bench_imageops(c: &mut Criterion) {
+@@ -90,6 +90,44 @@ pub fn bench_imageops(c: &mut Criterion) {
+         let palette = &[(1, 2, 3); 256];
+         b.iter(|| src_gray.expand_palette(black_box(palette), black_box(None)));
+     });
++
++    // Exercises DynamicImage's GenericImageView/GenericImage get_pixel/put_pixel shims via
++    // tile/replace/vertical_gradient/horizontal_gradient, the same accessors candidate 060
++    // measured for overlay - same 1920x1080 bottom / 300x300 partial-alpha top fixtures.
++    let src_dyn_rgba = DynamicImage::from(src_dyn.to_rgba8());
++    let dyn_top = DynamicImage::from(ImageBuffer::from_fn(300, 300, |x, y| {
++        Rgba([x as u8, y as u8, ((x * 3 + y) % 256) as u8, 180])
++    }));
++
++    c.bench_function("dyn image tile", |b| {
++        b.iter_batched(
++            || src_dyn_rgba.clone(),
++            |mut bottom| {
++                imageops::tile(&mut bottom, &dyn_top);
++                bottom
++            },
++            BatchSize::LargeInput,
++        );
++    });
++
++    c.bench_function("dyn image replace", |b| {
++        let mut bottom = src_dyn_rgba.clone();
++        b.iter(|| imageops::replace(black_box(&mut bottom), black_box(&dyn_top), 100, 100));
++    });
++
++    c.bench_function("dyn image vertical gradient", |b| {
++        let mut grad = src_dyn_rgba.clone();
++        let start = Rgba([0u8, 128, 0, 0]);
++        let stop = Rgba([255u8, 255, 255, 255]);
++        b.iter(|| imageops::vertical_gradient(black_box(&mut grad), &start, &stop));
++    });
++
++    c.bench_function("dyn image horizontal gradient", |b| {
++        let mut grad = src_dyn_rgba.clone();
++        let start = Rgba([0u8, 128, 0, 0]);
++        let stop = Rgba([255u8, 255, 255, 255]);
++        b.iter(|| imageops::horizontal_gradient(black_box(&mut grad), &start, &stop));
++    });
+ }
+ 
+ pub fn bench_resize(c: &mut Criterion) {
+diff --git a/src/images/dynimage.rs b/src/images/dynimage.rs
+index 594325dd..1cf0de8a 100644
+--- a/src/images/dynimage.rs
++++ b/src/images/dynimage.rs
+@@ -1751,12 +1751,14 @@ impl GenericImageView for DynamicImage {
+         dynamic_map!(*self, ref p, p.dimensions())
+     }
+ 
++    #[inline(always)]
+     fn get_pixel(&self, x: u32, y: u32) -> color::Rgba<u8> {
+         dynamic_map!(*self, ref p, p.get_pixel(x, y).to_rgba().into_color())
+     }
+ }
+ 
+ impl GenericImage for DynamicImage {
++    #[inline]
+     fn put_pixel(&mut self, x: u32, y: u32, pixel: color::Rgba<u8>) {
+         match *self {
+             DynamicImage::ImageLuma8(ref mut p) => p.put_pixel(x, y, pixel.to_luma()),

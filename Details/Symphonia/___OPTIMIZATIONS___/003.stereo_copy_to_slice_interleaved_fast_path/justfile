@@ -1,0 +1,46 @@
+# Self-contained reproduction for this candidate. patch.diff is a real source change to
+# symphonia-core/src/audio/util.rs (copy_to_slice_interleaved), applied and built for real.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp "{{justfile_directory()}}/bench_decode.rs" clone/symphonia/examples/bench_decode.rs
+    cp "{{justfile_directory()}}/master.flac" "{{justfile_directory()}}/master.mp3" \
+       "{{justfile_directory()}}/master.ogg" "{{justfile_directory()}}/master.wav" \
+       "{{justfile_directory()}}/mono.wav" "{{justfile_directory()}}/five_ch.wav" clone/
+
+build-baseline:
+    cd clone && cargo build --release --example bench_decode -p symphonia --features symphonia/mp3
+    cp clone/target/release/examples/bench_decode ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone && cargo build --release --example bench_decode -p symphonia --features symphonia/mp3
+    cp clone/target/release/examples/bench_decode ./bin_patched
+
+bench:
+    @echo "=== baseline ==="
+    taskset -c 2 ./bin_baseline clone/master.wav 20
+    taskset -c 2 ./bin_baseline clone/master.flac 20
+    taskset -c 2 ./bin_baseline clone/master.mp3 20
+    taskset -c 2 ./bin_baseline clone/master.ogg 20
+    taskset -c 2 ./bin_baseline clone/mono.wav 5
+    taskset -c 2 ./bin_baseline clone/five_ch.wav 5
+    @echo "=== patched (2-channel fast path) ==="
+    taskset -c 2 ./bin_patched clone/master.wav 20
+    taskset -c 2 ./bin_patched clone/master.flac 20
+    taskset -c 2 ./bin_patched clone/master.mp3 20
+    taskset -c 2 ./bin_patched clone/master.ogg 20
+    taskset -c 2 ./bin_patched clone/mono.wav 5
+    taskset -c 2 ./bin_patched clone/five_ch.wav 5
+
+clean:
+    rm -rf clone bin_baseline bin_patched

@@ -1,0 +1,34 @@
+# Self-contained reproduction for this addendum (candidate 052's own fix has an incomplete
+# encoder-side counterpart - see RESULT.md's "Addendum" section).
+#
+# Unlike every other candidate's justfile in this workspace, `just test` here applies TWO
+# patches in sequence: candidate 052's own `../patch.diff` first (a precondition - this
+# addendum's bug is only reachable once 052's lossy U+FFFD decode substitution exists), then
+# `../patch_addendum_encoder_trap.diff` (this addendum's own fix, on top of 052's).
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git fetch origin {{base_commit}} && git checkout {{base_commit}}
+    cd clone && git apply "{{justfile_directory()}}/../patch.diff"
+
+# Build+run the standalone repro against clone+052's patch only - should demonstrate the bug
+# (prints "write failed: Could not print data set" and "BUG REPRODUCED", exits non-zero).
+reproduce-before:
+    cargo run
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/../patch_addendum_encoder_trap.diff"
+
+# Same repro again, now with this addendum's own fix also applied - should print
+# "OK: wrote ... bytes successfully..." and exit 0.
+reproduce-after:
+    cargo run
+
+clean:
+    rm -rf clone target Cargo.lock

@@ -1,0 +1,93 @@
+==============================================================================
+Captured 2026-09-03. Host: Ryzen 9 7900 (Zen 4, AVX-512), Linux 7.0.0-30-generic.
+cg_clif @ 2bc05d45 (Cranelift 0.135), rustc nightly-2026-08-24, debug / opt-level 0.
+==============================================================================
+
+### 1. BEFORE - the LLVM oracle (plain rustc, debug): builds, runs, all correct
+$ cd repro && cargo run
+ok    u8x16 (256 lane results)
+ok    i8x32 (512 lane results)
+ok    u16x8 (256 lane results)
+ok    i16x32 (1024 lane results)
+ok    u32x4 (256 lane results)
+ok    i32x16 (1024 lane results)
+ok    u64x2 (256 lane results)
+ok    i64x8 (1024 lane results)
+ok    u128x2 (512 lane results)
+ok    i128x4 (1024 lane results)
+ok    _mm512_rol_epi32::<0>
+ok    _mm512_rol_epi32::<1>
+ok    _mm512_rol_epi32::<16>
+ok    _mm512_rol_epi32::<31>
+ok    _mm512_ror_epi32::<0>
+ok    _mm512_ror_epi32::<1>
+ok    _mm512_ror_epi32::<31>
+ok    _mm512_rolv_epi32
+ok    _mm512_rorv_epi32
+ok    _mm512_shldi_epi32::<0>
+ok    _mm512_shldi_epi32::<1>
+ok    _mm512_shldi_epi32::<31>
+ok    _mm512_shrdi_epi32::<0>
+ok    _mm512_shrdi_epi32::<1>
+ok    _mm512_shrdi_epi32::<31>
+ok    _mm512_shldv_epi32
+failures: 0
+
+### 2. BEFORE - the same crate through unpatched cg_clif: HARD ERROR, no binary produced
+$ cd repro && RUSTFLAGS="-Ctarget-cpu=native" ../clone/dist/cargo-clif run
+   Compiling simd_funnel_repro v0.0.0 (/home/rafal/Projekty/Obce/rustc_codegen_cranelift/___BUGHUNT___/003.simd_funnel_shift_hard_error/repro)
+error: Unknown SIMD intrinsic simd_funnel_shl
+   --> src/main.rs:76:44
+    |
+ 76 |                         unsafe { transmute(simd_funnel_shl(va, vb, vs)) };
+    |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+112 | funnel_case!(u8x16, u8, u8, 8, 16);
+    | ---------------------------------- in this macro invocation
+    |
+    = note: this error originates in the macro `funnel_case` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: Unknown SIMD intrinsic simd_funnel_shr
+   --> src/main.rs:78:44
+    |
+ 78 |                         unsafe { transmute(simd_funnel_shr(va, vb, vs)) };
+    |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+112 | funnel_case!(u8x16, u8, u8, 8, 16);
+    | ---------------------------------- in this macro invocation
+    |
+    = note: this error originates in the macro `funnel_case` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: could not compile `simd_funnel_repro` (bin "simd_funnel_repro") due to 2 previous errors
+exit status: 101
+
+### 3. AFTER - patch.diff applied to src/intrinsics/simd.rs, ./y.sh build, same command
+$ cd repro && RUSTFLAGS="-Ctarget-cpu=native" ../clone/dist/cargo-clif run
+ok    u8x16 (256 lane results)
+ok    i8x32 (512 lane results)
+ok    u16x8 (256 lane results)
+ok    i16x32 (1024 lane results)
+ok    u32x4 (256 lane results)
+ok    i32x16 (1024 lane results)
+ok    u64x2 (256 lane results)
+ok    i64x8 (1024 lane results)
+ok    u128x2 (512 lane results)
+ok    i128x4 (1024 lane results)
+ok    _mm512_rol_epi32::<0>
+ok    _mm512_rol_epi32::<1>
+ok    _mm512_rol_epi32::<16>
+ok    _mm512_rol_epi32::<31>
+ok    _mm512_ror_epi32::<0>
+ok    _mm512_ror_epi32::<1>
+ok    _mm512_ror_epi32::<31>
+ok    _mm512_rolv_epi32
+ok    _mm512_rorv_epi32
+ok    _mm512_shldi_epi32::<0>
+ok    _mm512_shldi_epi32::<1>
+ok    _mm512_shldi_epi32::<31>
+ok    _mm512_shrdi_epi32::<0>
+ok    _mm512_shrdi_epi32::<1>
+ok    _mm512_shrdi_epi32::<31>
+ok    _mm512_shldv_epi32
+failures: 0
+exit status: 0

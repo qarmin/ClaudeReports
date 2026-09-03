@@ -1,0 +1,43 @@
+Captured 2026-09-02, in a scratch git worktree of this repo at base_commit
+4cd7da5f9a5d9509b34ac0a766424ccdae706d33, reusing the main tree's already-built
+build/libgccjit + build/build_sysroot.
+
+=== Plain run (pristine backend, no instrumentation) ===
+
+$ ./target/debug/gather_repro
+g4 = [-1, 20, 30, -1]
+g8 = [1, 0, 3, 0, 5, 0, 7, 0]
+g16 = [1, -1, -1, 4, -1, -1, 7, -1, -1, 10, -1, -1, 13, -1, -1, 16]
+out4 = [100, 0, 300, 0]
+ok
+EXIT: 0
+
+All assertions passed for in_len = 4, 8, and 16 gather cases (boundary-disabled mask, alternating
+mask, and a mod-3 mask) and a 4-lane scatter case.
+
+=== Same binary, rebuilt against a backend patched with candidate 005's ubsan_hook.patch
+    (CG_GCCJIT_UBSAN=1, forwarding -fsanitize=undefined into libgccjit; linked with
+    -Clinker=gcc -Clink-arg=-fsanitize=undefined -Clink-arg=-lubsan, matching candidate 005's own
+    setup exactly) ===
+
+$ CG_GCCJIT_UBSAN=1 CG_RUSTFLAGS="-Clinker=gcc -Clink-arg=-fsanitize=undefined -Clink-arg=-lubsan" \
+  CHANNEL=release ./y.sh cargo build --manifest-path repro/Cargo.toml
+   Compiling gather_repro v0.1.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.96s
+
+$ ./target/debug/gather_repro
+g4 = [-1, 20, 30, -1]
+g8 = [1, 0, 3, 0, 5, 0, 7, 0]
+g16 = [1, -1, -1, 4, -1, -1, 7, -1, -1, 10, -1, -1, 13, -1, -1, 16]
+out4 = [100, 0, 300, 0]
+ok
+EXIT: 0
+
+Zero UBSan diagnostics printed (compare to candidate 005's own output.txt, which shows ~40
+"runtime error: load of address ... with insufficient space" diagnostics from the same
+instrumentation hook when the actually-vulnerable shuffle_vector call site - simd_shuffle's, not
+gather()'s - is driven with a mask longer than 2x the input vector length). This is the expected
+result given the structural argument in RESULT.md: gather()'s shuffle_vector call always has
+vec_num_units == mask_num_units == in_len, so the vec_num_units < mask_num_units branch (the only
+branch that can reach the OOB-reading loop) is never entered, regardless of in_len (tried 4, 8, 16)
+or mask pattern (boundary-disabled, alternating, mod-3).

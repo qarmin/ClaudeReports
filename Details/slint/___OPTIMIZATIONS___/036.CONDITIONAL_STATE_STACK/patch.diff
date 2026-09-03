@@ -1,0 +1,59 @@
+diff --git a/internal/core/item_rendering.rs b/internal/core/item_rendering.rs
+index 7d181113c..651cb181e 100644
+--- a/internal/core/item_rendering.rs
++++ b/internal/core/item_rendering.rs
+@@ -199,25 +199,33 @@ pub fn render_item_children(
+ ) {
+     let mut actual_visitor =
+         |component: &ItemTreeRc, index: u32, item: Pin<ItemRef>| -> VisitChildrenResult {
+-            renderer.save_state();
+             let item_rc = ItemRc::new(component.clone(), index);
+ 
+             let (do_draw, item_geometry) = renderer.filter_item(&item_rc, window_adapter);
+ 
+-            let item_origin = item_geometry.origin;
+-            renderer.translate(item_origin.to_vector());
+-
+             // Don't render items that are clipped, with the exception of the Clip or Flickable since
+             // they themselves clip their content.
+-            let render_result = if do_draw
++            let renders = do_draw
+                || item.as_ref().clips_children()
+                // HACK, the geometry of the box shadow does not include the shadow, because when the shadow is the root for repeated elements it would translate the children
+                || ItemRef::downcast_pin::<BoxShadow>(item).is_some()
+                // Transform and Opacity should also be applied regardless if the item itself is clipped or not
+                || ItemRef::downcast_pin::<Transform>(item).is_some()
+                || ItemRef::downcast_pin::<Opacity>(item).is_some()
+-               || ItemRef::downcast_pin::<Layer>(item).is_some()
+-            {
++               || ItemRef::downcast_pin::<Layer>(item).is_some();
++
++            // The state stack is only needed by what an item's own render() does
++            // (combine_clip/apply_opacity) - children balance their own state through their own
++            // save/restore. So an item whose render() doesn't run only needs its translation
++            // undone before returning, not a full save/restore pair.
++            if renders {
++                renderer.save_state();
++            }
++
++            let item_origin = item_geometry.origin;
++            renderer.translate(item_origin.to_vector());
++
++            let render_result = if renders {
+                 item.as_ref().render(
+                     &mut (renderer as &mut dyn ItemRenderer),
+                     &item_rc,
+@@ -230,7 +238,12 @@ pub fn render_item_children(
+             if matches!(render_result, RenderingResult::ContinueRenderingChildren) {
+                 render_item_children(renderer, component, index as isize, window_adapter);
+             }
+-            renderer.restore_state();
++
++            if renders {
++                renderer.restore_state();
++            } else {
++                renderer.translate(-item_origin.to_vector());
++            }
+             VisitChildrenResult::CONTINUE
+         };
+     vtable::new_vref!(let mut actual_visitor : VRefMut<ItemVisitorVTable> for ItemVisitor = &mut actual_visitor);

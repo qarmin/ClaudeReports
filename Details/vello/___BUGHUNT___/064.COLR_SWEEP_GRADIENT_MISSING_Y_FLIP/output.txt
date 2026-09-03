@@ -1,0 +1,55 @@
+Real captured output from `repro/` (candidate 064), run via `just test` (clone -> reproduce-before ->
+apply -> reproduce-after) against a fresh clone of linebender/vello at commit
+7516831426fb70f36d62c521c5477f6a7265b36a. Repeated 3/3 in both the before and after states
+(identical every run - deterministic).
+
+=== `just reproduce-before` (pristine clone, bug present) ===
+
+     Running `target/release/colr_sweep_gradient_missing_y_flip_repro`
+vello_cpu (reference) vs classic vello (GPU): 15447 / 40000 pixels differ by more than 10/255 in some channel (max_diff=255); images written to reference_vello_cpu.png / classic_vello_gpu.png
+REPRODUCED - classic vello's real GPU render of a COLRv1 sweep-gradient glyph diverges from vello_cpu's real render of the exact same glyph in 15447 of 40000 pixels (>= threshold 5000) - consistent with the missing y-flip in vello::scene::conv_brush's SweepGradient handling
+
+(repeated 2 more times, identical each time: 15447 / 40000, max_diff=255, REPRODUCED)
+
+=== `just apply` ===
+
+cd clone && git apply "<candidate_dir>/patch.diff"
+(applies cleanly, no output)
+
+=== `just reproduce-after` (patched clone, bug fixed) ===
+
+     Running `target/release/colr_sweep_gradient_missing_y_flip_repro`
+vello_cpu (reference) vs classic vello (GPU): 632 / 40000 pixels differ by more than 10/255 in some channel (max_diff=250); images written to reference_vello_cpu.png / classic_vello_gpu.png
+did not reproduce - only 632 pixels differ (< threshold 5000), consistent with ordinary anti-aliasing noise between two independent rasterizers
+
+(repeated 2 more times, identical each time: 632 / 40000, max_diff=250, "did not reproduce")
+
+=== Project test suite (`VELLO_SKIP_LFS_SNAPSHOTS=all cargo test -p vello_tests --release`), run against the same fresh clone ===
+
+Before patch:
+running 9 tests ... test result: ok. 9 passed; 0 failed; 1 ignored (tests/compare_gpu_cpu.rs)
+running 6 tests ... test result: ok. 6 passed; 0 failed; 0 ignored (tests/emoji.rs)
+running 4 tests ... test result: ok. 4 passed; 0 failed; 0 ignored (tests/hinting.rs)
+running 2 tests ... test result: ok. 2 passed; 0 failed; 0 ignored (tests/known_issues.rs)
+running 6 tests ... test result: ok. 6 passed; 0 failed; 0 ignored (tests/property.rs)
+running 10 tests ... test result: ok. 10 passed; 0 failed; 0 ignored (tests/regression.rs)
+running 8 tests ... test result: ok. 8 passed; 0 failed; 0 ignored (tests/smoke_snapshots.rs)
+running 19 tests ... test result: ok. 19 passed; 0 failed; 0 ignored (tests/snapshot_test_scenes.rs)
+Total: 64 passed; 0 failed; 1 ignored.
+
+After patch: byte-for-byte identical summary - 64 passed; 0 failed; 1 ignored. No test in this
+project's suite currently exercises a COLRv1 sweep-gradient glyph, so none of them observe this
+bug either way.
+
+=== Visual evidence ===
+
+reference_vello_cpu.png (vello_cpu, correct - both before and after, unaffected by this bug) shows
+a color wheel: cream in the top-right quadrant, a blue-to-red transition sweeping through the left
+half, dark teal in the bottom-right quadrant.
+
+classic_vello_gpu.png BEFORE the patch shows the exact vertical mirror image: dark teal top-right,
+red-to-blue transition through the left half, cream bottom-right.
+
+classic_vello_gpu.png AFTER the patch is visually identical to reference_vello_cpu.png (aside from
+~632/40000 pixels of ordinary anti-aliasing-level noise near the circle's outer edge, versus
+~15447/40000 pixels of gross mismatch before the fix).

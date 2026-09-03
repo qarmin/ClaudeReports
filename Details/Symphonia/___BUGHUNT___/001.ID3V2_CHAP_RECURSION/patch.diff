@@ -1,0 +1,76 @@
+diff --git a/symphonia-metadata/src/id3v2/frames/readers.rs b/symphonia-metadata/src/id3v2/frames/readers.rs
+index 3e7dee8..fb6aa01 100644
+--- a/symphonia-metadata/src/id3v2/frames/readers.rs
++++ b/symphonia-metadata/src/id3v2/frames/readers.rs
+@@ -7,6 +7,7 @@
+ 
+ //! Frame body readers.
+ 
++use std::cell::Cell;
+ use std::char;
+ use std::collections::HashMap;
+ use std::io;
+@@ -384,12 +385,54 @@ pub fn read_atxt_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Resu
+     Ok(FrameResult::Tag(Tag::new(raw)))
+ }
+ 
++// `CHAP` and `CTOC` frames may recursively contain further `CHAP`/`CTOC` frames as sub-frames.
++// Without a depth limit, a maliciously crafted tag can nest these frames deeply enough to
++// overflow the call stack well before the outer ID3v2 tag's declared size is exhausted (each
++// level only costs a small, fixed number of bytes). Cap the recursion depth to something no
++// legitimate chapter hierarchy would ever need.
++const MAX_CHAPTER_NESTING_DEPTH: u32 = 32;
++
++thread_local! {
++    static CHAPTER_NESTING_DEPTH: Cell<u32> = const { Cell::new(0) };
++}
++
++/// RAII guard that increments the chapter/TOC nesting depth counter on construction and
++/// decrements it on drop, so the counter is correctly restored even if reading returns early via
++/// `?`.
++struct ChapterNestingGuard;
++
++impl ChapterNestingGuard {
++    /// Enter a nested `CHAP`/`CTOC` frame, returning an error instead of a guard if the maximum
++    /// nesting depth has been exceeded.
++    fn enter() -> Result<Self> {
++        let depth = CHAPTER_NESTING_DEPTH.with(|d| {
++            let next = d.get() + 1;
++            d.set(next);
++            next
++        });
++
++        if depth > MAX_CHAPTER_NESTING_DEPTH {
++            return decode_error("id3v2: chapter/toc nesting is too deep");
++        }
++
++        Ok(ChapterNestingGuard)
++    }
++}
++
++impl Drop for ChapterNestingGuard {
++    fn drop(&mut self) {
++        CHAPTER_NESTING_DEPTH.with(|d| d.set(d.get() - 1));
++    }
++}
++
+ /// Reads a `CHAP` (chapter) frame.
+ pub fn read_chap_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Result<FrameResult> {
+     use crate::id3v2::frames::{
+         min_frame_size, read_id3v2p2_frame, read_id3v2p3_frame, read_id3v2p4_frame,
+     };
+ 
++    let _guard = ChapterNestingGuard::enter()?;
++
+     // Read the element ID.
+     let id = read_string(&mut reader, Encoding::Iso8859_1)?;
+ 
+@@ -562,6 +605,8 @@ pub fn read_ctoc_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Resu
+         min_frame_size, read_id3v2p2_frame, read_id3v2p3_frame, read_id3v2p4_frame,
+     };
+ 
++    let _guard = ChapterNestingGuard::enter()?;
++
+     // Read for the element ID.
+     let id = read_string(&mut reader, Encoding::Iso8859_1)?;
+ 

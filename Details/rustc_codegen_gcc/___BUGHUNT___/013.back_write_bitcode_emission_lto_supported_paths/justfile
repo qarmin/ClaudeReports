@@ -1,0 +1,45 @@
+# Self-contained reproduction for candidate 013 (back_write_bitcode_emission_lto_supported_paths).
+#
+# Status: Not reproducible - there is no patch.diff (nothing to fix). `probe.diff` is NOT a fix;
+# it's a diagnostic instrumentation patch that forces `lto_supported = true` in
+# src/back/write.rs, since this environment's real `gccjit::is_lto_supported()` returns `false`
+# (see RESULT.md), which would otherwise leave the three sub-branches under investigation as dead
+# code. Applying `probe.diff` and re-running is how this candidate confirms the guarded code
+# really does execute (and still doesn't crash) rather than merely being unreachable here.
+#
+# This bug (or rather, non-bug) is triggered purely through the project's own build system
+# (no dependency on any other rustc_codegen_gcc crate/API beyond the compiled backend itself), so
+# `clone` here does the full project setup (./y.sh prepare && ./y.sh build --sysroot --release)
+# rather than just checking out source.
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+# Full cycle: clone pristine, prove the unguarded/real-environment path doesn't crash, apply the
+# probe to force the guard live, prove the guarded path doesn't crash either.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && cp config.example.toml config.toml
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Real, unforced environment (lto_supported is false here) - config.emit_bc still hits
+# bitcode_needed()'s branch, just without the -flto=auto options added.
+reproduce-before:
+    ulimit -c 0 && bash repro/drive.sh
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/probe.diff"
+    cd clone && CHANNEL=release ./y.sh build --release
+
+# Same 9 runs, now with lto_supported forced true so all three -flto=auto/-flto-partition=one/
+# -ffat-lto-objects sub-branches are actually live - should still exit 0 every time (no crash).
+reproduce-after:
+    ulimit -c 0 && bash repro/drive.sh
+
+clean:
+    rm -rf clone

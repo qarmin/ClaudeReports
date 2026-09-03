@@ -1,0 +1,350 @@
+diff --git a/internal/core/partial_renderer.rs b/internal/core/partial_renderer.rs
+index 9de941ab7..577c313a4 100644
+--- a/internal/core/partial_renderer.rs
++++ b/internal/core/partial_renderer.rs
+@@ -59,7 +59,7 @@ fn release(
+         if self.cache_generation.get() == cache.generation() {
+             let index = self.cache_index.get();
+             self.cache_generation.set(0);
+-            Some(cache.remove(index).data)
++            Some(cache.remove(index))
+         } else {
+             None
+         }
+@@ -190,21 +190,141 @@ fn new<T: ItemRendererFeatures>(
+     }
+ }
+ 
++/// A slab-like arena that hands out `usize` indices for inserted values, like `slab::Slab`, but
++/// (unlike `slab::Slab`'s single contiguous, reallocating `Vec`) never moves an already-inserted
++/// value in memory for as long as it stays occupied: growth only ever appends a new,
++/// independently heap-allocated fixed-size chunk (existing chunks, and everything in them, are
++/// left untouched), and freeing a slot drops its value in place instead of moving it out.
++///
++/// This is required so `PartialRenderingCachedData`'s `PropertyTracker` fields can live inline
++/// (unboxed) below: `PropertyTracker` is `!Unpin` and self-referential (once
++/// `register_as_dependency_to_current_binding` runs, the property being read stores a raw
++/// pointer back into this tracker's own memory), so moving a live one anywhere - even
++/// transiently on the way to being dropped - would leave that external pointer dangling. See
++/// `___OPTIMIZATIONS___/071.INLINE_GEOM_TRACKER` for a build that stored the tracker inline in
++/// `slab::Slab` directly and crashed for exactly this reason.
++mod chunked_arena {
++    use alloc::boxed::Box;
++    use alloc::vec::Vec;
++
++    const CHUNK_SIZE: usize = 4096;
++
++    enum Slot<T> {
++        /// Not occupied; holds the index of the next vacant slot (or `chunks.len() * CHUNK_SIZE`,
++        /// i.e. one past the end, if this was the last slot handed out by `grow()` so far).
++        Vacant(usize),
++        Occupied(T),
++    }
++
++    pub struct ChunkedArena<T> {
++        chunks: Vec<Box<[Slot<T>; CHUNK_SIZE]>>,
++        next_free: usize,
++    }
++
++    impl<T> Default for ChunkedArena<T> {
++        fn default() -> Self {
++            Self { chunks: Vec::new(), next_free: 0 }
++        }
++    }
++
++    impl<T> ChunkedArena<T> {
++        fn slot_mut(&mut self, index: usize) -> Option<&mut Slot<T>> {
++            self.chunks.get_mut(index / CHUNK_SIZE)?.get_mut(index % CHUNK_SIZE)
++        }
++
++        fn grow(&mut self) {
++            let base = self.chunks.len() * CHUNK_SIZE;
++            self.chunks.push(Box::new(core::array::from_fn(|i| Slot::Vacant(base + i + 1))));
++        }
++
++        /// Inserts `value` and returns its index. `value` itself is moved once here, which is
++        /// only sound because a just-constructed value (e.g. a fresh `PropertyTracker`) has not
++        /// yet had any dependency registered against its address - see this module's docs.
++        pub fn insert(&mut self, value: T) -> usize {
++            if self.next_free >= self.chunks.len() * CHUNK_SIZE {
++                self.grow();
++            }
++            let index = self.next_free;
++            let next_free = match self.slot_mut(index).expect("just grown, index is in bounds") {
++                Slot::Vacant(next) => *next,
++                Slot::Occupied(_) => unreachable!("free list points at an occupied slot"),
++            };
++            *self.slot_mut(index).expect("checked above") = Slot::Occupied(value);
++            self.next_free = next_free;
++            index
++        }
++
++        pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
++            match self.slot_mut(index)? {
++                Slot::Occupied(value) => Some(value),
++                Slot::Vacant(_) => None,
++            }
++        }
++
++        /// Drops the value at `index` in place and returns the slot to the free list. Never
++        /// moves the value (unlike e.g. `slab::Slab::remove`, which hands the removed value back
++        /// by value) - required for soundness, see this module's docs.
++        #[allow(unsafe_code)]
++        pub fn free(&mut self, index: usize) {
++            let next_free = self.next_free;
++            let slot = self.slot_mut(index).expect("free() of an out-of-range index");
++            if matches!(slot, Slot::Vacant(_)) {
++                panic!("double free of a chunked_arena slot");
++            }
++            // Safety: `slot` is `Slot::Occupied(value)` (checked above). `ptr::drop_in_place`
++            // runs `value`'s destructor at its permanent address without moving it anywhere
++            // first, satisfying `Pin`'s contract for the whole time a dependency could have been
++            // registered against it. The following `ptr::write` only overwrites bytes that are
++            // now logically uninitialized since the destructor already ran - the same thing safe
++            // code does implicitly on every `*place = new_value` that drops an old value in place.
++            unsafe {
++                let ptr = slot as *mut Slot<T>;
++                if let Slot::Occupied(value) = &mut *ptr {
++                    core::ptr::drop_in_place(value as *mut T);
++                }
++                core::ptr::write(ptr, Slot::Vacant(next_free));
++            }
++            self.next_free = index;
++        }
++
++        /// Drops every occupied value in place - safe because `Vec::clear` drops its elements in
++        /// place without ever moving them (same as dropping the whole `ChunkedArena`).
++        pub fn clear(&mut self) {
++            self.chunks.clear();
++            self.next_free = 0;
++        }
++    }
++}
++
+ struct PartialRenderingCachedData {
+     /// The geometry of the item as it was previously rendered.
+     pub data: CachedItemBoundingBoxAndTransform,
+     /// The property tracker that should be used to evaluate whether the item needs to be re-rendered
+-    pub tracker: Option<core::pin::Pin<Box<PropertyTracker>>>,
++    pub tracker: Option<PropertyTracker>,
++    /// Tracks the properties read while computing `data` (geometry, clips_children,
++    /// children_transform, and whatever the item's own `bounding_rect()` reads). While this
++    /// stays clean, `compute_dirty_regions` can skip recomputing `data` for this item and its
++    /// dependency registration entirely, reusing the previous value instead.
++    pub geom_tracker: PropertyTracker,
+ }
+ impl PartialRenderingCachedData {
+-    fn new(data: CachedItemBoundingBoxAndTransform) -> Self {
+-        Self { data, tracker: None }
++    fn new(data: CachedItemBoundingBoxAndTransform, geom_tracker: PropertyTracker) -> Self {
++        Self { data, tracker: None, geom_tracker }
+     }
+ }
+ 
++/// Safety: see `chunked_arena`'s module docs - sound as long as `tracker` lives inline inside a
++/// `PartialRenderingCachedData` stored in a `PartialRendererCache`'s `ChunkedArena`, which
++/// guarantees a stable address for as long as the slot stays occupied and drops it in place
++/// (never moving it out) on removal.
++#[allow(unsafe_code)]
++fn pin_ref(tracker: &PropertyTracker) -> core::pin::Pin<&PropertyTracker> {
++    unsafe { core::pin::Pin::new_unchecked(tracker) }
++}
++
+ /// The cache that needs to be held by the Window for the partial rendering
+ struct PartialRendererCache {
+-    slab: slab::Slab<PartialRenderingCachedData>,
++    slab: chunked_arena::ChunkedArena<PartialRenderingCachedData>,
+     generation: usize,
+ }
+ 
+@@ -231,9 +351,13 @@ pub fn insert(&mut self, data: PartialRenderingCachedData) -> usize {
+         self.slab.insert(data)
+     }
+ 
+-    /// Removes the cached graphics data at the given index.
+-    pub fn remove(&mut self, index: usize) -> PartialRenderingCachedData {
+-        self.slab.remove(index)
++    /// Removes the cached graphics data at the given index, returning the (cheaply `Clone`-able)
++    /// geometry it held. Drops the rest of the entry (the trackers) in place - see
++    /// `chunked_arena::ChunkedArena::free`.
++    pub fn remove(&mut self, index: usize) -> CachedItemBoundingBoxAndTransform {
++        let data = self.slab.get_mut(index).expect("valid cache_index").data.clone();
++        self.slab.free(index);
++        data
+     }
+ 
+     /// Removes all entries from the cache and increases the cache's generation count, so
+@@ -463,16 +587,10 @@ fn adjust_transforms_for_child(
+                 };
+                 new_state.depth = state.depth + 1;
+ 
+-                let new_geom = CachedItemBoundingBoxAndTransform::new::<T>(
+-                    &item_rc,
+-                    &self.window_adapter,
+-                    my_sibling_index,
+-                );
+-
+                 let rendering_data = item.cached_rendering_data_offset();
+                 let mut cache = self.cache.borrow_mut();
+                 match rendering_data.get_entry(&mut cache) {
+-                    Some(PartialRenderingCachedData { data: cached_geom, tracker }) => {
++                    Some(PartialRenderingCachedData { data: cached_geom, tracker, geom_tracker }) => {
+                         let rendering_dirty = tracker.as_ref().is_some_and(|tr| tr.is_dirty());
+ 
+                         // Only repaint when the rank decreased. When two items swap it is
+@@ -485,6 +603,84 @@ fn adjust_transforms_for_child(
+                             my_sibling_index == u16::MAX || my_sibling_index < old_sibling_index;
+                         new_state.must_refresh_children |= sibling_index_changed;
+ 
++                        // Nothing this reads (geometry, clips_children, children_transform, and
++                        // whatever the item's own bounding_rect() reads) changed since the last
++                        // time it was dirty, so reuse `cached_geom` unchanged: `None` here takes
++                        // exactly the same path as `geometry_changed == false` below, without
++                        // having re-read or re-registered any of those properties this frame.
++                        // `register_as_dependency_to_current_binding` (called internally by
++                        // `evaluate_if_dirty` in both cases) is what keeps a future change to any
++                        // of them scheduling a redraw even while this item stays culled.
++                        let recomputed = pin_ref(geom_tracker).evaluate_if_dirty(|| {
++                            CachedItemBoundingBoxAndTransform::new::<T>(
++                                &item_rc,
++                                &self.window_adapter,
++                                my_sibling_index,
++                            )
++                        });
++                        let Some(new_geom) = recomputed else {
++                            new_state.adjust_transforms_for_child(
++                                &cached_geom.transform(),
++                                &cached_geom.transform(),
++                            );
++
++                            let moved = state.must_refresh_children
++                                || sibling_index_changed
++                                || new_state.transform_to_screen != new_state.old_transform_to_screen;
++
++                            if rendering_dirty {
++                                self.mark_dirty_rect(
++                                    cached_geom.bounding_rect(),
++                                    state.transform_to_screen,
++                                    &state.clipped,
++                                );
++                                if moved {
++                                    self.mark_dirty_rect(
++                                        cached_geom.bounding_rect(),
++                                        state.old_transform_to_screen,
++                                        &state.clipped,
++                                    );
++                                }
++                            } else if moved {
++                                self.mark_dirty_rect(
++                                    cached_geom.bounding_rect(),
++                                    state.old_transform_to_screen,
++                                    &state.clipped,
++                                );
++                                self.mark_dirty_rect(
++                                    cached_geom.bounding_rect(),
++                                    state.transform_to_screen,
++                                    &state.clipped,
++                                );
++                            } else if let Some(tr) = &tracker {
++                                pin_ref(tr).register_as_dependency_to_current_binding();
++                            }
++
++                            if let CachedItemBoundingBoxAndTransform::ClipItem { geometry, .. } =
++                                &cached_geom
++                            {
++                                new_state.clipped = new_state
++                                    .clipped
++                                    .intersection(
++                                        &state
++                                            .transform_to_screen
++                                            .outer_transformed_rect(&geometry.cast())
++                                            .cast()
++                                            .union(
++                                                &state
++                                                    .old_transform_to_screen
++                                                    .outer_transformed_rect(&geometry.cast())
++                                                    .cast(),
++                                            ),
++                                    )
++                                    .unwrap_or_default();
++                                if new_state.clipped.is_empty() {
++                                    return ItemVisitorResult::SkipChildren;
++                                }
++                            }
++                            return ItemVisitorResult::Continue(new_state);
++                        };
++
+                         let geometry_changed = !cached_geom.same_geometry(&new_geom);
+                         if ItemRef::downcast_pin::<Clip>(item).is_some()
+                             || ItemRef::downcast_pin::<Opacity>(item).is_some()
+@@ -557,7 +753,7 @@ fn adjust_transforms_for_child(
+                                     &state.clipped,
+                                 );
+                             } else if let Some(tr) = &tracker {
+-                                tr.as_ref().register_as_dependency_to_current_binding();
++                                pin_ref(tr).register_as_dependency_to_current_binding();
+                             }
+ 
+                             if let CachedItemBoundingBoxAndTransform::ClipItem {
+@@ -587,9 +783,34 @@ fn adjust_transforms_for_child(
+                         }
+                     }
+                     None => {
+-                        let cache_entry = PartialRenderingCachedData::new(new_geom.clone());
+-                        rendering_data.cache_index.set(cache.insert(cache_entry));
++                        // Insert a fresh, not-yet-evaluated placeholder first so `geom_tracker`
++                        // reaches its final, permanently-stable address (inside the arena) before
++                        // anything registers a dependency against it - see `chunked_arena`'s
++                        // module docs for why this order matters for inline (unboxed) storage.
++                        let placeholder = crate::properties::evaluate_no_tracking(|| {
++                            CachedItemBoundingBoxAndTransform::new::<T>(
++                                &item_rc,
++                                &self.window_adapter,
++                                my_sibling_index,
++                            )
++                        });
++                        let index = cache.insert(PartialRenderingCachedData::new(
++                            placeholder,
++                            PropertyTracker::default(),
++                        ));
++                        rendering_data.cache_index.set(index);
+                         rendering_data.cache_generation.set(cache.generation());
++                        let entry = cache.get_mut(index).expect("just inserted");
++                        let new_geom = pin_ref(&entry.geom_tracker)
++                            .evaluate_if_dirty(|| {
++                                CachedItemBoundingBoxAndTransform::new::<T>(
++                                    &item_rc,
++                                    &self.window_adapter,
++                                    my_sibling_index,
++                                )
++                            })
++                            .expect("a freshly created PropertyTracker is always dirty");
++                        entry.data = new_geom.clone();
+ 
+                         new_state.adjust_transforms_for_child(
+                             &new_geom.transform(),
+@@ -665,11 +886,8 @@ fn do_rendering(
+     ) {
+         let mut cache = cache.borrow_mut();
+         if let Some(entry) = rendering_data.get_entry(&mut cache) {
+-            entry
+-                .tracker
+-                .get_or_insert_with(|| Box::pin(PropertyTracker::default()))
+-                .as_ref()
+-                .evaluate(render_fn);
++            let tracker = entry.tracker.get_or_insert_with(PropertyTracker::default);
++            pin_ref(tracker).evaluate(render_fn);
+         } else {
+             // This item was created between the computation of the dirty region and the actual rendering.
+             // Register a dependency to the geometry since this wasn't done before
+@@ -722,7 +940,9 @@ fn filter_item(
+         let rendering_data = item.cached_rendering_data_offset();
+         let mut cache = self.cache.borrow_mut();
+         let item_bounding_rect = match rendering_data.get_entry(&mut cache) {
+-            Some(PartialRenderingCachedData { data, tracker: _ }) => *data.bounding_rect(),
++            Some(PartialRenderingCachedData { data, tracker: _, geom_tracker: _ }) => {
++                *data.bounding_rect()
++            }
+             None => {
+                 // This item was created between the computation of the dirty region and the actual rendering.
+                 item_rc.bounding_rect(&item_geometry, window_adapter)

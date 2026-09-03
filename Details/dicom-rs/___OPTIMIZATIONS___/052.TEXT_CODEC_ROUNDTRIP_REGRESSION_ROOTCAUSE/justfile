@@ -1,0 +1,72 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate re-applies candidate 005.TEXT_CODEC_BULK_SINGLE_BYTE's exact patch (patch.diff
+# here is a byte-for-byte copy of that candidate's own patch.diff - no new source change was made,
+# this candidate only re-measures) to try to root-cause a second, liver.dcm-specific regression
+# that candidate 005's own task description claimed on the combined `roundtrip` mode. See
+# RESULT.md: that regression did not reproduce in this session (every comparison tried - both
+# allocators, both run orders, 1x/5x iteration counts, pinned/unpinned, and the `roundtrip`/
+# `write-only`/`parse` modes individually - showed the patch consistently FASTER on liver.dcm, not
+# slower).
+#
+# Like candidates 005/027/050, this candidate's harness (bench_pipeline) is untracked in the main
+# dicom-rs repo, so this justfile is self-contained only *given the whole ___OPTIMIZATIONS___
+# folder kept together* - it copies the canonical harness copy from ../harness/bench_pipeline
+# into ./clone as part of `clone:` (see SKILL.md's "Bench harnesses: grow a few, don't multiply").
+#
+# `just test` clones dicom-rs at the pinned commit, builds baseline + patched bench binaries
+# (default glibc allocator), and runs a correctness check plus single-core/multi-core timing on
+# liver.dcm's `roundtrip`, `write-only`, and `parse` modes. Requires `taskset` (util-linux) on
+# PATH; a `mimalloc`-allocator re-check (as done in this session) needs
+# `cargo build --release --features diag-mimalloc` instead of the plain build below.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    rm -rf clone/___bench_pipeline
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___bench_pipeline
+    sed -i 's#\.\./\.\./\.\./#../#g' clone/___bench_pipeline/Cargo.toml
+
+build-baseline:
+    cd clone/___bench_pipeline && cargo build --release
+    cp clone/___bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___bench_pipeline && cargo build --release
+    cp clone/___bench_pipeline/target/release/bench ./bin_patched
+
+testfile := "clone/___bench_pipeline/testdata/liver.dcm"
+
+bench:
+    @echo "=== correctness: same checksum baseline vs patched? (dump, sha256) ==="
+    ./bin_baseline dump {{testfile}} > /tmp/052_liver_base.dump
+    ./bin_patched dump {{testfile}} > /tmp/052_liver_patch.dump
+    sha256sum /tmp/052_liver_base.dump /tmp/052_liver_patch.dump
+    @echo "=== single-core timing (taskset -c 0), baseline then patched - roundtrip ==="
+    taskset -c 0 ./bin_baseline roundtrip {{testfile}} 400
+    taskset -c 0 ./bin_patched roundtrip {{testfile}} 400
+    @echo "=== multi-core (unpinned) timing, baseline then patched - roundtrip/write-only/parse ==="
+    ./bin_baseline roundtrip {{testfile}} 400
+    ./bin_patched roundtrip {{testfile}} 400
+    ./bin_baseline write-only {{testfile}} 500
+    ./bin_patched write-only {{testfile}} 500
+    ./bin_baseline parse {{testfile}} 500
+    ./bin_patched parse {{testfile}} 500
+    @echo "NOTE: see RESULT.md - across 8 comparisons this session (both allocators, both run"
+    @echo "orders, 1x/5x iters, pinned/unpinned, 3 modes), patched measured consistently FASTER,"
+    @echo "contradicting this candidate's own task premise of an 11-15% liver.dcm regression."
+    @echo "Use tools/paired.sh (../../tools/paired.sh) for a real paired comparison rather than"
+    @echo "drawing a conclusion from a single invocation of this recipe."
+
+clean:
+    rm -rf clone bin_baseline bin_patched

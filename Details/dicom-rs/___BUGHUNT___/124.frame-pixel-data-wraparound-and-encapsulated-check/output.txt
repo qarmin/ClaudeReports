@@ -1,0 +1,116 @@
+==================================================================
+PART 1: native-branch 64-bit genuine wraparound-into-bounds demo
+==================================================================
+
+Worked values (see repro/src/wraparound.rs for the derivation):
+  rows=32768 columns=20000 samples_per_pixel=7 bits_allocated=2 (bytes_per_sample=1)
+  frame_size = 4587520000
+  frame = 4021071096  (< u32::MAX)
+  true_product = frame * frame_size = 18446744074321920000 = 1*2**64 + 612368384
+  predicted wrapped start = 612368384, end = 5199888384
+
+--- BEFORE (pristine clone of df2b9e42, i.e. pre-117-fix code) ---
+
+$ cargo build --release   (repro/, dicom-encoding pointed at ../clone/encoding)
+   Compiling dicom-encoding v0.10.0 (/home/rafal/Projekty/Obce/dicom-rs/.claude/worktrees/agent-a6692cc8269b3b53e/___BUGHUNT___/124.frame-pixel-data-wraparound-and-encapsulated-check/clone/encoding)
+   Compiling repro v0.1.0 (/home/rafal/Projekty/Obce/dicom-rs/.claude/worktrees/agent-a6692cc8269b3b53e/___BUGHUNT___/124.frame-pixel-data-wraparound-and-encapsulated-check/repro)
+    Finished `release` profile [optimized] target(s) in 0.54s
+
+$ ./target/release/wraparound   (run 1/3)
+Allocating a 5199888384 byte (~4.84 GiB) zero-filled buffer (lazily committed on Linux, only the marker bytes are actually touched)...
+Calling frame_pixel_data(4021071096) on a MONOCHROME2/2-bit/32768x20000/samples_per_pixel=7 object (frame_size=4587520000, each attribute individually legal for its own VR) - predicted wrapped start=612368384, end=5199888384...
+UNEXPECTED: no panic, returned Some(4587520000 bytes); first 8 bytes match the planted marker at the predicted wrapped offset 612368384: true
+WRAPAROUND CONFIRMED: frame_pixel_data(4021071096) silently returned bytes read from usize-wrapped offset 612368384..5199888384 instead of rejecting the request - exactly the release-mode 'silent frame corruption' the original issue alleged, now proven with a genuine 64-bit wraparound (true product = 2**64 + 612368384).
+exit code: 1
+
+$ ./target/release/wraparound   (run 2/3)
+Allocating a 5199888384 byte (~4.84 GiB) zero-filled buffer (lazily committed on Linux, only the marker bytes are actually touched)...
+Calling frame_pixel_data(4021071096) on a MONOCHROME2/2-bit/32768x20000/samples_per_pixel=7 object (frame_size=4587520000, each attribute individually legal for its own VR) - predicted wrapped start=612368384, end=5199888384...
+UNEXPECTED: no panic, returned Some(4587520000 bytes); first 8 bytes match the planted marker at the predicted wrapped offset 612368384: true
+WRAPAROUND CONFIRMED: frame_pixel_data(4021071096) silently returned bytes read from usize-wrapped offset 612368384..5199888384 instead of rejecting the request - exactly the release-mode 'silent frame corruption' the original issue alleged, now proven with a genuine 64-bit wraparound (true product = 2**64 + 612368384).
+exit code: 1
+
+$ ./target/release/wraparound   (run 3/3)
+Allocating a 5199888384 byte (~4.84 GiB) zero-filled buffer (lazily committed on Linux, only the marker bytes are actually touched)...
+Calling frame_pixel_data(4021071096) on a MONOCHROME2/2-bit/32768x20000/samples_per_pixel=7 object (frame_size=4587520000, each attribute individually legal for its own VR) - predicted wrapped start=612368384, end=5199888384...
+UNEXPECTED: no panic, returned Some(4587520000 bytes); first 8 bytes match the planted marker at the predicted wrapped offset 612368384: true
+WRAPAROUND CONFIRMED: frame_pixel_data(4021071096) silently returned bytes read from usize-wrapped offset 612368384..5199888384 instead of rejecting the request - exactly the release-mode 'silent frame corruption' the original issue alleged, now proven with a genuine 64-bit wraparound (true product = 2**64 + 612368384).
+exit code: 1
+
+--- Same BEFORE code, debug build (overflow-checks on by default) - corroborates candidate 117 panics on the exact same input ---
+
+$ cargo build   (dev profile)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+
+$ ./target/debug/wraparound
+Allocating a 5199888384 byte (~4.84 GiB) zero-filled buffer (lazily committed on Linux, only the marker bytes are actually touched)...
+Calling frame_pixel_data(4021071096) on a MONOCHROME2/2-bit/32768x20000/samples_per_pixel=7 object (frame_size=4587520000, each attribute individually legal for its own VR) - predicted wrapped start=612368384, end=5199888384...
+
+thread 'main' (30695) panicked at /home/rafal/Projekty/Obce/dicom-rs/.claude/worktrees/agent-a6692cc8269b3b53e/___BUGHUNT___/124.frame-pixel-data-wraparound-and-encapsulated-check/clone/encoding/src/adapters.rs:272:33:
+attempt to multiply with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+PANICKED: attempt to multiply with overflow
+exit code: 3
+
+--- AFTER (117-fix.patch applied to the same clone) - release build ---
+
+$ git apply ../117-fix.patch
+ encoding/src/adapters.rs | 30 ++++++++++++++++++++++--------
+ 1 file changed, 22 insertions(+), 8 deletions(-)
+
+$ cargo build --release
+   Compiling dicom-encoding v0.10.0 (/home/rafal/Projekty/Obce/dicom-rs/.claude/worktrees/agent-a6692cc8269b3b53e/___BUGHUNT___/124.frame-pixel-data-wraparound-and-encapsulated-check/clone/encoding)
+   Compiling repro v0.1.0 (/home/rafal/Projekty/Obce/dicom-rs/.claude/worktrees/agent-a6692cc8269b3b53e/___BUGHUNT___/124.frame-pixel-data-wraparound-and-encapsulated-check/repro)
+    Finished `release` profile [optimized] target(s) in 0.51s
+
+$ ./target/release/wraparound   (run 1/3)
+Allocating a 5199888384 byte (~4.84 GiB) zero-filled buffer (lazily committed on Linux, only the marker bytes are actually touched)...
+Calling frame_pixel_data(4021071096) on a MONOCHROME2/2-bit/32768x20000/samples_per_pixel=7 object (frame_size=4587520000, each attribute individually legal for its own VR) - predicted wrapped start=612368384, end=5199888384...
+OK: no panic, returned None (the overflowing computation was rejected gracefully instead of wrapping into a small, spuriously in-bounds offset).
+exit code: 0
+
+$ ./target/release/wraparound   (run 2/3)
+Allocating a 5199888384 byte (~4.84 GiB) zero-filled buffer (lazily committed on Linux, only the marker bytes are actually touched)...
+Calling frame_pixel_data(4021071096) on a MONOCHROME2/2-bit/32768x20000/samples_per_pixel=7 object (frame_size=4587520000, each attribute individually legal for its own VR) - predicted wrapped start=612368384, end=5199888384...
+OK: no panic, returned None (the overflowing computation was rejected gracefully instead of wrapping into a small, spuriously in-bounds offset).
+exit code: 0
+
+$ ./target/release/wraparound   (run 3/3)
+Allocating a 5199888384 byte (~4.84 GiB) zero-filled buffer (lazily committed on Linux, only the marker bytes are actually touched)...
+Calling frame_pixel_data(4021071096) on a MONOCHROME2/2-bit/32768x20000/samples_per_pixel=7 object (frame_size=4587520000, each attribute individually legal for its own VR) - predicted wrapped start=612368384, end=5199888384...
+OK: no panic, returned None (the overflowing computation was rejected gracefully instead of wrapping into a small, spuriously in-bounds offset).
+exit code: 0
+
+==================================================================
+PART 2: encapsulated-branch offset-table overflow check
+==================================================================
+
+--- AFTER (117-fix.patch still applied - the encapsulated branch is untouched by that patch, run here for completeness) ---
+
+$ ./target/release/encapsulated_offset_table
+[offset_table[1] = u32::MAX] frame_pixel_data(1): Some(0 bytes) = []
+[frame near u32::MAX, tiny real offset table] frame_pixel_data(4294967294): None
+[number_of_fragments = u32::MAX, 1 real fragment] frame_pixel_data(0): None
+[offset_table[0] = u32::MAX, frame = 0] frame_pixel_data(0): Some(0 bytes) = []
+
+No panics across any case; no arithmetic overflow observed. Cases 1 and 4 both return Some(0 bytes) rather than None for a frame whose own offset-table entry can never be reached by the real accumulated fragment offsets - a minor correctness quirk (silently synthesizing an empty frame instead of signaling "no such frame"), not the arithmetic- overflow class this check was looking for. Case 3 returns None even though its first fragment WAS legitimately matched and accumulated, because the loop's own `self.fragment(idx)?` short-circuits the whole function to None as soon as a later, out-of-range fragment index is hit (a `number_of_fragments` that overstates the real fragment count discards already-accumulated data rather than returning it) - again a logic quirk, not an overflow. No multiplication of two large attacker-controlled factors occurs anywhere in this branch, and every addition here is bounded by real, actually-allocated fragment byte lengths (impossible to approach usize::MAX on a 64-bit target) or by widening a u32 into usize (lossless, cannot overflow).
+exit code: 0
+
+--- BEFORE (pristine, 117-fix.patch reverted) - same encapsulated_offset_table binary, identical result expected ---
+
+$ git checkout -- encoding/src/adapters.rs (in clone/)
+(git status clean = fix reverted)
+
+$ cargo build --release
+   Compiling dicom-encoding v0.10.0 (/home/rafal/Projekty/Obce/dicom-rs/.claude/worktrees/agent-a6692cc8269b3b53e/___BUGHUNT___/124.frame-pixel-data-wraparound-and-encapsulated-check/clone/encoding)
+   Compiling repro v0.1.0 (/home/rafal/Projekty/Obce/dicom-rs/.claude/worktrees/agent-a6692cc8269b3b53e/___BUGHUNT___/124.frame-pixel-data-wraparound-and-encapsulated-check/repro)
+    Finished `release` profile [optimized] target(s) in 0.51s
+
+$ ./target/release/encapsulated_offset_table
+[offset_table[1] = u32::MAX] frame_pixel_data(1): Some(0 bytes) = []
+[frame near u32::MAX, tiny real offset table] frame_pixel_data(4294967294): None
+[number_of_fragments = u32::MAX, 1 real fragment] frame_pixel_data(0): None
+[offset_table[0] = u32::MAX, frame = 0] frame_pixel_data(0): Some(0 bytes) = []
+
+No panics across any case; no arithmetic overflow observed. Cases 1 and 4 both return Some(0 bytes) rather than None for a frame whose own offset-table entry can never be reached by the real accumulated fragment offsets - a minor correctness quirk (silently synthesizing an empty frame instead of signaling "no such frame"), not the arithmetic- overflow class this check was looking for. Case 3 returns None even though its first fragment WAS legitimately matched and accumulated, because the loop's own `self.fragment(idx)?` short-circuits the whole function to None as soon as a later, out-of-range fragment index is hit (a `number_of_fragments` that overstates the real fragment count discards already-accumulated data rather than returning it) - again a logic quirk, not an overflow. No multiplication of two large attacker-controlled factors occurs anywhere in this branch, and every addition here is bounded by real, actually-allocated fragment byte lengths (impossible to approach usize::MAX on a 64-bit target) or by widening a u32 into usize (lossless, cannot overflow).
+exit code: 0

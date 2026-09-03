@@ -1,0 +1,54 @@
+diff --git a/internal/renderers/software/lib.rs b/internal/renderers/software/lib.rs
+index 503070b1c..34264ef18 100644
+--- a/internal/renderers/software/lib.rs
++++ b/internal/renderers/software/lib.rs
+@@ -2227,6 +2227,16 @@ struct SceneBuilder<'a, T> {
+     rotation: RotationInfo,
+     #[cfg(feature = "systemfonts")]
+     text_layout_cache: &'a sharedparley::TextLayoutCache,
++    /// Rasterized scalable sources (SVG), keyed by source and target size.
++    ///
++    /// `render_to_buffer` rasterizes an SVG on every call, and it is called from inside the draw
++    /// function - so N items sharing one source used to run resvg N times per frame. This builder
++    /// lives for exactly one frame, which bounds the cache by what was drawn rather than by a
++    /// constant nobody can size correctly.
++    scalable_source_cache: std::collections::HashMap<
++        (i_slint_core::graphics::ImageCacheKey, u32, u32),
++        SharedImageBuffer,
++    >,
+ }
+ 
+ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
+@@ -2254,6 +2264,7 @@ fn new(
+             rotation: RotationInfo { orientation, screen_size },
+             #[cfg(feature = "systemfonts")]
+             text_layout_cache,
++            scalable_source_cache: Default::default(),
+         }
+     }
+ 
+@@ -2412,7 +2423,23 @@ fn draw_image_impl(
+                 } else {
+                     target_rect.size.cast()
+                 };
+-                if let Some(buffer) = image_inner.render_to_buffer(Some(svg_target_size)) {
++                let cache_key = i_slint_core::graphics::ImageCacheKey::new(image_inner)
++                    .map(|key| (key, svg_target_size.width, svg_target_size.height));
++                let cached = cache_key
++                    .as_ref()
++                    .and_then(|key| self.scalable_source_cache.get(key))
++                    .cloned();
++                let rendered = match cached {
++                    Some(buffer) => Some(buffer),
++                    None => {
++                        let buffer = image_inner.render_to_buffer(Some(svg_target_size));
++                        if let (Some(key), Some(buffer)) = (cache_key, buffer.as_ref()) {
++                            self.scalable_source_cache.insert(key, buffer.clone());
++                        }
++                        buffer
++                    }
++                };
++                if let Some(buffer) = rendered {
+                     let buf_size = buffer.size().cast::<f32>();
+ 
+                     let alpha = if colorize.alpha() > 0 {

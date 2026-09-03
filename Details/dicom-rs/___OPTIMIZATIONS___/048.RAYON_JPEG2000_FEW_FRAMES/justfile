@@ -1,0 +1,60 @@
+# Self-contained reproduction for candidate 048.
+#
+# This candidate has NO patch.diff - it measures an existing, already-wired, off-by-default
+# Cargo feature (`dicom-transfer-syntax-registry`'s `openjpeg-sys-threads`) against its own
+# default (`openjpeg-sys`, threads off). Both variants are built from the exact same clone,
+# differing only in which `--features` flags are passed - there is nothing to `git apply`.
+#
+# Harness note (shape 3 from SKILL.md's candidate_justfile comment): `harness/bench_pipeline`
+# is untracked in the main dicom-rs repo (built by the perf-optimize skill itself across many
+# candidates - see ___OPTIMIZATIONS___/README.md). This justfile copies the one canonical copy
+# in from `../harness/bench_pipeline` - this candidate is self-contained given the whole
+# `___OPTIMIZATIONS___` folder kept together, not as a fully isolated single subfolder.
+#
+# Fill in repo_url/base_commit at the moment this candidate is created - see the main
+# candidate_justfile template for why.
+
+# NOTE: base_commit exists in upstream (Enet4/dicom-rs) but NOT in origin's fork
+# (git@github.com:qarmin/dicom-rs.git) as of this writing - verified via a bare clone check
+# during this candidate's own justfile verification. Using upstream here so `just clone`
+# actually works; if working from a different `origin` state, adjust as needed.
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline build-threaded bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+    rm -rf clone/___OPTIMIZATIONS___/harness/bench_pipeline/target
+    mkdir -p clone/___OPTIMIZATIONS___/harness/bench_pipeline/testdata
+    cp "{{justfile_directory()}}"/testdata/*.dcm clone/___OPTIMIZATIONS___/harness/bench_pipeline/testdata/
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && \
+        cargo build --release --no-default-features --features dicom-transfer-syntax-registry/openjpeg-sys
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+build-threaded:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && \
+        cargo build --release --no-default-features --features dicom-transfer-syntax-registry/openjpeg-sys-threads
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_threaded
+
+# Runs the two fixtures that best show the two regimes found in RESULT.md: a tiny 64x64
+# multi-frame image (threads regress on both single- and multi-core) and a large 1760x1760
+# single-frame image (threads regress single-core, win big multi-core).
+bench:
+    @echo "=== tiny image (64x64x10 frames): decode-frame-raw, baseline then threaded ==="
+    ./bin_baseline decode-frame-raw testdata/emri_small_jpeg_2k_lossless.dcm 30
+    ./bin_threaded decode-frame-raw testdata/emri_small_jpeg_2k_lossless.dcm 30
+    @echo "=== large image (1760x1760x1 frame): decode-frame-raw, baseline then threaded ==="
+    ./bin_baseline decode-frame-raw testdata/RG3_J2KR.dcm 8
+    ./bin_threaded decode-frame-raw testdata/RG3_J2KR.dcm 8
+    @echo "(single-core comparison needs 'taskset -c 0 ./bin_baseline ...' / 'taskset -c 0 ./bin_threaded ...' by hand - see RESULT.md for the paired single-core numbers)"
+
+clean:
+    rm -rf clone bin_baseline bin_threaded

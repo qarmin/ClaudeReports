@@ -1,0 +1,35 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff applies BOTH candidate 002's deinterleave-based SIMD rewrite of the horizontal
+# IDWT filter AND this candidate's own restructuring on top of it - 002's rewrite was never
+# applied to real source (it regressed 8.6x, see 002's own RESULT.md), so it has to be
+# re-applied here for the restructured functions to exist at all. See ../002.../RESULT.md and
+# ../013.../RESULT.md for that background.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Real JPX decode of an embedded 1241x1752 codestream, hash-checked every iteration.
+# Compare against candidate 002's own harness (identical code) run on a tree with only
+# 002's patch applied (no restructuring) to reproduce the baseline this candidate compares
+# against - see RESULT.md for how that comparison was done this session.
+bench:
+    cd bench/idwt && cargo build --release
+    ./bench/idwt/target/release/bench_idwt 300
+
+clean:
+    rm -rf clone bench/idwt/target

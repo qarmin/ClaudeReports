@@ -1,0 +1,33 @@
+# Self-contained reproduction for candidate 033 (`lofty/src/mp4/properties.rs`'s `Minf::parse`,
+# the `find_child_atom` call for `stbl` within `minf`).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/Serial-ATA/lofty-rs.git"
+base_commit := "5c6565e36d35b9ea7de049daa67acc0be0fd3b01"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug
+# (non-zero exit, "REPRODUCED" on stderr). The repro's own exit code encodes reproduced/not, so
+# this recipe doesn't propagate it as a `just` failure - `test`'s later steps must still run.
+reproduce-before:
+    cd repro && cargo run --release; true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer demonstrate the bug
+# (exit 0, "did not reproduce").
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target

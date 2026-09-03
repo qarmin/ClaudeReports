@@ -1,0 +1,57 @@
+diff --git a/internal/core/item_tree.rs b/internal/core/item_tree.rs
+index 1b354c9c7..9c5082446 100644
+--- a/internal/core/item_tree.rs
++++ b/internal/core/item_tree.rs
+@@ -493,23 +493,43 @@ fn local_to_window_transform(&self, stop_condition: impl Fn(&Self) -> bool) -> I
+ 
+     /// Returns the clip rect that applies to this item (in window coordinates) as well as the
+     /// item's (unclipped) geometry (also in window coordinates).
++    ///
++    /// Computed as a single walk from the root down to `self` (collecting ancestors on the way
++    /// up, then folding the transform in root-to-self order), rather than the previous
++    /// definition which recursively called this same function on every clipping ancestor to
++    /// obtain just its geometry - for `k` nested clipping ancestors that redundantly re-walked
++    /// overlapping sub-chains and cost O(2^k). Each ancestor's own window-space geometry is now
++    /// computed exactly once.
+     fn absolute_clip_rect_and_geometry(&self) -> (LogicalRect, LogicalRect) {
+-        let geometry = self
+-            .local_to_window_transform(|_| false)
+-            .outer_transformed_rect(&self.geometry().cast())
+-            .cast();
++        let supports_transformations = self
++            .window_adapter()
++            .is_none_or(|adapter| adapter.renderer().supports_transformations());
+ 
+-        // Intersect the clip rects contributed by all clipping ancestors.
+-        let mut clip = LogicalRect::from_size((crate::Coord::MAX, crate::Coord::MAX).into());
++        let mut ancestors = Vec::new();
+         let mut cur = self.parent_item(ParentItemTraversalMode::StopAtPopups);
+-        while let Some(ref ancestor) = cur {
++        while let Some(ancestor) = cur {
++            cur = ancestor.parent_item(ParentItemTraversalMode::StopAtPopups);
++            ancestors.push(ancestor);
++        }
++
++        let mut clip = LogicalRect::from_size((crate::Coord::MAX, crate::Coord::MAX).into());
++        let mut transform = ItemTransform::identity();
++        for ancestor in ancestors.iter().rev() {
+             if ancestor.borrow().as_ref().clips_children() {
+-                let (_, ancestor_geom) = ancestor.absolute_clip_rect_and_geometry();
++                let ancestor_geom =
++                    transform.outer_transformed_rect(&ancestor.geometry().cast()).cast();
+                 clip = ancestor_geom.intersection(&clip).unwrap_or_default();
+             }
+-            cur = ancestor.parent_item(ParentItemTraversalMode::StopAtPopups);
++            if supports_transformations
++                && let Some(children_transform) = ancestor.children_transform()
++            {
++                transform = transform.then(&children_transform);
++            }
++            transform = transform.then_translate(ancestor.geometry().origin.to_vector().cast());
+         }
+ 
++        let geometry = transform.outer_transformed_rect(&self.geometry().cast()).cast();
++
+         (clip, geometry)
+     }
+ 

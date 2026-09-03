@@ -1,0 +1,71 @@
+diff --git a/benches/imageops.rs b/benches/imageops.rs
+index d1b33ebe..83574d11 100644
+--- a/benches/imageops.rs
++++ b/benches/imageops.rs
+@@ -1,10 +1,10 @@
+ use std::{hint::black_box, time::Duration};
+ 
+-use criterion::{criterion_group, criterion_main, Criterion};
++use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+ use image::{
+     imageops::{self, FilterType},
+     math::Rect,
+-    DynamicImage, GrayImage, ImageBuffer, Rgb,
++    DynamicImage, GrayImage, ImageBuffer, Rgb, Rgba,
+ };
+ 
+ pub fn bench_imageops(c: &mut Criterion) {
+@@ -90,6 +90,33 @@ pub fn bench_imageops(c: &mut Criterion) {
+         let palette = &[(1, 2, 3); 256];
+         b.iter(|| src_gray.expand_palette(black_box(palette), black_box(None)));
+     });
++
++    // Exercises SubImageInner<&mut DynamicImage>'s get_pixel/put_pixel (candidate 062):
++    // imageops::crop_mut on a DynamicImage produces a SubImage<&mut DynamicImage>, whose
++    // GenericImage{,View} impl forwards each per-pixel call into DynamicImage's own
++    // get_pixel/put_pixel dynamic_map! dispatch (candidate 060's target).
++    let src_dyn_rgba = src_dyn.to_rgba8();
++    let src_dyn_rgba = DynamicImage::from(src_dyn_rgba);
++    let overlay_top = DynamicImage::from(ImageBuffer::from_fn(300, 300, |x, y| {
++        Rgba([x as u8, y as u8, ((x * 3 + y) % 256) as u8, 180])
++    }));
++    c.bench_function("sub image overlay on dyn image", |b| {
++        b.iter_batched(
++            || src_dyn_rgba.clone(),
++            |mut bottom| {
++                let full = Rect {
++                    x: 0,
++                    y: 0,
++                    width: bottom.width(),
++                    height: bottom.height(),
++                };
++                let mut view = imageops::crop_mut(&mut bottom, full);
++                imageops::overlay(&mut *view, &overlay_top, 100, 100);
++                bottom
++            },
++            BatchSize::LargeInput,
++        );
++    });
+ }
+ 
+ pub fn bench_resize(c: &mut Criterion) {
+diff --git a/src/images/sub_image.rs b/src/images/sub_image.rs
+index a66ab905..c6b3a2c6 100644
+--- a/src/images/sub_image.rs
++++ b/src/images/sub_image.rs
+@@ -202,6 +202,7 @@ where
+         (self.xstride, self.ystride)
+     }
+ 
++    #[inline(always)]
+     fn get_pixel(&self, x: u32, y: u32) -> Self::Pixel {
+         self.image.get_pixel(x + self.xoffset, y + self.yoffset)
+     }
+@@ -238,6 +239,7 @@ where
+     I: DerefMut,
+     I::Target: GenericImage + Sized,
+ {
++    #[inline(always)]
+     fn put_pixel(&mut self, x: u32, y: u32, pixel: Self::Pixel) {
+         self.image
+             .put_pixel(x + self.xoffset, y + self.yoffset, pixel);

@@ -1,0 +1,84 @@
+diff --git a/core/src/header.rs b/core/src/header.rs
+index 655bda57..c1636c42 100644
+--- a/core/src/header.rs
++++ b/core/src/header.rs
+@@ -264,7 +264,11 @@ impl<I, P> DataElement<I, P> {
+         match &mut self.value {
+             Value::Primitive(v) => {
+                 let byte_len = v.calculate_byte_len();
+-                self.header.len = Length(byte_len as u32);
++                // cap at the largest defined length (0xFFFF_FFFE); a byte
++                // count that happens to be exactly (or a multiple of
++                // 2^32 away from) 0xFFFF_FFFF would otherwise silently
++                // truncate to the UNDEFINED sentinel.
++                self.header.len = Length(byte_len.min(u32::MAX as usize - 1) as u32);
+             }
+             Value::Sequence(_) => {
+                 self.header.vr = VR::SQ;
+@@ -1215,11 +1219,11 @@ impl std::ops::Add<Length> for Length {
+         match (self.0, rhs.0) {
+             (UNDEFINED_LEN, _) | (_, UNDEFINED_LEN) => Length::UNDEFINED,
+             (l1, l2) => {
+-                let o = l1 + l2;
+-                debug_assert!(
+-                    o != UNDEFINED_LEN,
+-                    "integer overflow (0xFFFF_FFFF reserved for undefined length)"
+-                );
++                // use a u64 intermediate so a sum that would land exactly on
++                // 0xFFFF_FFFF (or overflow past it) can't silently wrap
++                // around to the UNDEFINED sentinel or panic on overflow;
++                // clamp to the largest defined length instead.
++                let o = (l1 as u64 + l2 as u64).min(UNDEFINED_LEN as u64 - 1) as u32;
+                 Length(o)
+             }
+         }
+@@ -1233,12 +1237,9 @@ impl std::ops::Add<i32> for Length {
+         match self.0 {
+             UNDEFINED_LEN => Length::UNDEFINED,
+             len => {
+-                let o = (len as i32 + rhs) as u32;
+-                debug_assert!(
+-                    o != UNDEFINED_LEN,
+-                    "integer overflow (0xFFFF_FFFF reserved for undefined length)"
+-                );
+-
++                // use an i64 intermediate to avoid silently wrapping to
++                // UNDEFINED_LEN (0xFFFF_FFFF) or underflowing below 0.
++                let o = (len as i64 + rhs as i64).clamp(0, UNDEFINED_LEN as i64 - 1) as u32;
+                 Length(o)
+             }
+         }
+@@ -1259,12 +1260,11 @@ impl std::ops::SubAssign<Length> for Length {
+     fn sub_assign(&mut self, rhs: Length) {
+         match (self.0, rhs.0) {
+             (UNDEFINED_LEN, _) | (_, UNDEFINED_LEN) => (), // no-op
+-            (_, l2) => {
+-                self.0 -= l2;
+-                debug_assert!(
+-                    self.0 != UNDEFINED_LEN,
+-                    "integer overflow (0xFFFF_FFFF reserved for undefined length)"
+-                );
++            (l1, l2) => {
++                // use an i64 intermediate to avoid silently wrapping to
++                // UNDEFINED_LEN (0xFFFF_FFFF) on underflow.
++                let o = (l1 as i64 - l2 as i64).clamp(0, UNDEFINED_LEN as i64 - 1) as u32;
++                self.0 = o;
+             }
+         }
+     }
+@@ -1285,11 +1285,10 @@ impl std::ops::SubAssign<i32> for Length {
+         match self.0 {
+             UNDEFINED_LEN => (), // no-op
+             len => {
+-                self.0 = (len as i32 - rhs) as u32;
+-                debug_assert!(
+-                    self.0 != UNDEFINED_LEN,
+-                    "integer overflow (0xFFFF_FFFF reserved for undefined length)"
+-                );
++                // use an i64 intermediate to avoid silently wrapping to
++                // UNDEFINED_LEN (0xFFFF_FFFF).
++                let o = (len as i64 - rhs as i64).clamp(0, UNDEFINED_LEN as i64 - 1) as u32;
++                self.0 = o;
+             }
+         }
+     }

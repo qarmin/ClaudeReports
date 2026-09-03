@@ -1,0 +1,39 @@
+diff --git a/src/builder.rs b/src/builder.rs
+index 8ec72bb..a457350 100644
+--- a/src/builder.rs
++++ b/src/builder.rs
+@@ -2175,16 +2175,25 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
+                         .to_rvalue(),
+                 );
+             }
++            // NOTE: `v2` only has `vec_num_units` elements, so only read the ones that actually
++            // exist. Any slot beyond that can never be selected by a valid shuffle mask value
++            // (mask values are always < 2 * vec_num_units, i.e. within the logical concatenation
++            // of v1 and v2), so it's padded with zero instead of reading past the end of `v2`.
++            let zero_element = self.context.new_rvalue_zero(element_type);
+             for i in 0..(mask_num_units - vec_num_units) {
+-                elements.push(
+-                    self.context
+-                        .new_vector_access(
+-                            self.location,
+-                            v2,
+-                            self.context.new_rvalue_from_int(self.int_type, i as i32),
+-                        )
+-                        .to_rvalue(),
+-                );
++                if i < vec_num_units {
++                    elements.push(
++                        self.context
++                            .new_vector_access(
++                                self.location,
++                                v2,
++                                self.context.new_rvalue_from_int(self.int_type, i as i32),
++                            )
++                            .to_rvalue(),
++                    );
++                } else {
++                    elements.push(zero_element);
++                }
+             }
+             let v1 = self.context.new_rvalue_from_vector(self.location, result_type, &elements);
+             let zero = self.context.new_rvalue_zero(element_type);

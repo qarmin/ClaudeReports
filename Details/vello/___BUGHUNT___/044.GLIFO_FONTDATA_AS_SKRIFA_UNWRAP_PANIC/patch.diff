@@ -1,0 +1,125 @@
+diff --git a/glifo/src/glyph.rs b/glifo/src/glyph.rs
+index 58ff6391..c340166b 100644
+--- a/glifo/src/glyph.rs
++++ b/glifo/src/glyph.rs
+@@ -359,7 +359,11 @@ impl<'a, 'b, Glyphs: Iterator<Item = Glyph> + Clone> GlyphRunRenderer<'a, 'b, Gl
+     /// is checked before falling through to the slow path (rasterization / path
+     /// construction).
+     fn draw_glyphs(&mut self, style: Style, renderer: &mut impl crate::GlyphRenderer) {
+-        let font_ref = self.prepared_run.font.as_skrifa();
++        // A malformed/out-of-range font (see `FontDataExt::as_skrifa`) can't be drawn at all;
++        // skip this run rather than panicking the whole render call.
++        let Some(font_ref) = self.prepared_run.font.as_skrifa() else {
++            return;
++        };
+ 
+         let outlines = font_ref.outline_glyphs();
+         let color_glyphs = font_ref.color_glyphs();
+@@ -709,8 +713,11 @@ impl<'a, 'b, Glyphs: Iterator<Item = Glyph> + Clone> GlyphRunRenderer<'a, 'b, Gl
+         offset: f32,
+         size: f32,
+         buffer: f32,
+-    ) -> impl Iterator<Item = Rect> + 'c {
+-        let font_ref = self.prepared_run.font.as_skrifa();
++    ) -> Box<dyn Iterator<Item = Rect> + 'c> {
++        // A malformed/out-of-range font (see `FontDataExt::as_skrifa`) has no decorations to draw.
++        let Some(font_ref) = self.prepared_run.font.as_skrifa() else {
++            return Box::new(core::iter::empty());
++        };
+         let outlines = font_ref.outline_glyphs();
+ 
+         let PreparedGlyphRun {
+@@ -831,7 +838,7 @@ impl<'a, 'b, Glyphs: Iterator<Item = Glyph> + Clone> GlyphRunRenderer<'a, 'b, Gl
+         let y1 = f64::from(baseline_y) + layout_y1;
+ 
+         let mut state = Some((exclusions.drain(..), x0));
+-        core::iter::from_fn(move || {
++        Box::new(core::iter::from_fn(move || {
+             let (iter, current_x) = state.as_mut()?;
+             let Some((excl_start, excl_end)) = iter.next() else {
+                 // Draw the trailing rectangle
+@@ -844,7 +851,7 @@ impl<'a, 'b, Glyphs: Iterator<Item = Glyph> + Clone> GlyphRunRenderer<'a, 'b, Gl
+             let rect = Rect::new(*current_x, y0, excl_start, y1);
+             *current_x = excl_end;
+             Some(rect)
+-        })
++        }))
+     }
+ }
+ 
+@@ -1411,12 +1418,16 @@ fn create_colr_glyph<'a>(
+ }
+ 
+ trait FontDataExt {
+-    fn as_skrifa(&self) -> FontRef<'_>;
++    /// Parses this font data via `skrifa`, or returns `None` if `data`/`index` don't describe
++    /// a valid font (e.g. `index` is out of range for a font collection, or the sfnt/ttc header
++    /// itself is malformed). `peniko::FontData` is a public struct with an unchecked constructor,
++    /// so this must be handled by every caller rather than assumed to always succeed.
++    fn as_skrifa(&self) -> Option<FontRef<'_>>;
+ }
+ 
+ impl FontDataExt for FontData {
+-    fn as_skrifa(&self) -> FontRef<'_> {
+-        FontRef::from_index(self.data.data(), self.index).unwrap()
++    fn as_skrifa(&self) -> Option<FontRef<'_>> {
++        FontRef::from_index(self.data.data(), self.index).ok()
+     }
+ }
+ 
+@@ -1599,14 +1610,18 @@ fn prepare_glyph_run<'a>(run: GlyphRun<'a>, hint_cache: &'a mut HintCache) -> Pr
+         ),
+         PreparedGlyphRunMode::AbsorbScaleHinted => {
+             let vertical_font_size = run.font_size * t_d as f32;
+-            let font_ref = run.font.as_skrifa();
+-            let outlines = font_ref.outline_glyphs();
+-            let hinting_instance = hint_cache.get(&HintKey {
+-                font_id: run.font.data.id(),
+-                font_index: run.font.index,
+-                outlines: &outlines,
+-                size: vertical_font_size,
+-                coords: run.normalized_coords,
++            // A malformed/out-of-range font (see `FontDataExt::as_skrifa`) can't be hinted;
++            // fall back to unhinted (`hinting_instance: None`) rather than panicking here -
++            // `draw_glyphs`/`decoration_spans` will skip drawing entirely for this font anyway.
++            let hinting_instance = run.font.as_skrifa().and_then(|font_ref| {
++                let outlines = font_ref.outline_glyphs();
++                hint_cache.get(&HintKey {
++                    font_id: run.font.data.id(),
++                    font_index: run.font.index,
++                    outlines: &outlines,
++                    size: vertical_font_size,
++                    coords: run.normalized_coords,
++                })
+             });
+ 
+             (
+@@ -1621,13 +1636,15 @@ fn prepare_glyph_run<'a>(run: GlyphRun<'a>, hint_cache: &'a mut HintCache) -> Pr
+         }
+     };
+ 
++    // A malformed/out-of-range font (see `FontDataExt::as_skrifa`) has no units-per-em to read;
++    // fall back to a default rather than panicking here - `draw_glyphs`/`decoration_spans` will
++    // skip drawing entirely for this font anyway, so this value is never actually used to render.
++    const FALLBACK_UNITS_PER_EM: f32 = 1000.0;
+     let upem = run
+         .font
+         .as_skrifa()
+-        .head()
+-        .map(|h| h.units_per_em())
+-        .unwrap()
+-        .into();
++        .map(|font_ref| font_ref.head().map(|h| h.units_per_em()).unwrap().into())
++        .unwrap_or(FALLBACK_UNITS_PER_EM);
+     let font_info = FontInfo {
+         id: run.font.data.id(),
+         index: run.font.index,
+@@ -2308,7 +2325,7 @@ mod tests {
+             #[cfg(feature = "png")]
+             TestGlyphKind::Bitmap => '✅',
+         };
+-        let glyph_id = font.as_skrifa().charmap().map(ch).unwrap();
++        let glyph_id = font.as_skrifa().unwrap().charmap().map(ch).unwrap();
+         Glyph {
+             id: glyph_id.to_u32(),
+             x: 0.0,

@@ -1,0 +1,234 @@
+diff --git a/benches/imageops.rs b/benches/imageops.rs
+index d1b33ebe..4c9fda04 100644
+--- a/benches/imageops.rs
++++ b/benches/imageops.rs
+@@ -1,6 +1,6 @@
+ use std::{hint::black_box, time::Duration};
+ 
+-use criterion::{criterion_group, criterion_main, Criterion};
++use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+ use image::{
+     imageops::{self, FilterType},
+     math::Rect,
+@@ -23,10 +23,30 @@ pub fn bench_imageops(c: &mut Criterion) {
+     c.bench_function("brighten", |b| {
+         b.iter(|| imageops::brighten(&src, 100));
+     });
++    c.bench_function("brighten_in_place", |b| {
++        b.iter_batched(
++            || src.clone(),
++            |mut img| {
++                imageops::brighten_in_place(&mut img, 100);
++                img
++            },
++            BatchSize::LargeInput,
++        );
++    });
+ 
+     c.bench_function("contrast", |b| {
+         b.iter(|| imageops::contrast(&src, 5.0));
+     });
++    c.bench_function("contrast_in_place", |b| {
++        b.iter_batched(
++            || src.clone(),
++            |mut img| {
++                imageops::contrast_in_place(&mut img, 5.0);
++                img
++            },
++            BatchSize::LargeInput,
++        );
++    });
+ 
+     c.bench_function("dither", |b| {
+         let luma: GrayImage = src.convert();
+@@ -53,12 +73,26 @@ pub fn bench_imageops(c: &mut Criterion) {
+     c.bench_function("huerotate", |b| {
+         b.iter(|| imageops::huerotate(&src, 180));
+     });
++    c.bench_function("huerotate_in_place", |b| {
++        b.iter_batched(
++            || src.clone(),
++            |mut img| {
++                imageops::huerotate_in_place(&mut img, 180);
++                img
++            },
++            BatchSize::LargeInput,
++        );
++    });
+ 
+     c.bench_function("invert", |b| {
+-        b.iter(|| {
+-            let mut src = src.clone();
+-            imageops::invert(&mut src)
+-        });
++        b.iter_batched(
++            || src.clone(),
++            |mut img| {
++                imageops::invert(&mut img);
++                img
++            },
++            BatchSize::LargeInput,
++        );
+     });
+ 
+     c.bench_function("rotate90", |b| {
+diff --git a/src/imageops/colorops.rs b/src/imageops/colorops.rs
+index 08b1651b..f3b29b50 100644
+--- a/src/imageops/colorops.rs
++++ b/src/imageops/colorops.rs
+@@ -69,9 +69,23 @@ where
+ /// Invert each pixel within the supplied image.
+ /// This function operates in place.
+ pub fn invert<I: GenericImage>(image: &mut I) {
+-    // TODO find a way to use pixels?
+     let (width, height) = image.dimensions();
+ 
++    // Fast path: if the image exposes a canonical, fully packed sample buffer (true for the
++    // common `ImageBuffer<P, Vec<S>>` case), invert every pixel via a flat slice pass instead of
++    // one bounds-checked get_pixel/put_pixel round trip per pixel. invert() doesn't depend on
++    // pixel position, so a flattened iteration order is safe here.
++    let pix_stride = <I::Pixel as Pixel>::CHANNEL_COUNT as usize;
++    if let Some(mut view) = image.to_pixel_view_mut() {
++        let (_, w, h) = view.flat().strides_cwh();
++        if w == pix_stride && h == width as usize * pix_stride {
++            for p in <I::Pixel as Pixel>::pixels_from_channels_mut(view.image_mut_slice()) {
++                p.invert();
++            }
++            return;
++        }
++    }
++
+     for y in 0..height {
+         for x in 0..width {
+             let mut p = image.get_pixel(x, y);
+@@ -131,7 +145,25 @@ where
+ 
+     let percent = ((100.0 + contrast) / 100.0).powi(2);
+ 
+-    // TODO find a way to use pixels?
++    // Fast path: see `invert`'s fast path above for the packed-buffer invariant this relies on.
++    let pix_stride = <I::Pixel as Pixel>::CHANNEL_COUNT as usize;
++    if let Some(mut view) = image.to_pixel_view_mut() {
++        let (_, w, h) = view.flat().strides_cwh();
++        if w == pix_stride && h == width as usize * pix_stride {
++            for p in <I::Pixel as Pixel>::pixels_from_channels_mut(view.image_mut_slice()) {
++                p.apply(|b| {
++                    let c: f32 = NumCast::from(b).unwrap();
++
++                    let d = ((c / max - 0.5) * percent + 0.5) * max;
++                    let e = clamp(d, 0.0, max);
++
++                    NumCast::from(e).unwrap()
++                });
++            }
++            return;
++        }
++    }
++
+     for y in 0..height {
+         for x in 0..width {
+             let f = image.get_pixel(x, y).map(|b| {
+@@ -194,7 +226,26 @@ where
+     let max = <I::Pixel as Pixel>::Subpixel::DEFAULT_MAX_VALUE;
+     let max: i32 = NumCast::from(max).unwrap(); // TODO what does this do for f32? clamp at 1??
+ 
+-    // TODO find a way to use pixels?
++    // Fast path: see `invert`'s fast path above for the packed-buffer invariant this relies on.
++    let pix_stride = <I::Pixel as Pixel>::CHANNEL_COUNT as usize;
++    if let Some(mut view) = image.to_pixel_view_mut() {
++        let (_, w, h) = view.flat().strides_cwh();
++        if w == pix_stride && h == width as usize * pix_stride {
++            for p in <I::Pixel as Pixel>::pixels_from_channels_mut(view.image_mut_slice()) {
++                p.apply_with_alpha(
++                    |b| {
++                        let c: i32 = NumCast::from(b).unwrap();
++                        let d = clamp(c + value, 0, max);
++
++                        NumCast::from(d).unwrap()
++                    },
++                    |alpha| alpha,
++                );
++            }
++            return;
++        }
++    }
++
+     for y in 0..height {
+         for x in 0..width {
+             let e = image.get_pixel(x, y).map_with_alpha(
+@@ -265,6 +316,41 @@ where
+         0.072 + cosv * 0.928 + sinv * 0.072,
+     ];
+ 
++    // Fast path: if the source exposes a canonical, fully packed sample buffer (true for the
++    // common `ImageBuffer<P, Vec<S>>` case) - `out` is always one, being freshly allocated by
++    // `buffer_like` - apply the matrix as a flat zip over both pixel slices instead of one
++    // bounds-checked get_pixel call per pixel. The transform is elementwise, so a flattened
++    // iteration order (source index i -> destination index i) is safe.
++    let (width, _height) = image.dimensions();
++    let pix_stride = <I::Pixel as Pixel>::CHANNEL_COUNT as usize;
++    if let Some(view) = image.to_pixel_view() {
++        let (_, w, h) = view.flat().strides_cwh();
++        if w == pix_stride && h == width as usize * pix_stride {
++            let src_pixels = P::pixels_from_channels(view.image_slice());
++            let dst_pixels = P::pixels_from_channels_mut(out.subpixels_mut());
++            for (src_pixel, outpixel) in src_pixels.iter().zip(dst_pixels.iter_mut()) {
++                let mut pixel = *src_pixel;
++                let channels = pixel.channels_mut();
++
++                let r = channels[0].to_f64().unwrap();
++                let g = channels[1].to_f64().unwrap();
++                let b = channels[2].to_f64().unwrap();
++
++                let new_r = matrix[0] * r + matrix[1] * g + matrix[2] * b;
++                let new_g = matrix[3] * r + matrix[4] * g + matrix[5] * b;
++                let new_b = matrix[6] * r + matrix[7] * g + matrix[8] * b;
++                let max = 255f64;
++
++                channels[0] = NumCast::from(clamp(new_r, 0.0, max)).unwrap();
++                channels[1] = NumCast::from(clamp(new_g, 0.0, max)).unwrap();
++                channels[2] = NumCast::from(clamp(new_b, 0.0, max)).unwrap();
++
++                *outpixel = pixel;
++            }
++            return out;
++        }
++    }
++
+     for (x, y, outpixel) in out.enumerate_pixels_mut() {
+         let mut pixel = image.get_pixel(x, y);
+         let channels = pixel.channels_mut();
+@@ -321,7 +407,32 @@ where
+         0.072 + cosv * 0.928 + sinv * 0.072,
+     ];
+ 
+-    // TODO find a way to use pixels?
++    // Fast path: see `invert`'s fast path for the packed-buffer invariant this relies on; the
++    // matrix transform is elementwise, so a flattened iteration order is safe here too.
++    let pix_stride = <I::Pixel as Pixel>::CHANNEL_COUNT as usize;
++    if let Some(mut view) = image.to_pixel_view_mut() {
++        let (_, w, h) = view.flat().strides_cwh();
++        if w == pix_stride && h == width as usize * pix_stride {
++            for pixel in <I::Pixel as Pixel>::pixels_from_channels_mut(view.image_mut_slice()) {
++                let channels = pixel.channels_mut();
++
++                let r = channels[0].to_f64().unwrap();
++                let g = channels[1].to_f64().unwrap();
++                let b = channels[2].to_f64().unwrap();
++
++                let new_r = matrix[0] * r + matrix[1] * g + matrix[2] * b;
++                let new_g = matrix[3] * r + matrix[4] * g + matrix[5] * b;
++                let new_b = matrix[6] * r + matrix[7] * g + matrix[8] * b;
++                let max = 255f64;
++
++                channels[0] = NumCast::from(clamp(new_r, 0.0, max)).unwrap();
++                channels[1] = NumCast::from(clamp(new_g, 0.0, max)).unwrap();
++                channels[2] = NumCast::from(clamp(new_b, 0.0, max)).unwrap();
++            }
++            return;
++        }
++    }
++
+     for y in 0..height {
+         for x in 0..width {
+             let mut pixel = image.get_pixel(x, y);

@@ -1,0 +1,27 @@
+diff --git a/hayro-interpret/src/font/type3.rs b/hayro-interpret/src/font/type3.rs
+index e502a0c2..ed57ccaa 100644
+--- a/hayro-interpret/src/font/type3.rs
++++ b/hayro-interpret/src/font/type3.rs
+@@ -1,5 +1,5 @@
+ use crate::CMapResolverFn;
+-use crate::context::Context;
++use crate::context::{Context, MAX_NESTED_INTERPRETATION_DEPTH};
+ use crate::device::Device;
+ use crate::font::glyph_simulator::GlyphSimulator;
+ use crate::font::true_type::{Width, read_encoding, read_widths};
+@@ -110,6 +110,15 @@ impl<'a> Type3<'a> {
+         paint: &Paint<'a>,
+         device: &mut impl Device<'a>,
+     ) -> Option<()> {
++        // A glyph proc can show text using the same (or a cyclic chain of) Type3 font again, and
++        // unlike `x_object::form::FormXObject::draw`, nothing else on this path calls
++        // `Context::begin_nested_interpretation` to bound that - without this check, such a
++        // self-referential Type3 font recurses through `interpret` -> `draw_glyph_run` ->
++        // `Type3::render_glyph` -> `interpret` with no depth limit, overflowing the stack.
++        if glyph.nesting_depth >= MAX_NESTED_INTERPRETATION_DEPTH {
++            return None;
++        }
++
+         let mut state = glyph.state.clone();
+         let root_transform =
+             transform * glyph_transform * self.matrix * Affine::scale(UNITS_PER_EM as f64);

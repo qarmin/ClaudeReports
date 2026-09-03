@@ -1,0 +1,123 @@
+Build: `cargo +stable build --release` for repro/ (this Cargo.toml forces
+`overflow-checks = true` / `debug-assertions = true` in the release profile, since the underlying
+bug is a u16 multiply overflow that a plain `--release` build would otherwise silently wrap
+instead of panic on - see RESULT.md's CONFIRMATION.md-section-2 note). jpeg-decoder path
+dependency pointed at a tree with base_commit eb2d7c0 plus
+___OPTIMIZATIONS___/009.gated_row_batching/patch.diff applied (the "under review" state).
+
+=== BEFORE this candidate's patch.diff (009's patch alone applied) - 3 runs ===
+
+$ ./target/release/repro
+thread 'main' (156527) panicked at /tmp/bughunt_worktrees/014/src/decoder.rs:936:32:
+attempt to multiply with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - decode() panicked: attempt to multiply with overflow
+exit: 1
+
+$ ./target/release/repro
+thread 'main' (156528) panicked at /tmp/bughunt_worktrees/014/src/decoder.rs:936:32:
+attempt to multiply with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - decode() panicked: attempt to multiply with overflow
+exit: 1
+
+$ ./target/release/repro
+thread 'main' (156529) panicked at /tmp/bughunt_worktrees/014/src/decoder.rs:936:32:
+attempt to multiply with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - decode() panicked: attempt to multiply with overflow
+exit: 1
+
+=== Full backtrace (one representative run, RUST_BACKTRACE=full) ===
+
+thread 'main' (145213) panicked at src/decoder.rs:936:32:
+attempt to multiply with overflow
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::panicking::panic_const::panic_const_mul_overflow
+   3: <jpeg_decoder::decoder::Decoder<core::io::cursor::Cursor<alloc::vec::Vec<u8>>>>::decode_scan
+             at ./src/decoder.rs:936:32
+   4: <jpeg_decoder::decoder::Decoder<core::io::cursor::Cursor<alloc::vec::Vec<u8>>>>::decode_internal::{closure#2}
+             at ./src/decoder.rs:462:38
+   5: <jpeg_decoder::worker::WorkerScope>::get_or_init_worker::<...>
+             at ./src/worker/mod.rs:84:9
+   6: <jpeg_decoder::decoder::Decoder<...>>::decode_internal
+             at ./src/decoder.rs:461:30
+   7: <jpeg_decoder::decoder::Decoder<...>>::decode::{closure#0}
+             at ./src/decoder.rs:294:41
+   8: <jpeg_decoder::worker::WorkerScope>::with::<...>
+             at ./src/worker/mod.rs:61:9
+   9: <jpeg_decoder::decoder::Decoder<...>>::decode
+             at ./src/decoder.rs:294:9
+  10: single_test::main
+             at ./examples/single_test.rs:7:19
+
+=== AFTER this candidate's patch.diff applied on top - 3 runs ===
+
+$ ./target/release/repro
+did not reproduce - decode() returned a clean error: invalid JPEG format: failed to decode huffman code
+exit: 0
+
+$ ./target/release/repro
+did not reproduce - decode() returned a clean error: invalid JPEG format: failed to decode huffman code
+exit: 0
+
+$ ./target/release/repro
+did not reproduce - decode() returned a clean error: invalid JPEG format: failed to decode huffman code
+exit: 0
+
+This matches the pristine baseline's own output for this same file exactly:
+`ERR:invalid JPEG format: failed to decode huffman code` (see baseline diffcheck sweep referenced
+in RESULT.md).
+
+=== Same panic confirmed for 016.hybrid_gated_periodic_flush's patch too (identical dry-run code) ===
+
+$ (016's patch.diff applied instead of 009's, examples/single_test built fresh)
+thread 'main' (155526) panicked at src/decoder.rs:930:32:
+attempt to multiply with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+$ (candidate's patch.diff applied on top of 016's patch)
+ERR invalid JPEG format: failed to decode huffman code
+
+=== Full project test suite, debug profile (`cargo +stable test`), base_commit eb2d7c0 ===
+
+Pristine (no optimization patch applied):
+  running 5 tests / test result: ok. 5 passed; 0 failed
+  running 12 tests / test result: ok. 12 passed; 0 failed   (includes crashtest::crashtest)
+  running 1 test  / test result: ok. 1 passed; 0 failed     (rayon.rs)
+  running 1 test  / test result: ok. 1 passed; 0 failed     (rayon-0.rs)
+  running 1 test  / test result: ok. 1 passed; 0 failed     (rayon-1.rs)
+  running 1 test  / test result: ok. 1 passed; 0 failed     (rayon-2.rs)
+  running 2 tests / test result: ok. 2 passed; 0 failed     (doctests)
+  TOTAL: 23 passed, 0 failed
+
+With 009.gated_row_batching/patch.diff applied, no fix:
+  running 5 tests / test result: ok. 5 passed; 0 failed
+  running 12 tests:
+    test crashtest::crashtest ... FAILED
+    thread 'crashtest::crashtest' (152580) panicked at src/decoder.rs:936:32:
+    attempt to multiply with overflow
+    test result: FAILED. 11 passed; 1 failed
+  (remaining test binaries not reached in this run's output - cargo test's first failing target
+  is sufficient to demonstrate the regression; see RESULT.md)
+
+With 009.gated_row_batching/patch.diff + this candidate's patch.diff (the fix):
+  running 5 tests / test result: ok. 5 passed; 0 failed
+  running 12 tests / test result: ok. 12 passed; 0 failed   (crashtest::crashtest passes again)
+  running 1 test  / test result: ok. 1 passed; 0 failed
+  running 1 test  / test result: ok. 1 passed; 0 failed
+  running 1 test  / test result: ok. 1 passed; 0 failed
+  running 1 test  / test result: ok. 1 passed; 0 failed
+  running 2 tests / test result: ok. 2 passed; 0 failed
+  TOTAL: 23 passed, 0 failed - identical to pristine baseline.
+
+=== Differential sweep across 323 files (tests/crashtest/images + fuzz-afl/in + tests/reftest/images), debug build, decode() via catch_unwind ===
+
+Pristine baseline: 0 panics across all 323 files.
+009.gated_row_batching/patch.diff alone: 1 new panic (max_size.jpg: PANIC:attempt to multiply
+  with overflow, was ERR:invalid JPEG format: failed to decode huffman code in baseline) - all
+  other 322 files unchanged.
+016.hybrid_gated_periodic_flush/patch.diff alone: identical single divergence on max_size.jpg.
+009 (or 016) + this candidate's patch.diff: 0 diffs vs pristine baseline across all 323 files.

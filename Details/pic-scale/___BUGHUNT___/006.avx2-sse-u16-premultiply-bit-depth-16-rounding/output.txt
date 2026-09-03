@@ -1,0 +1,61 @@
+Real captured output of ./repro/compare.sh, run against a fresh clone of
+https://github.com/awxkee/pic-scale.git at commit 7eec7cfde2aed58a1606a48b5c7bd084536f9624.
+
+compare.sh builds repro_simd (pic-scale default features: avx+sse+neon+rdm+threading) and
+repro_scalar (pic-scale default-features = false, features = ["threading"], i.e. no avx/sse/neon
+code compiled in at all) from the *identical* main.rs, then runs both against seeds 1..50 through
+the identical public API call: Scaler::new(ResamplingFunction::Bilinear)
+.plan_rgba_resampling16(512x1 -> 256x1, premultiply_alpha=true, bit_depth=16).resample(...), and
+diffs their u16 output arrays.
+
+=== BEFORE the fix (patch.diff not yet applied, pristine base_commit) ===
+
+seed 1: 1 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 2: 1 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 6: 1 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 7: 2 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 9: 2 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 14: 1 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 19: 1 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 22: 2 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 25: 1 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 29: 1 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 33: 3 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 34: 3 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 35: 1 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 37: 3 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 40: 1 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 44: 1 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 45: 1 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 46: 1 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+seed 48: 1 of 1024 output u16 values differ between SIMD-enabled and scalar-only builds
+REPRODUCED - 19/50 seeds disagree between the SIMD-enabled and scalar-only builds
+(script exit code: 1)
+
+Example single mismatch (seed 1, downscaled pixel index 174, R channel):
+  SIMD-enabled (repro_simd) output value:   49887
+  scalar-only  (repro_scalar) output value: 49889
+Both processes are deterministic and repeatable: re-running seed 1 three times against each build
+individually produced byte-identical output every time on both sides; only the two builds disagree
+with each other, never with themselves.
+
+=== AFTER applying patch.diff to the clone ===
+
+did not reproduce - SIMD-enabled and scalar-only builds agree bit-for-bit across all 50 seeds
+(script exit code: 0)
+
+=== Earlier root-cause probe: the "obvious" fix (just re-routing bit_depth==16 to the existing
+Avx2PremultiplyExecutorDefault<16>/Sse41PremultiplyExecutorDefault<16>, without also fixing their
+_mm256_madd_epi16/_mm_madd_epi16 signed-16-bit-lane multiply) was tried first and made things far
+worse - captured here because it is exactly the "obvious" fix a future reader might reach for and
+should not: ===
+
+total mismatched u16 values across 200 random-seed runs (full 0..=65535 color/alpha range,
+512->256 Bilinear downscale) with ONLY the dispatch re-route applied (madd_epi16 left unchanged):
+  76510 mismatches out of 100 * 1024 = 102400 compared values (~75% of pixels wrong)
+example corrupted values observed: 65535 (clamped/saturated) where the scalar reference produced
+19317, 16636, 18586, ... - consistent with _mm256_madd_epi16/_mm_madd_epi16 interpreting the
+zero-extended 16-bit lane as signed, wrapping negative for source/alpha values >= 32768, and that
+negative i32 sum then being misinterpreted by the logical right-shift in
+_mm256_div_by_65535_epi32/_mm_div_by_65535_epi32 as a huge unsigned value that saturates on
+packus_epi32.

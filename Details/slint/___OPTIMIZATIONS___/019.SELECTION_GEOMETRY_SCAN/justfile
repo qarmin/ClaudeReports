@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+#
+# Note: `perf_test/` is untracked in the main repo's git history, so fully reproducing the
+# bench below additionally needs perf_test/ copied in manually next to the clone (it is not
+# fetched by `just clone`).
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "fb263fd4b78225112c71c374386fd986b9a54e44"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Patches internal/core/textlayout/sharedparley/selection.rs to binary-search the first
+# visible paragraph in selection_geometry, mirroring the draw loop's existing binary search.
+# Needs perf_test/ copied in manually (see note above) to run the actual comparison below.
+bench:
+    cd clone && cargo build --release --example perf_test
+    ./clone/target/release/examples/perf_test --bench --mode text --count 400000 --select-all
+
+clean:
+    rm -rf clone

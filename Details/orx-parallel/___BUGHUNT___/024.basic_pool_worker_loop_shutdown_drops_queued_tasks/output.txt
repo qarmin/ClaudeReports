@@ -1,0 +1,79 @@
+=== cargo test --test bughunt_024_basic_pool_stress (debug build, first run - Pool::basic(4), 4 tasks concurrently, 200 iterations x 64 tasks, 1 dropper thread per iteration) ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.99s
+     Running tests/bughunt_024_basic_pool_stress.rs (target/debug/deps/bughunt_024_basic_pool_stress-94ffb2125d537026)
+
+running 1 test
+test stress_concurrent_clone_drop_during_active_scope ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.84s
+
+
+=== cargo test --test bughunt_024_basic_pool_stress --release (release build, first run - same params as above) ===
+    Finished `release` profile [optimized] target(s) in 0.28s
+     Running tests/bughunt_024_basic_pool_stress.rs (target/release/deps/bughunt_024_basic_pool_stress-9dfdb0021e5bf754)
+
+running 1 test
+test stress_concurrent_clone_drop_during_active_scope ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.84s
+
+
+=== cargo test --test bughunt_024_basic_pool_stress --release (release build, heavier params - Pool::basic(1) single worker thread to widen the queue's non-empty window, 4 concurrent dropper threads per iteration, 500 iterations x 256 tasks) ===
+    Finished `release` profile [optimized] target(s) in 0.33s
+     Running tests/bughunt_024_basic_pool_stress.rs (target/release/deps/bughunt_024_basic_pool_stress-9dfdb0021e5bf754)
+
+running 1 test
+test stress_concurrent_clone_drop_during_active_scope ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.93s
+
+
+=== cargo test --test bughunt_024_basic_pool_stress (debug build, same heavier params, repeat run) ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running tests/bughunt_024_basic_pool_stress.rs (target/debug/deps/bughunt_024_basic_pool_stress-94ffb2125d537026)
+
+running 1 test
+test stress_concurrent_clone_drop_during_active_scope ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.95s
+
+
+=== cargo test --test bughunt_024_basic_pool_stress --release (release build, heavier params, repeat run) ===
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/bughunt_024_basic_pool_stress.rs (target/release/deps/bughunt_024_basic_pool_stress-9dfdb0021e5bf754)
+
+running 1 test
+test stress_concurrent_clone_drop_during_active_scope ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.94s
+
+--- Note: every run above reports "ok" - the stress test's own internal assertion
+(`assert_eq!(counter.load(...), expected_task_count)`, checked every iteration: 200+500+500 = 1200
+total iterations across the runs above) never fired, meaning no task was ever silently dropped
+without running, and the 60-second outer watchdog timeout was never hit (no hang), across every
+run. See "Compile-time evidence" below for the earlier attempts that failed to even compile a
+version of this scenario with no external reference tying the pool's borrow to a concrete
+lifetime shorter than 'static - included here because they are a form of real, captured evidence
+for why the suspected drop-during-active-scope interleaving cannot be constructed through the
+crate's real public API.
+
+=== Compile-time evidence: an under-constrained closure forces `'env` to `'static` (rustc rejects it outright rather than allowing a shorter-than-owner-lifetime borrow) ===
+error[E0597]: `pool` does not live long enough
+  --> tests/bughunt_024_basic_pool_stress.rs:46:17
+   |
+44 |                   let mut pool = pool;
+   |                       -------- binding `pool` declared here
+45 |                   let counter2 = Arc::clone(&counter);
+46 |                   pool.scoped_computation(move |s| {
+   |                   -^^^
+   |                   |
+   |  _________________borrowed value does not live long enough
+   | |
+47 | |                     for _ in 0..64 {
+...
+   | |__________________- argument requires that `pool` is borrowed for `'static`
+...
+   |               - `pool` dropped here while still borrowed
+
+=== cargo test --lib (baseline, unmodified tree - no fix was applied, no patch.diff produced) ===
+test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.25s (also independently re-run at 17.34s on a separate pass)

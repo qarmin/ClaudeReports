@@ -1,0 +1,16 @@
+# Optimization wins (Strong win / Small win only)
+
+Filtered from `SUMMARY.md` - see that file for every candidate tried (including null results and
+regressions) and the full methodology behind each number.
+
+| # | Impact | Candidate | Fix lines | Result |
+|---|---|---|---|---|
+| 001 | Strong win | `CubicOffset::eval_err`, the hottest function in stroking and offsetting, re-derives the Bézier basis polynomials on every call at 8 sample points that never change - and rebuilds the derivative curve to do it. The basis is a compile-time constant. | +53/-4 | -9% on both `offset` and `stroke`, paired 9/9 |
+| 004 | Strong win | `CubicOffset::draw_arc` calls `atan2` on two unit tangents and then takes the sine and cosine of half the result - three libm calls to recover what the cross and dot products already are. Half-angle identities replace them with two square roots. | +12/-4 | -6.4% to -7.5% on `offset`/`stroke`, -3.7% on `dash` |
+| 006 | Strong win | `flatten`, the most-called entry point in kurbo, calls four functions in another module that carry no `#[inline]`, so release builds never inline them across codegen units - the profiler showed one of them as a standalone symbol at 40.7% of the scene. | +7/-0 | -15% single-core, -27% multi-core on flattening, bit-exact |
+| 014 | Strong win | A crate-wide sweep of candidate 006's pattern - small hot functions left outlined because release builds never inline across codegen-unit boundaries - adding plain `#[inline]` hints to the qualifying set, skipping the large bodies candidate 007 showed regress. | +17/-0 | -21% on path simplification, -9% on bounding boxes, -5% on SVG parsing, bit-exact |
+| 016 | Strong win | `fit_to_cubic` turns tangent vectors into angles with three `atan2` calls, and every consumer immediately undoes them with `sin_cos` or a rotation matrix - so the angles never need to exist, since the cross and dot products against the chord already are the sine/cosine pairs. | +37/-15 | -7% to -9% on curve fitting; not bit-exact, see RESULT.md |
+| 017 | Strong win | `SvgLexer::get_number` scans a number's bytes to find its extent and then re-traverses the same digits with `core`'s general decimal-to-float parser. Accumulating the mantissa during the single scan finishes short decimals with one exactly-rounded table multiply instead. | +55/-9 | -14.5% on SVG parsing, -40% to -46% at real-world decimal precision, bit-exact |
+| 002 | Small win | `CubicBez::to_quads`, the path `flatten` takes for every curve, rebuilds the cubic's derivative on every segment and re-evaluates the parameter each segment shares with the next. Both are already known from the previous step. | +27/-2 | -3% to -6.5% on flattening, bit-exact |
+| 009 | Small win | `PathSeg` never overrides `bounding_box`, so the trait default re-does the Line/Quad/Cubic match on every point evaluation inside its own loop. Dispatching once per segment instead hoists it out. | +14/-0 | -6% to -10% on bounding-box computation, bit-exact |
+| 019 | Small win | `fit_to_bezpath` allocates a fresh output path per call and grows it by doubling - the entire allocation traffic of curve fitting. An `_into` variant writing into a caller-owned buffer, as `offset_cubic` already does, lets callers reuse one. | +34/-9 | -36% allocations in kurbo's own path simplifier (zero for an adopting caller), bit-exact |

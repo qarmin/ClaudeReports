@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, prove the bug exists (debug build panic), prove the release-mode
+# logic corruption too, apply the fix, prove both are gone.
+test: clone reproduce-before-debug reproduce-before-release apply reproduce-after-debug reproduce-after-release
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Debug build (default `dev` profile - `overflow-checks = true`): the repro panics with
+# "attempt to multiply with overflow" and exits 42 with a "PANIC: ..." message. The leading `-`
+# tolerates that nonzero exit so the dependency chain continues.
+reproduce-before-debug:
+    -cd repro && cargo run
+
+# Release build (`overflow-checks = false`): the same overflow silently wraps instead of
+# panicking, but row 1 of the rendered output ends up wrongly showing row 0's leftover red
+# pixels - the repro detects this and exits 42 with a "WRONG OUTPUT: ..." message.
+reproduce-before-release:
+    -cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - both builds print "OK: ..." and exit 0.
+reproduce-after-debug:
+    cd repro && cargo run
+
+reproduce-after-release:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

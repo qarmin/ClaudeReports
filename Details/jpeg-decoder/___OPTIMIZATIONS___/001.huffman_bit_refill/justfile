@@ -1,0 +1,40 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate is a measurement-only investigation - no patch.diff exists (see RESULT.md:
+# the obvious "batch multiple bytes per refill call" change to src/huffman.rs is unsafe to make
+# generically for an arbitrary io::Read source, so none was applied). `just test` therefore only
+# clones the project at base_commit, copies in the canonical bench_decode harness, builds it, and
+# runs it against the two workload images to reproduce the baseline numbers quoted in RESULT.md -
+# there is no "patched" binary to build or pair against.
+#
+# This candidate's harness copy-in makes it self-contained given the whole ___OPTIMIZATIONS___
+# folder (harness_dir below), not fully standalone with zero other setup - see
+# ___OPTIMIZATIONS___/README.md's "Instrumentation added for this workspace" / SKILL.md's
+# "Bench harnesses: grow a few, don't multiply" for why the harness lives there instead of being
+# duplicated into every candidate folder.
+
+repo_url := "https://github.com/image-rs/jpeg-decoder.git"
+base_commit := "eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c"
+harness_dir := "../harness/bench_decode"
+
+test: clone build bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/bench_decode
+    sed -i 's#path = "\.\./\.\./\.\."#path = ".."#' clone/bench_decode/Cargo.toml
+
+build:
+    cd clone/bench_decode && cargo +stable build --release
+    cp clone/bench_decode/target/release/bench_decode ./bin_baseline
+
+bench:
+    @echo "=== baseline: benches/large_image.jpg, 30 iters ==="
+    ./bin_baseline clone/benches/large_image.jpg 30
+    @echo "=== baseline: tests/reftest/images/lossless/1/jpeg_lossless_sel1-rgb.jpg, 30 iters ==="
+    ./bin_baseline clone/tests/reftest/images/lossless/1/jpeg_lossless_sel1-rgb.jpg 30
+
+clean:
+    rm -rf clone bin_baseline

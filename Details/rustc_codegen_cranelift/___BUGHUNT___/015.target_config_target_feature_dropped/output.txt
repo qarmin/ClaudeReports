@@ -1,0 +1,108 @@
+########## UNPATCHED (main tree dist/)
+=================== cfgpath   RUSTFLAGS=-Ctarget-feature=+avx2,+fma,+bmi2,+popcnt
+--- LLVM (cargo) ---
+kernel=avx2
+fused_multiply_add=true
+avx=true avx2=true fma=true bmi2=true popcnt=true
+--- cg_clif (cargo-clif) ---
+kernel=baseline
+fused_multiply_add=false
+avx=false avx2=false fma=false bmi2=false popcnt=false
+>>> cfgpath: DIFFERENT
+=================== abi   RUSTFLAGS=-Ctarget-feature=+avx
+--- LLVM (cargo) ---
+extern "C" __m256 by value: [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5]
+--- cg_clif (cargo-clif) ---
+COMPILE FAILED
+error: this function call uses SIMD vector type `std::arch::x86_64::__m256` which (with the chosen ABI) requires the `avx` target feature, which is not enabled in the caller
+  --> src/bin/abi.rs:22:17
+   |
+22 |         let r = c_add(a, b);
+   |                 ^^^^^^^^^^^ function called here
+   |
+>>> abi: DIFFERENT
+
+RESULT: BUG PRESENT - cfg(target_feature) ignores -C target-feature, the generated
+        program takes a different branch than the LLVM-built one (exit 1)
+exit=1
+
+########## PATCHED (worktree with patch.diff applied on top of candidate 012's patch)
+=================== cfgpath   RUSTFLAGS=-Ctarget-feature=+avx2,+fma,+bmi2,+popcnt
+--- LLVM (cargo) ---
+kernel=avx2
+fused_multiply_add=true
+avx=true avx2=true fma=true bmi2=true popcnt=true
+--- cg_clif (cargo-clif) ---
+kernel=avx2
+fused_multiply_add=true
+avx=true avx2=true fma=true bmi2=true popcnt=true
+>>> cfgpath: SAME
+=================== abi   RUSTFLAGS=-Ctarget-feature=+avx
+--- LLVM (cargo) ---
+extern "C" __m256 by value: [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5]
+--- cg_clif (cargo-clif) ---
+COMPILE FAILED
+error: passing SIMD vector type `std::arch::x86_64::__m256` by value is not yet supported by rustc_codegen_cranelift: the chosen ABI requires it to be passed in a 256-bit vector register, but the widest vector type Cranelift has is 128 bits. Pass it behind a pointer or reference, or use the default Rust ABI (which passes it indirectly) instead of an explicit `extern` ABI.
+
+Instance { def: Item(DefId(0:4 ~ abi[13b0]::c_add)), args: [] } _RNvCs1GOCJp9FvZj_3abi5c_add
+error: could not compile `target_feature_dropped_repro` (bin "abi") due to 1 previous error
+>>> abi: DIFFERENT
+
+RESULT: cfg(target_feature) now matches LLVM; only the >128-bit vector ABI facet
+        remains, which is a Cranelift capability gap, not this patch's job (exit 2)
+exit=2
+
+########## full `just test` cycle from a pristine clone of 2bc05d45
+# just repo_url=https://github.com/rust-lang/rustc_codegen_cranelift.git test
+# (https instead of ssh because this sandbox has no GitHub SSH key)
+
+=================== cfgpath   RUSTFLAGS=-Ctarget-feature=+avx2,+fma,+bmi2,+popcnt
+--- LLVM (cargo) ---
+kernel=avx2
+fused_multiply_add=true
+avx=true avx2=true fma=true bmi2=true popcnt=true
+--- cg_clif (cargo-clif) ---
+kernel=baseline
+fused_multiply_add=false
+avx=false avx2=false fma=false bmi2=false popcnt=false
+>>> cfgpath: DIFFERENT
+=================== abi   RUSTFLAGS=-Ctarget-feature=+avx
+--- LLVM (cargo) ---
+extern "C" __m256 by value: [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5]
+--- cg_clif (cargo-clif) ---
+COMPILE FAILED
+error: this function call uses SIMD vector type `std::arch::x86_64::__m256` which (with the chosen ABI) requires the `avx` target feature, which is not enabled in the caller
+  --> src/bin/abi.rs:22:17
+   |
+22 |         let r = c_add(a, b);
+   |                 ^^^^^^^^^^^ function called here
+   |
+>>> abi: DIFFERENT
+
+RESULT: BUG PRESENT - cfg(target_feature) ignores -C target-feature, the generated
+        program takes a different branch than the LLVM-built one (exit 1)
+rm -f rustc-ice-*.txt repro/rustc-ice-*.txt
+--- LLVM (cargo) ---
+kernel=avx2
+fused_multiply_add=true
+avx=true avx2=true fma=true bmi2=true popcnt=true
+--- cg_clif (cargo-clif) ---
+kernel=avx2
+fused_multiply_add=true
+avx=true avx2=true fma=true bmi2=true popcnt=true
+>>> cfgpath: SAME
+=================== abi   RUSTFLAGS=-Ctarget-feature=+avx
+--- LLVM (cargo) ---
+extern "C" __m256 by value: [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5]
+--- cg_clif (cargo-clif) ---
+COMPILE FAILED
+error: passing SIMD vector type `std::arch::x86_64::__m256` by value is not yet supported by rustc_codegen_cranelift: the chosen ABI requires it to be passed in a 256-bit vector register, but the widest vector type Cranelift has is 128 bits. Pass it behind a pointer or reference, or use the default Rust ABI (which passes it indirectly) instead of an explicit `extern` ABI.
+
+Instance { def: Item(DefId(0:4 ~ abi[13b0]::c_add)), args: [] } _RNvCs1GOCJp9FvZj_3abi5c_add
+error: could not compile `target_feature_dropped_repro` (bin "abi") due to 1 previous error
+>>> abi: DIFFERENT
+
+RESULT: cfg(target_feature) now matches LLVM; only the >128-bit vector ABI facet
+        remains, which is a Cranelift capability gap, not this patch's job (exit 2)
+rm -f rustc-ice-*.txt repro/rustc-ice-*.txt
+just test exit=0

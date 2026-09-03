@@ -1,0 +1,80 @@
+diff --git a/sparse_strips/vello_common/src/tile.rs b/sparse_strips/vello_common/src/tile.rs
+index b0d09df4..930c3053 100644
+--- a/sparse_strips/vello_common/src/tile.rs
++++ b/sparse_strips/vello_common/src/tile.rs
+@@ -420,6 +420,66 @@ impl PartialOrd for Tile {
+ 
+ impl Eq for Tile {}
+ 
++/// Sort `tiles` in ascending order of [`Tile::to_bits`], using an LSD radix sort over 8-bit
++/// digits instead of a generic comparison sort.
++///
++/// `(y, x)` are individually bounded to the tile grid dimensions, but `packed_winding_line_idx`
++/// (the low 32 bits of the sort key) can span a wide range for complex scenes, so a fixed 8-bit
++/// digit is used (256-entry counting buckets, small enough to stay cache-resident) with an
++/// early-out per digit whenever every tile has a zero in that byte - skipping the corresponding
++/// pass entirely, which is common for the (y, x) bytes on small/medium viewports.
++fn radix_sort_tiles(tiles: &mut Vec<Tile>) {
++    let n = tiles.len();
++    if n < 2 {
++        return;
++    }
++
++    let mut max_key: u64 = 0;
++    for t in tiles.iter() {
++        max_key |= t.to_bits();
++    }
++
++    let mut buf: Vec<Tile> = vec![Tile::SENTINEL; n];
++    // Tracks which buffer currently holds the authoritative data.
++    let mut current_is_tiles = true;
++
++    for pass in 0..8u32 {
++        let shift = pass * 8;
++        if (max_key >> shift) & 0xFF == 0 {
++            continue;
++        }
++
++        let (src, dst): (&[Tile], &mut [Tile]) = if current_is_tiles {
++            (tiles.as_slice(), buf.as_mut_slice())
++        } else {
++            (buf.as_slice(), tiles.as_mut_slice())
++        };
++
++        let mut counts = [0u32; 256];
++        for t in src {
++            let digit = ((t.to_bits() >> shift) & 0xFF) as usize;
++            counts[digit] += 1;
++        }
++        let mut sum = 0u32;
++        for c in counts.iter_mut() {
++            let cur = *c;
++            *c = sum;
++            sum += cur;
++        }
++        for t in src {
++            let digit = ((t.to_bits() >> shift) & 0xFF) as usize;
++            dst[counts[digit] as usize] = *t;
++            counts[digit] += 1;
++        }
++
++        current_is_tiles = !current_is_tiles;
++    }
++
++    if !current_is_tiles {
++        core::mem::swap(tiles, &mut buf);
++    }
++}
++
+ /// Handles the tiling of paths.
+ #[derive(Clone, Debug)]
+ pub struct Tiles {
+@@ -478,7 +538,7 @@ impl Tiles {
+     pub fn sort_tiles(&mut self) {
+         self.sorted = true;
+         // To enable auto-vectorization.
+-        self.level.dispatch(|_| self.tile_buf.sort_unstable());
++        self.level.dispatch(|_| radix_sort_tiles(&mut self.tile_buf));
+     }
+ 
+     /// Get the tile at a certain index.

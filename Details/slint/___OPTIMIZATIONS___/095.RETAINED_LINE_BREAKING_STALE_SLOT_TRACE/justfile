@@ -1,0 +1,58 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# This is an investigation candidate (root-causing candidate 093's rendering regression), not a
+# timing candidate - `bench` here runs the diagnostic trace and the pixel comparison, not a
+# performance benchmark. `patch.diff` bundles candidates 091+092+093 plus this candidate's own
+# `eprintln!` tracing (behind a `candidate-095-trace` Cargo feature, off by default) against
+# pristine `master`, the same convention 092/093/094 used.
+#
+# repo_url/base_commit read via `git remote get-url origin` / `git rev-parse HEAD` in the main
+# project, at the moment patch.diff was captured.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the trace + pixel compare.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# perf_test is the repo's own existing harness (perf_test/), reused as-is - no standalone bench
+# crate needed for this candidate.
+bench:
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug --features software
+    cd clone/perf_test && ./../target/rdebug/perf_test --bench --mode text --count 10000 \
+        --type-text --scroll-step 0 --frames 200 2>trace.log 1>/dev/null
+    @echo "Trace written to clone/perf_test/trace.log - grep for 'n_para=10001' to isolate the"
+    @echo "big text item; see this folder's RESULT.md for what to look for."
+    cd clone/perf_test && ./../target/rdebug/perf_test --bench --mode text --count 10000 \
+        --type-text --scroll-step 0 --frames 80 --snapshot a80.ppm
+    @echo "For the A/B pixel comparison against a pre-093 (091+092-only) binary, or against"
+    @echo "experimental_partial_fix.diff, see RESULT.md's Reproduce section - it needs a second"
+    @echo "differently-patched binary built from the same clone, which this single-patch"
+    @echo "recipe does not produce on its own."
+
+# Applies experimental_partial_fix.diff on top of 093 alone (not this candidate's trace patch) -
+# for reproducing the one-line-fix measurement in RESULT.md. Run `clone` first, then this instead
+# of `apply`/`bench`.
+apply-experimental-fix-on-093:
+    cd clone && git apply "{{justfile_directory()}}/../093.RETAINED_LINE_BREAKING_2SLOT_CACHE/patch.diff"
+    cd clone && git apply "{{justfile_directory()}}/experimental_partial_fix.diff"
+
+clean:
+    rm -rf clone

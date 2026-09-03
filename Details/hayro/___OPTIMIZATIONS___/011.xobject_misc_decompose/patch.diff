@@ -1,0 +1,589 @@
+diff --git a/hayro-interpret/src/interpret/mod.rs b/hayro-interpret/src/interpret/mod.rs
+index 8bb5ae73..50b6be2b 100644
+--- a/hayro-interpret/src/interpret/mod.rs
++++ b/hayro-interpret/src/interpret/mod.rs
+@@ -221,6 +221,86 @@ fn appearance_stream<'a>(annot: &Dict<'a>) -> Option<Stream<'a>> {
+     }
+ }
+ 
++// TEMPORARY profiling instrumentation (perf-optimize investigation, candidate 007), remove
++// before merging. Classifies an operator into a coarse bucket purely by variant, without
++// touching the real match arms below (so the real dispatch logic is unmodified byte-for-byte).
++fn __bucket_for(op: &TypedInstruction<'_, '_>) -> crate::__OpBucket {
++    use crate::__OpBucket::*;
++    match op {
++        TypedInstruction::SaveState(_) | TypedInstruction::RestoreState(_) => StateStack,
++        TypedInstruction::Transform(_) => Transform,
++        TypedInstruction::RectPath(_)
++        | TypedInstruction::MoveTo(_)
++        | TypedInstruction::LineTo(_)
++        | TypedInstruction::CubicTo(_)
++        | TypedInstruction::CubicStartTo(_)
++        | TypedInstruction::CubicEndTo(_)
++        | TypedInstruction::ClosePath(_)
++        | TypedInstruction::EndPath(_)
++        | TypedInstruction::ClipNonZero(_)
++        | TypedInstruction::ClipEvenOdd(_) => PathBuild,
++        TypedInstruction::FillPathEvenOdd(_)
++        | TypedInstruction::FillPathNonZero(_)
++        | TypedInstruction::FillPathNonZeroCompatibility(_)
++        | TypedInstruction::FillAndStrokeEvenOdd(_)
++        | TypedInstruction::FillAndStrokeNonZero(_)
++        | TypedInstruction::CloseAndStrokePath(_)
++        | TypedInstruction::CloseFillAndStrokeEvenOdd(_)
++        | TypedInstruction::CloseFillAndStrokeNonZero(_)
++        | TypedInstruction::StrokePath(_) => PathDraw,
++        TypedInstruction::LineWidth(_)
++        | TypedInstruction::LineCap(_)
++        | TypedInstruction::LineJoin(_)
++        | TypedInstruction::MiterLimit(_)
++        | TypedInstruction::DashPattern(_)
++        | TypedInstruction::RenderingIntent(_)
++        | TypedInstruction::FlatnessTolerance(_)
++        | TypedInstruction::SetGraphicsState(_)
++        | TypedInstruction::ColorSpaceStroke(_)
++        | TypedInstruction::ColorSpaceNonStroke(_)
++        | TypedInstruction::StrokeColor(_)
++        | TypedInstruction::StrokeColorNamed(_)
++        | TypedInstruction::NonStrokeColor(_)
++        | TypedInstruction::NonStrokeColorNamed(_)
++        | TypedInstruction::StrokeColorDeviceGray(_)
++        | TypedInstruction::NonStrokeColorDeviceGray(_)
++        | TypedInstruction::StrokeColorDeviceRgb(_)
++        | TypedInstruction::NonStrokeColorDeviceRgb(_)
++        | TypedInstruction::StrokeColorCmyk(_)
++        | TypedInstruction::NonStrokeColorCmyk(_) => Color,
++        TypedInstruction::TextFont(_) => TextFontOp,
++        TypedInstruction::CharacterSpacing(_)
++        | TypedInstruction::WordSpacing(_)
++        | TypedInstruction::HorizontalScaling(_)
++        | TypedInstruction::TextLeading(_)
++        | TypedInstruction::TextRenderingMode(_)
++        | TypedInstruction::TextRise(_)
++        | TypedInstruction::BeginText(_)
++        | TypedInstruction::EndText(_)
++        | TypedInstruction::NextLine(_)
++        | TypedInstruction::NextLineAndSetLeading(_)
++        | TypedInstruction::SetTextMatrix(_)
++        | TypedInstruction::NextLineUsingLeading(_) => TextState,
++        TypedInstruction::ShowText(_)
++        | TypedInstruction::NextLineAndShowText(_)
++        | TypedInstruction::ShowTextWithParameters(_)
++        | TypedInstruction::ShowTexts(_) => TextShow,
++        TypedInstruction::Shading(_)
++        | TypedInstruction::XObject(_)
++        | TypedInstruction::InlineImage(_)
++        | TypedInstruction::ColorGlyph(_)
++        | TypedInstruction::ShapeGlyph(_)
++        | TypedInstruction::MarkedContentPoint(_)
++        | TypedInstruction::MarkedContentPointWithProperties(_)
++        | TypedInstruction::BeginMarkedContent(_)
++        | TypedInstruction::BeginMarkedContentWithProperties(_)
++        | TypedInstruction::EndMarkedContent(_)
++        | TypedInstruction::BeginCompatibility(_)
++        | TypedInstruction::EndCompatibility(_) => XObjectMisc,
++        _ => Other,
++    }
++}
++
+ /// Interpret the instructions from `ops` and render them into the device.
+ pub fn interpret<'a>(
+     mut ops: TypedIter<'_>,
+@@ -233,7 +313,18 @@ pub fn interpret<'a>(
+ 
+     context.save_state();
+ 
+-    while let Some(op) = ops.next() {
++    loop {
++        let __t_tok = std::time::Instant::now();
++        let next = ops.next();
++        crate::__PHASE_TOKENIZE_NS.fetch_add(
++            __t_tok.elapsed().as_nanos() as u64,
++            std::sync::atomic::Ordering::Relaxed,
++        );
++        crate::__COUNT_OPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++        let Some(op) = next else { break };
++
++        let __bucket = __bucket_for(&op);
++        let __t_op = std::time::Instant::now();
+         match op {
+             TypedInstruction::SaveState(_) => context.save_state(),
+             TypedInstruction::StrokeColorDeviceRgb(s) => {
+@@ -588,7 +679,12 @@ pub fn interpret<'a>(
+                     .map(TextStateFont::Fallback);
+                 }
+ 
+-                text::show_text_string(context, device, resources, s.0);
++                let __t_show = std::time::Instant::now();
++text::show_text_string(context, device, resources, s.0);
++                crate::__PHASE_SHOW_TEXT_NS.fetch_add(
++                    __t_show.elapsed().as_nanos() as u64,
++                    std::sync::atomic::Ordering::Relaxed,
++                );
+             }
+             TypedInstruction::ShowTexts(s) => {
+                 if context.get().text_state.font.is_none() {
+@@ -613,7 +709,12 @@ pub fn interpret<'a>(
+                         _ => {}
+                     }
+                 }
+-                text::show_glyph_run(context, device);
++                let __t_show = std::time::Instant::now();
++text::show_glyph_run(context, device);
++                crate::__PHASE_SHOW_TEXT_NS.fetch_add(
++                    __t_show.elapsed().as_nanos() as u64,
++                    std::sync::atomic::Ordering::Relaxed,
++                );
+             }
+             TypedInstruction::HorizontalScaling(h) => {
+                 context.get_mut().text_state.horizontal_scaling = h.0.as_f32();
+@@ -636,7 +737,12 @@ pub fn interpret<'a>(
+             }
+             TypedInstruction::NextLineAndShowText(n) => {
+                 text::next_line(context, 0.0, -context.get().text_state.leading as f64);
+-                text::show_text_string(context, device, resources, n.0);
++                let __t_show = std::time::Instant::now();
++text::show_text_string(context, device, resources, n.0);
++                crate::__PHASE_SHOW_TEXT_NS.fetch_add(
++                    __t_show.elapsed().as_nanos() as u64,
++                    std::sync::atomic::Ordering::Relaxed,
++                );
+             }
+             TypedInstruction::TextRenderingMode(r) => {
+                 let mode = match r.0.as_i64() {
+@@ -741,12 +847,18 @@ pub fn interpret<'a>(
+                 context.get_mut().text_state.word_space = t.0.as_f32();
+                 context.get_mut().text_state.char_space = t.1.as_f32();
+                 text::next_line(context, 0.0, -context.get().text_state.leading as f64);
+-                text::show_text_string(context, device, resources, t.2);
++                let __t_show = std::time::Instant::now();
++text::show_text_string(context, device, resources, t.2);
++                crate::__PHASE_SHOW_TEXT_NS.fetch_add(
++                    __t_show.elapsed().as_nanos() as u64,
++                    std::sync::atomic::Ordering::Relaxed,
++                );
+             }
+             _ => {
+                 warn!("failed to read an operator");
+             }
+         }
++        crate::__record_bucket(__bucket, __t_op.elapsed().as_nanos() as u64);
+     }
+ 
+     while context.num_states() > num_states {
+diff --git a/hayro-interpret/src/lib.rs b/hayro-interpret/src/lib.rs
+index ff44c42f..1f51866c 100644
+--- a/hayro-interpret/src/lib.rs
++++ b/hayro-interpret/src/lib.rs
+@@ -59,3 +59,97 @@ pub use interpret::*;
+ pub use types::*;
+ pub use util::{RectExt, TransformExt};
+ pub use x_object::soft_mask::*;
++
++// TEMPORARY profiling instrumentation (perf-optimize investigation), remove before merging.
++pub(crate) static __PHASE_SHOW_TEXT_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++/// TEMPORARY profiling hook, not part of the public API.
++#[doc(hidden)]
++pub fn __debug_show_text_ns() -> u64 {
++    __PHASE_SHOW_TEXT_NS.load(std::sync::atomic::Ordering::Relaxed)
++}
++
++pub(crate) static __PHASE_TOKENIZE_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __COUNT_OPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++/// TEMPORARY profiling hook, not part of the public API.
++#[doc(hidden)]
++pub fn __debug_tokenize_ns() -> (u64, u64) {
++    use std::sync::atomic::Ordering::Relaxed;
++    (__PHASE_TOKENIZE_NS.load(Relaxed), __COUNT_OPS.load(Relaxed))
++}
++
++// Finer-grained buckets for the "dispatch overhead not explained by tokenizing or
++// font/glyph resolution" remainder (candidate 007). Each bucket's time is the whole
++// match-arm body, INCLUDING nested calls into fill_path/stroke_path/show_text_string/
++// x_object.draw - for PathDraw and TextShow this overlaps with hayro's own
++// draw_path/draw_glyph_run/draw_image timers, subtract those (via
++// hayro::__debug_op_timings_ns) to get the "prep work before reaching the device call"
++// portion specifically.
++#[derive(Clone, Copy)]
++pub(crate) enum __OpBucket {
++    StateStack,
++    Transform,
++    PathBuild,
++    PathDraw,
++    Color,
++    TextState,
++    TextFontOp,
++    TextShow,
++    XObjectMisc,
++    Other,
++}
++pub(crate) static __PHASE_STATE_STACK_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_TRANSFORM_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_PATH_BUILD_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_PATH_DRAW_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_COLOR_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_TEXT_STATE_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_TEXT_FONT_OP_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_TEXT_SHOW_WHOLE_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_XOBJECT_MISC_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_OTHER_BUCKET_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++
++pub(crate) fn __record_bucket(bucket: __OpBucket, ns: u64) {
++    use std::sync::atomic::Ordering::Relaxed;
++    let counter = match bucket {
++        __OpBucket::StateStack => &__PHASE_STATE_STACK_NS,
++        __OpBucket::Transform => &__PHASE_TRANSFORM_NS,
++        __OpBucket::PathBuild => &__PHASE_PATH_BUILD_NS,
++        __OpBucket::PathDraw => &__PHASE_PATH_DRAW_NS,
++        __OpBucket::Color => &__PHASE_COLOR_NS,
++        __OpBucket::TextState => &__PHASE_TEXT_STATE_NS,
++        __OpBucket::TextFontOp => &__PHASE_TEXT_FONT_OP_NS,
++        __OpBucket::TextShow => &__PHASE_TEXT_SHOW_WHOLE_NS,
++        __OpBucket::XObjectMisc => &__PHASE_XOBJECT_MISC_NS,
++        __OpBucket::Other => &__PHASE_OTHER_BUCKET_NS,
++    };
++    counter.fetch_add(ns, Relaxed);
++}
++
++/// TEMPORARY profiling hook, not part of the public API.
++#[doc(hidden)]
++pub fn __debug_op_buckets_ns() -> [(&'static str, u64); 9] {
++    use std::sync::atomic::Ordering::Relaxed;
++    [
++        ("state_stack", __PHASE_STATE_STACK_NS.load(Relaxed)),
++        ("transform", __PHASE_TRANSFORM_NS.load(Relaxed)),
++        ("path_build", __PHASE_PATH_BUILD_NS.load(Relaxed)),
++        ("path_draw_whole", __PHASE_PATH_DRAW_NS.load(Relaxed)),
++        ("color", __PHASE_COLOR_NS.load(Relaxed)),
++        ("text_state", __PHASE_TEXT_STATE_NS.load(Relaxed)),
++        ("text_font_op", __PHASE_TEXT_FONT_OP_NS.load(Relaxed)),
++        ("text_show_whole", __PHASE_TEXT_SHOW_WHOLE_NS.load(Relaxed)),
++        ("xobject_misc", __PHASE_XOBJECT_MISC_NS.load(Relaxed)),
++    ]
++}
+diff --git a/hayro/examples/bench_ops_reference.rs b/hayro/examples/bench_ops_reference.rs
+new file mode 100644
+index 00000000..60c7b874
+--- /dev/null
++++ b/hayro/examples/bench_ops_reference.rs
+@@ -0,0 +1,101 @@
++// TEMPORARY: breakdown of interpret+decode time by operation type. Extended for candidate 007
++// with the whole-match-arm buckets from interpret_dispatch_instrumentation.diff (state_stack,
++// transform, path_build, path_draw_whole, color, text_state, text_font_op, text_show_whole,
++// xobject_misc) - copy back alongside that diff plus pipeline_breakdown_profiling_instrumentation.diff
++// to reproduce (see ../README.md's "Instrumentation added for this workspace"). Extended again for
++// candidate 011 with the xobject_misc-minus-draw_image line.
++use hayro::hayro_interpret::InterpreterSettings;
++use hayro::hayro_syntax::Pdf;
++use hayro::{RenderCache, RenderSettings, render};
++use std::time::Instant;
++
++fn main() {
++    let path = std::env::args().nth(1).unwrap();
++    let iterations: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(50);
++    let data = std::fs::read(&path).unwrap();
++
++    let mut total_ns = 0u64;
++    for _ in 0..iterations {
++        let t = Instant::now();
++        let pdf = Pdf::new(data.clone()).unwrap();
++        let cache = RenderCache::new();
++        let settings = InterpreterSettings::default();
++        for page in pdf.pages().iter() {
++            let pixmap = render(page, &cache, &settings, &RenderSettings { x_scale: 1.0, y_scale: 1.0, ..Default::default() });
++            std::hint::black_box(&pixmap);
++        }
++        total_ns += t.elapsed().as_nanos() as u64;
++    }
++
++    let (img_ns, path_ns, glyph_ns, other_ns) = hayro::__debug_op_timings_ns();
++    let total_ms = total_ns as f64 / 1e6;
++    let img_ms = img_ns as f64 / 1e6;
++    let path_ms = path_ns as f64 / 1e6;
++    let glyph_ms = glyph_ns as f64 / 1e6;
++    let other_ms = other_ns as f64 / 1e6;
++
++    println!("{path} ({iterations} iterations), total render() time = {total_ms:.3}ms");
++    println!("  draw_image (incl. decode/convert): {:>8.3} ms  ({:>5.1}%)", img_ms, 100.0*img_ms/total_ms);
++    println!("  draw_path/draw_rect:               {:>8.3} ms  ({:>5.1}%)", path_ms, 100.0*path_ms/total_ms);
++    println!("  draw_glyph:                        {:>8.3} ms  ({:>5.1}%)", glyph_ms, 100.0*glyph_ms/total_ms);
++    println!("  clip/group ops:                    {:>8.3} ms  ({:>5.1}%)", other_ms, 100.0*other_ms/total_ms);
++    let accounted = img_ms + path_ms + glyph_ms + other_ms;
++    println!("  (accounted: {accounted:.3}ms of {total_ms:.3}ms total; remainder is content-stream parsing/dispatch overhead)");
++
++    let (lookup_ns, miss_ns, glyph_count) = hayro::__debug_glyph_timings_ns();
++    println!(
++        "  glyph outline: {} calls, cache-hit lookup={:.3}ms, cache-miss (extract outline)={:.3}ms",
++        glyph_count / iterations as u64,
++        lookup_ns as f64 / 1e6,
++        miss_ns as f64 / 1e6
++    );
++
++    let (interpret_total_ns, final_rasterize_ns) = hayro::__debug_toplevel_timings_ns();
++    let interpret_total_ms = interpret_total_ns as f64 / 1e6;
++    let final_rasterize_ms = final_rasterize_ns as f64 / 1e6;
++    let dispatch_overhead_ms = interpret_total_ms - accounted;
++    println!();
++    println!("  interpret_page total:    {:>8.3} ms  ({:>5.1}%)  [= draw_image+path+glyph+other+dispatch]", interpret_total_ms, 100.0*interpret_total_ms/total_ms);
++    println!("    of which dispatch/dedup overhead not in any draw_* call: {:>8.3} ms  ({:>5.1}%)", dispatch_overhead_ms, 100.0*dispatch_overhead_ms/total_ms);
++    println!("  final ctx.render() (rasterize to pixels): {:>8.3} ms  ({:>5.1}%)", final_rasterize_ms, 100.0*final_rasterize_ms/total_ms);
++
++    let show_text_ns = hayro::hayro_interpret::__debug_show_text_ns();
++    let show_text_ms = show_text_ns as f64 / 1e6;
++    let pre_glyph_ms = show_text_ms - glyph_ms;
++    println!();
++    println!("  show_text_string total (incl. draw_glyph calls it makes): {:>8.3} ms  ({:>5.1}%)", show_text_ms, 100.0*show_text_ms/total_ms);
++    println!("    of which BEFORE reaching device.draw_glyph (font/glyph resolution, code decoding, advance): {:>8.3} ms  ({:>5.1}%)", pre_glyph_ms, 100.0*pre_glyph_ms/total_ms);
++
++    let (tok_ns, op_count) = hayro::hayro_interpret::__debug_tokenize_ns();
++    let tok_ms = tok_ns as f64 / 1e6;
++    println!();
++    println!("  content-stream tokenizing (ops.next(), {} ops/render): {:>8.3} ms  ({:>5.1}%)", op_count / iterations as u64, tok_ms, 100.0*tok_ms/total_ms);
++
++    println!();
++    println!("  -- candidate 007: whole-match-arm buckets (may double-count time already shown above where an arm calls into a device method or show_text_string) --");
++    let buckets = hayro::hayro_interpret::__debug_op_buckets_ns();
++    let mut bucket_total_ms = 0.0;
++    for (name, ns) in buckets {
++        let ms = ns as f64 / 1e6;
++        bucket_total_ms += ms;
++        println!("    {:<16} {:>8.3} ms  ({:>5.1}%)", name, ms, 100.0*ms/total_ms);
++    }
++    println!("    {:<16} {:>8.3} ms  ({:>5.1}%)  [sum of buckets above]", "sum", bucket_total_ms, 100.0*bucket_total_ms/total_ms);
++    println!("    path_draw bucket minus draw_path/draw_rect (path-building prep before device call): {:.3} ms ({:.1}%)",
++        (buckets[3].1 as f64 / 1e6) - path_ms, 100.0 * ((buckets[3].1 as f64 / 1e6) - path_ms) / total_ms);
++    println!("    text_show bucket minus draw_glyph (font/glyph resolution + text-state work before device call): {:.3} ms ({:.1}%)",
++        (buckets[7].1 as f64 / 1e6) - glyph_ms, 100.0 * ((buckets[7].1 as f64 / 1e6) - glyph_ms) / total_ms);
++    println!("    xobject_misc bucket minus draw_image (candidate 011: XObject/InlineImage/Shading/marked-content prep before device call, NOT net of nested Form-XObject recursion - see RESULT.md caveat): {:.3} ms ({:.1}%)",
++        (buckets[8].1 as f64 / 1e6) - img_ms, 100.0 * ((buckets[8].1 as f64 / 1e6) - img_ms) / total_ms);
++    let tagged_sum_ms = buckets[0].1 as f64 / 1e6 // state_stack
++        + buckets[1].1 as f64 / 1e6 // transform
++        + ((buckets[3].1 as f64 / 1e6) - path_ms).max(0.0) // path_draw prep only
++        + buckets[4].1 as f64 / 1e6 // color
++        + buckets[5].1 as f64 / 1e6 // text_state
++        + buckets[6].1 as f64 / 1e6 // text_font_op
++        + ((buckets[7].1 as f64 / 1e6) - glyph_ms).max(0.0) // text_show prep only
++        + ((buckets[8].1 as f64 / 1e6) - img_ms).max(0.0) // xobject_misc prep only
++        + buckets[2].1 as f64 / 1e6; // path_build
++    println!("    sum of all non-device-call bucket time (state_stack+transform+path_build+path_draw_prep+color+text_state+text_font_op+text_show_prep+xobject_misc_prep): {:.3} ms ({:.1}%) of total render, vs. dispatch_overhead_ms={:.3}ms above",
++        tagged_sum_ms, 100.0*tagged_sum_ms/total_ms, dispatch_overhead_ms);
++}
+diff --git a/hayro/src/glyph.rs b/hayro/src/glyph.rs
+index 0d4638e7..cee505c6 100644
+--- a/hayro/src/glyph.rs
++++ b/hayro/src/glyph.rs
+@@ -48,9 +48,15 @@ impl Renderer<'_> {
+     }
+ 
+     fn cached_outline(&self, glyph: &OutlineGlyph) -> Rc<BezPath> {
++        let __t = std::time::Instant::now();
+         let id = glyph.identifier().cache_key();
+ 
+         if let Some(path) = self.global.outline_cache.borrow().get(&id) {
++            crate::__PHASE_OUTLINE_LOOKUP_NS.fetch_add(
++                __t.elapsed().as_nanos() as u64,
++                std::sync::atomic::Ordering::Relaxed,
++            );
++            crate::__COUNT_GLYPHS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+             return path.clone();
+         }
+ 
+@@ -59,6 +65,11 @@ impl Renderer<'_> {
+             .outline_cache
+             .borrow_mut()
+             .insert(id, path.clone());
++        crate::__PHASE_OUTLINE_MISS_NS.fetch_add(
++            __t.elapsed().as_nanos() as u64,
++            std::sync::atomic::Ordering::Relaxed,
++        );
++        crate::__COUNT_GLYPHS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+         path
+     }
+ 
+diff --git a/hayro/src/lib.rs b/hayro/src/lib.rs
+index ba6884a0..c1d1d98a 100644
+--- a/hayro/src/lib.rs
++++ b/hayro/src/lib.rs
+@@ -133,17 +133,82 @@ impl<'r> Renderer<'r> {
+     }
+ }
+ 
++// TEMPORARY profiling instrumentation (perf-optimize investigation), remove before merging.
++pub(crate) static __PHASE_DRAW_IMAGE_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_DRAW_PATH_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_DRAW_GLYPH_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_OTHER_OPS_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_OUTLINE_LOOKUP_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_OUTLINE_MISS_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __COUNT_GLYPHS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_INTERPRET_TOTAL_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_FINAL_RASTERIZE_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++/// TEMPORARY profiling hook, not part of the public API.
++#[doc(hidden)]
++pub fn __debug_toplevel_timings_ns() -> (u64, u64) {
++    use std::sync::atomic::Ordering::Relaxed;
++    (
++        __PHASE_INTERPRET_TOTAL_NS.load(Relaxed),
++        __PHASE_FINAL_RASTERIZE_NS.load(Relaxed),
++    )
++}
++/// TEMPORARY profiling hook, not part of the public API.
++#[doc(hidden)]
++pub fn __debug_op_timings_ns() -> (u64, u64, u64, u64) {
++    use std::sync::atomic::Ordering::Relaxed;
++    (
++        __PHASE_DRAW_IMAGE_NS.load(Relaxed),
++        __PHASE_DRAW_PATH_NS.load(Relaxed),
++        __PHASE_DRAW_GLYPH_NS.load(Relaxed),
++        __PHASE_OTHER_OPS_NS.load(Relaxed),
++    )
++}
++/// TEMPORARY profiling hook, not part of the public API.
++#[doc(hidden)]
++pub fn __debug_glyph_timings_ns() -> (u64, u64, u64) {
++    use std::sync::atomic::Ordering::Relaxed;
++    (
++        __PHASE_OUTLINE_LOOKUP_NS.load(Relaxed),
++        __PHASE_OUTLINE_MISS_NS.load(Relaxed),
++        __COUNT_GLYPHS.load(Relaxed),
++    )
++}
++
+ impl<'a, 'r> Device<'a> for Renderer<'r> {
+     fn draw_image(&mut self, image: hayro_interpret::Image<'a, '_>, props: ImageDrawProps<'a>) {
++        let __t = std::time::Instant::now();
+         Self::draw_pdf_image(self, image, props);
++        __PHASE_DRAW_IMAGE_NS.fetch_add(
++            __t.elapsed().as_nanos() as u64,
++            std::sync::atomic::Ordering::Relaxed,
++        );
+     }
+ 
+     fn push_clip_path(&mut self, clip_path: &ClipPath) {
++        let __t = std::time::Instant::now();
+         Self::push_clip_path(self, clip_path);
++        __PHASE_OTHER_OPS_NS.fetch_add(
++            __t.elapsed().as_nanos() as u64,
++            std::sync::atomic::Ordering::Relaxed,
++        );
+     }
+ 
+     fn push_clip_rect(&mut self, rect: &Rect) {
++        let __t = std::time::Instant::now();
+         Self::push_clip_rect(self, rect);
++        __PHASE_OTHER_OPS_NS.fetch_add(
++            __t.elapsed().as_nanos() as u64,
++            std::sync::atomic::Ordering::Relaxed,
++        );
+     }
+ 
+     fn push_transparency_group(
+@@ -152,23 +217,48 @@ impl<'a, 'r> Device<'a> for Renderer<'r> {
+         mask: Option<SoftMask<'a>>,
+         blend_mode: BlendMode,
+     ) {
++        let __t = std::time::Instant::now();
+         Self::push_transparency_group(self, opacity, mask, blend_mode);
++        __PHASE_OTHER_OPS_NS.fetch_add(
++            __t.elapsed().as_nanos() as u64,
++            std::sync::atomic::Ordering::Relaxed,
++        );
+     }
+ 
+     fn pop_clip(&mut self) {
++        let __t = std::time::Instant::now();
+         Self::pop_clip(self);
++        __PHASE_OTHER_OPS_NS.fetch_add(
++            __t.elapsed().as_nanos() as u64,
++            std::sync::atomic::Ordering::Relaxed,
++        );
+     }
+ 
+     fn pop_transparency_group(&mut self) {
++        let __t = std::time::Instant::now();
+         Self::pop_transparency_group(self);
++        __PHASE_OTHER_OPS_NS.fetch_add(
++            __t.elapsed().as_nanos() as u64,
++            std::sync::atomic::Ordering::Relaxed,
++        );
+     }
+ 
+     fn draw_path(&mut self, path: &BezPath, props: DrawProps<'a>, draw_mode: &DrawMode) {
++        let __t = std::time::Instant::now();
+         Self::draw_path(self, path, props, draw_mode);
++        __PHASE_DRAW_PATH_NS.fetch_add(
++            __t.elapsed().as_nanos() as u64,
++            std::sync::atomic::Ordering::Relaxed,
++        );
+     }
+ 
+     fn draw_rect(&mut self, rect: &Rect, props: DrawProps<'a>, draw_mode: &DrawMode) {
++        let __t = std::time::Instant::now();
+         Self::draw_rect(self, rect, props, draw_mode);
++        __PHASE_DRAW_PATH_NS.fetch_add(
++            __t.elapsed().as_nanos() as u64,
++            std::sync::atomic::Ordering::Relaxed,
++        );
+     }
+ 
+     fn draw_glyph_run(
+@@ -177,7 +267,12 @@ impl<'a, 'r> Device<'a> for Renderer<'r> {
+         props: DrawProps<'a>,
+         draw_mode: &DrawMode,
+     ) {
++        let __t = std::time::Instant::now();
+         Self::draw_glyph_run(self, glyph_run, props, draw_mode);
++        __PHASE_DRAW_GLYPH_NS.fetch_add(
++            __t.elapsed().as_nanos() as u64,
++            std::sync::atomic::Ordering::Relaxed,
++        );
+     }
+ }
+ 
+@@ -278,7 +373,12 @@ pub fn render<'a>(
+     });
+ 
+     device.push_transparency_group(1.0, None, BlendMode::Normal);
++    let __t0 = std::time::Instant::now();
+     interpret_page(page, &mut state, &mut device);
++    __PHASE_INTERPRET_TOTAL_NS.fetch_add(
++        __t0.elapsed().as_nanos() as u64,
++        std::sync::atomic::Ordering::Relaxed,
++    );
+ 
+     device.pop_transparency_group();
+ 
+@@ -286,7 +386,12 @@ pub fn render<'a>(
+ 
+     let mut pixmap = Pixmap::new(pix_width, pix_height);
+     let mut resources = vello_cpu::Resources::default();
++    let __t1 = std::time::Instant::now();
+     device.ctx.render(&mut pixmap, &mut resources);
++    __PHASE_FINAL_RASTERIZE_NS.fetch_add(
++        __t1.elapsed().as_nanos() as u64,
++        std::sync::atomic::Ordering::Relaxed,
++    );
+ 
+     pixmap
+ }

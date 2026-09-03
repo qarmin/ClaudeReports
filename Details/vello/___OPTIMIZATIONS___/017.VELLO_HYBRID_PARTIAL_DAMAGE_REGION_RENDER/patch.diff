@@ -1,0 +1,4318 @@
+diff --git a/sparse_strips/vello_common/CHANGELOG.md b/sparse_strips/vello_common/CHANGELOG.md
+index 1b83ceeb..ff613cdc 100644
+--- a/sparse_strips/vello_common/CHANGELOG.md
++++ b/sparse_strips/vello_common/CHANGELOG.md
+@@ -12,6 +12,10 @@ Subheadings to categorize changes are `added, changed, deprecated, removed, fixe
+ 
+ This release has an [MSRV][] of 1.88.
+ 
++### Added
++
++- `ClipState::push_clip_rect`: axis-aligned rectangle clips without the path machinery — the mask comes from the rect strip renderer, and rectangles on integer device coordinates are tracked exactly (`ClipContext::is_int_rect_clip`/`effective_int_rect_set`), so consumers can clamp content to the clip instead of intersecting with a mask. Rectangle clip paths pushed through `push_clip` are detected too. ([#1786][] by [@AdrianEddy][])
++
+ ## [0.2.0][] - 2026-08-07
+ 
+ This release has an [MSRV][] of 1.88.
+@@ -224,6 +228,7 @@ This is the initial release. No changelog was kept for this release.
+ 
+ See also the [vello_cpu 0.0.1](../vello_cpu/CHANGELOG.md#001---2025-05-10) release.
+ 
++[@AdrianEddy]: https://github.com/AdrianEddy
+ [@b0nes164]: https://github.com/b0nes164
+ [@conor-93]: https://github.com/conor-93
+ [@dipeshbabu]: https://github.com/dipeshbabu
+@@ -310,6 +315,7 @@ See also the [vello_cpu 0.0.1](../vello_cpu/CHANGELOG.md#001---2025-05-10) relea
+ [#1768]: https://github.com/linebender/vello/pull/1768
+ [#1778]: https://github.com/linebender/vello/pull/1778
+ [#1779]: https://github.com/linebender/vello/pull/1779
++[#1786]: https://github.com/linebender/vello/pull/1786
+ [#1801]: https://github.com/linebender/vello/pull/1801
+ 
+ [Unreleased]: https://github.com/linebender/vello/compare/sparse-strips-v0.2.0...HEAD
+diff --git a/sparse_strips/vello_common/src/clip.rs b/sparse_strips/vello_common/src/clip.rs
+index c3050633..1f6c61bb 100644
+--- a/sparse_strips/vello_common/src/clip.rs
++++ b/sparse_strips/vello_common/src/clip.rs
+@@ -4,7 +4,9 @@
+ //! Managing clipping state.
+ 
+ use crate::geometry::RectU16;
+-use crate::kurbo::{Affine, BezPath, PathEl};
++#[cfg(not(feature = "std"))]
++use crate::kurbo::common::FloatFuncs as _;
++use crate::kurbo::{Affine, BezPath, PathEl, Point, Rect, Shape};
+ use crate::strip::Strip;
+ use crate::strip_generator::{GenerationMode, StripGenerator, StripStorage};
+ use crate::tile::Tile;
+@@ -15,6 +17,292 @@ use core::ops::Range;
+ use fearless_simd::{Level, Simd, SimdBase, dispatch, u8x16};
+ use peniko::Fill;
+ 
++/// Maximum number of rectangles tracked in an [`IntRectSet`].
++pub const MAX_INT_CLIP_RECTS: usize = 16;
++
++/// Maximum number of path elements captured for integer-rectangle clip detection: a set of
++/// [`MAX_INT_CLIP_RECTS`] rectangles needs at most `MoveTo + 5 LineTo + ClosePath` per
++/// rectangle. Longer clip paths conservatively fail detection.
++const MAX_DETECT_ELEMENTS: usize = MAX_INT_CLIP_RECTS * 7;
++
++/// Tolerance for treating a device-space clip edge as lying on an integer pixel boundary.
++///
++/// Snapping is byte-exact only if every mask byte still quantizes to 0 or 255. The worst case
++/// is a pixel touched by TWO snapped edges — a corner, a 1px-thin rect, or a 1x1 rect — where
++/// the coverage is a product: for a 1x1 rect with all four edges snapped inward by `e`, the
++/// mask byte is `floor((1 - 2e)^2 * 255 + 0.5)`, which stays 255 only for `e <= ~1/2040`
++/// (a single 1D edge would allow `e < 1/510`). `1/4096` keeps a comfortable margin below
++/// that bound; on the outside, coverage `e` quantizes to 0 whenever `e < 1/510`, which holds
++/// trivially.
++const INT_EDGE_EPSILON: f64 = 1.0 / 4096.0;
++
++/// A small inline set of pairwise-disjoint, axis-aligned integer rectangles.
++///
++/// Used to mark clip stacks whose combined effect is exactly a union of such rectangles:
++/// anti-aliasing on integer edges degenerates to a 0/255 step, so clipping content to the set
++/// is byte-identical to intersecting with the rasterized clip mask.
++#[derive(Debug, Clone, Copy)]
++pub struct IntRectSet {
++    rects: [RectU16; MAX_INT_CLIP_RECTS],
++    len: u8,
++}
++
++impl IntRectSet {
++    fn new() -> Self {
++        Self {
++            rects: [RectU16::ZERO; MAX_INT_CLIP_RECTS],
++            len: 0,
++        }
++    }
++
++    /// Add a rectangle to the set. Empty rectangles are ignored. Returns `false` when the set
++    /// is full.
++    fn push(&mut self, rect: RectU16) -> bool {
++        if rect.is_empty() {
++            return true;
++        }
++        if (self.len as usize) == MAX_INT_CLIP_RECTS {
++            return false;
++        }
++        self.rects[self.len as usize] = rect;
++        self.len += 1;
++        true
++    }
++
++    /// The rectangles in the set.
++    #[inline]
++    pub fn as_slice(&self) -> &[RectU16] {
++        &self.rects[..self.len as usize]
++    }
++
++    /// Intersect two disjoint sets. The pairwise intersections of two internally disjoint
++    /// families are themselves pairwise disjoint. Returns `None` when the result would exceed
++    /// [`MAX_INT_CLIP_RECTS`].
++    fn intersect(&self, other: &Self) -> Option<Self> {
++        let mut out = Self::new();
++        for a in self.as_slice() {
++            for b in other.as_slice() {
++                if !out.push(a.intersect(*b)) {
++                    return None;
++                }
++            }
++        }
++        Some(out)
++    }
++}
++
++/// Decompose `path` (after `transform`) into a set of pairwise-disjoint, axis-aligned
++/// rectangles whose edges lie on integer device coordinates once clamped to `viewport`.
++///
++/// Returns `None` if any subpath is not such a rectangle (curves, diagonal edges, fractional
++/// in-viewport edges), if the rectangles overlap, or if there are more than
++/// [`MAX_INT_CLIP_RECTS`] of them. Rectangles fully outside `viewport` are dropped.
++pub(crate) fn path_as_integer_rect_set(
++    path: impl IntoIterator<Item = PathEl>,
++    transform: Affine,
++    viewport: RectU16,
++) -> Option<IntRectSet> {
++    let mut set = IntRectSet::new();
++    // Corners of the subpath currently being walked: the `MoveTo` point plus up to four
++    // `LineTo` points (the last of which may return to the start).
++    let mut pts = [Point::ZERO; 6];
++    let mut n = 0_usize;
++    let mut open = false;
++
++    let finish = |pts: &[Point], set: &mut IntRectSet| -> bool {
++        match subpath_as_integer_rect(pts, viewport) {
++            SubpathRect::Rect(rect) => set.push(rect),
++            SubpathRect::Empty => true,
++            SubpathRect::NotARect => false,
++        }
++    };
++
++    for el in path {
++        match el {
++            PathEl::MoveTo(p) => {
++                if open && !finish(&pts[..n], &mut set) {
++                    return None;
++                }
++                pts[0] = transform * p;
++                n = 1;
++                open = true;
++            }
++            PathEl::LineTo(p) => {
++                if !open || n == pts.len() {
++                    return None;
++                }
++                pts[n] = transform * p;
++                n += 1;
++            }
++            PathEl::QuadTo(..) | PathEl::CurveTo(..) => return None,
++            PathEl::ClosePath => {
++                if open && !finish(&pts[..n], &mut set) {
++                    return None;
++                }
++                open = false;
++            }
++        }
++    }
++    if open && !finish(&pts[..n], &mut set) {
++        return None;
++    }
++
++    // Overlapping rectangles form a union we cannot decompose here; reject them.
++    let rects = set.as_slice();
++    for (i, a) in rects.iter().enumerate() {
++        for b in &rects[i + 1..] {
++            if !a.intersect(*b).is_empty() {
++                return None;
++            }
++        }
++    }
++
++    Some(set)
++}
++
++/// The result of interpreting one subpath as an integer rectangle.
++enum SubpathRect {
++    Rect(RectU16),
++    /// A valid rectangle that clamps to nothing inside the viewport.
++    Empty,
++    NotARect,
++}
++
++/// Interpret already-transformed subpath corners as an axis-aligned rectangle loop with
++/// integer device edges (after clamping to `viewport`).
++fn subpath_as_integer_rect(pts: &[Point], viewport: RectU16) -> SubpathRect {
++    let mut n = pts.len();
++    // Drop an explicit closing point that returns to the start.
++    if n == 5 && point_eq(pts[4], pts[0]) {
++        n = 4;
++    }
++    if n != 4 {
++        return SubpathRect::NotARect;
++    }
++
++    // Consecutive edges (including the closing one) must be axis-parallel and alternate
++    // between horizontal and vertical; this excludes diagonal "Z" quads whose corners still
++    // span a rectangle.
++    let horizontal = |a: Point, b: Point| (a.y - b.y).abs() <= INT_EDGE_EPSILON;
++    let vertical = |a: Point, b: Point| (a.x - b.x).abs() <= INT_EDGE_EPSILON;
++    let mut first_horizontal = false;
++    for i in 0..4 {
++        let (a, b) = (pts[i], pts[(i + 1) % 4]);
++        let h = horizontal(a, b);
++        let v = vertical(a, b);
++        if h == v {
++            // Degenerate (both) or diagonal (neither).
++            return SubpathRect::NotARect;
++        }
++        if i == 0 {
++            first_horizontal = h;
++        } else if h != (first_horizontal == (i % 2 == 0)) {
++            return SubpathRect::NotARect;
++        }
++    }
++
++    let x0 = pts
++        .iter()
++        .take(4)
++        .map(|p| p.x)
++        .fold(f64::INFINITY, f64::min);
++    let x1 = pts
++        .iter()
++        .take(4)
++        .map(|p| p.x)
++        .fold(f64::NEG_INFINITY, f64::max);
++    let y0 = pts
++        .iter()
++        .take(4)
++        .map(|p| p.y)
++        .fold(f64::INFINITY, f64::min);
++    let y1 = pts
++        .iter()
++        .take(4)
++        .map(|p| p.y)
++        .fold(f64::NEG_INFINITY, f64::max);
++
++    // Clamp to the viewport first: out-of-viewport edges land on the (integer) viewport
++    // bounds, so only the surviving in-viewport edges need to be integers themselves.
++    let x0 = x0.max(f64::from(viewport.x0)).min(f64::from(viewport.x1));
++    let x1 = x1.max(f64::from(viewport.x0)).min(f64::from(viewport.x1));
++    let y0 = y0.max(f64::from(viewport.y0)).min(f64::from(viewport.y1));
++    let y1 = y1.max(f64::from(viewport.y0)).min(f64::from(viewport.y1));
++
++    let snap = |v: f64| -> Option<u16> {
++        let r = v.round();
++        ((v - r).abs() <= INT_EDGE_EPSILON).then_some(r as u16)
++    };
++    let (Some(x0), Some(x1), Some(y0), Some(y1)) = (snap(x0), snap(x1), snap(y0), snap(y1)) else {
++        return SubpathRect::NotARect;
++    };
++
++    let rect = RectU16::new(x0, y0, x1, y1);
++    if rect.is_empty() {
++        SubpathRect::Empty
++    } else {
++        SubpathRect::Rect(rect)
++    }
++}
++
++#[inline]
++fn point_eq(a: Point, b: Point) -> bool {
++    (a.x - b.x).abs() <= INT_EDGE_EPSILON && (a.y - b.y).abs() <= INT_EDGE_EPSILON
++}
++
++/// Interpret an already-transformed axis-aligned rectangle as a single-element integer
++/// rectangle set, when its edges land on integer device coordinates (same snap tolerance
++/// as the path detection). The rectangle is clamped to `viewport` first; a rectangle that
++/// clamps to nothing yields an empty set (the clip removes everything), and fractional
++/// edges yield `None`.
++#[expect(
++    clippy::cast_possible_truncation,
++    reason = "edges are clamped to the u16 viewport before rounding"
++)]
++pub(crate) fn rect_as_integer_rect_set(rect: Rect, viewport: RectU16) -> Option<IntRectSet> {
++    let x0 = rect
++        .x0
++        .max(f64::from(viewport.x0))
++        .min(f64::from(viewport.x1));
++    let x1 = rect
++        .x1
++        .max(f64::from(viewport.x0))
++        .min(f64::from(viewport.x1));
++    let y0 = rect
++        .y0
++        .max(f64::from(viewport.y0))
++        .min(f64::from(viewport.y1));
++    let y1 = rect
++        .y1
++        .max(f64::from(viewport.y0))
++        .min(f64::from(viewport.y1));
++
++    let snap = |v: f64| -> Option<u16> {
++        let r = v.round();
++        ((v - r).abs() <= INT_EDGE_EPSILON).then_some(r as u16)
++    };
++    let (Some(x0), Some(x1), Some(y0), Some(y1)) = (snap(x0), snap(x1), snap(y0), snap(y1)) else {
++        return None;
++    };
++
++    let mut set = IntRectSet::new();
++    // An empty rectangle is ignored by `push`, leaving the (valid) empty set.
++    set.push(RectU16::new(x0, y0, x1, y1));
++    Some(set)
++}
++
++/// Whether `transform` maps axis-aligned rectangles to axis-aligned rectangles
++/// (no rotation or skew; scaling and mirroring are fine).
++///
++/// Deliberately an exact zero test, unlike the epsilon-based helpers elsewhere:
++/// a false negative only routes the clip through the (always correct) path
++/// pipeline, while a false positive would silently drop a near-zero skew.
++#[inline]
++fn transform_is_axis_aligned(transform: Affine) -> bool {
++    let c = transform.as_coeffs();
++    c[1] == 0.0 && c[2] == 0.0
++}
++
+ #[derive(Debug)]
+ struct ClipData {
+     alpha_start: u32,
+@@ -24,6 +312,11 @@ struct ClipData {
+     ///
+     /// These bounds have already been intersected with the viewport.
+     bbox: RectU16,
++
++    /// When the whole clip stack up to and including this entry is equivalent to a set of
++    /// pairwise-disjoint integer rectangles, that effective set (clamped to the viewport).
++    /// `None` means "not representable", never "empty".
++    int_rects: Option<IntRectSet>,
+ }
+ 
+ impl ClipData {
+@@ -48,6 +341,9 @@ pub struct ClipContext {
+     storage: StripStorage,
+     temp_storage: StripStorage,
+     clip_stack: Vec<ClipData>,
++    /// Reusable capture buffer for integer-rectangle clip detection; see
++    /// [`Self::push_clip`].
++    detect_buf: Vec<PathEl>,
+ }
+ 
+ impl Default for ClipContext {
+@@ -66,6 +362,7 @@ impl ClipContext {
+             storage: main_storage,
+             temp_storage: StripStorage::default(),
+             clip_stack: vec![],
++            detect_buf: vec![],
+         }
+     }
+ 
+@@ -85,6 +382,21 @@ impl ClipContext {
+             .map(|c| c.to_path_data_ref(&self.storage))
+     }
+ 
++    /// Whether the current clip stack (possibly empty) is exactly representable as a set of
++    /// pairwise-disjoint integer rectangles.
++    #[inline]
++    pub fn is_int_rect_clip(&self) -> bool {
++        self.clip_stack.last().is_none_or(|c| c.int_rects.is_some())
++    }
++
++    /// The effective clip region as a set of pairwise-disjoint integer rectangles, when every
++    /// clip on the stack is such a set. `None` when the stack is empty or the region is not
++    /// representable.
++    #[inline]
++    pub fn effective_int_rect_set(&self) -> Option<IntRectSet> {
++        self.clip_stack.last().and_then(|c| c.int_rects)
++    }
++
+     /// Push a new clip path to the stack.
+     #[inline]
+     pub fn push_clip(
+@@ -105,6 +417,16 @@ impl ClipContext {
+             .last()
+             .map(|c| c.to_path_data_ref(&self.storage));
+ 
++        // Capture a bounded prefix of the path while it streams into generation, for the
++        // integer-rectangle detection below (the path is only iterable once).
++        self.detect_buf.clear();
++        let detect_buf = &mut self.detect_buf;
++        let clip_path = clip_path.into_iter().inspect(|el| {
++            if detect_buf.len() <= MAX_DETECT_ELEMENTS {
++                detect_buf.push(*el);
++            }
++        });
++
+         strip_generator.generate_filled_path(
+             clip_path,
+             fill_rule,
+@@ -115,10 +437,75 @@ impl ClipContext {
+         );
+ 
+         let bbox = strip_bbox(&self.temp_storage.strips).unwrap_or(RectU16::ZERO);
++
++        // Track whether the stack remains an exact union of disjoint integer rectangles.
++        // An aliasing threshold changes how the mask quantizes (bytes snap to 0/255 around
++        // the threshold, and the thresholded mask can extend to tile bounds), so the
++        // byte-exactness argument doesn't hold there — never claim the fast state.
++        let int_rects = if aliasing_threshold.is_some()
++            || self.detect_buf.len() > MAX_DETECT_ELEMENTS
++        {
++            None
++        } else {
++            let viewport = RectU16::new(0, 0, strip_generator.width(), strip_generator.height());
++            let own =
++                |buf: &[PathEl]| path_as_integer_rect_set(buf.iter().copied(), transform, viewport);
++            match self.clip_stack.last() {
++                Some(parent) => parent
++                    .int_rects
++                    .and_then(|parent_set| parent_set.intersect(&own(&self.detect_buf)?)),
++                None => own(&self.detect_buf),
++            }
++        };
++
++        let clip_data = ClipData {
++            alpha_start,
++            strip_start,
++            bbox,
++            int_rects,
++        };
++
++        self.storage.extend(&self.temp_storage);
++        self.clip_stack.push(clip_data);
++    }
++
++    /// Push an axis-aligned rectangle clip whose transform has already been applied.
++    ///
++    /// Does the same job as [`push_clip`](Self::push_clip) for a rectangle, but skips the
++    /// path machinery: the mask strips come from the closed-form rect strip renderer, and
++    /// the integer-rectangle tracking reads the rectangle's edges directly.
++    pub fn push_clip_rect(&mut self, rect: Rect, strip_generator: &mut StripGenerator) {
++        // Normalize inverted rectangles once, so the mask (which normalizes
++        // internally) and the integer-rectangle tracking below agree.
++        let rect = rect.abs();
++        self.temp_storage.clear();
++
++        let alpha_start = self.storage.alphas.len() as u32;
++        let strip_start = self.storage.strips.len() as u32;
++
++        let existing_clip = self
++            .clip_stack
++            .last()
++            .map(|c| c.to_path_data_ref(&self.storage));
++
++        strip_generator.generate_filled_rect_fast(&rect, &mut self.temp_storage, existing_clip);
++
++        let bbox = strip_bbox(&self.temp_storage.strips).unwrap_or(RectU16::ZERO);
++
++        let viewport = RectU16::new(0, 0, strip_generator.width(), strip_generator.height());
++        let own = rect_as_integer_rect_set(rect, viewport);
++        let int_rects = match self.clip_stack.last() {
++            Some(parent) => parent
++                .int_rects
++                .and_then(|parent_set| parent_set.intersect(&own?)),
++            None => own,
++        };
++
+         let clip_data = ClipData {
+             alpha_start,
+             strip_start,
+             bbox,
++            int_rects,
+         };
+ 
+         self.storage.extend(&self.temp_storage);
+@@ -137,13 +524,22 @@ impl ClipContext {
+ /// Raw data of a previously pushed clip path.
+ #[derive(Debug)]
+ struct RawClip {
+-    /// The range of commands in [`ClipState::path_elements`] belonging to this clip path.
+-    path: Range<usize>,
++    /// The clip's geometry, kept so the clip can be replayed into a fresh context.
++    kind: RawClipKind,
+     fill_rule: Fill,
+     transform: Affine,
+     aliasing_threshold: Option<u8>,
+ }
+ 
++/// The geometry of a pushed clip.
++#[derive(Debug)]
++enum RawClipKind {
++    /// The range of commands in [`ClipState::path_elements`] belonging to this clip path.
++    Path(Range<usize>),
++    /// An axis-aligned rectangle in local coordinates.
++    Rect(Rect),
++}
++
+ /// A frame containing clipping-relevant state for the root layer or a filter layer.
+ #[derive(Debug)]
+ struct ClipFrame {
+@@ -211,6 +607,19 @@ impl ClipState {
+         self.context.get()
+     }
+ 
++    /// Whether the active clip stack degenerates to integer-rectangle clipping,
++    /// so fast strips can still be emitted under it. See
++    /// [`ClipContext::is_int_rect_clip`].
++    pub fn is_int_rect_clip(&self) -> bool {
++        self.context.is_int_rect_clip()
++    }
++
++    /// The integer-rectangle set the active clip stack reduces to, if any. See
++    /// [`ClipContext::effective_int_rect_set`].
++    pub fn effective_int_rect_set(&self) -> Option<IntRectSet> {
++        self.context.effective_int_rect_set()
++    }
++
+     /// Push a new root viewport.
+     pub fn push_root_viewport(
+         &mut self,
+@@ -263,7 +672,7 @@ impl ClipState {
+             aliasing_threshold,
+         );
+         self.raw_clips.push(RawClip {
+-            path,
++            kind: RawClipKind::Path(path),
+             fill_rule,
+             transform,
+             aliasing_threshold,
+@@ -271,10 +680,48 @@ impl ClipState {
+         self.revision = self.revision.wrapping_add(1);
+     }
+ 
++    /// Push an axis-aligned rectangle clip.
++    ///
++    /// Cheaper than pushing the equivalent rectangle path: no path analysis, and the mask
++    /// comes from the rect strip renderer. Falls back to the path route when the effective
++    /// transform rotates or skews (the rectangle is then no longer axis-aligned), or when
++    /// an aliasing threshold is set.
++    pub fn push_clip_rect(
++        &mut self,
++        rect: &Rect,
++        strip_generator: &mut StripGenerator,
++        transform: Affine,
++        aliasing_threshold: Option<u8>,
++    ) {
++        let clip_transform = self.active_shift() * transform;
++        if aliasing_threshold.is_some() || !transform_is_axis_aligned(clip_transform) {
++            self.push_clip(
++                &rect.to_path(0.1),
++                strip_generator,
++                Fill::NonZero,
++                transform,
++                aliasing_threshold,
++            );
++            return;
++        }
++
++        self.context
++            .push_clip_rect(clip_transform.transform_rect_bbox(*rect), strip_generator);
++        self.raw_clips.push(RawClip {
++            kind: RawClipKind::Rect(*rect),
++            fill_rule: Fill::NonZero,
++            transform,
++            aliasing_threshold,
++        });
++        self.revision = self.revision.wrapping_add(1);
++    }
++
+     /// Pop the active clip path.
+     pub fn pop_clip(&mut self) {
+         let raw_clip = self.raw_clips.pop().expect("clip stack underflowed");
+-        self.path_elements.truncate(raw_clip.path.start);
++        if let RawClipKind::Path(path) = &raw_clip.kind {
++            self.path_elements.truncate(path.start);
++        }
+         self.context.pop_clip();
+         self.revision = self.revision.wrapping_add(1);
+     }
+@@ -300,13 +747,22 @@ impl ClipState {
+         self.context.reset();
+         let active_shift = self.active_shift();
+         for raw_clip in &self.raw_clips {
+-            self.context.push_clip(
+-                self.path_elements[raw_clip.path.clone()].iter().copied(),
+-                strip_generator,
+-                raw_clip.fill_rule,
+-                active_shift * raw_clip.transform,
+-                raw_clip.aliasing_threshold,
+-            );
++            match &raw_clip.kind {
++                RawClipKind::Path(path) => self.context.push_clip(
++                    self.path_elements[path.clone()].iter().copied(),
++                    strip_generator,
++                    raw_clip.fill_rule,
++                    active_shift * raw_clip.transform,
++                    raw_clip.aliasing_threshold,
++                ),
++                // Rect clips are only recorded when their effective transform is
++                // axis-aligned, and `active_shift` is a pure translation, so the
++                // replayed transform is axis-aligned too.
++                RawClipKind::Rect(rect) => self.context.push_clip_rect(
++                    (active_shift * raw_clip.transform).transform_rect_bbox(*rect),
++                    strip_generator,
++                ),
++            }
+         }
+     }
+ }
+@@ -765,14 +1221,353 @@ fn should_create_new_strip(
+ 
+ #[cfg(test)]
+ mod tests {
+-    use crate::clip::{PathDataRef, Region, RowIterator, first_strip_at_or_after, intersect};
++    use crate::clip::{
++        ClipContext, PathDataRef, Region, RowIterator, first_strip_at_or_after, intersect,
++        path_as_integer_rect_set, rect_as_integer_rect_set,
++    };
+     use crate::geometry::RectU16;
++    use crate::kurbo::{Affine, BezPath, Circle, Point, Rect, Shape};
+     use crate::strip::Strip;
+-    use crate::strip_generator::StripStorage;
++    use crate::strip_generator::{StripGenerator, StripStorage};
+     use crate::tile::Tile;
+     use fearless_simd::Level;
++    use peniko::Fill;
+     use std::vec;
+ 
++    const VIEWPORT: RectU16 = RectU16::new(0, 0, 200, 100);
++
++    fn rect_path(x0: f64, y0: f64, x1: f64, y1: f64) -> BezPath {
++        Rect::new(x0, y0, x1, y1).to_path(0.1)
++    }
++
++    fn detect(path: &BezPath, transform: Affine) -> Option<vec::Vec<RectU16>> {
++        path_as_integer_rect_set(path.iter(), transform, VIEWPORT)
++            .map(|set| set.as_slice().to_vec())
++    }
++
++    #[test]
++    fn detect_integer_rect() {
++        let detected = detect(&rect_path(10.0, 20.0, 50.0, 40.0), Affine::IDENTITY);
++        assert_eq!(detected, Some(vec![RectU16::new(10, 20, 50, 40)]));
++    }
++
++    #[test]
++    fn detect_integer_rect_reverse_winding() {
++        let mut p = BezPath::new();
++        p.move_to((10.0, 20.0));
++        p.line_to((10.0, 40.0));
++        p.line_to((50.0, 40.0));
++        p.line_to((50.0, 20.0));
++        p.close_path();
++        assert_eq!(
++            detect(&p, Affine::IDENTITY),
++            Some(vec![RectU16::new(10, 20, 50, 40)])
++        );
++    }
++
++    #[test]
++    fn detect_open_rect_without_close() {
++        let mut p = BezPath::new();
++        p.move_to((0.0, 0.0));
++        p.line_to((8.0, 0.0));
++        p.line_to((8.0, 8.0));
++        p.line_to((0.0, 8.0));
++        assert_eq!(
++            detect(&p, Affine::IDENTITY),
++            Some(vec![RectU16::new(0, 0, 8, 8)])
++        );
++    }
++
++    #[test]
++    fn detect_rejects_fractional_rect() {
++        assert_eq!(
++            detect(&rect_path(10.5, 20.0, 50.0, 40.0), Affine::IDENTITY),
++            None
++        );
++    }
++
++    #[test]
++    fn detect_snaps_near_integer_edges() {
++        let detected = detect(
++            &rect_path(10.0 + 1.0 / 8192.0, 20.0, 50.0 - 1.0 / 8192.0, 40.0),
++            Affine::IDENTITY,
++        );
++        assert_eq!(detected, Some(vec![RectU16::new(10, 20, 50, 40)]));
++        assert_eq!(
++            detect(&rect_path(10.01, 20.0, 50.0, 40.0), Affine::IDENTITY),
++            None
++        );
++    }
++
++    /// The snap tolerance must reject offsets whose mask bytes no longer
++    /// quantize to 0/255. A corner (or a 1x1 rect) sees the PRODUCT of two
++    /// snapped edges, so tolerances that are safe for a single edge (like
++    /// 1/512 or 1/1024) already produce a 254 corner byte — those offsets must
++    /// fail detection, while offsets within the corrected tolerance pass.
++    #[test]
++    fn detect_snap_tolerance_covers_two_edge_pixels() {
++        // 1/1024 off on two perpendicular edges: corner byte would be 254.
++        assert_eq!(
++            detect(
++                &rect_path(10.0 + 1.0 / 1024.0, 20.0 + 1.0 / 1024.0, 50.0, 40.0),
++                Affine::IDENTITY,
++            ),
++            None
++        );
++        // A 1x1 rect with all four edges snapped by 1/1024: worst case.
++        assert_eq!(
++            detect(
++                &rect_path(
++                    10.0 + 1.0 / 1024.0,
++                    20.0 + 1.0 / 1024.0,
++                    11.0 - 1.0 / 1024.0,
++                    21.0 - 1.0 / 1024.0,
++                ),
++                Affine::IDENTITY,
++            ),
++            None
++        );
++        // The same worst case within the tolerance still detects, and its
++        // exact-coverage byte stays 255: (1 - 2/4096)^2 * 255 + 0.5 > 255.
++        assert_eq!(
++            detect(
++                &rect_path(
++                    10.0 + 1.0 / 8192.0,
++                    20.0 + 1.0 / 8192.0,
++                    11.0 - 1.0 / 8192.0,
++                    21.0 - 1.0 / 8192.0,
++                ),
++                Affine::IDENTITY,
++            ),
++            Some(vec![RectU16::new(10, 20, 11, 21)])
++        );
++    }
++
++    #[test]
++    fn detect_applies_transform() {
++        let detected = detect(&rect_path(5.0, 10.0, 25.0, 20.0), Affine::scale(2.0));
++        assert_eq!(detected, Some(vec![RectU16::new(10, 20, 50, 40)]));
++        // 90° rotation maps an axis-aligned rect back to an axis-aligned rect.
++        let rotated =
++            Affine::rotate(core::f64::consts::FRAC_PI_2) * Affine::translate((0.0, -60.0));
++        let detected = detect(&rect_path(10.0, 20.0, 30.0, 50.0), rotated);
++        assert_eq!(detected, Some(vec![RectU16::new(10, 10, 40, 30)]));
++        // A non-integer scale of integer coordinates is fractional in device space.
++        assert_eq!(
++            detect(&rect_path(5.0, 10.0, 25.0, 20.0), Affine::scale(1.25)),
++            None
++        );
++    }
++
++    #[test]
++    fn detect_rejects_non_rects() {
++        let mut triangle = BezPath::new();
++        triangle.move_to((0.0, 0.0));
++        triangle.line_to((10.0, 0.0));
++        triangle.line_to((0.0, 10.0));
++        triangle.close_path();
++        assert_eq!(detect(&triangle, Affine::IDENTITY), None);
++
++        // Corners span a rectangle but the edges are diagonal.
++        let mut z_quad = BezPath::new();
++        z_quad.move_to((0.0, 0.0));
++        z_quad.line_to((10.0, 10.0));
++        z_quad.line_to((0.0, 10.0));
++        z_quad.line_to((10.0, 0.0));
++        z_quad.close_path();
++        assert_eq!(detect(&z_quad, Affine::IDENTITY), None);
++
++        let circle = Circle::new(Point::new(20.0, 20.0), 10.0).to_path(0.1);
++        assert_eq!(detect(&circle, Affine::IDENTITY), None);
++    }
++
++    #[test]
++    fn detect_clamps_to_viewport() {
++        // Out-of-viewport edges land on the integer viewport bounds, so they may be fractional.
++        let detected = detect(&rect_path(-5.3, -2.7, 50.0, 300.9), Affine::IDENTITY);
++        assert_eq!(detected, Some(vec![RectU16::new(0, 0, 50, 100)]));
++        // Fully outside: a valid, empty set (everything is clipped away).
++        let detected = detect(&rect_path(300.0, 0.0, 400.0, 50.0), Affine::IDENTITY);
++        assert_eq!(detected, Some(vec![]));
++    }
++
++    #[test]
++    fn detect_multi_rect_set() {
++        let mut p = rect_path(0.0, 0.0, 40.0, 100.0);
++        p.extend(rect_path(60.0, 0.0, 100.0, 100.0).iter());
++        assert_eq!(
++            detect(&p, Affine::IDENTITY),
++            Some(vec![
++                RectU16::new(0, 0, 40, 100),
++                RectU16::new(60, 0, 100, 100)
++            ])
++        );
++    }
++
++    #[test]
++    fn detect_rejects_overlapping_rects() {
++        let mut p = rect_path(0.0, 0.0, 50.0, 50.0);
++        p.extend(rect_path(40.0, 40.0, 90.0, 90.0).iter());
++        assert_eq!(detect(&p, Affine::IDENTITY), None);
++    }
++
++    #[test]
++    fn detect_rejects_too_many_rects() {
++        let mut p = BezPath::new();
++        for i in 0..17_usize {
++            let x = (i * 10) as f64;
++            p.extend(rect_path(x, 0.0, x + 5.0, 5.0).iter());
++        }
++        assert_eq!(detect(&p, Affine::IDENTITY), None);
++    }
++
++    #[test]
++    fn clip_stack_tracks_int_rects() {
++        let mut ctx = ClipContext::new();
++        let mut generator = StripGenerator::new(200, 100, Level::baseline());
++        let push = |ctx: &mut ClipContext, generator: &mut StripGenerator, path: &BezPath| {
++            ctx.push_clip(
++                path.iter(),
++                generator,
++                Fill::NonZero,
++                Affine::IDENTITY,
++                None,
++            );
++        };
++        assert!(ctx.is_int_rect_clip());
++        assert!(ctx.effective_int_rect_set().is_none());
++
++        push(&mut ctx, &mut generator, &rect_path(10.0, 10.0, 90.0, 90.0));
++        assert!(ctx.is_int_rect_clip());
++        assert_eq!(
++            ctx.effective_int_rect_set().unwrap().as_slice(),
++            &[RectU16::new(10, 10, 90, 90)]
++        );
++
++        // Nested integer rect: effective set is the intersection.
++        push(&mut ctx, &mut generator, &rect_path(50.0, 0.0, 120.0, 60.0));
++        assert_eq!(
++            ctx.effective_int_rect_set().unwrap().as_slice(),
++            &[RectU16::new(50, 10, 90, 60)]
++        );
++
++        // A non-rect clip poisons the stack until it is popped.
++        let mut triangle = BezPath::new();
++        triangle.move_to((0.0, 0.0));
++        triangle.line_to((100.0, 0.0));
++        triangle.line_to((0.0, 100.0));
++        triangle.close_path();
++        push(&mut ctx, &mut generator, &triangle);
++        assert!(!ctx.is_int_rect_clip());
++        assert!(ctx.effective_int_rect_set().is_none());
++
++        ctx.pop_clip();
++        assert_eq!(
++            ctx.effective_int_rect_set().unwrap().as_slice(),
++            &[RectU16::new(50, 10, 90, 60)]
++        );
++        ctx.pop_clip();
++        ctx.pop_clip();
++        assert!(ctx.is_int_rect_clip());
++        assert!(ctx.effective_int_rect_set().is_none());
++    }
++
++    /// An aliasing threshold changes how the clip mask quantizes, so a clip
++    /// pushed under one must never claim the integer-rectangle fast state.
++    #[test]
++    fn aliasing_threshold_poisons_int_rect_tracking() {
++        let mut ctx = ClipContext::new();
++        let mut generator = StripGenerator::new(200, 100, Level::baseline());
++        ctx.push_clip(
++            rect_path(10.0, 10.0, 90.0, 90.0).iter(),
++            &mut generator,
++            Fill::NonZero,
++            Affine::IDENTITY,
++            Some(128),
++        );
++        assert!(!ctx.is_int_rect_clip());
++        assert!(ctx.effective_int_rect_set().is_none());
++    }
++
++    /// `push_clip_rect` tracks the rectangle directly (no path analysis) and
++    /// intersects with the parent set exactly like the path route.
++    #[test]
++    fn push_clip_rect_tracks_int_rects() {
++        let mut ctx = ClipContext::new();
++        let mut generator = StripGenerator::new(200, 100, Level::baseline());
++
++        ctx.push_clip_rect(Rect::new(10.0, 10.0, 90.0, 90.0), &mut generator);
++        assert!(ctx.is_int_rect_clip());
++        assert_eq!(
++            ctx.effective_int_rect_set().unwrap().as_slice(),
++            &[RectU16::new(10, 10, 90, 90)]
++        );
++
++        // Nested: intersection, same as the path route.
++        ctx.push_clip_rect(Rect::new(50.0, 0.0, 120.0, 60.0), &mut generator);
++        assert_eq!(
++            ctx.effective_int_rect_set().unwrap().as_slice(),
++            &[RectU16::new(50, 10, 90, 60)]
++        );
++
++        // Fractional edges take the mask route for tracking purposes: no set.
++        ctx.push_clip_rect(Rect::new(50.5, 10.0, 80.0, 60.0), &mut generator);
++        assert!(!ctx.is_int_rect_clip());
++        ctx.pop_clip();
++
++        // Inverted rectangles normalize instead of clipping everything away.
++        ctx.push_clip_rect(Rect::new(90.0, 60.0, 50.0, 10.0), &mut generator);
++        assert_eq!(
++            ctx.effective_int_rect_set().unwrap().as_slice(),
++            &[RectU16::new(50, 10, 90, 60)]
++        );
++    }
++
++    #[test]
++    fn rect_as_integer_rect_set_snaps_clamps_and_rejects() {
++        let viewport = RectU16::new(0, 0, 200, 100);
++        // Near-integer edges snap.
++        let set =
++            rect_as_integer_rect_set(Rect::new(10.0 + 1.0 / 8192.0, 20.0, 50.0, 40.0), viewport)
++                .unwrap();
++        assert_eq!(set.as_slice(), &[RectU16::new(10, 20, 50, 40)]);
++        // Out-of-viewport edges clamp to the (integer) viewport bounds.
++        let set = rect_as_integer_rect_set(Rect::new(-5.3, 20.0, 300.7, 40.0), viewport).unwrap();
++        assert_eq!(set.as_slice(), &[RectU16::new(0, 20, 200, 40)]);
++        // A rect fully outside the viewport yields the empty set (clips everything).
++        let set = rect_as_integer_rect_set(Rect::new(300.0, 20.0, 400.0, 40.0), viewport).unwrap();
++        assert!(set.as_slice().is_empty());
++        // Fractional in-viewport edges are not representable.
++        assert!(rect_as_integer_rect_set(Rect::new(10.5, 20.0, 50.0, 40.0), viewport).is_none());
++    }
++
++    #[test]
++    fn int_rect_below_non_rect_stays_unrepresentable() {
++        let mut ctx = ClipContext::new();
++        let mut generator = StripGenerator::new(200, 100, Level::baseline());
++        let mut triangle = BezPath::new();
++        triangle.move_to((0.0, 0.0));
++        triangle.line_to((100.0, 0.0));
++        triangle.line_to((0.0, 100.0));
++        triangle.close_path();
++        ctx.push_clip(
++            triangle.iter(),
++            &mut generator,
++            Fill::NonZero,
++            Affine::IDENTITY,
++            None,
++        );
++        ctx.push_clip(
++            rect_path(10.0, 10.0, 50.0, 50.0).iter(),
++            &mut generator,
++            Fill::NonZero,
++            Affine::IDENTITY,
++            None,
++        );
++        assert!(!ctx.is_int_rect_clip());
++        assert!(ctx.effective_int_rect_set().is_none());
++    }
++
+     #[test]
+     fn intersect_partly_overlapping_strips() {
+         let path_1 = StripBuilder::new().add_strip(0, 0, 32, false).finish();
+diff --git a/sparse_strips/vello_common/src/flatten_simd.rs b/sparse_strips/vello_common/src/flatten_simd.rs
+index 0ab71eb9..60db3c85 100644
+--- a/sparse_strips/vello_common/src/flatten_simd.rs
++++ b/sparse_strips/vello_common/src/flatten_simd.rs
+@@ -113,8 +113,15 @@ pub(crate) fn flatten<S: Simd>(
+                 callback.callback(LinePathEl::MoveTo(p));
+             }
+             PathEl::LineTo(p) => {
++                // Same culling as for the curves below: a segment fully to the right, top, or
++                // bottom of the cull bbox affects neither coverage nor winding inside it (winding
++                // accumulates left-to-right, and strip rows are independent).
++                if line_culled(last_pt, p, right, top, bottom) {
++                    callback.callback(LinePathEl::MoveTo(p));
++                } else {
++                    callback.callback(LinePathEl::LineTo(p));
++                }
+                 last_pt = p;
+-                callback.callback(LinePathEl::LineTo(p));
+             }
+             PathEl::QuadTo(p1, p2) => {
+                 let p0 = last_pt;
+@@ -223,7 +230,11 @@ pub(crate) fn flatten<S: Simd>(
+             }
+             PathEl::ClosePath => {
+                 if last_pt != start_pt {
+-                    callback.callback(LinePathEl::LineTo(start_pt));
++                    if line_culled(last_pt, start_pt, right, top, bottom) {
++                        callback.callback(LinePathEl::MoveTo(start_pt));
++                    } else {
++                        callback.callback(LinePathEl::LineTo(start_pt));
++                    }
+ 
+                     // Kurbo says: "If `quad_to` [or another drawing op] is called immediately
+                     // after `close_path` then the current subpath starts at the initial point of
+@@ -236,11 +247,17 @@ pub(crate) fn flatten<S: Simd>(
+         }
+     }
+ 
+-    if last_pt != start_pt {
++    if last_pt != start_pt && !line_culled(last_pt, start_pt, right, top, bottom) {
+         callback.callback(LinePathEl::LineTo(start_pt));
+     }
+ }
+ 
++/// Whether a line segment lies fully to the right, top, or bottom of the cull bbox.
++#[inline(always)]
++fn line_culled(p0: Point, p1: Point, right: f64, top: f64, bottom: f64) -> bool {
++    (p0.x > right && p1.x > right) || (p0.y < top && p1.y < top) || (p0.y > bottom && p1.y > bottom)
++}
++
+ // The below methods are copied from kurbo and needed to implement flattening of normal quad curves.
+ 
+ /// An approximation to $\int (1 + 4x^2) ^ -0.25 dx$
+diff --git a/sparse_strips/vello_common/src/viewport.rs b/sparse_strips/vello_common/src/viewport.rs
+index 2096b393..a5b903d1 100644
+--- a/sparse_strips/vello_common/src/viewport.rs
++++ b/sparse_strips/vello_common/src/viewport.rs
+@@ -3,9 +3,9 @@
+ 
+ //! Shared viewport state.
+ 
+-use crate::clip::{ClipState, PathDataRef};
++use crate::clip::{ClipState, IntRectSet, PathDataRef};
+ use crate::filter::FilterData;
+-use crate::kurbo::{Affine, BezPath};
++use crate::kurbo::{Affine, BezPath, Rect};
+ use crate::strip_generator::StripGenerator;
+ use alloc::vec::Vec;
+ use fearless_simd::Level;
+@@ -47,6 +47,18 @@ impl ViewportState {
+         self.clip_state.get()
+     }
+ 
++    /// Whether the active clip stack degenerates to integer-rectangle clipping.
++    /// See [`ClipState::is_int_rect_clip`].
++    pub fn is_int_rect_clip(&self) -> bool {
++        self.clip_state.is_int_rect_clip()
++    }
++
++    /// The integer-rectangle set the active clip stack reduces to, if any. See
++    /// [`ClipState::effective_int_rect_set`].
++    pub fn effective_int_rect_set(&self) -> Option<IntRectSet> {
++        self.clip_state.effective_int_rect_set()
++    }
++
+     /// Whether any root viewports are currently pushed.
+     pub fn has_root_viewports(&self) -> bool {
+         !self.strip_generator_stack.is_empty()
+@@ -79,6 +91,21 @@ impl ViewportState {
+         );
+     }
+ 
++    /// Push an axis-aligned rectangle clip.
++    pub fn push_clip_rect(
++        &mut self,
++        rect: &Rect,
++        transform: Affine,
++        aliasing_threshold: Option<u8>,
++    ) {
++        self.clip_state.push_clip_rect(
++            rect,
++            &mut self.strip_generator,
++            transform,
++            aliasing_threshold,
++        );
++    }
++
+     /// Pop the last clip path.
+     pub fn pop_clip(&mut self) {
+         self.clip_state.pop_clip();
+diff --git a/sparse_strips/vello_cpu/CHANGELOG.md b/sparse_strips/vello_cpu/CHANGELOG.md
+index de996e82..8acf7f0e 100644
+--- a/sparse_strips/vello_cpu/CHANGELOG.md
++++ b/sparse_strips/vello_cpu/CHANGELOG.md
+@@ -12,6 +12,10 @@ Subheadings to categorize changes are `added, changed, deprecated, removed, fixe
+ 
+ This release has an [MSRV][] of 1.88.
+ 
++### Added
++
++- `RenderContext::push_clip_rect`: axis-aligned rectangle clips whose mask comes from the rect strip renderer instead of the path pipeline, falling back to the path route under rotation or skew. ([#1786][] by [@AdrianEddy][])
++
+ ## [0.2.0][] - 2026-08-07
+ 
+ This release has an [MSRV][] of 1.88.
+@@ -208,6 +212,7 @@ This is the initial release. No changelog was kept for this release.
+ 
+ See also the [vello_common 0.0.1](../vello_common/CHANGELOG.md#001---2025-05-10) release.
+ 
++[@AdrianEddy]: https://github.com/AdrianEddy
+ [@DJMcNab]: https://github.com/DJMcNab
+ [@b0nes164]: https://github.com/b0nes164
+ [@grebmeg]: https://github.com/grebmeg
+@@ -274,6 +279,7 @@ See also the [vello_common 0.0.1](../vello_common/CHANGELOG.md#001---2025-05-10)
+ [#1756]: https://github.com/linebender/vello/pull/1756
+ [#1760]: https://github.com/linebender/vello/pull/1760
+ [#1763]: https://github.com/linebender/vello/pull/1763
++[#1786]: https://github.com/linebender/vello/pull/1786
+ [#1787]: https://github.com/linebender/vello/pull/1787
+ [#1803]: https://github.com/linebender/vello/pull/1803
+ 
+diff --git a/sparse_strips/vello_cpu/src/dispatch/mod.rs b/sparse_strips/vello_cpu/src/dispatch/mod.rs
+index 4d84cd86..8fa57704 100644
+--- a/sparse_strips/vello_cpu/src/dispatch/mod.rs
++++ b/sparse_strips/vello_cpu/src/dispatch/mod.rs
+@@ -52,6 +52,7 @@ pub(crate) trait Dispatcher: Debug + Send {
+         transform: Affine,
+         aliasing_threshold: Option<u8>,
+     );
++    fn push_clip_rect(&mut self, rect: &Rect, transform: Affine, aliasing_threshold: Option<u8>);
+     fn pop_clip_path(&mut self);
+     fn push_layer(
+         &mut self,
+diff --git a/sparse_strips/vello_cpu/src/dispatch/multi_threaded.rs b/sparse_strips/vello_cpu/src/dispatch/multi_threaded.rs
+index c90a3396..3a5bda58 100644
+--- a/sparse_strips/vello_cpu/src/dispatch/multi_threaded.rs
++++ b/sparse_strips/vello_cpu/src/dispatch/multi_threaded.rs
+@@ -696,6 +696,30 @@ impl Dispatcher for MultiThreadedDispatcher {
+         }
+     }
+ 
++    fn push_clip_rect(&mut self, rect: &Rect, transform: Affine, aliasing_threshold: Option<u8>) {
++        use crate::kurbo::Shape;
++        self.flush_tasks();
++        // Mirror `ClipState::push_clip_rect`'s routing: the rect route needs an
++        // axis-aligned transform (exact test, matching `vello_common::clip`)
++        // and no aliasing threshold; otherwise the path pipeline handles it.
++        let coeffs = transform.as_coeffs();
++        let axis_aligned = coeffs[1] == 0.0 && coeffs[2] == 0.0;
++        if aliasing_threshold.is_some() || !axis_aligned {
++            self.clip_context.push_clip(
++                rect.to_path(0.1).iter(),
++                &mut self.strip_generator,
++                Fill::NonZero,
++                transform,
++                aliasing_threshold,
++            );
++        } else {
++            self.clip_context.push_clip_rect(
++                transform.transform_rect_bbox(*rect),
++                &mut self.strip_generator,
++            );
++        }
++    }
++
+     fn push_clip_path(
+         &mut self,
+         path: &BezPath,
+diff --git a/sparse_strips/vello_cpu/src/dispatch/single_threaded.rs b/sparse_strips/vello_cpu/src/dispatch/single_threaded.rs
+index 234860b6..f1ade278 100644
+--- a/sparse_strips/vello_cpu/src/dispatch/single_threaded.rs
++++ b/sparse_strips/vello_cpu/src/dispatch/single_threaded.rs
+@@ -500,6 +500,11 @@ impl Dispatcher for SingleThreadedDispatcher {
+             .push_clip(path, fill_rule, transform, aliasing_threshold);
+     }
+ 
++    fn push_clip_rect(&mut self, rect: &Rect, transform: Affine, aliasing_threshold: Option<u8>) {
++        self.viewport
++            .push_clip_rect(rect, transform, aliasing_threshold);
++    }
++
+     fn pop_clip_path(&mut self) {
+         self.viewport.pop_clip();
+     }
+diff --git a/sparse_strips/vello_cpu/src/render.rs b/sparse_strips/vello_cpu/src/render.rs
+index f2d89e54..fc6badbb 100644
+--- a/sparse_strips/vello_cpu/src/render.rs
++++ b/sparse_strips/vello_cpu/src/render.rs
+@@ -733,6 +733,18 @@ impl RenderContext {
+         );
+     }
+ 
++    /// Push an axis-aligned rectangle clip.
++    ///
++    /// Renders like pushing the rectangle as a clip path, but cheaper: the mask
++    /// comes from the rect strip renderer instead of the path pipeline. Falls
++    /// back to the path pipeline under rotation or skew. Pop with
++    /// [`pop_clip_path`](Self::pop_clip_path).
++    pub fn push_clip_rect(&mut self, rect: &Rect) {
++        let transform = self.transforms().clip_path_transform();
++        self.dispatcher
++            .push_clip_rect(rect, transform, self.aliasing_threshold);
++    }
++
+     /// Pop a clip path from the clip stack.
+     ///
+     /// Note that unlike `push_clip_layer`, it is permissible to have pending
+diff --git a/sparse_strips/vello_hybrid/CHANGELOG.md b/sparse_strips/vello_hybrid/CHANGELOG.md
+index 625fd1b5..5e5c0861 100644
+--- a/sparse_strips/vello_hybrid/CHANGELOG.md
++++ b/sparse_strips/vello_hybrid/CHANGELOG.md
+@@ -12,6 +12,11 @@ Subheadings to categorize changes are `added, changed, deprecated, removed, fixe
+ 
+ This release has an [MSRV][] of 1.88.
+ 
++### Added
++
++- Partial (damage-region) rendering: `Renderer::render` takes a `RenderRegion` that confines root drawing to a set of damage rects (overlapping rects are normalized internally into a disjoint union, so content is composited exactly once). Pixels outside the rects are preserved byte-exact, pixels inside are byte-identical to a full render, and root strips entirely outside the rects are culled before reaching the GPU. `Renderer::partial_renders`/`Renderer::culled_strips` report engagement. ([#1737][] by [@AdrianEddy][])
++- `Scene::push_clip_rect`: axis-aligned rectangle clips, cheaper than the equivalent clip path. A rectangle on integer device coordinates keeps rect content (`fill_rect`, `draw_texture_rects`, `fill_blurred_rounded_rect`, glyph quads) on the GPU fast path instead of demoting it to CPU strips; output is byte-identical either way. ([#1786][] by [@AdrianEddy][])
++
+ ## [0.2.0][] - 2026-08-07
+ 
+ This release has an [MSRV][] of 1.88.
+@@ -201,6 +206,7 @@ This is the initial release. No changelog was kept for this release.
+ 
+ See also the [vello_cpu 0.0.4](../vello_cpu/CHANGELOG.md#004---2025-10-17) and [vello_common 0.0.4](../vello_common/CHANGELOG.md#004---2025-10-17) releases.
+ 
++[@AdrianEddy]: https://github.com/AdrianEddy
+ [@DJMcNab]: https://github.com/DJMcNab
+ [@b0nes164]: https://github.com/b0nes164
+ [@dipeshbabu]: https://github.com/dipeshbabu
+@@ -287,6 +293,7 @@ See also the [vello_cpu 0.0.4](../vello_cpu/CHANGELOG.md#004---2025-10-17) and [
+ [#1726]: https://github.com/linebender/vello/pull/1726
+ [#1734]: https://github.com/linebender/vello/pull/1734
+ [#1735]: https://github.com/linebender/vello/pull/1735
++[#1737]: https://github.com/linebender/vello/pull/1737
+ [#1747]: https://github.com/linebender/vello/pull/1747
+ [#1750]: https://github.com/linebender/vello/pull/1750
+ [#1757]: https://github.com/linebender/vello/pull/1757
+@@ -297,6 +304,7 @@ See also the [vello_cpu 0.0.4](../vello_cpu/CHANGELOG.md#004---2025-10-17) and [
+ [#1778]: https://github.com/linebender/vello/pull/1778
+ [#1779]: https://github.com/linebender/vello/pull/1779
+ [#1781]: https://github.com/linebender/vello/pull/1781
++[#1786]: https://github.com/linebender/vello/pull/1786
+ [#1791]: https://github.com/linebender/vello/pull/1791
+ [#1792]: https://github.com/linebender/vello/pull/1792
+ [#1794]: https://github.com/linebender/vello/pull/1794
+diff --git a/sparse_strips/vello_hybrid/examples/native_webgl/src/lib.rs b/sparse_strips/vello_hybrid/examples/native_webgl/src/lib.rs
+index c77af0b1..2855948d 100644
+--- a/sparse_strips/vello_hybrid/examples/native_webgl/src/lib.rs
++++ b/sparse_strips/vello_hybrid/examples/native_webgl/src/lib.rs
+@@ -127,6 +127,7 @@ impl AppState {
+                 &mut self.renderer_wrapper.resources,
+                 &render_size,
+                 &vello_hybrid::WebGlTextureBindings::new(),
++                vello_hybrid::ClearSettings::default(),
+             )
+             .unwrap();
+         self.need_render = false;
+@@ -552,6 +553,7 @@ pub async fn render_scene(scene: Scene, width: u16, height: u16) {
+             &mut resources,
+             &render_size,
+             &vello_hybrid::WebGlTextureBindings::new(),
++            vello_hybrid::ClearSettings::default(),
+         )
+         .unwrap();
+ }
+diff --git a/sparse_strips/vello_hybrid/examples/render_to_file.rs b/sparse_strips/vello_hybrid/examples/render_to_file.rs
+index 8418bf8d..9f76b10b 100644
+--- a/sparse_strips/vello_hybrid/examples/render_to_file.rs
++++ b/sparse_strips/vello_hybrid/examples/render_to_file.rs
+@@ -100,6 +100,8 @@ async fn run() {
+             &render_size,
+             &texture_view,
+             &vello_hybrid::TextureBindings::new(),
++            vello_hybrid::ClearSettings::default(),
++            vello_hybrid::RenderRegion::Full,
+         )
+         .unwrap();
+ 
+diff --git a/sparse_strips/vello_hybrid/examples/wgpu_webgl/src/lib.rs b/sparse_strips/vello_hybrid/examples/wgpu_webgl/src/lib.rs
+index 61af866a..21f58368 100644
+--- a/sparse_strips/vello_hybrid/examples/wgpu_webgl/src/lib.rs
++++ b/sparse_strips/vello_hybrid/examples/wgpu_webgl/src/lib.rs
+@@ -224,6 +224,8 @@ impl AppState {
+                 &render_size,
+                 &surface_texture_view,
+                 &vello_hybrid::TextureBindings::new(),
++                vello_hybrid::ClearSettings::default(),
++                vello_hybrid::RenderRegion::Full,
+             )
+             .unwrap();
+ 
+@@ -655,6 +657,8 @@ pub async fn render_scene(scene: Scene, width: u16, height: u16) {
+             &render_size,
+             &surface_texture_view,
+             &vello_hybrid::TextureBindings::new(),
++            vello_hybrid::ClearSettings::default(),
++            vello_hybrid::RenderRegion::Full,
+         )
+         .unwrap();
+ 
+diff --git a/sparse_strips/vello_hybrid/examples/winit/src/main.rs b/sparse_strips/vello_hybrid/examples/winit/src/main.rs
+index 4da7bc22..38f486bb 100644
+--- a/sparse_strips/vello_hybrid/examples/winit/src/main.rs
++++ b/sparse_strips/vello_hybrid/examples/winit/src/main.rs
+@@ -394,6 +394,8 @@ impl ApplicationHandler for App<'_> {
+                         &render_size,
+                         &texture_view,
+                         &texture_bindings,
++                        vello_hybrid::ClearSettings::default(),
++                        vello_hybrid::RenderRegion::Full,
+                     )
+                     .unwrap();
+ 
+diff --git a/sparse_strips/vello_hybrid/src/draw.rs b/sparse_strips/vello_hybrid/src/draw.rs
+index d65b638d..0043628b 100644
+--- a/sparse_strips/vello_hybrid/src/draw.rs
++++ b/sparse_strips/vello_hybrid/src/draw.rs
+@@ -121,6 +121,22 @@ impl<'a, T: DrawTarget> DrawBuilder<'a, T> {
+         true
+     }
+ 
++    /// Whether `strip` (spanning `height` device pixels from its top) lies
++    /// fully outside the root damage region and can be skipped. Only the root
++    /// target carries a [`StripCull`]; on every other target this is a no-op
++    /// that returns `false`. Counts each skipped strip in
++    /// [`DrawState::culled_strips`].
++    #[inline]
++    fn cull_root_strip(&mut self, strip: &GpuStrip, height: u16) -> bool {
++        if let Some(cull) = self.state.root_cull.as_ref()
++            && cull.culls_quad(strip.x, strip.y, strip.width, height)
++        {
++            self.state.culled_strips += 1;
++            return true;
++        }
++        false
++    }
++
+     fn push_path(
+         &mut self,
+         path: &RecordedPath,
+@@ -156,6 +172,11 @@ impl<'a, T: DrawTarget> DrawBuilder<'a, T> {
+                     depth_index,
+                 );
+ 
++                // A fill strip is exactly one tile row tall.
++                if builder.cull_root_strip(&strip, Tile::HEIGHT) {
++                    return;
++                }
++
+                 builder
+                     .draw
+                     .push(builder.strips, strip, paint.external_texture_id);
+@@ -172,6 +193,11 @@ impl<'a, T: DrawTarget> DrawBuilder<'a, T> {
+                     depth_index,
+                 );
+ 
++                // A fill strip is exactly one tile row tall.
++                if builder.cull_root_strip(&strip, Tile::HEIGHT) {
++                    return;
++                }
++
+                 if !paint.opaque || !builder.push_opaque(strip) {
+                     builder
+                         .draw
+@@ -217,6 +243,12 @@ impl<'a, T: DrawTarget> DrawBuilder<'a, T> {
+                 depth_index,
+             );
+ 
++            // Each split part is an independent quad spanning its own height;
++            // parts entirely outside the root damage region are skipped.
++            if self.cull_root_strip(&strip, strip.dense_width_or_rect_height) {
++                continue;
++            }
++
+             if !(paint.opaque && part.frac == 0 && self.push_opaque(strip)) {
+                 self.draw
+                     .push(self.strips, strip, paint.external_texture_id);
+@@ -322,6 +354,97 @@ impl DrawBuffers {
+     }
+ }
+ 
++/// A damage-region cull for root-destined strips.
++///
++/// Given the set of scissor rectangles a partial render is confined to (see
++/// [`RenderRegion::Rects`](crate::RenderRegion::Rects)), a strip that falls entirely outside
++/// every rectangle produces no pixel and can be dropped before it reaches the
++/// GPU. The scissor test at draw time already guarantees correctness; this
++/// cull is a build-time optimization that keeps such strips out of the vertex
++/// buffer in the first place.
++///
++/// Only content destined for the root user surface is culled. Intermediate
++/// layer and atlas targets always render in full because the root pass samples
++/// them, so a cull there could drop pixels that later become visible.
++#[derive(Debug, Clone)]
++pub(crate) struct StripCull {
++    /// Bounding box of `rects` — left/top inclusive, right/bottom exclusive,
++    /// device pixels. The cheap first test (and the whole test for a single
++    /// rect).
++    x0: u16,
++    y0: u16,
++    x1: u16,
++    y1: u16,
++    /// The individual scissor rects in the same edge form, populated only when
++    /// there is more than one (multi-rect damage): a quad inside the bounding
++    /// box must still intersect one of these to survive.
++    rects: Vec<[u16; 4]>,
++}
++
++impl StripCull {
++    /// Build cull bounds from the damage scissor rectangles.
++    ///
++    /// An empty or fully degenerate set culls everything (a partial render with
++    /// no drawable area). Zero-area rects are ignored.
++    pub(crate) fn new(scissors: &[RectU16]) -> Self {
++        let mut rects: Vec<[u16; 4]> = Vec::new();
++        let (mut x0, mut y0, mut x1, mut y1) = (u16::MAX, u16::MAX, 0_u16, 0_u16);
++        for rect in scissors {
++            if rect.width() == 0 || rect.height() == 0 {
++                continue;
++            }
++            let r = [rect.x0, rect.y0, rect.x1, rect.y1];
++            x0 = x0.min(r[0]);
++            y0 = y0.min(r[1]);
++            x1 = x1.max(r[2]);
++            y1 = y1.max(r[3]);
++            rects.push(r);
++        }
++        if rects.is_empty() {
++            // Everything degenerate: cull everything.
++            return Self {
++                x0: 0,
++                y0: 0,
++                x1: 0,
++                y1: 0,
++                rects,
++            };
++        }
++        if rects.len() == 1 {
++            // The bounding box IS the one rect — no per-rect pass needed.
++            rects.clear();
++        }
++        Self {
++            x0,
++            y0,
++            x1,
++            y1,
++            rects,
++        }
++    }
++
++    /// Whether a quad at `(x, y)` spanning `width × height` pixels lies fully
++    /// outside every scissor rect (and therefore cannot produce any pixel in
++    /// the scissored root draws).
++    #[inline(always)]
++    fn culls_quad(&self, x: u16, y: u16, width: u16, height: u16) -> bool {
++        let outside_bounds = x >= self.x1
++            || y >= self.y1
++            || u32::from(x) + u32::from(width) <= u32::from(self.x0)
++            || u32::from(y) + u32::from(height) <= u32::from(self.y0);
++        if outside_bounds || self.rects.is_empty() {
++            return outside_bounds;
++        }
++        // Multi-rect: a quad in the gap between rects has no scissored draw.
++        !self.rects.iter().any(|&[rx0, ry0, rx1, ry1]| {
++            x < rx1
++                && y < ry1
++                && u32::from(x) + u32::from(width) > u32::from(rx0)
++                && u32::from(y) + u32::from(height) > u32::from(ry0)
++        })
++    }
++}
++
+ /// Target-specific state used while encoding a draw.
+ #[derive(Debug)]
+ pub(crate) struct DrawState<T: DrawTarget> {
+@@ -333,6 +456,13 @@ pub(crate) struct DrawState<T: DrawTarget> {
+     depth_counter: DepthCounter,
+     /// Scene-space bounds visible in the target.
+     pub(crate) target_bbox: RectU16,
++    /// Damage-region cull applied to root-destined strips. Only ever set for
++    /// the root user surface; intermediate layer and atlas targets keep this
++    /// `None` so their contents are never culled (the parent samples them in
++    /// full). See [`StripCull`].
++    pub(crate) root_cull: Option<StripCull>,
++    /// Number of root strips skipped by [`Self::root_cull`] while encoding.
++    pub(crate) culled_strips: u64,
+ }
+ 
+ impl<T: DrawTarget> DrawState<T> {
+@@ -342,6 +472,8 @@ impl<T: DrawTarget> DrawState<T> {
+             use_depth_buffer,
+             depth_counter: DepthCounter::default(),
+             target_bbox,
++            root_cull: None,
++            culled_strips: 0,
+         }
+     }
+ }
+diff --git a/sparse_strips/vello_hybrid/src/lib.rs b/sparse_strips/vello_hybrid/src/lib.rs
+index b1ed16c6..f2b9371d 100644
+--- a/sparse_strips/vello_hybrid/src/lib.rs
++++ b/sparse_strips/vello_hybrid/src/lib.rs
+@@ -95,7 +95,7 @@ pub use render::{
+ };
+ #[cfg(feature = "wgpu")]
+ pub use render::{AtlasWriter, RenderTargetConfig, Renderer, TextureBindings};
+-pub use render::{Config, GpuStrip, RenderSize};
++pub use render::{ClearSettings, Config, GpuStrip, RenderRegion, RenderSize};
+ #[cfg(all(feature = "webgl", feature = "probe"))]
+ pub use render::{PROBE_ELEMENTS, Probe, ProbeFeature, ProbeResult, ProbeStatistics};
+ #[cfg(all(feature = "webgl", feature = "probe"))]
+@@ -107,7 +107,7 @@ pub use scene::{LayersConfig, MemorySettings, RenderSettings, Scene};
+ pub use text::{GlyphRunBuilder, HybridGlyphRunBackend};
+ pub use util::DimensionConstraints;
+ pub use vello_common::TextureId;
+-pub use vello_common::geometry::SizeU16;
++pub use vello_common::geometry::{RectU16, SizeU16};
+ pub use vello_common::multi_atlas::{AllocationStrategy, AtlasConfig, AtlasId};
+ pub use vello_common::pixmap::Pixmap;
+ 
+diff --git a/sparse_strips/vello_hybrid/src/render/common.rs b/sparse_strips/vello_hybrid/src/render/common.rs
+index 372382e3..c380e222 100644
+--- a/sparse_strips/vello_hybrid/src/render/common.rs
++++ b/sparse_strips/vello_hybrid/src/render/common.rs
+@@ -15,7 +15,8 @@ use crate::filter::FILTER_ATLAS_PADDING;
+ use crate::scene::{LayersConfig, MemorySettings, RecordedDraw};
+ use alloc::vec::Vec;
+ use bytemuck::{Pod, Zeroable};
+-use vello_common::geometry::{SizeU16, SizeU32};
++use vello_common::color::{AlphaColor, Srgb};
++use vello_common::geometry::{RectU16, SizeU16, SizeU32};
+ use vello_common::record::CommandRecorder;
+ 
+ // GPU paint structure sizes in texels (1 texel = 16 bytes for RGBA32Uint texture format).
+@@ -32,6 +33,64 @@ pub(crate) const GPU_BLURRED_ROUNDED_RECT_SIZE_TEXELS: u32 =
+ // we can pass 1 instead of 0 here.
+ pub(crate) const IMAGE_PADDING: u16 = 0;
+ 
++/// Controls how the output target is cleared before drawing.
++#[derive(Debug, Clone, Copy, PartialEq)]
++pub enum ClearSettings<'a> {
++    /// Do not clear the target.
++    DontClear,
++    /// Clear the complete viewport to `color`.
++    Viewport {
++        /// The clear color.
++        color: AlphaColor<Srgb>,
++    },
++    /// Clear each rectangle to `color`.
++    Rects {
++        /// The clear color.
++        color: AlphaColor<Srgb>,
++        /// The rectangles to clear.
++        rects: &'a [RectU16],
++    },
++}
++
++impl ClearSettings<'_> {
++    pub(crate) fn clear_color(self) -> Option<AlphaColor<Srgb>> {
++        match self {
++            Self::DontClear => None,
++            Self::Viewport { color } | Self::Rects { color, .. } => Some(color),
++        }
++    }
++}
++
++impl Default for ClearSettings<'_> {
++    fn default() -> Self {
++        Self::Viewport {
++            color: AlphaColor::TRANSPARENT,
++        }
++    }
++}
++
++/// Controls where drawing happens: the whole target, or only a damage region.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++pub enum RenderRegion<'a> {
++    /// Draw the whole target.
++    #[default]
++    Full,
++    /// Confine drawing to these device-pixel rectangles.
++    ///
++    /// Pixels outside the rectangles are left untouched, and pixels inside them come out
++    /// byte-identical to a [`Full`](Self::Full) render of the same scene. Rectangles are
++    /// clamped to the target; a set that is empty (or clamps entirely away) draws nothing.
++    /// Overlapping rectangles are normalized internally into a disjoint union, so content
++    /// in an overlap is still composited exactly once; pass pairwise-disjoint rectangles
++    /// to skip the normalization.
++    ///
++    /// Note that clearing is separate: [`ClearSettings::Viewport`] still clears the whole
++    /// target. Damage-region rendering typically pairs this with
++    /// [`ClearSettings::DontClear`] (when the scene repaints the region opaquely) or
++    /// [`ClearSettings::Rects`] over the same rectangles.
++    Rects(&'a [RectU16]),
++}
++
+ /// Texture limits reported by the rendering device.
+ #[derive(Debug, Clone, Copy)]
+ pub(crate) struct DeviceLimits {
+diff --git a/sparse_strips/vello_hybrid/src/render/mod.rs b/sparse_strips/vello_hybrid/src/render/mod.rs
+index fa345735..8e14f6fa 100644
+--- a/sparse_strips/vello_hybrid/src/render/mod.rs
++++ b/sparse_strips/vello_hybrid/src/render/mod.rs
+@@ -14,7 +14,7 @@ mod webgl;
+ #[cfg(feature = "wgpu")]
+ mod wgpu;
+ 
+-pub use common::{Config, GpuStrip, RenderSize};
++pub use common::{ClearSettings, Config, GpuStrip, RenderRegion, RenderSize};
+ 
+ #[cfg(all(feature = "webgl", feature = "probe"))]
+ pub use vello_common::probe::{PROBE_ELEMENTS, Probe, ProbeFeature, ProbeResult, ProbeStatistics};
+diff --git a/sparse_strips/vello_hybrid/src/render/webgl/mod.rs b/sparse_strips/vello_hybrid/src/render/webgl/mod.rs
+index 484cd212..f53a7e75 100644
+--- a/sparse_strips/vello_hybrid/src/render/webgl/mod.rs
++++ b/sparse_strips/vello_hybrid/src/render/webgl/mod.rs
+@@ -28,7 +28,7 @@ use crate::draw::ExternalTextureRun;
+ use crate::render::common::IMAGE_PADDING;
+ use crate::util::RangedSlice;
+ use crate::{
+-    GpuStrip, LayersConfig, RenderError, RenderSettings, RenderSize, Resources,
++    ClearSettings, GpuStrip, LayersConfig, RenderError, RenderSettings, RenderSize, Resources,
+     blend::{BlendStrip, GpuBlendInstance},
+     copy::GpuCopyInstance,
+     filter::{FilterContext, FilterInstanceData, FilterPassPlan},
+@@ -354,6 +354,7 @@ impl WebGlRenderer {
+         resources: &mut Resources,
+         render_size: &RenderSize,
+         texture_bindings: &WebGlTextureBindings,
++        clear: ClearSettings<'_>,
+     ) -> Result<(), RenderError> {
+         debug_assert_eq!(
+             RenderSize {
+@@ -394,7 +395,7 @@ impl WebGlRenderer {
+             scene,
+             &resources.image_cache,
+             render_size,
+-            true,
++            clear,
+             RootTarget::UserSurface,
+             texture_bindings,
+         )?;
+@@ -485,7 +486,7 @@ impl WebGlRenderer {
+             scene,
+             &dummy_image_cache,
+             &atlas_render_size,
+-            false,
++            ClearSettings::DontClear,
+             RootTarget::AtlasLayer,
+             texture_bindings,
+         );
+@@ -519,16 +520,12 @@ impl WebGlRenderer {
+     /// Shared render pipeline: prepares GPU resources, runs the scheduler, and
+     /// maintains caches.
+     ///
+-    /// When `clear` is true the view framebuffer is cleared to transparent black
+-    /// before drawing. This must happen *after* `prepare` (which may create/resize
+-    /// the framebuffer attachment). Atlas renders skip the clear so previously
+-    /// rendered atlas content is preserved.
+     pub(crate) fn render_scene(
+         &mut self,
+         scene: &Scene,
+         image_cache: &ImageCache,
+         render_size: &RenderSize,
+-        clear: bool,
++        clear: ClearSettings<'_>,
+         root_output_target: RootTarget,
+         texture_bindings: &WebGlTextureBindings,
+     ) -> Result<(), RenderError> {
+@@ -560,6 +557,8 @@ impl WebGlRenderer {
+             required_texture_size,
+             current_allocations,
+             self.layers_config.max_textures,
++            // The WebGL backend always renders the whole target.
++            &[],
+         )?;
+         self.programs
+             .prepare_intermediate_textures(&self.gl, &schedule, required_texture_size);
+@@ -575,10 +574,8 @@ impl WebGlRenderer {
+             render_size,
+             &self.paint_idxs,
+             &self.schedule_storage.filter_context,
++            root_output_target,
+         );
+-        if clear {
+-            self.programs.clear_view_framebuffer(&self.gl);
+-        }
+         self.programs.resources.depth_cleared_this_frame = false;
+         let mut ctx = WebGlRendererContext {
+             programs: &mut self.programs,
+@@ -587,6 +584,7 @@ impl WebGlRenderer {
+             scratch_buffers: &mut self.scratch_buffers,
+             use_depth_buffer: self.use_depth_buffer,
+         };
++        ctx.clear_pass_inner(DrawPassTarget::Root(root_output_target), clear);
+         crate::schedule::execute(
+             &mut ctx,
+             &mut self.schedule_storage,
+@@ -1226,13 +1224,19 @@ impl WebGlPrograms {
+         render_size: &RenderSize,
+         paint_idxs: &[u32],
+         filter_context: &FilterContext,
++        root_target: RootTarget,
+     ) {
+         let max_texture_dimension_2d = self.resources.max_texture_dimension_2d;
+ 
+         self.maybe_resize_alphas_tex(max_texture_dimension_2d, alphas.len());
+         self.maybe_resize_encoded_paints_tex(max_texture_dimension_2d, paint_idxs);
+         self.maybe_resize_filter_data_tex(filter_context);
+-        self.maybe_update_config_buffer(gl, max_texture_dimension_2d, render_size);
++        self.maybe_update_config_buffer(
++            gl,
++            max_texture_dimension_2d,
++            render_size,
++            DrawPassTarget::Root(root_target),
++        );
+ 
+         self.upload_alpha_texture(gl, alphas);
+         self.upload_encoded_paints_texture(gl, encoded_paints);
+@@ -1567,9 +1571,9 @@ impl WebGlPrograms {
+         gl: &WebGl2RenderingContext,
+         max_texture_dimension_2d: u32,
+         new_render_size: &RenderSize,
++        target: DrawPassTarget,
+     ) {
+-        // Only negate if we are rendering to the main frame buffer.
+-        let negate_ndc = self.resources.view_framebuffer_override.is_none();
++        let negate_ndc = target.negate_ndc();
+ 
+         // TODO: Collect all attributes that influence the config buffer into a
+         // single struct and compare that, such that we cannot forget to update the
+@@ -1693,17 +1697,6 @@ impl WebGlPrograms {
+         gradient_cache.restore_luts(luts);
+     }
+ 
+-    /// Clear the view framebuffer.
+-    // TODO: Investigate adding tests for the clear_view behavior.
+-    fn clear_view_framebuffer(&mut self, gl: &WebGl2RenderingContext) {
+-        gl.bind_framebuffer(
+-            WebGl2RenderingContext::FRAMEBUFFER,
+-            self.resources.view_framebuffer_override.as_deref(),
+-        );
+-        gl.clear_color(0.0, 0.0, 0.0, 0.0);
+-        gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
+-    }
+-
+     /// Uploads two strip slices (opaque then alpha) into a single GPU buffer.
+     fn upload_strip_pair(
+         &mut self,
+@@ -3097,32 +3090,72 @@ impl WebGlRendererContext<'_> {
+         );
+     }
+ 
+-    fn clear_pass_inner(&self, target: LayerTextureId, rects: &[RectU16]) {
+-        let size = self.texture_size();
+-        self.gl.disable(WebGl2RenderingContext::BLEND);
+-        self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+-        let framebuffer = self.programs.resources.layer_framebuffer(target);
+-        self.gl
+-            .bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, Some(framebuffer));
+-        self.gl
+-            .viewport(0, 0, i32::from(size.width()), i32::from(size.height()));
+-        self.gl.enable(WebGl2RenderingContext::SCISSOR_TEST);
++    fn clear_pass_inner(&self, target: DrawPassTarget, settings: ClearSettings<'_>) {
++        let Some(color) = settings.clear_color() else {
++            return;
++        };
+ 
+-        // It's unclear whether it's better to scissor + clear repeatedly, or to do
+-        // one instanced clear pass via a shader. But using this approach should give the
+-        // GPU more semantic information about what we want to do, so it seems reasonable
+-        // to assume that this is better.
+-        for rect in rects {
+-            self.gl.scissor(
+-                i32::from(rect.x0),
+-                i32::from(rect.y0),
+-                i32::from(rect.width()),
+-                i32::from(rect.height()),
+-            );
+-            self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
++        let negate_ndc = target.negate_ndc();
++        let (width, height) = match target {
++            DrawPassTarget::Root(_) => {
++                self.gl.bind_framebuffer(
++                    WebGl2RenderingContext::FRAMEBUFFER,
++                    self.programs.resources.view_framebuffer_override.as_deref(),
++                );
++                (
++                    u16::try_from(self.programs.render_size.width).unwrap(),
++                    u16::try_from(self.programs.render_size.height).unwrap(),
++                )
++            }
++            DrawPassTarget::Layer(target) => {
++                let size = self.texture_size();
++                let framebuffer = self.programs.resources.layer_framebuffer(target);
++                self.gl
++                    .bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, Some(framebuffer));
++                (size.width(), size.height())
++            }
++        };
++
++        self.gl.viewport(0, 0, i32::from(width), i32::from(height));
++        let [r, g, b, a] = color.premultiply().components;
++        self.gl.clear_color(r, g, b, a);
++
++        match settings {
++            ClearSettings::DontClear => unreachable!(),
++            ClearSettings::Viewport { .. } => {
++                self.gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
++                self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
++            }
++            ClearSettings::Rects { rects, .. } => {
++                self.gl.enable(WebGl2RenderingContext::SCISSOR_TEST);
++                let bounds = RectU16::new(0, 0, width, height);
++
++                // It's unclear whether it's better to scissor + clear repeatedly, or to do
++                // one instanced clear pass via a shader. But using this approach should give the
++                // GPU more semantic information about what we want to do, so it seems reasonable
++                // to assume that this is better.
++                for rect in rects
++                    .iter()
++                    .map(|rect| rect.intersect(bounds))
++                    .filter(|rect| !rect.is_empty())
++                {
++                    let y = if negate_ndc {
++                        height - rect.y1
++                    } else {
++                        rect.y0
++                    };
++
++                    self.gl.scissor(
++                        i32::from(rect.x0),
++                        i32::from(y),
++                        i32::from(rect.width()),
++                        i32::from(rect.height()),
++                    );
++                    self.gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
++                }
++                self.gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
++            }
+         }
+-        self.gl.disable(WebGl2RenderingContext::SCISSOR_TEST);
+-        self.gl.enable(WebGl2RenderingContext::BLEND);
+     }
+ }
+ 
+@@ -3166,7 +3199,13 @@ impl Backend for WebGlRendererContext<'_> {
+     }
+ 
+     fn clear_pass(&mut self, target: LayerTextureId, rects: &[RectU16]) {
+-        self.clear_pass_inner(target, rects);
++        self.clear_pass_inner(
++            DrawPassTarget::Layer(target),
++            ClearSettings::Rects {
++                color: vello_common::color::AlphaColor::TRANSPARENT,
++                rects,
++            },
++        );
+     }
+ }
+ 
+@@ -3463,3 +3502,9 @@ fn upload_data_to_rgba32_texture(
+     )
+     .unwrap();
+ }
++impl DrawPassTarget {
++    fn negate_ndc(self) -> bool {
++        // Only negate if we are rendering to the main frame buffer.
++        matches!(self, Self::Root(RootTarget::UserSurface))
++    }
++}
+diff --git a/sparse_strips/vello_hybrid/src/render/webgl/probe.rs b/sparse_strips/vello_hybrid/src/render/webgl/probe.rs
+index e92ff778..0a0e1cee 100644
+--- a/sparse_strips/vello_hybrid/src/render/webgl/probe.rs
++++ b/sparse_strips/vello_hybrid/src/render/webgl/probe.rs
+@@ -8,7 +8,7 @@ use crate::render::webgl::{
+     create_framebuffer_for_texture, create_texture,
+ };
+ use crate::target::RootTarget;
+-use crate::{RenderError, RenderSize, Scene, WebGlRenderer};
++use crate::{ClearSettings, RenderError, RenderSize, Scene, WebGlRenderer};
+ use alloc::{borrow::Cow, format, sync::Arc};
+ use core::ops::Deref;
+ use thiserror::Error;
+@@ -165,7 +165,7 @@ impl WebGlRenderer {
+             &scene,
+             &probe_image_cache,
+             &render_size,
+-            true,
++            ClearSettings::default(),
+             RootTarget::AtlasLayer,
+             &WebGlTextureBindings::new(),
+         );
+diff --git a/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs b/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
+index 36e41890..dce80055 100644
+--- a/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
++++ b/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
+@@ -22,7 +22,8 @@ use crate::draw::ExternalTextureRun;
+ use crate::render::common::IMAGE_PADDING;
+ use crate::util::RangedSlice;
+ use crate::{
+-    GpuStrip, LayersConfig, RenderError, RenderSettings, RenderSize, Resources,
++    ClearSettings, GpuStrip, LayersConfig, RenderError, RenderRegion, RenderSettings, RenderSize,
++    Resources,
+     blend::{BlendStrip, GpuBlendInstance},
+     copy::GpuCopyInstance,
+     filter::{FilterContext, FilterInstanceData, FilterPassPlan},
+@@ -51,10 +52,11 @@ use crate::{
+ };
+ use alloc::vec::Vec;
+ use alloc::{sync::Arc, vec};
+-use core::{fmt::Debug, num::NonZeroU64};
++use core::{fmt::Debug, mem, num::NonZeroU64};
+ #[cfg(feature = "text")]
+ use glifo::PendingClearRect;
+ use hashbrown::{HashMap, hash_map::Entry};
++use vello_common::color::{AlphaColor, Srgb};
+ use vello_common::image_cache::{ImageCache, ImageResource};
+ use vello_common::multi_atlas::{AtlasConfig, AtlasId};
+ use vello_common::{
+@@ -147,6 +149,119 @@ impl TextureBindings {
+     }
+ }
+ 
++/// Clamp the [`RenderRegion`] to the `size` render target so the draw-time
++/// scissor never exceeds the render attachment, and normalize the result into
++/// a pairwise-disjoint set.
++///
++/// [`RenderRegion::Full`] yields an empty set (no scissoring). For
++/// [`RenderRegion::Rects`], rects are clamped and dropped when they become
++/// empty; if none survive (including an empty input set), a single zero-area
++/// sentinel is returned instead: the strip cull then discards every root strip,
++/// so the render draws nothing rather than silently falling back to a full,
++/// unscissored render.
++fn clamp_region_to_target(region: RenderRegion<'_>, size: &RenderSize) -> Vec<RectU16> {
++    let RenderRegion::Rects(rects) = region else {
++        return Vec::new();
++    };
++    let w = size.width.min(u32::from(u16::MAX)) as u16;
++    let h = size.height.min(u32::from(u16::MAX)) as u16;
++    let clamped: Vec<RectU16> = rects
++        .iter()
++        .filter_map(|r| {
++            let x0 = r.x0.min(w);
++            let y0 = r.y0.min(h);
++            let x1 = r.x1.min(w);
++            let y1 = r.y1.min(h);
++            (x1 > x0 && y1 > y0).then(|| RectU16::new(x0, y0, x1, y1))
++        })
++        .collect();
++    let mut disjoint = normalize_disjoint(clamped);
++    if disjoint.is_empty() {
++        disjoint.push(RectU16::new(0, 0, 0, 0));
++    }
++    disjoint
++}
++
++/// Whether two non-empty rects share any pixel.
++#[inline]
++fn rects_intersect(a: &RectU16, b: &RectU16) -> bool {
++    a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0
++}
++
++/// Normalize `rects` into a pairwise-disjoint set covering the same pixels.
++///
++/// The root draw sequence is replayed once per damage rect under that rect's
++/// scissor, so a pixel covered by more than one rect would have translucent
++/// content composited once per covering rect. Splitting overlaps away keeps
++/// the replay single-composite regardless of what the caller's damage
++/// tracking produced. Already-disjoint input — the common case — is detected
++/// with a pairwise sweep and returned unchanged.
++fn normalize_disjoint(rects: Vec<RectU16>) -> Vec<RectU16> {
++    let already_disjoint = rects
++        .iter()
++        .enumerate()
++        .all(|(i, a)| rects[..i].iter().all(|b| !rects_intersect(a, b)));
++    if already_disjoint {
++        return rects;
++    }
++
++    // For each rect, keep only the parts not covered by previously accepted
++    // rects: subtract each accepted rect from the current fragment set.
++    let mut out: Vec<RectU16> = Vec::with_capacity(rects.len());
++    let mut fragments: Vec<RectU16> = Vec::new();
++    let mut remaining: Vec<RectU16> = Vec::new();
++    for rect in rects {
++        fragments.clear();
++        fragments.push(rect);
++        for &cover in &out {
++            remaining.clear();
++            for &fragment in &fragments {
++                subtract_rect_into(fragment, cover, &mut remaining);
++            }
++            mem::swap(&mut fragments, &mut remaining);
++            if fragments.is_empty() {
++                break;
++            }
++        }
++        out.extend_from_slice(&fragments);
++    }
++    out
++}
++
++/// Push the (up to four) non-empty parts of `fragment` not covered by `cover`.
++fn subtract_rect_into(fragment: RectU16, cover: RectU16, out: &mut Vec<RectU16>) {
++    if !rects_intersect(&fragment, &cover) {
++        out.push(fragment);
++        return;
++    }
++    // Band above and band below the cover, full fragment width.
++    if fragment.y0 < cover.y0 {
++        out.push(RectU16::new(
++            fragment.x0,
++            fragment.y0,
++            fragment.x1,
++            cover.y0,
++        ));
++    }
++    if fragment.y1 > cover.y1 {
++        out.push(RectU16::new(
++            fragment.x0,
++            cover.y1,
++            fragment.x1,
++            fragment.y1,
++        ));
++    }
++    // Left and right parts within the shared vertical span.
++    let y0 = fragment.y0.max(cover.y0);
++    let y1 = fragment.y1.min(cover.y1);
++    if fragment.x0 < cover.x0 {
++        out.push(RectU16::new(fragment.x0, y0, cover.x0, y1));
++    }
++    if fragment.x1 > cover.x1 {
++        out.push(RectU16::new(cover.x1, y0, fragment.x1, y1));
++    }
++}
++
+ /// Vello Hybrid's Renderer.
+ #[derive(Debug)]
+ pub struct Renderer {
+@@ -165,6 +280,14 @@ pub struct Renderer {
+     use_depth_buffer: bool,
+     #[cfg(feature = "text")]
+     atlas_clear_scratch: Vec<u8>,
++    /// Number of [`Self::render`] calls that drew a partial
++    /// ([`RenderRegion::Rects`]) region. Lets damage-tracking callers assert
++    /// that partial rendering actually happened rather than silently falling
++    /// back to a full render.
++    partial_renders: u64,
++    /// Number of root-destined strips skipped by the damage-region cull across
++    /// all renders. Lets damage-tracking callers assert the cull engaged.
++    culled_strips: u64,
+ }
+ 
+ impl Renderer {
+@@ -215,11 +338,28 @@ impl Renderer {
+             use_depth_buffer: settings.use_depth_buffer,
+             #[cfg(feature = "text")]
+             atlas_clear_scratch: Vec::new(),
++            partial_renders: 0,
++            culled_strips: 0,
+         };
+ 
+         (renderer, resources)
+     }
+ 
++    /// Number of [`Self::render`] calls that drew a partial
++    /// ([`RenderRegion::Rects`]) region. Lets damage-tracking callers assert
++    /// the partial path actually engaged.
++    pub fn partial_renders(&self) -> u64 {
++        self.partial_renders
++    }
++
++    /// Number of root-destined strips skipped by the damage-region cull across
++    /// all renders (the fast-path coverage, gap, and rectangle quads that fell
++    /// entirely outside the [`RenderRegion::Rects`] set). Lets damage-tracking
++    /// callers assert the cull actually engaged.
++    pub fn culled_strips(&self) -> u64 {
++        self.culled_strips
++    }
++
+     /// Render `scene`.
+     ///
+     /// Every [`TextureId`] referenced by the scene must have a binding; this returns
+@@ -227,6 +367,12 @@ impl Renderer {
+     /// requirements on the bound texture views.
+     ///
+     /// To render without any texture bindings, you can pass an empty [`TextureBindings`].
++    ///
++    /// For damage-region rendering, pass the damaged rects as
++    /// [`RenderRegion::Rects`]: only that region is redrawn (byte-identical to a
++    /// full render of the same scene) and the rest of the target is preserved.
++    /// Pair it with [`ClearSettings::DontClear`], or [`ClearSettings::Rects`]
++    /// over the same rects when the scene does not repaint the region opaquely.
+     pub fn render(
+         &mut self,
+         scene: &Scene,
+@@ -237,7 +383,13 @@ impl Renderer {
+         render_size: &RenderSize,
+         view: &TextureView,
+         texture_bindings: &TextureBindings,
++        clear: ClearSettings<'_>,
++        region: RenderRegion<'_>,
+     ) -> Result<(), RenderError> {
++        if !matches!(region, RenderRegion::Full) {
++            self.partial_renders += 1;
++        }
++
+         #[cfg(feature = "text")]
+         {
+             resources.before_render(
+@@ -278,7 +430,8 @@ impl Renderer {
+             view,
+             &resources.image_cache,
+             &scene.encoded_paints,
+-            true,
++            clear,
++            region,
+             RootTarget::UserSurface,
+             texture_bindings,
+         );
+@@ -356,7 +509,7 @@ impl Renderer {
+         // Swap in the stub atlas bind group to avoid the read-write conflict:
+         // the real atlas texture is used as the render target (COLOR_TARGET), so it
+         // cannot also be bound as a shader resource (TEXTURE_BINDING) in the same pass.
+-        core::mem::swap(
++        mem::swap(
+             &mut self.programs.resources.atlas_bind_group,
+             &mut self.programs.resources.stub_atlas_bind_group,
+         );
+@@ -375,14 +528,15 @@ impl Renderer {
+             &layer_view,
+             &dummy_image_cache,
+             encoded_paints,
+-            false,
++            ClearSettings::DontClear,
++            RenderRegion::Full,
+             RootTarget::AtlasLayer,
+             texture_bindings,
+         );
+         self.dummy_image_cache = Some(dummy_image_cache);
+ 
+         // Restore the real atlas bind group.
+-        core::mem::swap(
++        mem::swap(
+             &mut self.programs.resources.atlas_bind_group,
+             &mut self.programs.resources.stub_atlas_bind_group,
+         );
+@@ -408,9 +562,6 @@ impl Renderer {
+ 
+     /// Shared render pipeline: prepares GPU resources, runs the scheduler against
+     /// the provided `view` at `render_size`, and maintains caches.
+-    ///
+-    /// When `clear` is true the render target is cleared to transparent black
+-    /// before drawing (normal frame rendering).
+     fn render_scene(
+         &mut self,
+         scene: &Scene,
+@@ -421,11 +572,17 @@ impl Renderer {
+         view: &TextureView,
+         image_cache: &ImageCache,
+         encoded_paints: &[EncodedPaint],
+-        clear: bool,
++        clear: ClearSettings<'_>,
++        region: RenderRegion<'_>,
+         root_output_target: RootTarget,
+         texture_bindings: &TextureBindings,
+     ) -> Result<(), RenderError> {
+         self.programs.depth_cleared_this_frame = false;
++        // Clamp the damage rects to the target so the draw-time scissor never
++        // exceeds the render attachment, and so a partial render whose rects all
++        // clamp away draws nothing instead of silently falling back to a full
++        // render. Both the strip cull and the scissor loop use the clamped set.
++        let clamped_scissors = clamp_region_to_target(region, render_size);
+         self.prepare_gpu_encoded_paints(encoded_paints, image_cache, texture_bindings)?;
+         let required_texture_size = self
+             .layers_config
+@@ -449,7 +606,9 @@ impl Renderer {
+             texture_size,
+             current_allocations,
+             self.layers_config.max_textures,
++            &clamped_scissors,
+         )?;
++        self.culled_strips += schedule.culled_strips();
+         self.programs
+             .prepare_intermediate_textures(device, &schedule);
+         // TODO: For the time being, we upload the entire alpha buffer as one big chunk. As a future
+@@ -466,9 +625,6 @@ impl Renderer {
+             &self.schedule_storage.filter_context,
+         );
+ 
+-        if clear {
+-            Self::clear_view(encoder, view);
+-        }
+         let mut ctx = RendererContext {
+             programs: &mut self.programs,
+             device,
+@@ -479,8 +635,12 @@ impl Renderer {
+             external_paint_source_bind_groups: HashMap::new(),
+             scratch_buffers: &mut self.scratch_buffers,
+             use_depth_buffer: self.use_depth_buffer,
++            root_load_op: wgpu::LoadOp::Load,
++            root_scissors: &clamped_scissors,
+         };
+ 
++        ctx.init_root_clear(clear, root_output_target);
++
+         crate::schedule::execute(
+             &mut ctx,
+             &mut self.schedule_storage,
+@@ -488,32 +648,13 @@ impl Renderer {
+             root_output_target,
+         );
+ 
++        ctx.finish_root_clear();
++
+         self.gradient_cache.maintain();
+ 
+         Ok(())
+     }
+ 
+-    /// Clear the view to transparent black.
+-    // TODO: Investigate adding tests for the clear_view behavior.
+-    fn clear_view(encoder: &mut CommandEncoder, view: &TextureView) {
+-        encoder.begin_render_pass(&RenderPassDescriptor {
+-            label: Some("Clear View"),
+-            color_attachments: &[Some(RenderPassColorAttachment {
+-                view,
+-                resolve_target: None,
+-                ops: wgpu::Operations {
+-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+-                    store: wgpu::StoreOp::Store,
+-                },
+-                depth_slice: None,
+-            })],
+-            depth_stencil_attachment: None,
+-            occlusion_query_set: None,
+-            timestamp_writes: None,
+-            multiview_mask: None,
+-        });
+-    }
+-
+     /// Upload image to cache and atlas in one step. Returns the `ImageId`.
+     ///
+     /// It's used when an image is not already in the cache.
+@@ -953,8 +1094,10 @@ struct Programs {
+     filter_pair_bind_groups: HashMap<FilterPassBindings, FilterPairBindGroups>,
+     /// Pipeline for applying filter effects.
+     filter_pipeline: RenderPipeline,
+-    /// Layer-clear pipeline.
++    /// Layer-clear pipeline (layer textures are always `Rgba8Unorm`).
+     clear_pipeline: RenderPipeline,
++    /// User-target rectangle-clear pipeline.
++    root_clear_pipeline: RenderPipeline,
+     /// Pipeline for clearing atlas regions.
+     atlas_clear_pipeline: RenderPipeline,
+     /// Blend pipeline.
+@@ -1267,44 +1410,60 @@ impl Programs {
+             Some(depth_stencil(true)),
+         );
+ 
+-        let clear_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+-            label: Some("Clear Pipeline"),
+-            layout: Some(&clear_pipeline_layout),
+-            vertex: wgpu::VertexState {
+-                module: &clear_shader,
+-                entry_point: Some("vs_main"),
+-                buffers: &[wgpu::VertexBufferLayout {
+-                    array_stride: size_of::<GpuClearInstance>() as u64,
+-                    step_mode: wgpu::VertexStepMode::Instance,
+-                    attributes: &wgpu::vertex_attr_array![
+-                        0 => Uint32x2,
+-                        1 => Uint32x2,
+-                        2 => Uint32x2,
+-                    ],
+-                }],
+-                compilation_options: PipelineCompilationOptions::default(),
+-            },
+-            fragment: Some(wgpu::FragmentState {
+-                module: &clear_shader,
+-                entry_point: Some("fs_main"),
+-                targets: &[Some(ColorTargetState {
+-                    format: wgpu::TextureFormat::Rgba8Unorm,
+-                    // No blending needed for clearing
+-                    blend: None,
+-                    write_mask: ColorWrites::ALL,
+-                })],
+-                compilation_options: PipelineCompilationOptions::default(),
+-            }),
+-            primitive: wgpu::PrimitiveState {
+-                topology: wgpu::PrimitiveTopology::TriangleStrip,
+-                ..Default::default()
+-            },
+-            depth_stencil: None,
+-            multisample: wgpu::MultisampleState::default(),
+-            multiview_mask: None,
+-            cache: None,
++        let clear_blend_component = wgpu::BlendComponent {
++            src_factor: wgpu::BlendFactor::Constant,
++            dst_factor: wgpu::BlendFactor::Zero,
++            operation: wgpu::BlendOperation::Add,
++        };
++        let clear_blend = Some(BlendState {
++            color: clear_blend_component,
++            alpha: clear_blend_component,
+         });
+ 
++        let clear_vertex_state = wgpu::VertexBufferLayout {
++            array_stride: size_of::<GpuClearInstance>() as u64,
++            step_mode: wgpu::VertexStepMode::Instance,
++            attributes: &wgpu::vertex_attr_array![
++                0 => Uint32x2,
++                1 => Uint32x2,
++                2 => Uint32x2,
++            ],
++        };
++        let create_clear_pipeline = |label, format| {
++            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
++                label: Some(label),
++                layout: Some(&clear_pipeline_layout),
++                vertex: wgpu::VertexState {
++                    module: &clear_shader,
++                    entry_point: Some("vs_main"),
++                    buffers: core::slice::from_ref(&clear_vertex_state),
++                    compilation_options: PipelineCompilationOptions::default(),
++                },
++                fragment: Some(wgpu::FragmentState {
++                    module: &clear_shader,
++                    entry_point: Some("fs_main"),
++                    targets: &[Some(ColorTargetState {
++                        format,
++                        blend: clear_blend,
++                        write_mask: ColorWrites::ALL,
++                    })],
++                    compilation_options: PipelineCompilationOptions::default(),
++                }),
++                primitive: wgpu::PrimitiveState {
++                    topology: wgpu::PrimitiveTopology::TriangleStrip,
++                    ..Default::default()
++                },
++                depth_stencil: None,
++                multisample: wgpu::MultisampleState::default(),
++                multiview_mask: None,
++                cache: None,
++            })
++        };
++        let clear_pipeline =
++            create_clear_pipeline("Clear Pipeline", wgpu::TextureFormat::Rgba8Unorm);
++        let root_clear_pipeline =
++            create_clear_pipeline("Root Clear Pipeline", render_target_config.format);
++
+         // Create atlas clear pipeline
+         let atlas_clear_pipeline_layout =
+             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+@@ -1312,6 +1471,7 @@ impl Programs {
+                 bind_group_layouts: &[],
+                 immediate_size: 0,
+             });
++        // TODO: Change the atlas clear pipeline to use the existing layer clear mechanism.
+         let atlas_clear_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+             label: Some("Atlas Clear Pipeline"),
+             layout: Some(&atlas_clear_pipeline_layout),
+@@ -1324,7 +1484,7 @@ impl Programs {
+             },
+             fragment: Some(wgpu::FragmentState {
+                 module: &clear_shader,
+-                entry_point: Some("fs_main"),
++                entry_point: Some("fs_transparent"),
+                 targets: &[Some(ColorTargetState {
+                     format: wgpu::TextureFormat::Rgba8Unorm,
+                     blend: None,
+@@ -1760,6 +1920,7 @@ impl Programs {
+                 height: render_target_config.height,
+             },
+             clear_pipeline,
++            root_clear_pipeline,
+             atlas_clear_pipeline,
+             filter_input_bind_group_layouts,
+             filter_sampler,
+@@ -2728,9 +2889,59 @@ struct RendererContext<'a> {
+     external_paint_source_bind_groups: HashMap<TextureId, BindGroup>,
+     scratch_buffers: &'a mut ScratchBuffers,
+     use_depth_buffer: bool,
++    root_load_op: wgpu::LoadOp<wgpu::Color>,
++    /// Device-pixel damage rects to scissor root drawing to, already clamped
++    /// and normalized to a pairwise-disjoint set by `clamp_region_to_target`
++    /// (the draw sequence is replayed once per rect, so an overlap would
++    /// composite translucent content twice). Empty means draw the whole
++    /// target. Only applied to the root user surface.
++    root_scissors: &'a [RectU16],
+ }
+ 
+ impl RendererContext<'_> {
++    fn init_root_clear(&mut self, clear: ClearSettings<'_>, root_target: RootTarget) {
++        self.root_load_op = match clear {
++            ClearSettings::DontClear => wgpu::LoadOp::Load,
++            ClearSettings::Viewport { color } => wgpu::LoadOp::Clear(clear_color(color)),
++            ClearSettings::Rects { .. } => {
++                self.clear_pass_inner(DrawPassTarget::Root(root_target), clear);
++
++                wgpu::LoadOp::Load
++            }
++        };
++    }
++
++    fn finish_root_clear(&mut self) {
++        // If the load mode was set to clear but no actual drawing instructions were
++        // emitted, we still need to start a pass to clear the output.
++        if let wgpu::LoadOp::Clear(color) = self.take_root_load_op() {
++            Self::clear_full_target(self.encoder, self.view, color);
++        }
++    }
++
++    fn take_root_load_op(&mut self) -> wgpu::LoadOp<wgpu::Color> {
++        mem::replace(&mut self.root_load_op, wgpu::LoadOp::Load)
++    }
++
++    fn clear_full_target(encoder: &mut CommandEncoder, view: &TextureView, color: wgpu::Color) {
++        encoder.begin_render_pass(&RenderPassDescriptor {
++            label: Some("Clear Target"),
++            color_attachments: &[Some(RenderPassColorAttachment {
++                view,
++                depth_slice: None,
++                resolve_target: None,
++                ops: wgpu::Operations {
++                    load: wgpu::LoadOp::Clear(color),
++                    store: wgpu::StoreOp::Store,
++                },
++            })],
++            depth_stencil_attachment: None,
++            occlusion_query_set: None,
++            timestamp_writes: None,
++            multiview_mask: None,
++        });
++    }
++
+     fn external_paint_source_bind_group_for_texture(
+         &mut self,
+         texture_id: TextureId,
+@@ -2778,6 +2989,12 @@ impl RendererContext<'_> {
+         let opaque_count = opaque_count as u32;
+         let alpha_count = alpha_count as u32;
+ 
++        let color_load_op = if matches!(target, DrawPassTarget::Root(_)) {
++            self.take_root_load_op()
++        } else {
++            // For layer targets we always want to load.
++            wgpu::LoadOp::Load
++        };
+         let (view, config_buffer, bind_group_target) = match target {
+             DrawPassTarget::Root(_) => (
+                 self.view,
+@@ -2821,6 +3038,15 @@ impl RendererContext<'_> {
+ 
+         let enable_opaque = self.use_depth_buffer && target.enable_opaque();
+ 
++        // Damage scissoring: only the root user surface is confined to the
++        // damage rects; layer and atlas targets always render in full.
++        let scissors: &[RectU16] =
++            if matches!(target, DrawPassTarget::Root(RootTarget::UserSurface)) {
++                self.root_scissors
++            } else {
++                &[]
++            };
++
+         let depth_stencil_attachment = if enable_opaque {
+             let depth_load = if self.programs.depth_cleared_this_frame {
+                 wgpu::LoadOp::Load
+@@ -2851,7 +3077,7 @@ impl RendererContext<'_> {
+                 depth_slice: None,
+                 resolve_target: None,
+                 ops: wgpu::Operations {
+-                    load: wgpu::LoadOp::Load,
++                    load: color_load_op,
+                     store: wgpu::StoreOp::Store,
+                 },
+             })],
+@@ -2865,46 +3091,59 @@ impl RendererContext<'_> {
+         render_pass.set_bind_group(3, &self.programs.resources.gradient_bind_group, &[]);
+         render_pass.set_vertex_buffer(0, self.programs.resources.strips_buffer.slice(..));
+ 
+-        if opaque_count > 0 {
+-            // Opaque pass
+-            debug_assert!(
+-                enable_opaque,
+-                "opaque strips require the final view depth attachment"
+-            );
+-            render_pass.set_pipeline(&self.programs.opaque_strip_pipeline);
+-            render_pass.set_bind_group(1, &self.programs.resources.atlas_bind_group, &[]);
+-            render_pass.draw(0..4, 0..opaque_count);
+-        }
+-
+-        if alpha_count > 0 {
+-            // Alpha pass
+-            if matches!(target, DrawPassTarget::Root(RootTarget::UserSurface)) {
+-                render_pass.set_pipeline(&self.programs.alpha_strip_pipeline);
+-            } else {
+-                render_pass.set_pipeline(&self.programs.intermediate_strip_pipeline);
++        // Replay the draw sequence once per damage rect (with that rect as the
++        // scissor), or once unscissored when there are no damage rects.
++        for pass_idx in 0..scissors.len().max(1) {
++            if let Some(rect) = scissors.get(pass_idx) {
++                render_pass.set_scissor_rect(
++                    u32::from(rect.x0),
++                    u32::from(rect.y0),
++                    u32::from(rect.width()),
++                    u32::from(rect.height()),
++                );
+             }
+ 
+-            let alpha_start = opaque_count;
+-            if external_texture_runs.is_empty() {
++            if opaque_count > 0 {
++                // Opaque pass
++                debug_assert!(
++                    enable_opaque,
++                    "opaque strips require the final view depth attachment"
++                );
++                render_pass.set_pipeline(&self.programs.opaque_strip_pipeline);
+                 render_pass.set_bind_group(1, &self.programs.resources.atlas_bind_group, &[]);
+-                render_pass.draw(0..4, alpha_start..alpha_start + alpha_count);
+-            } else {
+-                // Each run is drawn with a different external texture binding. Runs go from
+-                // `run.strips_start` to the next run's `strips_start`; the last run goes to the end of
+-                // the strips buffer.
+-                for (i, run) in external_texture_runs.iter().enumerate() {
+-                    let paint_source_bind_group = self
+-                        .external_paint_source_bind_groups
+-                        .get(&run.texture_id)
+-                        .unwrap();
+-                    render_pass.set_bind_group(1, paint_source_bind_group, &[]);
+-                    let start = u32::try_from(run.strips_start).unwrap();
+-                    let end = external_texture_runs
+-                        .get(i + 1)
+-                        .map_or(alpha_count, |next| {
+-                            u32::try_from(next.strips_start).unwrap()
+-                        });
+-                    render_pass.draw(0..4, alpha_start + start..alpha_start + end);
++                render_pass.draw(0..4, 0..opaque_count);
++            }
++
++            if alpha_count > 0 {
++                // Alpha pass
++                if matches!(target, DrawPassTarget::Root(RootTarget::UserSurface)) {
++                    render_pass.set_pipeline(&self.programs.alpha_strip_pipeline);
++                } else {
++                    render_pass.set_pipeline(&self.programs.intermediate_strip_pipeline);
++                }
++
++                let alpha_start = opaque_count;
++                if external_texture_runs.is_empty() {
++                    render_pass.set_bind_group(1, &self.programs.resources.atlas_bind_group, &[]);
++                    render_pass.draw(0..4, alpha_start..alpha_start + alpha_count);
++                } else {
++                    // Each run is drawn with a different external texture binding. Runs go from
++                    // `run.strips_start` to the next run's `strips_start`; the last run goes to the end of
++                    // the strips buffer.
++                    for (i, run) in external_texture_runs.iter().enumerate() {
++                        let paint_source_bind_group = self
++                            .external_paint_source_bind_groups
++                            .get(&run.texture_id)
++                            .unwrap();
++                        render_pass.set_bind_group(1, paint_source_bind_group, &[]);
++                        let start = u32::try_from(run.strips_start).unwrap();
++                        let end = external_texture_runs
++                            .get(i + 1)
++                            .map_or(alpha_count, |next| {
++                                u32::try_from(next.strips_start).unwrap()
++                            });
++                        render_pass.draw(0..4, alpha_start + start..alpha_start + end);
++                    }
+                 }
+             }
+         }
+@@ -3074,20 +3313,59 @@ impl RendererContext<'_> {
+         }
+     }
+ 
+-    fn clear_pass_inner(&mut self, target: LayerTextureId, rects: &[RectU16]) {
+-        let texture_size = self.texture_size();
+-        let target_size = [
+-            u32::from(texture_size.width()),
+-            u32::from(texture_size.height()),
+-        ];
++    fn clear_pass_inner(&mut self, target: DrawPassTarget, settings: ClearSettings<'_>) {
++        let Some(color) = settings.clear_color().map(clear_color) else {
++            return;
++        };
++
++        let view = match target {
++            DrawPassTarget::Root(_) => self.view,
++            DrawPassTarget::Layer(target) => self.programs.resources.layer_view(target),
++        };
++        let rects = match settings {
++            ClearSettings::DontClear => unreachable!(),
++            ClearSettings::Viewport { .. } => {
++                Self::clear_full_target(self.encoder, view, color);
++
++                return;
++            }
++            ClearSettings::Rects { rects, .. } => rects,
++        };
++
++        let (target_size, pipeline) = match target {
++            DrawPassTarget::Root(_) => (
++                [
++                    u16::try_from(self.programs.render_size.width).unwrap(),
++                    u16::try_from(self.programs.render_size.height).unwrap(),
++                ],
++                &self.programs.root_clear_pipeline,
++            ),
++            DrawPassTarget::Layer(_) => {
++                let texture_size = self.texture_size();
++                (
++                    [texture_size.width(), texture_size.height()],
++                    &self.programs.clear_pipeline,
++                )
++            }
++        };
++        let bounds = RectU16::new(0, 0, target_size[0], target_size[1]);
++        let target_size = target_size.map(u32::from);
+         self.scratch_buffers.clear_instances.clear();
+-        self.scratch_buffers
+-            .clear_instances
+-            .extend(rects.iter().copied().map(|rect| GpuClearInstance {
+-                origin: [u32::from(rect.x0), u32::from(rect.y0)],
+-                size: [u32::from(rect.width()), u32::from(rect.height())],
+-                target_size,
+-            }));
++        self.scratch_buffers.clear_instances.extend(
++            rects
++                .iter()
++                .map(|rect| rect.intersect(bounds))
++                .filter(|rect| !rect.is_empty())
++                .map(|rect| GpuClearInstance {
++                    origin: [u32::from(rect.x0), u32::from(rect.y0)],
++                    size: [u32::from(rect.width()), u32::from(rect.height())],
++                    target_size,
++                }),
++        );
++
++        if self.scratch_buffers.clear_instances.is_empty() {
++            return;
++        }
+ 
+         let clear_buffer = self
+             .device
+@@ -3096,7 +3374,6 @@ impl RendererContext<'_> {
+                 contents: bytemuck::cast_slice(&self.scratch_buffers.clear_instances),
+                 usage: wgpu::BufferUsages::VERTEX,
+             });
+-        let view = self.programs.resources.layer_view(target);
+         let mut render_pass = self.encoder.begin_render_pass(&RenderPassDescriptor {
+             label: Some("Clear Rects"),
+             color_attachments: &[Some(RenderPassColorAttachment {
+@@ -3113,7 +3390,8 @@ impl RendererContext<'_> {
+             timestamp_writes: None,
+             multiview_mask: None,
+         });
+-        render_pass.set_pipeline(&self.programs.clear_pipeline);
++        render_pass.set_pipeline(pipeline);
++        render_pass.set_blend_constant(color);
+         render_pass.set_vertex_buffer(0, clear_buffer.slice(..));
+         render_pass.draw(
+             0..4,
+@@ -3162,7 +3440,13 @@ impl Backend for RendererContext<'_> {
+     }
+ 
+     fn clear_pass(&mut self, target: LayerTextureId, rects: &[RectU16]) {
+-        self.clear_pass_inner(target, rects);
++        self.clear_pass_inner(
++            DrawPassTarget::Layer(target),
++            ClearSettings::Rects {
++                color: AlphaColor::TRANSPARENT,
++                rects,
++            },
++        );
+     }
+ }
+ 
+@@ -3434,3 +3718,114 @@ impl AtlasWriter for Arc<Pixmap> {
+         );
+     }
+ }
++
++fn clear_color(color: AlphaColor<Srgb>) -> wgpu::Color {
++    let [r, g, b, a] = color.premultiply().components;
++    wgpu::Color {
++        r: f64::from(r),
++        g: f64::from(g),
++        b: f64::from(b),
++        a: f64::from(a),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{RenderRegion, RenderSize, clamp_region_to_target};
++    use vello_common::geometry::RectU16;
++
++    fn size(width: u32, height: u32) -> RenderSize {
++        RenderSize { width, height }
++    }
++
++    #[test]
++    fn clamp_trims_overhang_and_drops_out_of_bounds() {
++        let rects = [
++            RectU16::new(10, 20, 40, 60),     // in-bounds: unchanged
++            RectU16::new(90, 90, 140, 140),   // overhang: trimmed to the target
++            RectU16::new(200, 200, 210, 210), // fully outside: dropped
++            RectU16::new(5, 5, 5, 12),        // zero width: dropped
++        ];
++        assert_eq!(
++            clamp_region_to_target(RenderRegion::Rects(&rects), &size(100, 100)),
++            [RectU16::new(10, 20, 40, 60), RectU16::new(90, 90, 100, 100)]
++        );
++    }
++
++    #[test]
++    fn clamp_full_region_yields_no_scissors() {
++        assert!(clamp_region_to_target(RenderRegion::Full, &size(100, 100)).is_empty());
++    }
++
++    #[test]
++    fn clamp_degenerate_region_yields_zero_area_sentinel() {
++        // A partial region that clamps entirely away (or is empty to begin
++        // with) must draw nothing, signalled by a single zero-area rect rather
++        // than an empty (full-render) set.
++        let rects = [RectU16::new(200, 200, 240, 240)];
++        assert_eq!(
++            clamp_region_to_target(RenderRegion::Rects(&rects), &size(100, 100)),
++            [RectU16::new(0, 0, 0, 0)]
++        );
++        assert_eq!(
++            clamp_region_to_target(RenderRegion::Rects(&[]), &size(100, 100)),
++            [RectU16::new(0, 0, 0, 0)]
++        );
++    }
++
++    /// Exhaustively compare a normalized set's coverage against the input's:
++    /// every pixel covered by the input must be covered by exactly one output
++    /// rect, and no other pixel by any.
++    fn assert_disjoint_same_coverage(input: &[RectU16], output: &[RectU16], w: u16, h: u16) {
++        for y in 0..h {
++            for x in 0..w {
++                let contains = |r: &RectU16| x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1;
++                let expected = usize::from(input.iter().any(contains));
++                let got = output.iter().filter(|r| contains(r)).count();
++                assert_eq!(
++                    got, expected,
++                    "pixel ({x}, {y}): covered by {got} output rects"
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn normalize_splits_overlapping_rects_into_a_disjoint_union() {
++        // The draw sequence is replayed once per rect, so any overlap would
++        // composite translucent content twice.
++        let cases: &[&[RectU16]] = &[
++            // Plain two-rect overlap.
++            &[RectU16::new(0, 0, 20, 20), RectU16::new(10, 10, 30, 30)],
++            // One rect fully inside another (the contained one must vanish).
++            &[RectU16::new(0, 0, 30, 30), RectU16::new(5, 5, 10, 10)],
++            // Duplicate rects.
++            &[RectU16::new(4, 4, 12, 12), RectU16::new(4, 4, 12, 12)],
++            // Cross shape: three rects sharing a center.
++            &[
++                RectU16::new(10, 0, 20, 30),
++                RectU16::new(0, 10, 30, 20),
++                RectU16::new(5, 5, 25, 25),
++            ],
++        ];
++        for input in cases {
++            let output = clamp_region_to_target(RenderRegion::Rects(input), &size(40, 40));
++            assert_disjoint_same_coverage(input, &output, 40, 40);
++        }
++    }
++
++    #[test]
++    fn normalize_keeps_already_disjoint_rects_unchanged() {
++        // Touching edges (x1 == x0) are not overlaps; the set passes through
++        // in its original form and order.
++        let rects = [
++            RectU16::new(0, 0, 10, 10),
++            RectU16::new(10, 0, 20, 10),
++            RectU16::new(0, 10, 20, 20),
++        ];
++        assert_eq!(
++            clamp_region_to_target(RenderRegion::Rects(&rects), &size(100, 100)),
++            rects
++        );
++    }
++}
+diff --git a/sparse_strips/vello_hybrid/src/scene.rs b/sparse_strips/vello_hybrid/src/scene.rs
+index e4ec4ef7..13ae8cc4 100644
+--- a/sparse_strips/vello_hybrid/src/scene.rs
++++ b/sparse_strips/vello_hybrid/src/scene.rs
+@@ -393,6 +393,20 @@ impl Scene {
+         );
+     }
+ 
++    /// Push an axis-aligned rectangle clip.
++    ///
++    /// Renders like pushing the rectangle as a clip path, but cheaper: the mask comes from
++    /// the rect strip renderer instead of the path pipeline, and a rectangle on integer
++    /// device coordinates keeps rect content on the GPU fast path instead of demoting it to
++    /// CPU strips — with output identical to the mask route, since an integer clip edge is
++    /// an exact 0/255 coverage step. Falls back to the path pipeline under rotation or skew.
++    /// Pop with [`pop_clip_path`](Self::pop_clip_path).
++    pub fn push_clip_rect(&mut self, rect: &Rect) {
++        let transform = self.transforms().clip_path_transform();
++        self.viewport_state
++            .push_clip_rect(rect, transform, self.aliasing_threshold);
++    }
++
+     /// Pop a clip path from the clip stack.
+     ///
+     /// Note that unlike `push_clip_layer`, it is permissible to have pending
+@@ -464,8 +478,7 @@ impl Scene {
+             let paint = ctx.encode_current_paint();
+ 
+             if let Some(bounds) = ctx.fast_rect_bounds(rect) {
+-                ctx.recorder
+-                    .push_draw(RecordedDraw::new_rect(bounds, paint), &[]);
++                ctx.push_fast_rect_clipped(bounds, paint);
+ 
+                 return;
+             }
+@@ -556,8 +569,7 @@ impl Scene {
+                         transform,
+                     );
+ 
+-                    ctx.recorder
+-                        .push_draw(RecordedDraw::new_rect(transformed_rect, paint), &[]);
++                    ctx.push_fast_rect_clipped(transformed_rect, paint);
+                 } else {
+                     let paint = ctx.encode_external_texture_paint(
+                         texture_id,
+@@ -605,7 +617,39 @@ impl Scene {
+ 
+     #[inline]
+     fn can_emit_fast_strips(&self) -> bool {
+-        self.viewport_state.clip().is_none() && self.aliasing_threshold.is_none()
++        // An integer-rectangle clip (or no clip) keeps anti-aliasing on a 0/255
++        // step, so fast strips stay byte-identical to the rasterized clip mask;
++        // `push_fast_rect_clipped` clamps the emitted rect to that clip set.
++        self.viewport_state.is_int_rect_clip() && self.aliasing_threshold.is_none()
++    }
++
++    /// Emit a fast (no-clip-strip) rect, clamped to the active integer-rectangle
++    /// clip set. With no clip the rect is emitted as-is; with a disjoint
++    /// integer-rect clip it is split into one piece per clip rect, so disjoint
++    /// pieces never double-blend (paints still sample by absolute position, so
++    /// the pieces need no UV adjustment).
++    fn push_fast_rect_clipped(&mut self, bounds: Rect, paint: Paint) {
++        match self.viewport_state.effective_int_rect_set() {
++            None => {
++                self.recorder
++                    .push_draw(RecordedDraw::new_rect(bounds, paint), &[]);
++            }
++            Some(clip_set) => {
++                for clip_rect in clip_set.as_slice() {
++                    let clip = Rect::new(
++                        f64::from(clip_rect.x0),
++                        f64::from(clip_rect.y0),
++                        f64::from(clip_rect.x1),
++                        f64::from(clip_rect.y1),
++                    );
++                    let piece = bounds.intersect(clip);
++                    if !piece.is_zero_area() {
++                        self.recorder
++                            .push_draw(RecordedDraw::new_rect(piece, paint.clone()), &[]);
++                    }
++                }
++            }
++        }
+     }
+ 
+     fn fast_rect_bounds(&self, rect: &Rect) -> Option<Rect> {
+@@ -678,8 +722,7 @@ impl Scene {
+             let paint = blurred_rect.encode_into(&mut ctx.encoded_paints, transform, None);
+ 
+             if let Some(bounds) = ctx.fast_rect_bounds(&inflated_rect) {
+-                ctx.recorder
+-                    .push_draw(RecordedDraw::new_rect(bounds, paint), &[]);
++                ctx.push_fast_rect_clipped(bounds, paint);
+                 return;
+             }
+ 
+diff --git a/sparse_strips/vello_hybrid/src/schedule/mod.rs b/sparse_strips/vello_hybrid/src/schedule/mod.rs
+index 22644220..7eba82b4 100644
+--- a/sparse_strips/vello_hybrid/src/schedule/mod.rs
++++ b/sparse_strips/vello_hybrid/src/schedule/mod.rs
+@@ -133,7 +133,7 @@ pub(crate) use self::execute::{Backend, execute};
+ use self::round::{
+     BlendOp, FilterOp, FilterTextureRegions, Round, RoundStage, Rounds, SchedulePoint,
+ };
+-use crate::draw::{Draw, DrawBuffers, DrawBuilder, DrawState, RectU16Ext};
++use crate::draw::{Draw, DrawBuffers, DrawBuilder, DrawState, RectU16Ext, StripCull};
+ use crate::filter::{FilterContext, FilterPassPlan, PreparedGpuFilter};
+ use crate::paint::PaintResolver;
+ use crate::scene::RecordedDraw;
+@@ -160,6 +160,9 @@ pub(crate) struct Schedule {
+     rounds: Rounds,
+     /// Intermediate textures required to execute this schedule.
+     intermediate_textures: IntermediateTextureRequirements,
++    /// Number of root strips skipped by the damage-region cull while building
++    /// this schedule.
++    culled_strips: u64,
+ }
+ 
+ impl Schedule {
+@@ -172,6 +175,7 @@ impl Schedule {
+         texture_size: SizeU16,
+         backend_allocations: IntermediateTextureAllocations,
+         max_textures: Option<usize>,
++        scissors: &[RectU16],
+     ) -> Result<Self, RenderError> {
+         storage.clear();
+ 
+@@ -193,6 +197,7 @@ impl Schedule {
+             paint_resolver,
+             texture_size,
+             storage,
++            scissors,
+         );
+ 
+         let schedule = scheduler.build()?;
+@@ -208,6 +213,12 @@ impl Schedule {
+     pub(crate) fn intermediate_texture_requirements(&self) -> IntermediateTextureRequirements {
+         self.intermediate_textures
+     }
++
++    /// Number of root strips the damage-region cull skipped while building this
++    /// schedule.
++    pub(crate) fn culled_strips(&self) -> u64 {
++        self.culled_strips
++    }
+ }
+ 
+ /// Intermediate textures required to execute a [`Schedule`].
+@@ -289,6 +300,10 @@ struct Scheduler<'a, 'p> {
+     texture_size: SizeU16,
+     /// Reusable buffers populated while constructing the schedule.
+     storage: &'p mut ScheduleStorage,
++    /// Damage-region cull for root draws, or `None` for a full render.
++    root_cull: Option<StripCull>,
++    /// Number of root strips skipped by [`Self::root_cull`].
++    culled_strips: u64,
+ }
+ 
+ impl<'a, 'p> Scheduler<'a, 'p> {
+@@ -302,7 +317,12 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+         paint_resolver: PaintResolver<'a>,
+         texture_size: SizeU16,
+         storage: &'p mut ScheduleStorage,
++        scissors: &[RectU16],
+     ) -> Self {
++        // An empty scissor set is a full render (no cull). Otherwise cull root
++        // strips against the damage rects; the draw-time scissor is what makes
++        // the output correct, so this only trims work.
++        let root_cull = (!scissors.is_empty()).then(|| StripCull::new(scissors));
+         Self {
+             recorder,
+             scene_bbox,
+@@ -313,6 +333,8 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+             cursor: Cursor::new(Atlases::new(texture_size)),
+             texture_size,
+             storage,
++            root_cull,
++            culled_strips: 0,
+         }
+     }
+ 
+@@ -337,6 +359,7 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+         Ok(Schedule {
+             rounds,
+             intermediate_textures,
++            culled_strips: self.culled_strips,
+         })
+     }
+ 
+@@ -350,6 +373,10 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+             self.scene_bbox,
+             self.use_depth_buffer,
+         );
++        // Only the root target is culled against the damage region. Layer and
++        // atlas states created elsewhere keep `root_cull == None`, so their
++        // contents (which the root samples) are never dropped.
++        state.draw_state.root_cull = self.root_cull.clone();
+ 
+         if self.recorder.root_is_blend_target {
+             // If the layer is a target of a non-default blending operation, we need to be able to
+@@ -393,6 +420,10 @@ impl<'a, 'p> Scheduler<'a, 'p> {
+             }
+         };
+ 
++        // The root is the only culled target, so its accumulated count is the
++        // whole schedule's.
++        self.culled_strips += state.draw_state.culled_strips;
++
+         Ok(())
+     }
+ 
+diff --git a/sparse_strips/vello_hybrid/src/schedule/test_support.rs b/sparse_strips/vello_hybrid/src/schedule/test_support.rs
+index 80cc180e..9769f57c 100644
+--- a/sparse_strips/vello_hybrid/src/schedule/test_support.rs
++++ b/sparse_strips/vello_hybrid/src/schedule/test_support.rs
+@@ -73,6 +73,7 @@ impl SceneCase {
+             texture_size,
+             IntermediateTextureAllocations::default(),
+             Some(max_textures),
++            &[],
+         )?;
+ 
+         Ok(ScheduledCase {
+@@ -101,6 +102,7 @@ impl SceneCase {
+             texture_size,
+             IntermediateTextureAllocations::default(),
+             Some(max_textures),
++            &[],
+         )
+     }
+ 
+diff --git a/sparse_strips/vello_sparse_shaders/shaders/clear.wesl b/sparse_strips/vello_sparse_shaders/shaders/clear.wesl
+index 7353225e..117cec7c 100644
+--- a/sparse_strips/vello_sparse_shaders/shaders/clear.wesl
++++ b/sparse_strips/vello_sparse_shaders/shaders/clear.wesl
+@@ -43,6 +43,12 @@ fn vs_main_fullscreen(
+ 
+ @fragment
+ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+-    // Clear with transparent pixels
++    // The WGPU render pipeline multiplies this by its dynamic blend constant.
++    // The WebGL backend currently doesn't use this entry point.
++    return vec4<f32>(1.0, 1.0, 1.0, 1.0);
++}
++
++@fragment
++fn fs_transparent(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+-} 
++}
+diff --git a/sparse_strips/vello_sparse_tests/snapshots/clear_area_empty_rects_preserve_existing_pixels.png b/sparse_strips/vello_sparse_tests/snapshots/clear_area_empty_rects_preserve_existing_pixels.png
+new file mode 100644
+index 00000000..08411635
+--- /dev/null
++++ b/sparse_strips/vello_sparse_tests/snapshots/clear_area_empty_rects_preserve_existing_pixels.png
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:0eb0d22d76f474af05dc9d1c4bc3054dfe75aca123bb814ac7d51189861e9687
++size 352
+diff --git a/sparse_strips/vello_sparse_tests/snapshots/clear_area_rects_clear_to_translucent_color.png b/sparse_strips/vello_sparse_tests/snapshots/clear_area_rects_clear_to_translucent_color.png
+new file mode 100644
+index 00000000..96227047
+--- /dev/null
++++ b/sparse_strips/vello_sparse_tests/snapshots/clear_area_rects_clear_to_translucent_color.png
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:de40fe27314c37bac3121211ec9df20b4d296a9697eae1ea68f72c81001a4c6d
++size 390
+diff --git a/sparse_strips/vello_sparse_tests/snapshots/clear_area_rects_clear_to_transparent.png b/sparse_strips/vello_sparse_tests/snapshots/clear_area_rects_clear_to_transparent.png
+new file mode 100644
+index 00000000..60b3c167
+--- /dev/null
++++ b/sparse_strips/vello_sparse_tests/snapshots/clear_area_rects_clear_to_transparent.png
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:f2cad4da6b17c04cbb7526abe847359fdcbf3c54d66f24f95a3c1b78e7dc34c5
++size 380
+diff --git a/sparse_strips/vello_sparse_tests/snapshots/clear_area_rects_use_requested_color.png b/sparse_strips/vello_sparse_tests/snapshots/clear_area_rects_use_requested_color.png
+new file mode 100644
+index 00000000..dc77fe6a
+--- /dev/null
++++ b/sparse_strips/vello_sparse_tests/snapshots/clear_area_rects_use_requested_color.png
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:62a3062975a9e970105c4a0d5337bd170e87ab550f562ec8042f33f63bb41141
++size 421
+diff --git a/sparse_strips/vello_sparse_tests/snapshots/clear_area_viewport_uses_requested_color.png b/sparse_strips/vello_sparse_tests/snapshots/clear_area_viewport_uses_requested_color.png
+new file mode 100644
+index 00000000..87130411
+--- /dev/null
++++ b/sparse_strips/vello_sparse_tests/snapshots/clear_area_viewport_uses_requested_color.png
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:a53004375d1cbdb29b24bf26c5aab21919b91be4f42ac259d41a31f1c5587a08
++size 373
+diff --git a/sparse_strips/vello_sparse_tests/snapshots/clear_disabled_preserves_existing_pixels.png b/sparse_strips/vello_sparse_tests/snapshots/clear_disabled_preserves_existing_pixels.png
+new file mode 100644
+index 00000000..09f8d5d2
+--- /dev/null
++++ b/sparse_strips/vello_sparse_tests/snapshots/clear_disabled_preserves_existing_pixels.png
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:e42f307c77fe5d57f9d4b645de5df41ced65ebd4eea30c68c0b45fab374fe32e
++size 334
+diff --git a/sparse_strips/vello_sparse_tests/tests/clear.rs b/sparse_strips/vello_sparse_tests/tests/clear.rs
+new file mode 100644
+index 00000000..8b669b8e
+--- /dev/null
++++ b/sparse_strips/vello_sparse_tests/tests/clear.rs
+@@ -0,0 +1,84 @@
++// Copyright 2026 the Vello Authors
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++//! Tests for clearing the output target.
++
++use crate::renderer::Renderer;
++use crate::util::render_pixmap;
++use vello_common::color::AlphaColor;
++use vello_common::color::palette::css::{BLUE, LIME};
++use vello_common::kurbo::Rect;
++use vello_dev_macros::vello_test;
++use vello_hybrid::{ClearSettings, RectU16};
++
++const CLEAR_RECTS: &[RectU16] = &[
++    RectU16::new(6, 6, 32, 32),
++    RectU16::new(56, 10, 90, 44),
++    RectU16::new(22, 58, 66, 92),
++];
++const EMPTY_CLEAR_RECTS: &[RectU16] = &[
++    RectU16::new(100, 100, u16::MAX, u16::MAX),
++    RectU16::new(24, 24, 12, 12),
++];
++
++fn prepare_clear_test(ctx: &mut impl Renderer) {
++    ctx.flush();
++    let _ = render_pixmap(ctx);
++    ctx.reset();
++}
++
++#[vello_test]
++fn clear_area_viewport_uses_requested_color(ctx: &mut impl Renderer) {
++    prepare_clear_test(ctx);
++    ctx.set_clear(ClearSettings::Viewport {
++        color: AlphaColor::from_rgba8(18, 52, 86, 120),
++    });
++    ctx.set_paint(LIME);
++    ctx.fill_rect(&Rect::new(16.0, 16.0, 48.0, 48.0));
++}
++
++#[vello_test]
++fn clear_area_rects_use_requested_color(ctx: &mut impl Renderer) {
++    prepare_clear_test(ctx);
++    ctx.set_clear(ClearSettings::Rects {
++        color: AlphaColor::from_rgba8(18, 52, 86, 120),
++        rects: CLEAR_RECTS,
++    });
++    ctx.set_paint(LIME);
++    ctx.fill_rect(&Rect::new(8.0, 8.0, 24.0, 24.0));
++}
++
++#[vello_test]
++fn clear_area_rects_clear_to_transparent(ctx: &mut impl Renderer) {
++    prepare_clear_test(ctx);
++    ctx.set_clear(ClearSettings::Rects {
++        color: AlphaColor::TRANSPARENT,
++        rects: CLEAR_RECTS,
++    });
++}
++
++#[vello_test]
++fn clear_area_rects_clear_to_translucent_color(ctx: &mut impl Renderer) {
++    prepare_clear_test(ctx);
++    ctx.set_clear(ClearSettings::Rects {
++        color: BLUE.with_alpha(0.1),
++        rects: CLEAR_RECTS,
++    });
++}
++
++#[vello_test]
++fn clear_area_empty_rects_preserve_existing_pixels(ctx: &mut impl Renderer) {
++    prepare_clear_test(ctx);
++    ctx.set_clear(ClearSettings::Rects {
++        color: AlphaColor::from_rgba8(18, 52, 86, 120),
++        rects: EMPTY_CLEAR_RECTS,
++    });
++    ctx.set_paint(LIME);
++    ctx.fill_rect(&Rect::new(16.0, 16.0, 48.0, 48.0));
++}
++
++#[vello_test]
++fn clear_disabled_preserves_existing_pixels(ctx: &mut impl Renderer) {
++    prepare_clear_test(ctx);
++    ctx.set_clear(ClearSettings::DontClear);
++}
+diff --git a/sparse_strips/vello_sparse_tests/tests/clip_exact.rs b/sparse_strips/vello_sparse_tests/tests/clip_exact.rs
+new file mode 100644
+index 00000000..347b8b7a
+--- /dev/null
++++ b/sparse_strips/vello_sparse_tests/tests/clip_exact.rs
+@@ -0,0 +1,357 @@
++// Copyright 2026 the Vello Authors
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++//! Byte-exactness pins for `vello_hybrid`'s integer-rectangle clip fast path.
++//!
++//! An axis-aligned clip rectangle on integer device coordinates has a 0/255
++//! anti-aliasing step at its edges, so clamping fast-path rects to it must be
++//! byte-identical to the mask-intersection path — and content strictly inside
++//! the clip must be byte-identical to the unclipped scene. These tests render
++//! the same content with and without such clips and compare raw pixels
++//! (fractional content edges included: those are the bytes that would drift
++//! if clipping demoted rects from the GPU analytic path to CPU strips).
++
++#[cfg(not(all(target_arch = "wasm32", feature = "webgl")))]
++mod tests {
++    use vello_common::geometry::RectU16;
++    use vello_common::kurbo::{Affine, BezPath, Rect, Shape, Stroke};
++    use vello_common::peniko::{Color, ImageQuality};
++    use vello_common::pixmap::Pixmap;
++    use vello_hybrid::SampleRect;
++
++    use crate::load_image;
++    use crate::renderer::{HybridRenderer, Renderer};
++    use crate::util::{get_ctx, render_pixmap};
++    use vello_cpu::RenderMode;
++
++    const W: u16 = 128;
++    const H: u16 = 64;
++
++    fn hybrid() -> HybridRenderer {
++        get_ctx::<HybridRenderer>(W, H, false, 0, "fallback", RenderMode::OptimizeQuality)
++    }
++
++    fn rect_path(x0: f64, y0: f64, x1: f64, y1: f64) -> BezPath {
++        Rect::new(x0, y0, x1, y1).to_path(0.1)
++    }
++
++    fn paint_backdrop(ctx: &mut HybridRenderer) {
++        ctx.set_paint(Color::new([0.086, 0.106, 0.133, 1.0]));
++        ctx.fill_rect(&Rect::new(0.0, 0.0, W as f64, H as f64));
++    }
++
++    /// Fractional-edge content of every fast-path class: opaque rect,
++    /// translucent rect, non-rect path, stroke.
++    fn paint_content(ctx: &mut HybridRenderer) {
++        ctx.set_paint(Color::new([0.941, 0.533, 0.243, 1.0]));
++        ctx.fill_rect(&Rect::new(10.3, 8.7, 40.6, 30.2));
++        ctx.set_paint(Color::new([0.2, 0.8, 0.4, 0.5]));
++        ctx.fill_rect(&Rect::new(60.5, 12.25, 95.75, 40.5));
++        let mut p = BezPath::new();
++        p.move_to((100.3, 10.4));
++        p.line_to((120.7, 18.9));
++        p.line_to((104.2, 44.6));
++        p.close_path();
++        ctx.set_paint(Color::new([0.4, 0.4, 0.9, 1.0]));
++        ctx.fill_path(&p);
++        ctx.set_paint(Color::new([0.9, 0.2, 0.3, 0.8]));
++        ctx.set_stroke(Stroke::new(2.5));
++        ctx.stroke_path(&rect_path(30.6, 35.3, 70.4, 55.8));
++    }
++
++    fn pixel(pixmap: &Pixmap, x: u16, y: u16) -> &[u8] {
++        let i = (usize::from(y) * usize::from(W) + usize::from(x)) * 4;
++        &pixmap.data_as_u8_slice()[i..i + 4]
++    }
++
++    fn assert_identical(a: &Pixmap, b: &Pixmap, what: &str) {
++        let diffs = a
++            .data_as_u8_slice()
++            .iter()
++            .zip(b.data_as_u8_slice())
++            .filter(|(x, y)| x != y)
++            .count();
++        assert_eq!(diffs, 0, "{what}: {diffs} differing bytes");
++    }
++
++    /// A full-viewport integer-aligned rect clip removes nothing, so it must
++    /// change nothing.
++    #[test]
++    fn clip_exact_full_viewport_integer_rect_is_byte_identical() {
++        let mut plain = hybrid();
++        paint_backdrop(&mut plain);
++        paint_content(&mut plain);
++        let plain = render_pixmap(&mut plain);
++
++        let mut clipped = hybrid();
++        paint_backdrop(&mut clipped);
++        clipped.push_clip_path(&rect_path(0.0, 0.0, W as f64, H as f64));
++        paint_content(&mut clipped);
++        clipped.pop_clip_path();
++        let clipped = render_pixmap(&mut clipped);
++
++        assert_identical(&plain, &clipped, "full-viewport integer clip");
++    }
++
++    /// An interior integer-rect clip: bytes inside the clip equal the
++    /// unclipped render, bytes outside are exactly the backdrop (content
++    /// removed — including the straddling shapes' out-of-clip parts).
++    #[test]
++    fn clip_exact_interior_integer_rect_confines_and_preserves() {
++        const CLIP: [u16; 4] = [16, 12, 112, 56]; // x0, y0, x1, y1
++
++        let mut reference = hybrid();
++        paint_backdrop(&mut reference);
++        paint_content(&mut reference);
++        let reference = render_pixmap(&mut reference);
++
++        let mut backdrop_only = hybrid();
++        paint_backdrop(&mut backdrop_only);
++        let backdrop_only = render_pixmap(&mut backdrop_only);
++
++        let mut clipped = hybrid();
++        paint_backdrop(&mut clipped);
++        clipped.push_clip_path(&rect_path(
++            CLIP[0] as f64,
++            CLIP[1] as f64,
++            CLIP[2] as f64,
++            CLIP[3] as f64,
++        ));
++        paint_content(&mut clipped);
++        clipped.pop_clip_path();
++        let clipped = render_pixmap(&mut clipped);
++
++        for y in 0..H {
++            for x in 0..W {
++                let inside = x >= CLIP[0] && x < CLIP[2] && y >= CLIP[1] && y < CLIP[3];
++                let want = if inside {
++                    pixel(&reference, x, y)
++                } else {
++                    pixel(&backdrop_only, x, y)
++                };
++                assert_eq!(
++                    pixel(&clipped, x, y),
++                    want,
++                    "({x},{y}) inside={inside}: clip must {}",
++                    if inside {
++                        "preserve the unclipped bytes"
++                    } else {
++                        "remove the content"
++                    }
++                );
++            }
++        }
++    }
++
++    /// A clip path made of two disjoint integer rectangles: content clamps to
++    /// each rect (a straddling shape splits, without double-blending), and
++    /// the gap between the rects keeps the backdrop.
++    #[test]
++    fn clip_exact_disjoint_rect_set_confines_and_preserves() {
++        const LEFT: [u16; 4] = [8, 4, 52, 60];
++        const RIGHT: [u16; 4] = [70, 4, 124, 48];
++        let inside = |x: u16, y: u16| {
++            (x >= LEFT[0] && x < LEFT[2] && y >= LEFT[1] && y < LEFT[3])
++                || (x >= RIGHT[0] && x < RIGHT[2] && y >= RIGHT[1] && y < RIGHT[3])
++        };
++
++        let mut reference = hybrid();
++        paint_backdrop(&mut reference);
++        paint_content(&mut reference);
++        let reference = render_pixmap(&mut reference);
++
++        let mut backdrop_only = hybrid();
++        paint_backdrop(&mut backdrop_only);
++        let backdrop_only = render_pixmap(&mut backdrop_only);
++
++        let mut clip = rect_path(
++            LEFT[0] as f64,
++            LEFT[1] as f64,
++            LEFT[2] as f64,
++            LEFT[3] as f64,
++        );
++        clip.extend(
++            rect_path(
++                RIGHT[0] as f64,
++                RIGHT[1] as f64,
++                RIGHT[2] as f64,
++                RIGHT[3] as f64,
++            )
++            .iter(),
++        );
++        let mut clipped = hybrid();
++        paint_backdrop(&mut clipped);
++        clipped.push_clip_path(&clip);
++        paint_content(&mut clipped);
++        clipped.pop_clip_path();
++        let clipped = render_pixmap(&mut clipped);
++
++        for y in 0..H {
++            for x in 0..W {
++                let want = if inside(x, y) {
++                    pixel(&reference, x, y)
++                } else {
++                    pixel(&backdrop_only, x, y)
++                };
++                assert_eq!(
++                    pixel(&clipped, x, y),
++                    want,
++                    "({x},{y}) inside={}",
++                    inside(x, y)
++                );
++            }
++        }
++    }
++
++    /// Texture rects at a fractional offset under an integer clip: the
++    /// fast-arm clamp must not shift sampling (paints sample by absolute
++    /// position), so in-clip bytes equal the unclipped render.
++    #[test]
++    fn clip_exact_texture_rects_are_byte_identical_inside() {
++        const CLIP: [u16; 4] = [16, 12, 112, 56];
++        let sample = SampleRect {
++            source_region: RectU16::new(0, 0, 56, 56),
++            transform: Affine::translate((10.3, 8.7)),
++        };
++
++        let mut reference = hybrid();
++        paint_backdrop(&mut reference);
++        let id = reference.register_external_texture(load_image!("glyphs_colr_noto"));
++        reference.draw_texture_rects(id, ImageQuality::Low, [sample]);
++        let reference = render_pixmap(&mut reference);
++
++        let mut backdrop_only = hybrid();
++        paint_backdrop(&mut backdrop_only);
++        let backdrop_only = render_pixmap(&mut backdrop_only);
++
++        let mut clipped = hybrid();
++        paint_backdrop(&mut clipped);
++        let id = clipped.register_external_texture(load_image!("glyphs_colr_noto"));
++        clipped.push_clip_path(&rect_path(
++            CLIP[0] as f64,
++            CLIP[1] as f64,
++            CLIP[2] as f64,
++            CLIP[3] as f64,
++        ));
++        clipped.draw_texture_rects(id, ImageQuality::Low, [sample]);
++        clipped.pop_clip_path();
++        let clipped = render_pixmap(&mut clipped);
++
++        for y in 0..H {
++            for x in 0..W {
++                let inside = x >= CLIP[0] && x < CLIP[2] && y >= CLIP[1] && y < CLIP[3];
++                let want = if inside {
++                    pixel(&reference, x, y)
++                } else {
++                    pixel(&backdrop_only, x, y)
++                };
++                assert_eq!(pixel(&clipped, x, y), want, "({x},{y}) inside={inside}");
++            }
++        }
++    }
++
++    /// `Scene::push_clip_rect` is byte-identical to pushing the same rectangle as a clip
++    /// path — in both regimes: integer edges (no mask, fast-path clamping) and fractional
++    /// edges (rect-strip mask, content demotes in both).
++    #[test]
++    fn clip_exact_push_clip_rect_matches_clip_path() {
++        for (clip, name) in [
++            ([16.0, 12.0, 112.0, 56.0], "integer"),
++            ([16.4, 12.6, 111.5, 55.25], "fractional"),
++        ] {
++            let mut via_path = hybrid();
++            paint_backdrop(&mut via_path);
++            via_path.push_clip_path(&rect_path(clip[0], clip[1], clip[2], clip[3]));
++            paint_content(&mut via_path);
++            via_path.pop_clip_path();
++            let via_path = render_pixmap(&mut via_path);
++
++            let mut via_rect = hybrid();
++            paint_backdrop(&mut via_rect);
++            via_rect
++                .scene_mut()
++                .push_clip_rect(&Rect::new(clip[0], clip[1], clip[2], clip[3]));
++            paint_content(&mut via_rect);
++            via_rect.pop_clip_path();
++            let via_rect = render_pixmap(&mut via_rect);
++
++            assert_identical(
++                &via_path,
++                &via_rect,
++                &format!("push_clip_rect vs clip path ({name})"),
++            );
++        }
++    }
++
++    /// A rectangle clip must survive the filter-layer viewport rebuild: pushing a filter
++    /// layer re-generates every active clip into a shifted context, and the `RawClipKind::Rect`
++    /// replay arm must reproduce exactly what the equivalent path clip's replay produces.
++    #[test]
++    fn clip_exact_push_clip_rect_replays_across_filter_layers() {
++        use vello_common::filter_effects::{Filter, FilterPrimitive};
++
++        const CLIP: [f64; 4] = [16.0, 12.0, 112.0, 56.0];
++        let build = |ctx: &mut HybridRenderer, rect_clip: bool| {
++            paint_backdrop(ctx);
++            if rect_clip {
++                ctx.scene_mut()
++                    .push_clip_rect(&Rect::new(CLIP[0], CLIP[1], CLIP[2], CLIP[3]));
++            } else {
++                ctx.push_clip_path(&rect_path(CLIP[0], CLIP[1], CLIP[2], CLIP[3]));
++            }
++            // The filter layer forces a viewport push, which rebuilds the clip
++            // context from the recorded raw clips.
++            ctx.push_filter_layer(Filter::from_primitive(FilterPrimitive::Offset {
++                dx: 4.0,
++                dy: 2.0,
++            }));
++            paint_content(ctx);
++            ctx.pop_layer();
++            ctx.pop_clip_path();
++        };
++
++        let mut via_path = hybrid();
++        build(&mut via_path, false);
++        let via_path = render_pixmap(&mut via_path);
++
++        let mut via_rect = hybrid();
++        build(&mut via_rect, true);
++        let via_rect = render_pixmap(&mut via_rect);
++
++        assert_identical(&via_path, &via_rect, "rect clip across a filter layer");
++    }
++
++    /// A rectangle clip nested under a non-rectangular clip path takes the mask route and
++    /// intersects with the parent mask exactly like the equivalent clip path would.
++    #[test]
++    fn clip_exact_push_clip_rect_nested_under_path_clip() {
++        let mut tri = BezPath::new();
++        tri.move_to((20.0, 5.0));
++        tri.line_to((120.0, 25.0));
++        tri.line_to((30.0, 60.0));
++        tri.close_path();
++        const CLIP: [f64; 4] = [16.0, 12.0, 112.0, 56.0];
++
++        let mut via_path = hybrid();
++        paint_backdrop(&mut via_path);
++        via_path.push_clip_path(&tri);
++        via_path.push_clip_path(&rect_path(CLIP[0], CLIP[1], CLIP[2], CLIP[3]));
++        paint_content(&mut via_path);
++        via_path.pop_clip_path();
++        via_path.pop_clip_path();
++        let via_path = render_pixmap(&mut via_path);
++
++        let mut via_rect = hybrid();
++        paint_backdrop(&mut via_rect);
++        via_rect.push_clip_path(&tri);
++        via_rect
++            .scene_mut()
++            .push_clip_rect(&Rect::new(CLIP[0], CLIP[1], CLIP[2], CLIP[3]));
++        paint_content(&mut via_rect);
++        via_rect.pop_clip_path();
++        via_rect.pop_clip_path();
++        let via_rect = render_pixmap(&mut via_rect);
++
++        assert_identical(&via_path, &via_rect, "nested push_clip_rect vs clip path");
++    }
++}
+diff --git a/sparse_strips/vello_sparse_tests/tests/clip_rect_cpu.rs b/sparse_strips/vello_sparse_tests/tests/clip_rect_cpu.rs
+new file mode 100644
+index 00000000..125a156b
+--- /dev/null
++++ b/sparse_strips/vello_sparse_tests/tests/clip_rect_cpu.rs
+@@ -0,0 +1,92 @@
++// Copyright 2026 the Vello Authors
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++//! `vello_cpu`'s `push_clip_rect` must render byte-identically to pushing the
++//! same rectangle as a clip path, on both the single- and multi-threaded
++//! dispatchers, in every routing regime (integer edges, fractional edges, and
++//! the rotated fallback to the path pipeline).
++
++use vello_common::kurbo::{Affine, Point, Rect, Shape};
++use vello_common::peniko::Color;
++use vello_common::pixmap::Pixmap;
++use vello_cpu::{RenderContext, RenderSettings, Resources};
++
++const W: u16 = 128;
++const H: u16 = 64;
++
++fn render(num_threads: u16, rect_clip: bool, clip: Rect, transform: Affine) -> Pixmap {
++    let settings = RenderSettings {
++        num_threads,
++        ..Default::default()
++    };
++    let mut ctx = RenderContext::new_with(W, H, settings);
++    let mut resources = Resources::new();
++
++    ctx.set_paint(Color::new([0.086, 0.106, 0.133, 1.0]));
++    ctx.fill_rect(&Rect::new(0.0, 0.0, f64::from(W), f64::from(H)));
++
++    ctx.set_transform(transform);
++    if rect_clip {
++        ctx.push_clip_rect(&clip);
++    } else {
++        ctx.push_clip_path(&clip.to_path(0.1));
++    }
++    ctx.set_transform(Affine::IDENTITY);
++
++    ctx.set_paint(Color::new([0.941, 0.533, 0.243, 1.0]));
++    ctx.fill_rect(&Rect::new(10.3, 8.7, 40.6, 30.2));
++    ctx.set_paint(Color::new([0.2, 0.8, 0.4, 0.5]));
++    ctx.fill_rect(&Rect::new(60.5, 12.25, 95.75, 40.5));
++
++    ctx.pop_clip_path();
++    ctx.flush();
++
++    let mut pixmap = Pixmap::new(W, H);
++    ctx.render(&mut pixmap, &mut resources);
++    pixmap
++}
++
++fn assert_parity(clip: Rect, transform: Affine, what: &str) {
++    for num_threads in [0, 2] {
++        let via_path = render(num_threads, false, clip, transform);
++        let via_rect = render(num_threads, true, clip, transform);
++        let diffs = via_path
++            .data_as_u8_slice()
++            .iter()
++            .zip(via_rect.data_as_u8_slice())
++            .filter(|(a, b)| a != b)
++            .count();
++        assert_eq!(
++            diffs, 0,
++            "{what} (num_threads={num_threads}): {diffs} differing bytes"
++        );
++    }
++}
++
++#[test]
++fn cpu_push_clip_rect_matches_clip_path_integer() {
++    assert_parity(
++        Rect::new(16.0, 12.0, 112.0, 56.0),
++        Affine::IDENTITY,
++        "integer rect clip",
++    );
++}
++
++#[test]
++fn cpu_push_clip_rect_matches_clip_path_fractional() {
++    assert_parity(
++        Rect::new(16.4, 12.6, 111.5, 55.25),
++        Affine::IDENTITY,
++        "fractional rect clip",
++    );
++}
++
++#[test]
++fn cpu_push_clip_rect_matches_clip_path_rotated() {
++    // Rotation forces the fallback to the path pipeline.
++    assert_parity(
++        Rect::new(30.0, 10.0, 100.0, 50.0),
++        Affine::rotate_about(0.3, Point::new(64.0, 32.0)),
++        "rotated rect clip",
++    );
++}
+diff --git a/sparse_strips/vello_sparse_tests/tests/mod.rs b/sparse_strips/vello_sparse_tests/tests/mod.rs
+index 864ff5d6..bb79b0d5 100644
+--- a/sparse_strips/vello_sparse_tests/tests/mod.rs
++++ b/sparse_strips/vello_sparse_tests/tests/mod.rs
+@@ -32,7 +32,10 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+ 
+ mod basic;
+ mod blurred_rounded_rect;
++mod clear;
+ mod clip;
++mod clip_exact;
++mod clip_rect_cpu;
+ mod compose;
+ mod external_texture;
+ mod filter;
+@@ -48,6 +51,7 @@ mod layer;
+ mod mask;
+ mod mix;
+ mod opacity;
++mod partial_render;
+ mod renderer;
+ mod scenes;
+ #[macro_use]
+diff --git a/sparse_strips/vello_sparse_tests/tests/partial_render.rs b/sparse_strips/vello_sparse_tests/tests/partial_render.rs
+new file mode 100644
+index 00000000..46485ebb
+--- /dev/null
++++ b/sparse_strips/vello_sparse_tests/tests/partial_render.rs
+@@ -0,0 +1,311 @@
++// Copyright 2026 the Vello Authors
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++//! Correctness pins for `vello_hybrid`'s partial (damage-region) rendering via
++//! [`RenderRegion::Rects`] and [`ClearSettings::Rects`].
++
++#[cfg(not(all(target_arch = "wasm32", feature = "webgl")))]
++mod tests {
++    use vello_common::geometry::RectU16;
++    use vello_common::kurbo::Rect;
++    use vello_common::peniko::Color;
++    use vello_common::pixmap::Pixmap;
++    use vello_hybrid::{ClearSettings, RenderRegion};
++
++    use crate::renderer::{HybridRenderer, Renderer};
++    use crate::util::{get_ctx, render_pixmap};
++    use vello_cpu::RenderMode;
++
++    const W: u16 = 128;
++    const H: u16 = 64;
++
++    fn hybrid() -> HybridRenderer {
++        get_ctx::<HybridRenderer>(W, H, false, 0, "fallback", RenderMode::OptimizeQuality)
++    }
++
++    fn paint_scene(ctx: &mut HybridRenderer) {
++        ctx.set_paint(Color::new([0.086, 0.106, 0.133, 1.0]));
++        ctx.fill_rect(&Rect::new(0.0, 0.0, W as f64, H as f64));
++        ctx.set_paint(Color::new([0.941, 0.533, 0.243, 1.0]));
++        ctx.fill_rect(&Rect::new(10.3, 8.7, 60.6, 40.2));
++        ctx.set_paint(Color::new([0.2, 0.8, 0.4, 0.7]));
++        ctx.fill_rect(&Rect::new(70.5, 12.25, 115.75, 50.5));
++    }
++
++    fn pixel(p: &Pixmap, x: u16, y: u16) -> [u8; 4] {
++        let i = (y as usize * W as usize + x as usize) * 4;
++        let d = p.data_as_u8_slice();
++        [d[i], d[i + 1], d[i + 2], d[i + 3]]
++    }
++
++    /// A viewport-clear render confined to a damage rect must reproduce the
++    /// full render inside the rect and leave everything outside cleared to
++    /// transparent — i.e. the region actually confines drawing.
++    #[test]
++    fn partial_render_clear_confines_to_scissor() {
++        let mut full_ctx = hybrid();
++        paint_scene(&mut full_ctx);
++        let full = render_pixmap(&mut full_ctx);
++
++        let damage = RectU16::new(16, 8, 96, 48);
++        let mut scissored_ctx = hybrid();
++        paint_scene(&mut scissored_ctx);
++        let mut scissored = Pixmap::new(W, H);
++        scissored_ctx.render_region_to_pixmap(
++            ClearSettings::default(),
++            RenderRegion::Rects(&[damage]),
++            false,
++            &mut scissored,
++        );
++
++        for y in 0..H {
++            for x in 0..W {
++                let inside = x >= damage.x0 && x < damage.x1 && y >= damage.y0 && y < damage.y1;
++                if inside {
++                    assert_eq!(
++                        pixel(&scissored, x, y),
++                        pixel(&full, x, y),
++                        "in-scissor pixel ({x}, {y}) must match the full render"
++                    );
++                } else {
++                    assert_eq!(
++                        pixel(&scissored, x, y),
++                        [0, 0, 0, 0],
++                        "out-of-scissor pixel ({x}, {y}) must stay cleared"
++                    );
++                }
++            }
++        }
++    }
++
++    /// A full render followed by a damage render (clear the damaged rect, redraw
++    /// only it) reproduces the full render everywhere: the damaged region is
++    /// redrawn identically and the rest of the target is preserved.
++    #[test]
++    fn partial_render_damage_preserves_and_matches_full() {
++        let mut full_ctx = hybrid();
++        paint_scene(&mut full_ctx);
++        let full = render_pixmap(&mut full_ctx);
++
++        let damage = RectU16::new(16, 8, 96, 48);
++        let mut damaged_ctx = hybrid();
++        paint_scene(&mut damaged_ctx);
++        let mut damaged = Pixmap::new(W, H);
++        damaged_ctx.render_region_to_pixmap(
++            ClearSettings::Rects {
++                color: Color::TRANSPARENT,
++                rects: &[damage],
++            },
++            RenderRegion::Rects(&[damage]),
++            true,
++            &mut damaged,
++        );
++
++        let diffs = damaged
++            .data_as_u8_slice()
++            .iter()
++            .zip(full.data_as_u8_slice())
++            .filter(|(a, b)| a != b)
++            .count();
++        assert_eq!(
++            diffs, 0,
++            "damage render must be byte-identical to the full render ({diffs} differing bytes)"
++        );
++    }
++
++    /// Two disjoint damage rects clear and redraw independently, still matching
++    /// the full render (exercises the multi-rect scissor loop and the rect clear).
++    #[test]
++    fn partial_render_disjoint_damage_rects_match_full() {
++        let mut full_ctx = hybrid();
++        paint_scene(&mut full_ctx);
++        let full = render_pixmap(&mut full_ctx);
++
++        let damage = [RectU16::new(8, 8, 40, 40), RectU16::new(80, 16, 120, 56)];
++        let mut damaged_ctx = hybrid();
++        paint_scene(&mut damaged_ctx);
++        let mut damaged = Pixmap::new(W, H);
++        damaged_ctx.render_region_to_pixmap(
++            ClearSettings::Rects {
++                color: Color::TRANSPARENT,
++                rects: &damage,
++            },
++            RenderRegion::Rects(&damage),
++            true,
++            &mut damaged,
++        );
++
++        let diffs = damaged
++            .data_as_u8_slice()
++            .iter()
++            .zip(full.data_as_u8_slice())
++            .filter(|(a, b)| a != b)
++            .count();
++        assert_eq!(
++            diffs, 0,
++            "disjoint-damage render must be byte-identical to the full render ({diffs} differing bytes)"
++        );
++
++        // The region render is the partial one; the preceding full render is
++        // not counted.
++        assert_eq!(
++            damaged_ctx.partial_renders(),
++            1,
++            "the region render must be counted as a partial render"
++        );
++        // The two scenes' edge quads that fall in the gap between the disjoint
++        // damage rects have no scissored draw, so the cull must skip some.
++        assert!(
++            damaged_ctx.culled_strips() > 0,
++            "the damage-region cull must skip strips in the gap between disjoint rects"
++        );
++    }
++
++    /// Overlapping damage rects must composite translucent content exactly
++    /// once. The root draw sequence is replayed once per scissor rect, so
++    /// without normalizing the region into a disjoint union, the overlap
++    /// would blend the translucent fill twice and diverge from a full render.
++    /// The scene deliberately has no opaque backdrop: an opaque first draw
++    /// would reset the overlap on every replay and mask the double blend.
++    #[test]
++    fn partial_render_overlapping_damage_rects_match_full() {
++        let paint_translucent = |ctx: &mut HybridRenderer| {
++            ctx.set_paint(Color::new([0.2, 0.8, 0.4, 0.7]));
++            ctx.fill_rect(&Rect::new(4.0, 4.0, 124.0, 60.0));
++        };
++
++        let mut full_ctx = hybrid();
++        paint_translucent(&mut full_ctx);
++        let full = render_pixmap(&mut full_ctx);
++
++        // Two rects overlapping over x 40..88, y 16..48.
++        let damage = [RectU16::new(8, 8, 88, 48), RectU16::new(40, 16, 120, 56)];
++        let mut damaged_ctx = hybrid();
++        paint_translucent(&mut damaged_ctx);
++        let mut damaged = Pixmap::new(W, H);
++        damaged_ctx.render_region_to_pixmap(
++            ClearSettings::default(),
++            RenderRegion::Rects(&damage),
++            false,
++            &mut damaged,
++        );
++
++        for y in 0..H {
++            for x in 0..W {
++                let inside = damage
++                    .iter()
++                    .any(|r| x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1);
++                if inside {
++                    assert_eq!(
++                        pixel(&damaged, x, y),
++                        pixel(&full, x, y),
++                        "in-region pixel ({x}, {y}) must match the full render \
++                         (a mismatch inside the overlap means it was composited twice)"
++                    );
++                } else {
++                    assert_eq!(
++                        pixel(&damaged, x, y),
++                        [0, 0, 0, 0],
++                        "out-of-region pixel ({x}, {y}) must stay cleared"
++                    );
++                }
++            }
++        }
++    }
++
++    /// [`ClearSettings::Rects`] renders into the caller's target, so its
++    /// pipeline must be built for the render target's format — not for the
++    /// `Rgba8Unorm` the renderer's own layer textures use.
++    ///
++    /// The pixel tests above all run on an `Rgba8Unorm` target, where the two
++    /// formats coincide. A real swapchain is typically `Bgra8Unorm`, and there
++    /// a layer-format clear pipeline is incompatible with the render pass:
++    /// wgpu rejects the `set_pipeline`, which invalidates the encoder and drops
++    /// the whole frame. Assert the damage-region recipe raises no validation
++    /// error on a target whose format differs from the layer format.
++    #[test]
++    fn clear_rects_matches_the_render_target_format() {
++        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
++
++        let instance = wgpu::Instance::default();
++        let Ok(adapter) =
++            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
++                power_preference: wgpu::PowerPreference::default(),
++                force_fallback_adapter: false,
++                compatible_surface: None,
++            }))
++        else {
++            return;
++        };
++        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
++            label: Some("clear_rects target format"),
++            required_features: wgpu::Features::empty(),
++            ..Default::default()
++        }))
++        .expect("Failed to create device");
++
++        let texture = device.create_texture(&wgpu::TextureDescriptor {
++            label: Some("Render Target"),
++            size: wgpu::Extent3d {
++                width: W.into(),
++                height: H.into(),
++                depth_or_array_layers: 1,
++            },
++            mip_level_count: 1,
++            sample_count: 1,
++            dimension: wgpu::TextureDimension::D2,
++            format: FORMAT,
++            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
++            view_formats: &[],
++        });
++        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
++
++        let (mut renderer, mut resources) = vello_hybrid::Renderer::new(
++            &device,
++            &vello_hybrid::RenderTargetConfig {
++                format: FORMAT,
++                width: W.into(),
++                height: H.into(),
++            },
++        );
++        let texture_bindings = vello_hybrid::TextureBindings::new();
++        let render_size = vello_hybrid::RenderSize {
++            width: W.into(),
++            height: H.into(),
++        };
++
++        let mut scene = vello_hybrid::Scene::new(W, H);
++        scene.set_paint(Color::new([0.941, 0.533, 0.243, 1.0]));
++        scene.fill_rect(&Rect::new(0.0, 0.0, W as f64, H as f64));
++
++        let damage = [RectU16::new(16, 8, 96, 48)];
++        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
++        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
++            label: Some("Damage Render"),
++        });
++        renderer
++            .render(
++                &scene,
++                &mut resources,
++                &device,
++                &queue,
++                &mut encoder,
++                &render_size,
++                &view,
++                &texture_bindings,
++                ClearSettings::Rects {
++                    color: Color::TRANSPARENT,
++                    rects: &damage,
++                },
++                RenderRegion::Rects(&damage),
++            )
++            .unwrap();
++        queue.submit([encoder.finish()]);
++
++        let error = pollster::block_on(scope.pop());
++        assert!(
++            error.is_none(),
++            "a rect clear on a {FORMAT:?} target must not raise a validation error: {error:?}"
++        );
++    }
++}
+diff --git a/sparse_strips/vello_sparse_tests/tests/renderer.rs b/sparse_strips/vello_sparse_tests/tests/renderer.rs
+index ef6e8b48..c114033c 100644
+--- a/sparse_strips/vello_sparse_tests/tests/renderer.rs
++++ b/sparse_strips/vello_sparse_tests/tests/renderer.rs
+@@ -6,16 +6,19 @@ use std::collections::HashMap;
+ use std::sync::Arc;
+ 
+ use glifo::GlyphRunBackend;
++use vello_common::color::AlphaColor;
+ use vello_common::filter_effects::Filter;
+ use vello_common::kurbo::{Affine, BezPath, Rect, Stroke};
+ use vello_common::mask::Mask;
+ use vello_common::paint::{ImageId, ImageSource, PaintType, Tint};
+ use vello_common::peniko::{BlendMode, Fill, FontData, ImageQuality};
+ use vello_common::pixmap::Pixmap;
+-use vello_cpu::{Level, RasterizerSettings, RenderContext, RenderMode, RenderSettings, Resources};
++use vello_cpu::{
++    CompositeMode, Level, RasterizerSettings, RenderContext, RenderMode, RenderSettings, Resources,
++};
+ use vello_hybrid::{
+-    RenderSettings as HybridRenderSettings, Resources as HybridResources, SampleRect, Scene,
+-    TextureId,
++    ClearSettings, RectU16, RenderSettings as HybridRenderSettings, Resources as HybridResources,
++    SampleRect, Scene, TextureId,
+ };
+ #[cfg(all(target_arch = "wasm32", feature = "webgl"))]
+ use web_sys::WebGl2RenderingContext;
+@@ -84,6 +87,7 @@ pub(crate) trait Renderer: Sized {
+     fn set_filter_effect(&mut self, filter: Filter);
+     fn reset_filter_effect(&mut self);
+     fn reset(&mut self);
++    fn set_clear(&mut self, clear: ClearSettings<'static>);
+     fn render_to_pixmap(&mut self, pixmap: &mut Pixmap);
+     fn width(&self) -> u16;
+     fn height(&self) -> u16;
+@@ -102,6 +106,8 @@ pub(crate) struct CpuRenderer {
+     ctx: RenderContext,
+     resources: Resources,
+     render_mode: RenderMode,
++    target: Pixmap,
++    clear: ClearSettings<'static>,
+ }
+ 
+ impl Renderer for CpuRenderer {
+@@ -119,6 +125,8 @@ impl Renderer for CpuRenderer {
+             ctx: RenderContext::new_with(width, height, settings),
+             resources: Resources::new(),
+             render_mode,
++            target: Pixmap::new(width, height),
++            clear: ClearSettings::default(),
+         }
+     }
+ 
+@@ -246,15 +254,33 @@ impl Renderer for CpuRenderer {
+         self.ctx.reset();
+     }
+ 
++    fn set_clear(&mut self, clear: ClearSettings<'static>) {
++        self.clear = clear;
++    }
++
+     fn render_to_pixmap(&mut self, pixmap: &mut Pixmap) {
++        apply_clear(&mut self.target, self.clear);
++        // We still want to exercise the `Replace` path for the common case since it's
++        // the default, so use it whenever possible.
++        let composite_mode = match self.clear {
++            ClearSettings::Viewport { color } if color == AlphaColor::TRANSPARENT => {
++                CompositeMode::Replace
++            }
++            ClearSettings::DontClear
++            | ClearSettings::Viewport { .. }
++            | ClearSettings::Rects { .. } => CompositeMode::SrcOver,
++        };
++
+         self.ctx.render_with(
+-            pixmap,
++            &mut self.target,
+             &mut self.resources,
+             RasterizerSettings {
+                 render_mode: self.render_mode,
++                composite_mode,
+                 ..Default::default()
+             },
+         );
++        pixmap.data_mut().copy_from_slice(self.target.data());
+     }
+ 
+     fn width(&self) -> u16 {
+@@ -299,10 +325,147 @@ pub(crate) struct HybridRenderer {
+     renderer: vello_hybrid::Renderer,
+     external_textures: HashMap<TextureId, wgpu::TextureView>,
+     next_external_texture_id: u64,
++    clear: ClearSettings<'static>,
+ }
+ 
+ #[cfg(not(all(target_arch = "wasm32", feature = "webgl")))]
+ impl HybridRenderer {
++    /// Mutable access to the underlying scene, for hybrid-only APIs not on the
++    /// shared `Renderer` trait (e.g. `Scene::push_clip_rect`).
++    pub(crate) fn scene_mut(&mut self) -> &mut Scene {
++        &mut self.scene
++    }
++
++    /// Number of partial ([`vello_hybrid::RenderRegion::Rects`]) renders this
++    /// renderer has performed.
++    pub(crate) fn partial_renders(&self) -> u64 {
++        self.renderer.partial_renders()
++    }
++
++    /// Number of root strips this renderer's damage-region cull has skipped.
++    pub(crate) fn culled_strips(&self) -> u64 {
++        self.renderer.culled_strips()
++    }
++
++    /// Render the scene into `pixmap` with an explicit clear mode and render
++    /// region. When `prior_full_render` is true, the scene is first rendered in
++    /// full so the region render exercises the damage-region preserve path over
++    /// real prior content.
++    pub(crate) fn render_region_to_pixmap(
++        &mut self,
++        clear: ClearSettings<'_>,
++        region: vello_hybrid::RenderRegion<'_>,
++        prior_full_render: bool,
++        pixmap: &mut Pixmap,
++    ) {
++        let _guard = {
++            use std::sync::Mutex;
++            static M: Mutex<()> = Mutex::new(());
++            M.lock().unwrap()
++        };
++
++        let width = self.scene.width();
++        let height = self.scene.height();
++        let render_size = vello_hybrid::RenderSize {
++            width: width.into(),
++            height: height.into(),
++        };
++        let mut texture_bindings = vello_hybrid::TextureBindings::new();
++        for (texture_id, texture) in &self.external_textures {
++            texture_bindings.insert(*texture_id, texture.clone());
++        }
++        let mut encoder = self
++            .device
++            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
++                label: Some("Vello Region Render"),
++            });
++
++        if prior_full_render {
++            self.renderer
++                .render(
++                    &self.scene,
++                    &mut self.resources,
++                    &self.device,
++                    &self.queue,
++                    &mut encoder,
++                    &render_size,
++                    &self.texture_view,
++                    &texture_bindings,
++                    ClearSettings::default(),
++                    vello_hybrid::RenderRegion::Full,
++                )
++                .unwrap();
++        }
++
++        self.renderer
++            .render(
++                &self.scene,
++                &mut self.resources,
++                &self.device,
++                &self.queue,
++                &mut encoder,
++                &render_size,
++                &self.texture_view,
++                &texture_bindings,
++                clear,
++                region,
++            )
++            .unwrap();
++
++        let bytes_per_row = (u32::from(width) * 4).next_multiple_of(256);
++        let texture_copy_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
++            label: Some("Output Buffer"),
++            size: u64::from(bytes_per_row) * u64::from(height),
++            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
++            mapped_at_creation: false,
++        });
++        encoder.copy_texture_to_buffer(
++            wgpu::TexelCopyTextureInfo {
++                texture: &self.texture,
++                mip_level: 0,
++                origin: wgpu::Origin3d::ZERO,
++                aspect: wgpu::TextureAspect::All,
++            },
++            wgpu::TexelCopyBufferInfo {
++                buffer: &texture_copy_buffer,
++                layout: wgpu::TexelCopyBufferLayout {
++                    offset: 0,
++                    bytes_per_row: Some(bytes_per_row),
++                    rows_per_image: None,
++                },
++            },
++            wgpu::Extent3d {
++                width: width.into(),
++                height: height.into(),
++                depth_or_array_layers: 1,
++            },
++        );
++        self.queue.submit([encoder.finish()]);
++        texture_copy_buffer
++            .slice(..)
++            .map_async(wgpu::MapMode::Read, move |result| {
++                if result.is_err() {
++                    panic!("Failed to map texture for reading");
++                }
++            });
++        self.device
++            .poll(wgpu::PollType::wait_indefinitely())
++            .unwrap();
++        for (row, buf) in texture_copy_buffer
++            .slice(..)
++            .get_mapped_range()
++            .chunks_exact(bytes_per_row as usize)
++            .zip(
++                pixmap
++                    .data_as_u8_slice_mut()
++                    .chunks_exact_mut(width as usize * 4),
++            )
++        {
++            buf.copy_from_slice(&row[0..width as usize * 4]);
++        }
++        texture_copy_buffer.unmap();
++    }
++
+     fn new_with_settings(width: u16, height: u16, settings: HybridRenderSettings) -> Self {
+         let scene = Scene::new_with(width, height, settings.level);
+         // Initialize wgpu device and queue for GPU rendering
+@@ -359,6 +522,7 @@ impl HybridRenderer {
+             renderer,
+             external_textures: HashMap::new(),
+             next_external_texture_id: 1,
++            clear: ClearSettings::default(),
+         }
+     }
+ 
+@@ -544,6 +708,10 @@ impl Renderer for HybridRenderer {
+         self.scene.reset();
+     }
+ 
++    fn set_clear(&mut self, clear: ClearSettings<'static>) {
++        self.clear = clear;
++    }
++
+     // This method creates device resources every time it is called. This does not matter much for
+     // testing, but should not be used as a basis for implementing something real. This would be a
+     // very bad example for that.
+@@ -591,6 +759,8 @@ impl Renderer for HybridRenderer {
+                 &render_size,
+                 &self.texture_view,
+                 &texture_bindings,
++                self.clear,
++                vello_hybrid::RenderRegion::Full,
+             )
+             .unwrap();
+ 
+@@ -734,6 +904,7 @@ pub(crate) struct HybridRenderer {
+     gl: WebGl2RenderingContext,
+     external_textures: vello_hybrid::WebGlTextureBindings,
+     next_external_texture_id: u64,
++    clear: ClearSettings<'static>,
+ }
+ 
+ #[cfg(all(target_arch = "wasm32", feature = "webgl"))]
+@@ -806,6 +977,7 @@ impl Renderer for HybridRenderer {
+             gl,
+             external_textures: vello_hybrid::WebGlTextureBindings::new(),
+             next_external_texture_id: 1,
++            clear: ClearSettings::default(),
+         }
+     }
+ 
+@@ -931,6 +1103,10 @@ impl Renderer for HybridRenderer {
+         self.scene.reset();
+     }
+ 
++    fn set_clear(&mut self, clear: ClearSettings<'static>) {
++        self.clear = clear;
++    }
++
+     // vello_hybrid WebGL renderer backend.
+     fn render_to_pixmap(&mut self, pixmap: &mut Pixmap) {
+         use web_sys::WebGl2RenderingContext;
+@@ -948,6 +1124,7 @@ impl Renderer for HybridRenderer {
+                 &mut self.resources,
+                 &render_size,
+                 &self.external_textures,
++                self.clear,
+             )
+             .unwrap();
+         let mut pixels = vec![0_u8; (width as usize) * (height as usize) * 4];
+@@ -1051,3 +1228,32 @@ impl Renderer for HybridRenderer {
+         self.upload_image(&pixmap)
+     }
+ }
++
++// For now, we simulate `ClearSettings` for Vello CPU so that we can use it
++// for the snapshot reference images.
++fn apply_clear(pixmap: &mut Pixmap, clear: ClearSettings<'_>) {
++    match clear {
++        ClearSettings::DontClear => {}
++        ClearSettings::Viewport { color } => {
++            pixmap.data_mut().fill(color.premultiply().to_rgba8());
++        }
++        ClearSettings::Rects { color, rects } => {
++            let color = color.premultiply().to_rgba8();
++            let width = usize::from(pixmap.width());
++            let bounds = RectU16::new(0, 0, pixmap.width(), pixmap.height());
++            let data = pixmap.data_mut();
++
++            for rect in rects
++                .iter()
++                .map(|rect| rect.intersect(bounds))
++                .filter(|rect| !rect.is_empty())
++            {
++                for y in usize::from(rect.y0)..usize::from(rect.y1) {
++                    let start = y * width + usize::from(rect.x0);
++                    let end = y * width + usize::from(rect.x1);
++                    data[start..end].fill(color);
++                }
++            }
++        }
++    }
++}

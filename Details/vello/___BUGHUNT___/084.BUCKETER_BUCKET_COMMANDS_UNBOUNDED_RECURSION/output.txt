@@ -1,0 +1,132 @@
+Real captured output for candidate 084 (BUCKETER_BUCKET_COMMANDS_UNBOUNDED_RECURSION).
+Environment: Linux, `ulimit -s` = 8192 (8 MiB default thread stack), x86_64-unknown-linux-gnu,
+rustc stable toolchain. Repro built via `vello_cpu`'s real public API
+(`RenderContext::push_opacity_layer`/`pop_layer`/`render`), depth = number of nested opacity
+layers (see repro/src/main.rs).
+
+=====================================================================
+1) BEFORE the fix, full end-to-end run via `just test`'s `reproduce-before`
+   (fresh `git clone` of https://github.com/linebender/vello.git at commit
+   7516831426fb70f36d62c521c5477f6a7265b36a, real `cargo run --release`, default depth=100_000)
+=====================================================================
+$ just reproduce-before
+cd repro && cargo run --release
+   [... normal `cargo` build output omitted ...]
+    Finished `release` profile [optimized + debuginfo] target(s) in 23.44s
+     Running `target/release/repro`
+
+thread 'main' (522703) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+Aborted (core dumped)
+error: Recipe `reproduce-before` failed on line 25 with exit code 134
+
+=====================================================================
+2) AFTER applying patch.diff to that same fresh clone, `reproduce-after`
+   (same repro, same default depth=100_000, real rebuild against the patched vello_cpu)
+=====================================================================
+$ just apply && just reproduce-after
+cd clone && git apply ".../patch.diff"
+cd repro && cargo run --release
+   Compiling vello_cpu v0.2.0 (.../clone/sparse_strips/vello_cpu)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized + debuginfo] target(s) in 16.38s
+     Running `target/release/repro`
+did not reproduce - rendered successfully with depth=100000
+
+=====================================================================
+3) Repeatability: 3/3 runs, release build, unfixed tree, depth=100_000
+   (working tree, not the scratch clone - same binary, repeated invocation)
+=====================================================================
+$ for i in 1 2 3; do ./target/release/repro 100000; echo "run$i exit=$?"; done
+
+thread 'main' (526234) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+run1 exit=134
+
+thread 'main' (526235) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+run2 exit=134
+
+thread 'main' (526236) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+run3 exit=134
+
+=====================================================================
+4) Depth threshold, release build (unfixed): succeeds at depth=10_000,
+   overflows at depth=15_000 (binary search narrowed it to somewhere between
+   10_000-11_000; 50_000/100_000 also reliably overflow)
+=====================================================================
+$ ./target/release/repro 10000 ; echo "exit=$?"
+did not reproduce - rendered successfully with depth=10000
+exit=0
+
+$ ./target/release/repro 15000 ; echo "exit=$?"
+
+thread 'main' (526731) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+exit=134
+
+=====================================================================
+5) gdb backtrace confirming the exact recursive call site (unfixed debug build,
+   depth=15_000) - crash is deterministically inside
+   `CommandBucketer::bucket_commands`'s own recursive self-call at
+   sparse_strips/vello_cpu/src/coarse/bucketer.rs:331 (candidate's suspected line, confirmed)
+=====================================================================
+$ gdb -q -batch -ex run -ex "bt 10" --args ./target/debug/repro 15000
+
+Program received signal SIGSEGV, Segmentation fault.
+0x000057d1e2a38fc7 in alloc::vec::Vec<alloc::vec::Vec<usize, alloc::alloc::Global>, alloc::alloc::Global>::pop<alloc::vec::Vec<usize, alloc::alloc::Global>, alloc::alloc::Global> (self=<error reading variable: Cannot access memory at address 0x7ffd70aeefe0>) at /rustc/.../library/alloc/src/vec/mod.rs:2853
+2853	    pub fn pop(&mut self) -> Option<T> {
+#0  0x000057d1e2a38fc7 in alloc::vec::Vec<...>::pop<...> (...) at .../alloc/src/vec/mod.rs:2853
+#1  0x000057d1e280c10e in vello_common::util::Pool<Vec<usize>>::take<Vec<usize>> (self=...) at sparse_strips/vello_common/src/util.rs:243
+#2  0x000057d1e27fa144 in vello_cpu::coarse::bucketer::CommandBucketer::push_layer (self=..., props=...) at src/coarse/bucketer.rs:396
+#3  0x000057d1e27fab68 in vello_cpu::coarse::bucketer::CommandBucketer::bucket_commands (...) at src/coarse/bucketer.rs:328
+#4  0x000057d1e27fabd4 in vello_cpu::coarse::bucketer::CommandBucketer::bucket_commands (...) at src/coarse/bucketer.rs:331
+#5  0x000057d1e27fabd4 in vello_cpu::coarse::bucketer::CommandBucketer::bucket_commands (...) at src/coarse/bucketer.rs:331
+#6  0x000057d1e27fabd4 in vello_cpu::coarse::bucketer::CommandBucketer::bucket_commands (...) at src/coarse/bucketer.rs:331
+#7  0x000057d1e27fabd4 in vello_cpu::coarse::bucketer::CommandBucketer::bucket_commands (...) at src/coarse/bucketer.rs:331
+#8  0x000057d1e27fabd4 in vello_cpu::coarse::bucketer::CommandBucketer::bucket_commands (...) at src/coarse/bucketer.rs:331
+#9  0x000057d1e27fabd4 in vello_cpu::coarse::bucketer::CommandBucketer::bucket_commands (...) at src/coarse/bucketer.rs:331
+[... frames 9 through several thousand, all identical, elided ...]
+
+=====================================================================
+6) Fix verified with a much larger depth than any input that originally
+   triggered the crash (CONFIRMATION.md section 7: varied within the same
+   bug class, not just the exact triggering input) - patched tree, release
+   and debug builds, depth=1_000_000
+=====================================================================
+$ ./target/release/repro 1000000 ; echo "exit=$?"
+did not reproduce - rendered successfully with depth=1000000
+exit=0
+
+=====================================================================
+7) Project test suite, before vs after (release build)
+=====================================================================
+BEFORE (unfixed bucketer.rs):
+  $ cargo test -p vello_cpu --release --lib
+  test result: ok. 81 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+  $ cargo test -p vello_sparse_tests --release
+  test result: ok. 1 passed; 0 failed (regenerate_probe_reference, no tests)
+  test result: FAILED. 3541 passed; 86 failed; 1230 ignored
+  (all 86 failures are `_hybrid`-suffixed tests requiring a real GPU/wgpu device, unavailable in
+  this environment - pre-existing, unrelated to this candidate)
+
+AFTER (patched bucketer.rs, patch.diff applied):
+  $ cargo test -p vello_cpu --release --lib
+  test result: ok. 81 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+  $ cargo test -p vello_sparse_tests --release
+  test result: ok. 1 passed; 0 failed (regenerate_probe_reference, no tests)
+  test result: FAILED. 3541 passed; 86 failed; 1230 ignored
+
+  `diff` of the sorted list of failing test names before vs after: IDENTICAL (same 86 `_hybrid`
+  tests, byte-for-byte the same set) - confirms the fix introduces zero regressions in either
+  suite.
+
+Note: `cargo test -p vello_cpu --release` (including doctests) also shows one pre-existing,
+unrelated doctest failure (`unresolved import glifo::atlas::GlyphCacheStats` in
+src/text_debug.rs, a debug_assertions-gated re-export not available when doctests build without
+debug assertions) - present identically before and after this candidate's change, not part of
+this candidate's own test-suite count above (the `--lib` run above excludes doctests for this
+reason).

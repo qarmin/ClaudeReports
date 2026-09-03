@@ -1,0 +1,42 @@
+=== BEFORE (pristine clone at ca273499e3e48bd2de6f02aa8e99a148984e45f3, unpatched) ===
+$ cd repro && cargo run --release
+   Compiling smallvec v1.16.0
+   Compiling polycool v0.4.0 (.../clone/polycool)
+   Compiling kurbo v0.13.1 (.../clone/kurbo)
+   Compiling repro-042-roundedrect-circlesegment-path-elements-unbounded-tolerance v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 1.00s
+     Running `target/release/repro-042-roundedrect-circlesegment-path-elements-unbounded-tolerance`
+[RoundedRect::path_elements, tolerance=0.0] -> 20000000 elements in 971.440608ms, iterator finished on its own: false
+FAIL: RoundedRect::path_elements did not terminate in a reasonable time/element budget for tolerance=0.0
+[CircleSegment::path_elements, tolerance=0.0] -> 20000000 elements in 358.844686ms, iterator finished on its own: false
+FAIL: CircleSegment::path_elements did not terminate in a reasonable time/element budget for tolerance=0.0
+(exit code 1)
+
+=== AFTER (same clone, patch.diff applied to kurbo/src/arc.rs) ===
+$ cd clone && git apply ../patch.diff
+$ cd repro && cargo run --release
+   Compiling kurbo v0.13.1 (.../clone/kurbo)
+   Compiling repro-042-roundedrect-circlesegment-path-elements-unbounded-tolerance v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 0.67s
+     Running `target/release/repro-042-roundedrect-circlesegment-path-elements-unbounded-tolerance`
+[RoundedRect::path_elements, tolerance=0.0] -> 4194309 elements in 208.722485ms, iterator finished on its own: true
+[CircleSegment::path_elements, tolerance=0.0] -> 2097155 elements in 37.711742ms, iterator finished on its own: true
+PASS: RoundedRect::path_elements and CircleSegment::path_elements both terminated promptly for tolerance=0.0
+(exit code 0)
+
+=== Repeat runs (release, separate standalone probe crate against a path-dependency worktree, not the clone above) ===
+Run 1: RoundedRect::path_elements(0.0): 20000000 elements in 1.048012298s (cutoff hit: true); CircleSegment::path_elements(0.0): 20000000 elements in 847.248249ms (cutoff hit: true)
+Run 2 (debug build, debug-assertions=true): RoundedRect::path_elements(0.0): 20000000 elements in 2.484010101s (cutoff hit: true); CircleSegment::path_elements(0.0): 20000000 elements in 2.542495848s (cutoff hit: true)
+Run 3: RoundedRect::path_elements(0.0): 20000000 elements in 1.052619347s (cutoff hit: true); CircleSegment::path_elements(0.0): 20000000 elements in 836.40165ms (cutoff hit: true)
+Run 4: RoundedRect::path_elements(0.0): 20000000 elements in 1.051133571s (cutoff hit: true); CircleSegment::path_elements(0.0): 20000000 elements in 837.401315ms (cutoff hit: true)
+Run 5: RoundedRect::path_elements(0.0): 20000000 elements in 1.054328887s (cutoff hit: true); CircleSegment::path_elements(0.0): 20000000 elements in 840.022893ms (cutoff hit: true)
+-> Reproduces deterministically 5/5 runs (1 debug + 4 release), never terminating on its own within
+   the 20,000,000-element/5s cutoff, for both RoundedRect::path_elements(0.0) and
+   CircleSegment::path_elements(0.0).
+
+=== Post-fix boundary-value sweep (patched worktree, same standalone probe crate) ===
+tolerance=0.0:      RoundedRect -> 4194309 elements, finished; CircleSegment -> 2097155 elements, finished
+tolerance=1e-300:   RoundedRect -> 4194309 elements, finished; CircleSegment -> 2097155 elements, finished
+tolerance=-0.0:     RoundedRect -> 4194309 elements, finished; CircleSegment -> 2097155 elements, finished
+tolerance=0.1:      RoundedRect -> 9 elements, finished (unchanged from pre-fix);       CircleSegment -> 7 elements, finished (unchanged from pre-fix)
+tolerance=1.0:      RoundedRect -> 9 elements, finished (unchanged from pre-fix);       CircleSegment -> 7 elements, finished (unchanged from pre-fix)

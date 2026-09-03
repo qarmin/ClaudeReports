@@ -1,0 +1,59 @@
+==============================================================================
+BEFORE (pristine clone of pdeljanov/Symphonia @ ee35874, release build with
+overflow checks on): `just clone reproduce-before`
+==============================================================================
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling symphonia-codec-alac v0.6.1 (<clone>/symphonia-codec-alac)
+   Compiling symphonia v0.6.1 (<clone>/symphonia)
+   Compiling alac-predict-repro v0.1.0 (/home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/030.ALAC_PREDICT_FIR_I32_SUB_OVERFLOW/repro)
+    Finished `release` profile [optimized] target(s) in 1.72s
+     Running `target/release/alac-predict-repro`
+symphonia-codec-alac: ElementChannel::predict() i32 overflow, 32-bit ALAC
+path: real .caf file -> get_probe() -> caf demuxer -> get_codecs() -> alac decoder
+
+case 1: mono, bit_depth=32, lpc_order=1, residuals = i32::MIN
+  case1_mono_bd32: PANIC (134 byte file) at <clone>/symphonia-codec-alac/src/lib.rs:216:56: attempt to subtract with overflow
+case 2: mono, bit_depth=32, lpc_order=4, shift=4, non-zero coefficients
+  case2_mono_bd32_order4: PANIC (201 byte file) at <clone>/symphonia-codec-alac/src/lib.rs:216:56: attempt to subtract with overflow
+case 3: stereo CPE, bit_depth=31 (bps=32), lpc_order=1, residuals = i32::MIN
+  case3_stereo_bd31: PANIC (158 byte file) at <clone>/symphonia-codec-alac/src/lib.rs:216:56: attempt to subtract with overflow
+case 4: 400 generated 32-bit ALAC files (random headers/residuals)
+  sweep: 326 panics
+
+total: 329 panics, 0 decode errors, 74 decoded without panicking
+
+distinct panic sites:
+   308x <clone>/symphonia-codec-alac/src/lib.rs:216:56: attempt to subtract with overflow
+     8x <clone>/symphonia-codec-alac/src/lib.rs:233:35: attempt to subtract with overflow
+     1x <clone>/symphonia-codec-alac/src/lib.rs:238:32: attempt to multiply with overflow
+     9x <clone>/symphonia-codec-alac/src/lib.rs:248:35: attempt to subtract with overflow
+     3x <clone>/symphonia-codec-alac/src/lib.rs:253:32: attempt to multiply with overflow
+RESULT: BUG PRESENT - the decoder panicked on valid-shaped 32-bit ALAC input
+repro exit status: 1
+
+==============================================================================
+AFTER (same clone with patch.diff applied): `just apply reproduce-after`
+==============================================================================
+   Compiling symphonia-codec-alac v0.6.1 (<clone>/symphonia-codec-alac)
+   Compiling symphonia v0.6.1 (<clone>/symphonia)
+   Compiling alac-predict-repro v0.1.0 (/home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/030.ALAC_PREDICT_FIR_I32_SUB_OVERFLOW/repro)
+    Finished `release` profile [optimized] target(s) in 0.58s
+     Running `target/release/alac-predict-repro`
+symphonia-codec-alac: ElementChannel::predict() i32 overflow, 32-bit ALAC
+path: real .caf file -> get_probe() -> caf demuxer -> get_codecs() -> alac decoder
+
+case 1: mono, bit_depth=32, lpc_order=1, residuals = i32::MIN
+  case1_mono_bd32: decoded 4 frames, no panic
+case 2: mono, bit_depth=32, lpc_order=4, shift=4, non-zero coefficients
+  case2_mono_bd32_order4: decoded 16 frames, no panic
+case 3: stereo CPE, bit_depth=31 (bps=32), lpc_order=1, residuals = i32::MIN
+  case3_stereo_bd31: decoded 4 frames, no panic
+case 4: 400 generated 32-bit ALAC files (random headers/residuals)
+  sweep: 0 panics
+
+total: 0 panics, 0 decode errors, 403 decoded without panicking
+RESULT: no panics - the decoder either decoded or cleanly rejected every input
+repro exit status: 0

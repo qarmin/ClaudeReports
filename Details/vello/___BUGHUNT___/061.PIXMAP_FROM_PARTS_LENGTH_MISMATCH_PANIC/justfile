@@ -1,0 +1,41 @@
+# Self-contained reproduction for candidate 061 (Pixmap::from_parts panics on caller-supplied
+# data/dimension mismatch, with no fallible variant).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# The fix intentionally keeps `Pixmap::from_parts` itself panicking (documented, backward-
+# compatible behavior, unchanged) and adds a new fallible `Pixmap::try_from_parts` alongside it -
+# so `reproduce-before` and `reproduce-after` run two different binaries in this crate:
+# `vulnerable` (calls `from_parts`, panics identically before and after the fix - this is
+# intended, not a bug) demonstrates the bug exists; `safe` (calls the new `try_from_parts`, which
+# does not exist before the fix, so it is only built/run after) demonstrates the fix.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove the new API avoids it.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro's `vulnerable` binary against the pristine clone - demonstrates
+# `Pixmap::from_parts` panicking on caller-supplied data/dimension mismatches (exit code 1).
+reproduce-before:
+    cd repro && cargo run --bin vulnerable
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# `vulnerable` still panics identically (from_parts's documented contract is unchanged - this is
+# expected, not a regression). `safe` (only compilable now that `try_from_parts` exists) handles
+# the exact same malformed inputs gracefully instead (exit code 0).
+reproduce-after:
+    cd repro && cargo run --bin vulnerable || true
+    cd repro && cargo run --bin safe
+
+clean:
+    rm -rf clone repro/target

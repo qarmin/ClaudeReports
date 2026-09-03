@@ -1,0 +1,337 @@
+diff --git a/sparse_strips/vello_hybrid/src/lib.rs b/sparse_strips/vello_hybrid/src/lib.rs
+index 1a262912..53a0f55a 100644
+--- a/sparse_strips/vello_hybrid/src/lib.rs
++++ b/sparse_strips/vello_hybrid/src/lib.rs
+@@ -131,6 +131,17 @@ pub enum RenderError {
+     /// An intermediate texture allocation failed.
+     #[error(transparent)]
+     IntermediateTexture(#[from] IntermediateTextureError),
++    /// The strips generated for a single draw pass require a GPU buffer larger than the
++    /// device's maximum buffer size.
++    #[error(
++        "Required strips buffer size {required} exceeds the device's maximum buffer size {max}"
++    )]
++    StripsBufferTooLarge {
++        /// The buffer size, in bytes, required to upload this pass's strips.
++        required: u64,
++        /// The device's maximum buffer size, in bytes.
++        max: u64,
++    },
+     // TODO: Consider expanding `RenderError` to replace some `.unwrap` and `.expect`.
+ }
+ 
+diff --git a/sparse_strips/vello_hybrid/src/render/webgl/mod.rs b/sparse_strips/vello_hybrid/src/render/webgl/mod.rs
+index 633ee8d2..a162b4ae 100644
+--- a/sparse_strips/vello_hybrid/src/render/webgl/mod.rs
++++ b/sparse_strips/vello_hybrid/src/render/webgl/mod.rs
+@@ -656,7 +656,7 @@ impl WebGlRenderer {
+             &mut self.schedule_storage,
+             schedule,
+             root_output_target,
+-        );
++        )?;
+ 
+         self.gl.bind_framebuffer(
+             WebGl2RenderingContext::FRAMEBUFFER,
+@@ -3386,7 +3386,7 @@ impl Backend for WebGlRendererContext<'_> {
+         &mut self,
+         strips: &[GpuStrip],
+         external_texture_runs: &[ExternalTextureRun],
+-    ) {
++    ) -> Result<(), RenderError> {
+         self.strip_pass_inner(
+             strips,
+             RangedSlice::empty(),
+@@ -3394,6 +3394,7 @@ impl Backend for WebGlRendererContext<'_> {
+             DrawPassTarget::Root(RootTarget::UserSurface),
+             None,
+         );
++        Ok(())
+     }
+ 
+     fn draw_pass(
+@@ -3401,7 +3402,7 @@ impl Backend for WebGlRendererContext<'_> {
+         strips: RangedSlice<'_, GpuStrip>,
+         external_texture_runs: &[ExternalTextureRun],
+         bindings: DrawPassBindings,
+-    ) {
++    ) -> Result<(), RenderError> {
+         self.strip_pass_inner(
+             &[],
+             strips,
+@@ -3409,6 +3410,7 @@ impl Backend for WebGlRendererContext<'_> {
+             bindings.target,
+             bindings.child,
+         );
++        Ok(())
+     }
+ 
+     fn blend_pass(
+diff --git a/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs b/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
+index 9521829f..021790c7 100644
+--- a/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
++++ b/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
+@@ -525,7 +525,7 @@ impl Renderer {
+             &mut self.schedule_storage,
+             schedule,
+             root_output_target,
+-        );
++        )?;
+ 
+         self.gradient_cache.maintain();
+ 
+@@ -1016,6 +1016,8 @@ struct Programs {
+     encoded_paints_data: Vec<u8>,
+     /// Scratch buffer for staging filter data texture data.
+     filter_data: Vec<u8>,
++    /// The device's maximum buffer size, in bytes (`Device::limits().max_buffer_size`).
++    max_buffer_size: u64,
+ }
+ 
+ /// Contains all GPU resources needed for rendering
+@@ -1818,6 +1820,7 @@ impl Programs {
+             strip_layer_bind_groups: HashMap::new(),
+             blend_layer_bind_groups: HashMap::new(),
+             filter_pair_bind_groups: HashMap::new(),
++            max_buffer_size: device.limits().max_buffer_size,
+         }
+     }
+ 
+@@ -2711,10 +2714,16 @@ impl Programs {
+         queue: &Queue,
+         opaque_strips: &[GpuStrip],
+         alpha_strips: RangedSlice<'_, GpuStrip>,
+-    ) {
++    ) -> Result<(), RenderError> {
+         let opaque_len = size_of_val(opaque_strips) as u64;
+         let alpha_len = (alpha_strips.len() * size_of::<GpuStrip>()) as u64;
+         let total_len = opaque_len + alpha_len;
++        if total_len > self.max_buffer_size {
++            return Err(RenderError::StripsBufferTooLarge {
++                required: total_len,
++                max: self.max_buffer_size,
++            });
++        }
+         self.resources.strips_buffer = Self::create_strips_buffer(device, total_len);
+         // TODO: Consider using a staging belt to avoid an extra staging buffer allocation.
+         let mut buffer_view = queue
+@@ -2735,6 +2744,7 @@ impl Programs {
+                 .copy_from_slice(bytes);
+             offset += bytes.len();
+         }
++        Ok(())
+     }
+ }
+ 
+@@ -2780,12 +2790,12 @@ impl RendererContext<'_> {
+         external_texture_runs: &[ExternalTextureRun],
+         target: DrawPassTarget,
+         child_layer_texture: Option<LayerTextureId>,
+-    ) {
++    ) -> Result<(), RenderError> {
+         let opaque_count = opaque_strips.len();
+         let alpha_count = alpha_strips.len();
+ 
+         if opaque_count == 0 && alpha_count == 0 {
+-            return;
++            return Ok(());
+         }
+         // TODO: We currently allocate a new strips buffer for each render pass. A more efficient
+         // approach would be to re-use buffers or slices of a larger buffer.
+@@ -2796,7 +2806,7 @@ impl RendererContext<'_> {
+         }
+ 
+         self.programs
+-            .upload_strip_pair(self.device, self.queue, opaque_strips, alpha_strips);
++            .upload_strip_pair(self.device, self.queue, opaque_strips, alpha_strips)?;
+         let opaque_count = opaque_count as u32;
+         let alpha_count = alpha_count as u32;
+ 
+@@ -2935,6 +2945,8 @@ impl RendererContext<'_> {
+ 
+             draw_strip_runs(&mut render_pass, opaque_count, alpha_count);
+         }
++
++        Ok(())
+     }
+ 
+     fn texture_size(&self) -> SizeU16 {
+@@ -3154,14 +3166,14 @@ impl Backend for RendererContext<'_> {
+         &mut self,
+         strips: &[GpuStrip],
+         external_texture_runs: &[ExternalTextureRun],
+-    ) {
++    ) -> Result<(), RenderError> {
+         self.strip_pass_inner(
+             strips,
+             RangedSlice::empty(),
+             external_texture_runs,
+             DrawPassTarget::Root(RootTarget::UserSurface),
+             None,
+-        );
++        )
+     }
+ 
+     fn draw_pass(
+@@ -3169,14 +3181,14 @@ impl Backend for RendererContext<'_> {
+         strips: RangedSlice<'_, GpuStrip>,
+         external_texture_runs: &[ExternalTextureRun],
+         bindings: DrawPassBindings,
+-    ) {
++    ) -> Result<(), RenderError> {
+         self.strip_pass_inner(
+             &[],
+             strips,
+             external_texture_runs,
+             bindings.target,
+             bindings.child,
+-        );
++        )
+     }
+ 
+     fn blend_pass(
+diff --git a/sparse_strips/vello_hybrid/src/schedule/execute.rs b/sparse_strips/vello_hybrid/src/schedule/execute.rs
+index 54e63865..a24e7aae 100644
+--- a/sparse_strips/vello_hybrid/src/schedule/execute.rs
++++ b/sparse_strips/vello_hybrid/src/schedule/execute.rs
+@@ -12,7 +12,7 @@ use crate::target::{
+     RootTarget,
+ };
+ use crate::util::RangedSlice;
+-use crate::{GpuStrip, blend::BlendStrip};
++use crate::{GpuStrip, RenderError, blend::BlendStrip};
+ use vello_common::geometry::{RectU16, SizeU16};
+ 
+ /// A backend for executing GPU render passes.
+@@ -25,7 +25,7 @@ pub(crate) trait Backend {
+         &mut self,
+         strips: &[GpuStrip],
+         external_texture_runs: &[ExternalTextureRun],
+-    );
++    ) -> Result<(), RenderError>;
+ 
+     /// Execute a draw pass against the given target.
+     ///
+@@ -35,7 +35,7 @@ pub(crate) trait Backend {
+         strips: RangedSlice<'_, GpuStrip>,
+         external_texture_runs: &[ExternalTextureRun],
+         bindings: DrawPassBindings,
+-    );
++    ) -> Result<(), RenderError>;
+ 
+     /// Execute a clear pass with the given rectangles against the target.
+     ///
+@@ -63,14 +63,14 @@ pub(crate) fn execute<R: Backend>(
+     storage: &mut ScheduleStorage,
+     schedule: Schedule,
+     root_output_target: RootTarget,
+-) {
++) -> Result<(), RenderError> {
+     let ScheduleStorage {
+         buffers,
+         filter_pass_plan,
+         ..
+     } = storage;
+ 
+-    schedule.execute(renderer, root_output_target, buffers, filter_pass_plan);
++    schedule.execute(renderer, root_output_target, buffers, filter_pass_plan)
+ }
+ 
+ impl Schedule {
+@@ -80,14 +80,14 @@ impl Schedule {
+         root_output_target: RootTarget,
+         buffers: &ScheduleBuffers,
+         filter_plan: &mut FilterPassPlan,
+-    ) {
++    ) -> Result<(), RenderError> {
+         if DrawPassTarget::Root(root_output_target).enable_opaque()
+             && !buffers.draw_buffers.opaque.is_empty()
+         {
+             renderer.opaque_draw_pass(
+                 buffers.draw_buffers.opaque.strips(),
+                 buffers.draw_buffers.opaque.external_texture_runs(),
+-            );
++            )?;
+         }
+ 
+         self.rounds.execute(
+@@ -96,7 +96,7 @@ impl Schedule {
+             buffers,
+             filter_plan,
+             self.intermediate_textures.size,
+-        );
++        )
+     }
+ }
+ 
+@@ -108,7 +108,7 @@ impl Rounds {
+         buffers: &ScheduleBuffers,
+         filter_plan: &mut FilterPassPlan,
+         texture_size: SizeU16,
+-    ) {
++    ) -> Result<(), RenderError> {
+         // This is the core loop that ties everything together.
+ 
+         // TODO: Currently, we upload data for layers when executing each round. It might be
+@@ -125,7 +125,7 @@ impl Rounds {
+                 // For each layer texture target, first perform the draws of all layers that are
+                 // allocated in this texture.
+                 if let Some(pass) = layer_passes.draw {
+-                    backend.draw_pass(pass.strips, pass.external_texture_runs, pass.bindings);
++                    backend.draw_pass(pass.strips, pass.external_texture_runs, pass.bindings)?;
+                 }
+ 
+                 // Next, we apply all filters for layers in this texture.
+@@ -144,7 +144,7 @@ impl Rounds {
+ 
+             // Once layers are done, we perform draws against the root target.
+             if let Some(pass) = round.root_draw_pass(buffers, root_output_target) {
+-                backend.draw_pass(pass.strips, pass.external_texture_runs, pass.bindings);
++                backend.draw_pass(pass.strips, pass.external_texture_runs, pass.bindings)?;
+             }
+ 
+             // And in the end, clear all layer regions that are deallocated in this round.
+@@ -152,6 +152,8 @@ impl Rounds {
+                 backend.clear_pass(props.target, props.rects);
+             }
+         }
++
++        Ok(())
+     }
+ }
+ 
+@@ -220,8 +222,9 @@ mod tests {
+             &mut self,
+             _strips: &[GpuStrip],
+             _external_texture_runs: &[ExternalTextureRun],
+-        ) {
++        ) -> Result<(), RenderError> {
+             self.calls.push(Call::Opaque);
++            Ok(())
+         }
+ 
+         fn draw_pass(
+@@ -229,8 +232,9 @@ mod tests {
+             _strips: RangedSlice<'_, GpuStrip>,
+             _external_texture_runs: &[ExternalTextureRun],
+             bindings: DrawPassBindings,
+-        ) {
++        ) -> Result<(), RenderError> {
+             self.calls.push(Call::Draw(bindings.target, bindings.child));
++            Ok(())
+         }
+ 
+         fn clear_pass(&mut self, target: LayerTextureId, _rects: &[RectU16]) {
+diff --git a/sparse_strips/vello_hybrid/src/schedule/test_support.rs b/sparse_strips/vello_hybrid/src/schedule/test_support.rs
+index 5fcfabdd..fb9f4158 100644
+--- a/sparse_strips/vello_hybrid/src/schedule/test_support.rs
++++ b/sparse_strips/vello_hybrid/src/schedule/test_support.rs
+@@ -140,7 +140,7 @@ pub(super) struct ScheduledCase {
+ 
+ impl ScheduledCase {
+     pub(super) fn execute<R: Backend>(mut self, renderer: &mut R) {
+-        super::execute(renderer, &mut self.storage, self.schedule, self.root_target);
++        super::execute(renderer, &mut self.storage, self.schedule, self.root_target).unwrap();
+     }
+ 
+     pub(super) fn page_counts(&self) -> [usize; 2] {

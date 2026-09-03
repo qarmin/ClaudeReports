@@ -1,0 +1,193 @@
+diff --git a/vello_shaders/src/cpu/binning.rs b/vello_shaders/src/cpu/binning.rs
+index fb864420..d8bf2a22 100644
+--- a/vello_shaders/src/cpu/binning.rs
++++ b/vello_shaders/src/cpu/binning.rs
+@@ -3,7 +3,7 @@
+ 
+ use vello_encoding::{BinHeader, BumpAllocators, ConfigUniform, DrawMonoid, PathBbox};
+ 
+-use super::CpuBinding;
++use super::{CpuBinding, util::STAGE_BINNING};
+ 
+ const WG_SIZE: usize = 256;
+ const TILE_WIDTH: usize = 16;
+@@ -87,6 +87,13 @@ fn binning_main(
+             let global_ix = wg * aligned_n_bins + local_ix;
+             chunk_offset[local_ix] = bump.binning;
+             bump.binning += counts[local_ix];
++            // Mirrors binning.wgsl: if this bin's own share of elements doesn't fit in the
++            // fixed-capacity `bin_data` buffer, reset its chunk offset to 0 and record the
++            // failure, rather than handing out an offset the write loop below can't satisfy.
++            if chunk_offset[local_ix] + counts[local_ix] > config.binning_size {
++                chunk_offset[local_ix] = 0;
++                bump.failed |= STAGE_BINNING;
++            }
+             bin_header[global_ix] = BinHeader {
+                 element_count: counts[local_ix],
+                 chunk_offset: chunk_offset[local_ix],
+@@ -99,7 +106,13 @@ fn binning_main(
+                 for x in bbox[0]..bbox[2] {
+                     let bin_ix = (y * width_in_bins + x) as usize;
+                     let ix = config.layout.bin_data_start + chunk_offset[bin_ix];
+-                    bin_data[ix as usize] = element_ix as u32;
++                    // A single bin's own element count can still exceed capacity even after the
++                    // reset above (GPU relies on wgpu/naga's implicit storage-buffer bounds
++                    // clamp for this case; the CPU shim has no such implicit check, so guard
++                    // explicitly).
++                    if let Some(slot) = bin_data.get_mut(ix as usize) {
++                        *slot = element_ix as u32;
++                    }
+                     chunk_offset[bin_ix] += 1;
+                 }
+             }
+diff --git a/vello_shaders/src/cpu/path_count.rs b/vello_shaders/src/cpu/path_count.rs
+index f59fbdee..909e25f6 100644
+--- a/vello_shaders/src/cpu/path_count.rs
++++ b/vello_shaders/src/cpu/path_count.rs
+@@ -1,7 +1,7 @@
+ // Copyright 2023 the Vello Authors
+ // SPDX-License-Identifier: Apache-2.0 OR MIT OR Unlicense
+ 
+-use vello_encoding::{BumpAllocators, LineSoup, Path, SegmentCount, Tile};
++use vello_encoding::{BumpAllocators, ConfigUniform, LineSoup, Path, SegmentCount, Tile};
+ 
+ use super::{
+     CpuBinding,
+@@ -11,6 +11,7 @@ use super::{
+ const TILE_SCALE: f32 = 1.0 / 16.0;
+ 
+ fn path_count_main(
++    config: &ConfigUniform,
+     bump: &mut BumpAllocators,
+     lines: &[LineSoup],
+     paths: &[Path],
+@@ -126,7 +127,13 @@ fn path_count_main(
+         ymax = ymax.min(bbox[3]);
+         for y in ymin..ymax {
+             let base = path.tiles as i32 + (y - bbox[1]) * stride;
+-            tile[base as usize].backdrop += delta;
++            // `tile` is sized from the same fixed capacity as `tiles` in tile_alloc.rs; guard
++            // against a base derived from an offset that tile_alloc.rs had to reset to 0 (or
++            // that otherwise overflows), mirroring the implicit bounds clamp wgpu/naga applies
++            // to the equivalent WGSL storage-buffer write.
++            if let Some(tile) = tile.get_mut(base as usize) {
++                tile.backdrop += delta;
++            }
+         }
+         let mut last_z = (a * (imin as f32 - 1.0) + b).floor();
+         let seg_base = bump.seg_counts;
+@@ -140,25 +147,43 @@ fn path_count_main(
+             let top_edge = if i == 0 { y0 == s0.y } else { last_z == z };
+             if top_edge && x + 1 < bbox[2] {
+                 let x_bump = (x + 1).max(bbox[0]);
+-                tile[(base + x_bump) as usize].backdrop += delta;
++                if let Some(tile) = tile.get_mut((base + x_bump) as usize) {
++                    tile.backdrop += delta;
++                }
+             }
+             // .segments is another name for the .count field; it's overloaded
+-            let seg_within_slice = tile[(base + x) as usize].segment_count_or_ix;
+-            tile[(base + x) as usize].segment_count_or_ix += 1;
+-            let counts = (seg_within_slice << 16) | i;
+-            let seg_count = SegmentCount { line_ix, counts };
+-            seg_counts[(seg_base + i - imin) as usize] = seg_count;
++            if let Some(tile) = tile.get_mut((base + x) as usize) {
++                let seg_within_slice = tile.segment_count_or_ix;
++                tile.segment_count_or_ix += 1;
++                let counts = (seg_within_slice << 16) | i;
++                let seg_count = SegmentCount { line_ix, counts };
++                // Mirrors path_count.wgsl's own `if seg_ix < config.seg_counts_size` guard: the
++                // `seg_counts` buffer has a fixed capacity independent of how many segments a
++                // real scene ends up producing, so an over-budget scene must have this write
++                // silently dropped rather than panicking.
++                let seg_ix = seg_base + i - imin;
++                if seg_ix < config.seg_counts_size {
++                    seg_counts[seg_ix as usize] = seg_count;
++                }
++            }
+             last_z = z;
+         }
+     }
+ }
+ 
+ pub fn path_count(_n_wg: u32, resources: &[CpuBinding<'_>]) {
+-    // config is binding 0
++    let config = resources[0].as_typed();
+     let mut bump = resources[1].as_typed_mut();
+     let lines = resources[2].as_slice();
+     let paths = resources[3].as_slice();
+     let mut tile = resources[4].as_slice_mut();
+     let mut seg_counts = resources[5].as_slice_mut();
+-    path_count_main(&mut bump, &lines, &paths, &mut tile, &mut seg_counts);
++    path_count_main(
++        &config,
++        &mut bump,
++        &lines,
++        &paths,
++        &mut tile,
++        &mut seg_counts,
++    );
+ }
+diff --git a/vello_shaders/src/cpu/tile_alloc.rs b/vello_shaders/src/cpu/tile_alloc.rs
+index e67d0d9c..a7cecb75 100644
+--- a/vello_shaders/src/cpu/tile_alloc.rs
++++ b/vello_shaders/src/cpu/tile_alloc.rs
+@@ -3,7 +3,7 @@
+ 
+ use vello_encoding::{BumpAllocators, ConfigUniform, DrawTag, Path, Tile};
+ 
+-use super::CpuBinding;
++use super::{CpuBinding, util::STAGE_TILE_ALLOC};
+ 
+ const TILE_WIDTH: usize = 16;
+ const TILE_HEIGHT: usize = 16;
+@@ -43,13 +43,28 @@ fn tile_alloc_main(
+         let tile_count = (ux1 - ux0) * (uy1 - uy0);
+         let offset = bump.tile;
+         bump.tile += tile_count;
++        // Mirrors tile_alloc.wgsl: if this draw object's tiles don't fit in the fixed-capacity
++        // `tiles` buffer, reset the offset to 0 (so every subsequent read of `path.tiles` stays
++        // in-bounds) and record the failure, rather than handing out an offset the write loop
++        // below can't satisfy.
++        let offset = if offset + tile_count > config.tiles_size {
++            bump.failed |= STAGE_TILE_ALLOC;
++            0
++        } else {
++            offset
++        };
+         // We construct it this way because padding is private.
+         let mut path = Path::default();
+         path.bbox = [ux0, uy0, ux1, uy1];
+         path.tiles = offset;
+         paths[drawobj_ix as usize] = path;
+         for i in 0..tile_count {
+-            tiles[(offset + i) as usize] = Tile::default();
++            // A single draw object's own `tile_count` can still exceed capacity even after the
++            // reset above (GPU relies on wgpu/naga's implicit storage-buffer bounds clamp for
++            // this case; the CPU shim has no such implicit check, so guard explicitly).
++            if let Some(tile) = tiles.get_mut((offset + i) as usize) {
++                *tile = Tile::default();
++            }
+         }
+     }
+ }
+diff --git a/vello_shaders/src/cpu/util.rs b/vello_shaders/src/cpu/util.rs
+index ec801ebe..f008a571 100644
+--- a/vello_shaders/src/cpu/util.rs
++++ b/vello_shaders/src/cpu/util.rs
+@@ -226,3 +226,15 @@ pub(crate) const ONE_MINUS_ULP: f32 = 0.99999994;
+ /// direction. The theory is that a is not off by more than a few ulp, and it's
+ /// always in the range of 0..1.
+ pub(crate) const ROBUST_EPSILON: f32 = 2e-7;
++
++/// Bitflags for each stage that can fail bump allocation.
++///
++/// Mirrors the `STAGE_*` constants in `shader/shared/bump.wgsl`. On the GPU path, a shader that
++/// would overflow one of the fixed-capacity bump-allocated buffers (`vello_encoding`'s
++/// `BufferSizes::new`) instead resets its own claimed offset to 0 and ORs its stage's bit into
++/// `BumpAllocators::failed`, relying on wgpu/naga's storage-buffer bounds checks to make the
++/// resulting writes a silent (wrong-but-safe) clamp rather than a crash. The CPU shader shim has
++/// no such implicit bounds check, so it must reset the offset *and* explicitly guard the
++/// resulting writes itself.
++pub(crate) const STAGE_BINNING: u32 = 0x1;
++pub(crate) const STAGE_TILE_ALLOC: u32 = 0x2;

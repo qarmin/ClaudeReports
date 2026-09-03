@@ -1,0 +1,41 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench, check bit-exactness.
+test: clone apply bench correctness
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Runs the existing "Pic scale Plane S10: Lanczos 3" criterion case (harness = false),
+# single-threaded by construction (ThreadingPolicy::Single) - pin with `taskset -c N` yourself
+# for a single-core-ranking run; unpinned is the realistic multi-core wall-clock run. This case
+# already exists in the harness (no bench-file changes needed) and exercises both the
+# horizontal and vertical/column LB signed-i16 kernels (bit_depth=10, Plane i16, CN=1) - the
+# vertical one is what this candidate's patch touches.
+bench:
+    cd clone && cargo bench -p app --bench resize_plane -- "Pic scale Plane S10: Lanczos 3"
+
+# Bit-exactness check: builds bit_exact_check/ against ./clone once as-is (patched, since
+# `apply` already ran) and prints one hash line. Run `just clone` (without `apply`) and then
+# `just correctness` separately to get the pre-patch hash to diff against by eye - both must
+# print the same `len=... hash=...` line.
+correctness:
+    cd bit_exact_check && cargo build --release
+    ./bit_exact_check/target/release/correctness_check
+
+clean:
+    rm -rf clone

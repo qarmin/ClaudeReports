@@ -1,0 +1,53 @@
+# Self-contained reproduction for candidate 003.RAYON_COLORSPACE_THRESHOLD_GUARD.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern). Self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+#
+# `just test` clones dicom-rs at base_commit, builds baseline + patched default-feature (rayon
+# enabled) binaries, and runs paired comparisons at a below-threshold and an above-threshold
+# pixel count.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cp "{{justfile_directory()}}/testdata/ybr_below_threshold.dcm" clone/
+    cp "{{justfile_directory()}}/testdata/ybr_above_threshold.dcm" clone/
+    echo "=== bit-exactness check ==="
+    for f in ybr_below_threshold ybr_above_threshold; do
+        ./bin_baseline dump-image "clone/$f.dcm" > "/tmp/candidate003_${f}_baseline.raw"
+        ./bin_patched dump-image "clone/$f.dcm" > "/tmp/candidate003_${f}_patched.raw"
+        cmp "/tmp/candidate003_${f}_baseline.raw" "/tmp/candidate003_${f}_patched.raw" && echo "$f: bit-exact" || echo "$f: DIFFERS (unexpected)"
+    done
+    echo "=== below-threshold (10,000px) paired comparison (RUNS=${RUNS:-9}) ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- colorspace clone/ybr_below_threshold.dcm 3000
+    echo "=== above-threshold (300,000px) paired comparison - expect NOT consistent (no change) ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- colorspace clone/ybr_above_threshold.dcm 150
+
+clean:
+    rm -rf clone bin_baseline bin_patched

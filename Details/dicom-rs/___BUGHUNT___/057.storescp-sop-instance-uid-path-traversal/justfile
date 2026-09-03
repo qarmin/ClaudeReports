@@ -1,0 +1,38 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# This is a REAL end-to-end, two-real-binary reproduction (per CONFIRMATION.md section 11):
+# `repro/run_e2e.sh` builds and runs the actual `dicom-storescp` and `dicom-storescu` binaries
+# from the clone, has `dicom-storescu` send a genuine DICOM file (built by the small
+# `make_evil_file` helper) whose Media Storage SOP Instance UID contains a path traversal
+# sequence, and checks the real filesystem outcome after a real DICOM association + C-STORE
+# exchange over a real loopback TCP socket.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Runs the real two-binary exchange against the pristine clone - should exit 1 (bug reproduced:
+# the file escaped the configured output directory).
+reproduce-before:
+    ./repro/run_e2e.sh clone; test "$?" -eq 1 && echo "(exit 1 expected here: bug reproduced)"; true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Confirm the fix: the same real two-binary exchange now exits 0 (file stayed inside the
+# configured output directory, safely sanitized).
+reproduce-after:
+    ./repro/run_e2e.sh clone
+
+clean:
+    rm -rf clone
+    rm -rf repro/make_evil_file/target repro/make_evil_file/Cargo.lock

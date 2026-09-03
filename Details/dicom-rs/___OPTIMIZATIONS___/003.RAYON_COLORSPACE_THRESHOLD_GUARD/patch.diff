@@ -1,0 +1,160 @@
+diff --git a/pixeldata/src/lib.rs b/pixeldata/src/lib.rs
+index 6ede5847..b1b08ac9 100644
+--- a/pixeldata/src/lib.rs
++++ b/pixeldata/src/lib.rs
+@@ -1983,36 +1983,62 @@ fn bytes_to_vec_u16(data: &[u8]) -> Vec<u16> {
+     pixel_array
+ }
+ 
++// Below this many pixels, rayon's own per-call dispatch overhead (par_chunks_mut spawning /
++// work-stealing setup) costs more than the sequential per-pixel arithmetic it would save -
++// measured crossover on a 24-core box sits between 10,000 and 20,000 pixels for this function.
++#[cfg(feature = "rayon")]
++const COLORSPACE_RAYON_PIXEL_THRESHOLD: usize = 16_384;
++
++// Caches whether this process has more than one available core - on a single-core (or
++// affinity-restricted to one core) host, dispatching to rayon can never pay for its own
++// overhead regardless of input size.
++#[cfg(feature = "rayon")]
++fn rayon_worth_it() -> bool {
++    use std::sync::OnceLock;
++    static WORTH_IT: OnceLock<bool> = OnceLock::new();
++    *WORTH_IT.get_or_init(|| {
++        std::thread::available_parallelism()
++            .map(|n| n.get() > 1)
++            .unwrap_or(false)
++    })
++}
++
++#[cfg(feature = "image")]
++fn convert_pixel_u8(pixel: &mut [u8]) {
++    // Matrix multiplication taken from
++    // https://github.com/pydicom/pydicom/blob/f36517e10/pydicom/pixel_data_handlers/util.py#L576
++    let y = pixel[0] as f32;
++    let b: f32 = pixel[1] as f32;
++    let r: f32 = pixel[2] as f32;
++    let b = b - 128.0;
++    let r = r - 128.0;
++
++    let cr = (y + 1.402 * r) + 0.5;
++    let cg = (y + (0.114 * 1.772 / 0.587) * b + (-0.299 * 1.402 / 0.587) * r) + 0.5;
++    let cb = (y + 1.772 * b) + 0.5;
++
++    let cr = cr.floor().clamp(0.0, u8::MAX as f32) as u8;
++    let cg = cg.floor().clamp(0.0, u8::MAX as f32) as u8;
++    let cb = cb.floor().clamp(0.0, u8::MAX as f32) as u8;
++
++    pixel[0] = cr;
++    pixel[1] = cg;
++    pixel[2] = cb;
++}
++
+ // Convert u8 pixel array from YBR_FULL or YBR_FULL_422 to RGB
+ // Every pixel is replaced with an RGB value
+ #[cfg(feature = "image")]
+ fn convert_colorspace_u8(i: &mut [u8]) {
+     #[cfg(feature = "rayon")]
+-    let iter = i.par_chunks_mut(3);
+-    #[cfg(not(feature = "rayon"))]
+-    let iter = i.chunks_mut(3);
+-
+-    // Matrix multiplication taken from
+-    // https://github.com/pydicom/pydicom/blob/f36517e10/pydicom/pixel_data_handlers/util.py#L576
+-    iter.for_each(|pixel| {
+-        let y = pixel[0] as f32;
+-        let b: f32 = pixel[1] as f32;
+-        let r: f32 = pixel[2] as f32;
+-        let b = b - 128.0;
+-        let r = r - 128.0;
+-
+-        let cr = (y + 1.402 * r) + 0.5;
+-        let cg = (y + (0.114 * 1.772 / 0.587) * b + (-0.299 * 1.402 / 0.587) * r) + 0.5;
+-        let cb = (y + 1.772 * b) + 0.5;
+-
+-        let cr = cr.floor().clamp(0.0, u8::MAX as f32) as u8;
+-        let cg = cg.floor().clamp(0.0, u8::MAX as f32) as u8;
+-        let cb = cb.floor().clamp(0.0, u8::MAX as f32) as u8;
+-
+-        pixel[0] = cr;
+-        pixel[1] = cg;
+-        pixel[2] = cb;
+-    });
++    {
++        let pixel_count = i.len() / 3;
++        if rayon_worth_it() && pixel_count >= COLORSPACE_RAYON_PIXEL_THRESHOLD {
++            i.par_chunks_mut(3).for_each(convert_pixel_u8);
++            return;
++        }
++    }
++    i.chunks_mut(3).for_each(convert_pixel_u8);
+ }
+ 
+ #[cfg(feature = "image")]
+@@ -2029,36 +2055,42 @@ fn interleave<T: Copy>(data: &[T]) -> Vec<T> {
+         .collect()
+ }
+ 
++#[cfg(feature = "image")]
++fn convert_pixel_u16(pixel: &mut [u16]) {
++    // Matrix multiplication taken from
++    // https://github.com/pydicom/pydicom/blob/f36517e10/pydicom/pixel_data_handlers/util.py#L576
++    let y = pixel[0] as f32;
++    let b: f32 = pixel[1] as f32;
++    let r: f32 = pixel[2] as f32;
++    let b = b - 32768.0;
++    let r = r - 32768.0;
++
++    let cr = (y + 1.402 * r) + 0.5;
++    let cg = (y + (0.114 * 1.772 / 0.587) * b + (-0.299 * 1.402 / 0.587) * r) + 0.5;
++    let cb = (y + 1.772 * b) + 0.5;
++
++    let cr = cr.floor().clamp(0.0, u16::MAX as f32) as u16;
++    let cg = cg.floor().clamp(0.0, u16::MAX as f32) as u16;
++    let cb = cb.floor().clamp(0.0, u16::MAX as f32) as u16;
++
++    pixel[0] = cr;
++    pixel[1] = cg;
++    pixel[2] = cb;
++}
++
+ // Convert u16 pixel array from YBR_FULL or YBR_FULL_422 to RGB
+ // Every pixel is replaced with an RGB value
+ #[cfg(feature = "image")]
+ fn convert_colorspace_u16(i: &mut [u16]) {
+     #[cfg(feature = "rayon")]
+-    let iter = i.par_chunks_mut(3);
+-    #[cfg(not(feature = "rayon"))]
+-    let iter = i.chunks_mut(3);
+-
+-    // Matrix multiplication taken from
+-    // https://github.com/pydicom/pydicom/blob/f36517e10/pydicom/pixel_data_handlers/util.py#L576
+-    iter.for_each(|pixel| {
+-        let y = pixel[0] as f32;
+-        let b: f32 = pixel[1] as f32;
+-        let r: f32 = pixel[2] as f32;
+-        let b = b - 32768.0;
+-        let r = r - 32768.0;
+-
+-        let cr = (y + 1.402 * r) + 0.5;
+-        let cg = (y + (0.114 * 1.772 / 0.587) * b + (-0.299 * 1.402 / 0.587) * r) + 0.5;
+-        let cb = (y + 1.772 * b) + 0.5;
+-
+-        let cr = cr.floor().clamp(0.0, u16::MAX as f32) as u16;
+-        let cg = cg.floor().clamp(0.0, u16::MAX as f32) as u16;
+-        let cb = cb.floor().clamp(0.0, u16::MAX as f32) as u16;
+-
+-        pixel[0] = cr;
+-        pixel[1] = cg;
+-        pixel[2] = cb;
+-    });
++    {
++        let pixel_count = i.len() / 3;
++        if rayon_worth_it() && pixel_count >= COLORSPACE_RAYON_PIXEL_THRESHOLD {
++            i.par_chunks_mut(3).for_each(convert_pixel_u16);
++            return;
++        }
++    }
++    i.chunks_mut(3).for_each(convert_pixel_u16);
+ }
+ 
+ /// Convert the i16 vector by shifting it up,

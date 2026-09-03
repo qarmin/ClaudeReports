@@ -1,0 +1,74 @@
+# Self-contained reproduction for this candidate.
+#
+# Uses the `rss_probe` harness from ../harness/rss_probe (untracked in the main calamine repo -
+# see ../README.md), extended this session with a `formula` mode (worksheet_formula() instead of
+# worksheet_range()) - self-contained given the whole ___OPTIMIZATIONS___ folder kept together.
+#
+# The primary fixture is a synthetic formula-heavy XLSX (scripts/gen_formula_xlsx.py, stdlib
+# zipfile only) - no free-standing large formula-heavy XLSX fixture was found publicly in the
+# time budgeted for this candidate (see RESULT.md). `just test` generates it fresh.
+#
+# A secondary correctness check (bench/formula_probe) exercises Range::from_sparse_dense_hint()'s
+# fallback-to-sparse path against 5 wrong/mismatched-<dimension> variants of the project's own
+# tests/formula.issue.xlsx (scripts/gen_dimtest.py) - run via `just correctness`.
+
+repo_url := "https://github.com/tafia/calamine.git"
+base_commit := "5c02e86e99ec5c1fb1dcc15e64c2bbaf19bff60d"
+harness_dir := "../harness/rss_probe"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/rss_probe
+    mkdir -p testdata
+    python3 "{{justfile_directory()}}/scripts/gen_formula_xlsx.py" 300000 8 testdata/big_formula.xlsx
+    python3 "{{justfile_directory()}}/scripts/gen_dimtest.py" clone/tests/formula.issue.xlsx testdata
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_baseline
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_patched
+
+bench:
+    @echo "=== baseline: XLSX synthetic formula-heavy file, worksheet_formula() (watch peak_rss_kb) ==="
+    ./rss_probe_baseline formula testdata/big_formula.xlsx
+    @echo "=== patched: same file (expect lower peak_rss_kb, identical sig/cells) ==="
+    ./rss_probe_patched formula testdata/big_formula.xlsx
+
+# Correctness-only: bit-exact worksheet_formula() output across 5 wrong/mismatched-<dimension>
+# variants, baseline vs patched. Prints "IDENTICAL" per file when outputs match exactly.
+correctness: clone
+    mkdir -p bench_baseline bench_patched
+    cd bench/formula_probe && cargo build --release
+    cp bench/formula_probe/target/release/formula_probe ./formula_probe_baseline
+    just apply
+    cd bench/formula_probe && cargo build --release
+    cp bench/formula_probe/target/release/formula_probe ./formula_probe_patched
+    just _correctness_diff
+
+_correctness_diff:
+    #!/usr/bin/env bash
+    set -e
+    for f in exact small large nodim reversed; do
+        ./formula_probe_baseline "testdata/$f.xlsx" > "bench_baseline/$f.txt"
+        ./formula_probe_patched "testdata/$f.xlsx" > "bench_patched/$f.txt"
+        if diff -q "bench_baseline/$f.txt" "bench_patched/$f.txt" > /dev/null; then
+            echo "$f: IDENTICAL"
+        else
+            echo "$f: DIFFERS"
+            diff "bench_baseline/$f.txt" "bench_patched/$f.txt" || true
+        fi
+    done
+
+clean:
+    rm -rf clone rss_probe_baseline rss_probe_patched formula_probe_baseline formula_probe_patched testdata bench_baseline bench_patched bench/formula_probe/target bench/formula_probe/Cargo.lock

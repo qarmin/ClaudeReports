@@ -1,0 +1,38 @@
+# Self-contained reproduction for candidate 010 (u128_as_f32_cast_broken_release_mode).
+#
+# Confirmed, but no patch.diff - the one bounded fix attempted this session (strengthening the
+# `black_box` intrinsic's inline-asm optimization barrier in src/intrinsic/mod.rs to also declare
+# `result`'s memory as an output operand) made libgccjit itself SIGSEGV while compiling, so it was
+# rejected and reverted; see RESULT.md. Only `reproduce-before` exists (no `apply`/
+# `reproduce-after` step, per candidate_justfile's own template note for this case).
+#
+# Requires this project's own toolchain to already be buildable in the environment running this
+# (see the upstream project's Readme.md "Quick start" - `./y.sh prepare` needs network access to
+# download a prebuilt libgccjit.so and to fetch rustc-dev components). Not fast: a fresh clone's
+# first `./y.sh prepare && ./y.sh build --sysroot --release` takes a few minutes.
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+test: clone build reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# One-time setup: downloads a prebuilt libgccjit.so and builds the sysroot (core/alloc/std).
+# ~2-3 minutes on a modern multi-core machine, per this workspace's own README.md.
+build:
+    echo 'download-gccjit = true' > clone/config.toml
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Runs the real end-to-end repro (compiles+runs repro/u128_as_f32.rs through the real backend,
+# both with and without optimizations, plus a plain-rustc/LLVM reference) and prints a
+# REPRODUCED/NOT REPRODUCED verdict - see repro/run.sh for what each step does.
+reproduce-before:
+    bash repro/run.sh clone
+
+clean:
+    rm -rf clone

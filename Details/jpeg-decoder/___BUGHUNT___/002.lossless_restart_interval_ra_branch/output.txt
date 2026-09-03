@@ -1,0 +1,69 @@
+Captured output of `cd repro && cargo run --release`, run against the real jpeg_decoder::Decoder
+public API, base_commit eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c.
+
+=== BEFORE (patch.diff not applied - src/decoder/lossless.rs as of base_commit) ===
+Built synthetic lossless JPEG: 96 bytes
+Params: 4x4 predictor_selection=1 (Ra) restart_interval=5
+
+Ground truth pixel grid:
+  [100, 110, 120, 130]
+  [90, 200, 60, 180]
+  [40, 170, 30, 210]
+  [220, 50, 240, 20]
+
+Decoded image: 4x4, 16 bytes
+
+Decoded pixel grid:
+  [100, 110, 120, 130]
+  [90, 162, 22, 142]
+  [40, 170, 72, 252]
+  [220, 50, 240, 132]
+
+6 of 16 pixels mismatched between ground truth and decoder output.
+  mismatch at (x=1, y=1): expected 200, decoder produced 162
+  mismatch at (x=2, y=1): expected 60, decoder produced 22
+  mismatch at (x=3, y=1): expected 180, decoder produced 142
+  mismatch at (x=2, y=2): expected 30, decoder produced 72
+  mismatch at (x=3, y=2): expected 210, decoder produced 252
+  mismatch at (x=3, y=3): expected 20, decoder produced 132
+
+BUG REPRODUCED: decode_scan_lossless's Predictor::Ra branch produced wrong pixel values for a valid lossless JPEG combining a restart interval with predictor selection 1 (Ra) - the branch never resets prediction to the frame default at restart boundaries.
+
+Reproduced identically on 3/3 runs (no randomness/seed involved - the input bytes are
+hand-constructed and fixed, and the decoder path is purely deterministic).
+
+=== AFTER (patch.diff applied) ===
+Built synthetic lossless JPEG: 96 bytes
+Params: 4x4 predictor_selection=1 (Ra) restart_interval=5
+
+Ground truth pixel grid:
+  [100, 110, 120, 130]
+  [90, 200, 60, 180]
+  [40, 170, 30, 210]
+  [220, 50, 240, 20]
+
+Decoded image: 4x4, 16 bytes
+
+Decoded pixel grid:
+  [100, 110, 120, 130]
+  [90, 200, 60, 180]
+  [40, 170, 30, 210]
+  [220, 50, 240, 20]
+
+0 of 16 pixels mismatched between ground truth and decoder output.
+
+No mismatch found - bug did NOT reproduce with these parameters.
+
+=== Isolation check ===
+The before/after runs above were produced by `git stash push -- src/decoder/lossless.rs` /
+`git stash pop` around the same worktree checkout (not a fresh clone diff), i.e. the only
+difference between the two runs is exactly patch.diff's hunk - confirms the fix, and not some
+other confounding change, is what makes the mismatch go away (SKILL.md pitfall #6).
+
+=== Project test suite (cargo +1.90.0 test --release; a newer toolchain than this crate's
+declared MSRV of 1.61.0 was used only because this sandbox's stable rustc 1.61.0 cannot build
+the rayon-core dependency in the Cargo.lock - unrelated to the bug or the fix) ===
+
+Before patch: 23 passed, 0 failed (5 unittests + 12 tests/lib.rs + 1 tests/rayon.rs +
+1 tests/rayon-0.rs + 1 tests/rayon-1.rs + 1 tests/rayon-2.rs + 2 doc-tests)
+After patch:  23 passed, 0 failed (identical breakdown)

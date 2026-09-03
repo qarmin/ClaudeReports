@@ -1,0 +1,51 @@
+# Self-contained reproduction for candidate 043.
+#
+# This candidate does NOT reuse hayro-bench's render_bench, because `flate::decode` inside
+# hayro-syntax is `pub(crate)` (not reachable from an external bench crate). Instead, `bench/`
+# is a standalone crate that reproduces the exact two functions under test (the pre-patch and
+# post-patch shapes of `zlib_stream`), built against the SAME pinned `flate2`/`zlib-rs` version
+# hayro-syntax depends on, and decodes real FlateDecode-compressed stream payloads extracted from
+# this workspace's own test PDFs (testdata/*.zlib, from img.pdf and hayro-tests/pdfs/load/issue391.pdf).
+# One binary, both code paths compiled in, selected via a CLI arg - so there is never a
+# "did the patch actually get applied to this binary" ambiguity.
+#
+# `just test` clones the real project too (and applies patch.diff to it) purely so a reader can
+# independently confirm the patch applies cleanly and the project's own test suite still passes -
+# see the `correctness` recipe.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+test: bench-build bench-run clone apply correctness
+
+# ---- isolated bench (the actual measured result) ----
+
+bench-build:
+    cd bench && cargo build --release
+
+bench-run:
+    @echo "=== baseline vs patched (single binary, both code paths) ==="
+    ./bench/target/release/flate_decode_bench baseline 200
+    @echo
+    ./bench/target/release/flate_decode_bench patched 200
+
+# ---- real project clone, to verify patch.diff applies and tests still pass ----
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    @echo "patch applied cleanly against {{base_commit}}"
+
+correctness:
+    @echo "=== hayro-syntax unit tests (patched) ==="
+    cd clone && cargo test --release -p hayro-syntax --features std,unsafe
+    @echo "=== hayro-tests flate/predictor snapshot tests (patched) - run twice: first run seeds local reference PNGs (not committed to git), second run actually compares ==="
+    cd clone && cargo test --release -p hayro-tests --test tests -- filter_flate_1bit filter_tiff_predictor_gray || true
+    cd clone && cargo test --release -p hayro-tests --test tests -- filter_flate_1bit filter_tiff_predictor_gray
+
+clean:
+    rm -rf clone bench/target

@@ -1,0 +1,180 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# This candidate is a measurement-only re-confirmation of candidates 008/011's already-known
+# fix (patch.diff here is byte-identical to candidate 025's) using valgrind/cachegrind instead of
+# perf (not installed in the original environment) to get exact dynamic instruction/branch counts
+# per function. Needs `valgrind` (cachegrind + cg_annotate) and `hyperfine` on PATH; falls back to
+# skipping cachegrind/hyperfine steps with a loud message if either is missing rather than failing
+# silently.
+#
+# The two example drivers this needs (_cachegrind_bmp_loop.rs, _correctness_check_bmp.rs) are
+# NOT part of patch.diff (see RESULT.md's "Does it change behavior/output?" - they're measurement
+# tooling, the same convention candidate 025 used for its own temporary correctness script) - this
+# justfile writes them into the clone directly instead.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+test: clone add-drivers copy-testdata build-baseline build-patched correctness cachegrind wallclock
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Adds the two temporary example drivers + their [[example]] Cargo.toml entries to the clone.
+# Kept out of patch.diff on purpose (measurement tooling, not the fix) - see justfile header.
+add-drivers:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cat > clone/examples/_cachegrind_bmp_loop.rs <<'RUST'
+    use std::env;
+    use std::hint::black_box;
+
+    fn main() {
+        let mut args = env::args().skip(1);
+        let path = args.next().expect("usage: _cachegrind_bmp_loop <path.bmp> <iterations>");
+        let iterations: u32 = args
+            .next()
+            .expect("usage: _cachegrind_bmp_loop <path.bmp> <iterations>")
+            .parse()
+            .expect("iterations must be a u32");
+        let bytes = std::fs::read(&path).expect("failed to read input file");
+        for _ in 0..iterations {
+            let img = image::load_from_memory_with_format(black_box(&bytes), image::ImageFormat::Bmp)
+                .expect("decode failed")
+                .to_rgba8();
+            black_box(img.as_raw().len());
+        }
+    }
+    RUST
+    cat > clone/examples/_correctness_check_bmp.rs <<'RUST'
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    fn main() {
+        let dir = std::env::args().nth(1).expect("usage: _correctness_check_bmp <dir>");
+        let mut paths: Vec<_> = walk(&dir);
+        paths.sort();
+        for path in paths {
+            match image::open(&path) {
+                Ok(img) => {
+                    let rgba = img.to_rgba8();
+                    let mut hasher = DefaultHasher::new();
+                    rgba.as_raw().hash(&mut hasher);
+                    println!("{}\t{}x{}\t{:016x}", path, rgba.width(), rgba.height(), hasher.finish());
+                }
+                Err(e) => println!("{path}\tERROR\t{e}"),
+            }
+        }
+    }
+
+    fn walk(dir: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walk(path.to_str().unwrap()));
+            } else if path.extension().and_then(|e| e.to_str()) == Some("bmp") {
+                out.push(path.to_str().unwrap().to_string());
+            }
+        }
+        out
+    }
+    RUST
+    python3 - <<'PY'
+    content = open("clone/Cargo.toml").read()
+    marker = '[[example]]\nname = "bmp_1bit_encoding"\nrequired-features = ["bmp"]\n'
+    addition = marker + '\n[[example]]\nname = "_cachegrind_bmp_loop"\nrequired-features = ["bmp"]\n\n[[example]]\nname = "_correctness_check_bmp"\nrequired-features = ["bmp"]\n'
+    assert marker in content, "bmp_1bit_encoding [[example]] block not found - Cargo.toml layout changed since base_commit"
+    open("clone/Cargo.toml", "w").write(content.replace(marker, addition))
+    PY
+
+# candidate 020's synthetic 2-bit corpus file (copied from this folder's own testdata/, not
+# fetched from anywhere external) - needed so the 2-bit case has a large-enough sample, same as
+# candidates 020/025 used.
+copy-testdata:
+    cp "{{justfile_directory()}}/testdata/pal2_large.bmp" clone/tests/images/bmp/images/pal2_large.bmp
+    cp "{{justfile_directory()}}/testdata/pal2_large.bmp.png" clone/tests/reference/bmp/images/pal2_large.bmp.png
+
+build-baseline:
+    cd clone && cargo build --release --example _cachegrind_bmp_loop --example _correctness_check_bmp
+    mkdir -p bin
+    cp clone/target/release/examples/_cachegrind_bmp_loop bin/cg_baseline
+    cp clone/target/release/examples/_correctness_check_bmp bin/check_baseline
+
+build-patched: apply
+    cd clone && cargo build --release --example _cachegrind_bmp_loop --example _correctness_check_bmp
+    mkdir -p bin
+    cp clone/target/release/examples/_cachegrind_bmp_loop bin/cg_patched
+    cp clone/target/release/examples/_correctness_check_bmp bin/check_patched
+
+# Bit-exact hash comparison across every .bmp under tests/images/bmp/ (66 pre-existing + pal2_large.bmp).
+correctness:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone
+    ./../bin/check_baseline tests/images/bmp > ../hashes_baseline.txt
+    ./../bin/check_patched tests/images/bmp > ../hashes_patched.txt
+    cd ..
+    if diff -q hashes_baseline.txt hashes_patched.txt > /dev/null; then
+        echo "correctness: bit-exact (0 differences across 67 files)"
+    else
+        echo "correctness: MISMATCH - see hashes_baseline.txt / hashes_patched.txt"
+        diff hashes_baseline.txt hashes_patched.txt || true
+    fi
+
+# Dynamic instruction/branch counts via valgrind --tool=cachegrind. Needs a raised open-file
+# limit in this environment (cachegrind's libcfile aborts under the container's very high default
+# ulimit -n) - harmless to set unconditionally.
+cachegrind:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v valgrind >/dev/null; then
+        echo "valgrind not installed - skipping cachegrind step (see RESULT.md for this session's already-captured numbers in evidence/cachegrind/)"
+        exit 0
+    fi
+    ulimit -n 4096
+    mkdir -p cg_out
+    for depth_file in Core_8_Bit.bmp:8bit Core_4_Bit.bmp:4bit pal2_large.bmp:2bit Core_1_Bit.bmp:1bit; do
+        f="${depth_file%%:*}"; tag="${depth_file##*:}"
+        for variant in baseline patched; do
+            valgrind --tool=cachegrind --branch-sim=yes --cache-sim=yes \
+                --cachegrind-out-file="cg_out/${tag}_${variant}.cgout" \
+                "bin/cg_${variant}" "clone/tests/images/bmp/images/${f}" 200 \
+                > "cg_out/${tag}_${variant}.log" 2>&1
+            echo "=== ${tag} ${variant} ==="
+            grep -E "I refs|Branches:|Mispredicts:" "cg_out/${tag}_${variant}.log"
+        done
+    done
+
+# Wall-clock via hyperfine: single-core (taskset) and multi-core (unpinned), matching
+# SKILL.md's requirement to measure both.
+wallclock:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v hyperfine >/dev/null; then
+        echo "hyperfine not installed - skipping wall-clock step (see RESULT.md for this session's already-captured numbers in evidence/wallclock/)"
+        exit 0
+    fi
+    for depth_file in Core_8_Bit.bmp:8bit Core_4_Bit.bmp:4bit pal2_large.bmp:2bit Core_1_Bit.bmp:1bit; do
+        f="${depth_file%%:*}"; tag="${depth_file##*:}"
+        echo "=== ${tag} single-core (taskset -c 0) ==="
+        hyperfine --warmup 3 -m 10 \
+            "taskset -c 0 bin/cg_baseline clone/tests/images/bmp/images/${f} 2000" \
+            "taskset -c 0 bin/cg_patched clone/tests/images/bmp/images/${f} 2000"
+        echo "=== ${tag} multi-core (unpinned) ==="
+        hyperfine --warmup 3 -m 10 \
+            "bin/cg_baseline clone/tests/images/bmp/images/${f} 2000" \
+            "bin/cg_patched clone/tests/images/bmp/images/${f} 2000"
+    done
+
+clean:
+    rm -rf clone bin cg_out hashes_baseline.txt hashes_patched.txt

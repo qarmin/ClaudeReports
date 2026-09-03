@@ -1,0 +1,114 @@
+=== grep: callers of ValIdx::collect_into (qualified) ===
+(no output above = zero matches)
+
+=== grep: all ValIdx usages by file (to show every consumer uses first/first_res/first_opt) ===
+src/result/par_runner.rs:64:                ValIdx::first_res(results_bag.into_inner().into_inner())
+src/infallible_use/par_runner.rs:27:                    .map(|(idx, val)| ValIdx::new(val, idx))
+src/infallible_use/par_runner.rs:54:                ValIdx::first(results_bag.into_inner().into_inner())
+src/option/par_runner.rs:62:                ValIdx::first_opt(results_bag.into_inner().into_inner())
+src/infallible/par_runner.rs:23:                .map(|(idx, val)| ValIdx::new(val, idx)),
+src/infallible/par_runner.rs:44:                ValIdx::first(results_bag.into_inner().into_inner())
+src/result_use/par_runner.rs:76:                ValIdx::first_res(results_bag.into_inner().into_inner())
+src/option_use/par_runner.rs:75:                ValIdx::first_opt(results_bag.into_inner().into_inner())
+
+=== cargo build (default features), after touch to force recompile ===
+   Compiling orx-parallel v3.4.0 (/home/rafal/Projekty/Obce/orx-parallel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.30s
+
+=== cargo build --no-default-features --features std ===
+   Compiling orx-parallel v3.4.0 (/home/rafal/Projekty/Obce/orx-parallel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.30s
+
+=== git log -S on the qualified call string, all branches ===
+480024e3 implement collect_arbitrary_into for Vec
+6c4fb6bc implement collect for parallel runner
+8a720edc implement collect_arbitrary_into for Vec
+ee7224cf implement collect for parallel runner
+
+=== commit that added collect_into ===
+commit 78f41c192624d4edf3c6f14efae30b5e0987ee0e
+Author: orxfun <orx.ugur.arikan@gmail.com>
+Date:   Thu Apr 9 16:18:56 2026 +0200
+
+    implement collect into with heap sort
+
+ src/infallible/par_runner.rs           | 24 ++++++++++++++++++++++
+ src/infallible/thread_execution/mod.rs |  2 ++
+ src/results/val_idx.rs                 | 37 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 63 insertions(+)
+
+=== commit that wired it in as sole caller ===
+commit 6c4fb6bcde4486aaa45f9950f3d7a10dc2b4a234
+Author: orxfun <orx.ugur.arikan@gmail.com>
+Date:   Thu Apr 9 16:20:51 2026 +0200
+
+    implement collect for parallel runner
+
+diff --git a/src/infallible/par_runner.rs b/src/infallible/par_runner.rs
+index 18a0340d..0be4096a 100644
+--- a/src/infallible/par_runner.rs
++++ b/src/infallible/par_runner.rs
+@@ -4,6 +4,7 @@ use crate::results::{Val, ValIdx};
+ use crate::{parameters::Params, pool::ParThreadPool, runner::ParRunner};
+ use orx_concurrent_bag::ConcurrentBag;
+ use orx_concurrent_iter::ConcurrentIter;
++use orx_pinned_vec::PinnedVec;
+ 
+ pub trait ParRunnerInfallible: ParRunner {
+     fn next<I, X>(&mut self, params: Params, iter: I, x: X) -> Option<ValIdx<X::O>>
+@@ -79,11 +80,12 @@ pub trait ParRunnerInfallible: ParRunner {
+         Val::reduce(results_bag.into_inner().into_inner(), f)
+     }
+ 
+-    fn collect<I, X>(&mut self, params: Params, iter: I, x: X)
++    fn collect<I, X, P>(&mut self, params: Params, iter: I, x: X, pinned_vec: &mut P)
+     where
+         I: ConcurrentIter,
+         X: Xap<I = I::Item>,
+         X::O: Send,
++        P: PinnedVec<X::O>,
+     {
+         let mut spawned = 0;
+         let (max_nt, state) = self.nt_state(params, iter.try_get_len());
+@@ -100,7 +102,7 @@ pub trait ParRunnerInfallible: ParRunner {
+             }
+         });
+ 
+-        // ValIdx::first(results_bag.into_inner().into_inner())
++        ValIdx::collect_into(results_bag.into_inner().into_inner(), pinned_vec);
+     }
+ }
+ 
+diff --git a/src/results/val_idx.rs b/src/results/val_idx.rs
+index 88163fea..dc693d49 100644
+--- a/src/results/val_idx.rs
++++ b/src/results/val_idx.rs
+@@ -1,6 +1,6 @@
+ use alloc::vec;
+ use alloc::vec::Vec;
+-use orx_pinned_vec::{IntoConcurrentPinnedVec, PinnedVec};
++use orx_pinned_vec::PinnedVec;
+ use orx_priority_queue::{BinaryHeap, PriorityQueue};
+ 
+ /// Value and index of an element.
+
+=== commit that removed the caller ===
+commit 480024e3fa7bd0ca5315a0353c7e9c02dc331e97
+Author: orxfun <orx.ugur.arikan@gmail.com>
+Date:   Thu Apr 9 17:01:29 2026 +0200
+
+    implement collect_arbitrary_into for Vec
+
+ src/infallible/collectables/col_into.rs | 10 +++++--
+ src/infallible/collectables/utils.rs    | 47 +++++++++++++++++++++++++++++++++
+ src/infallible/collectables/vec.rs      | 31 ++++++++++++++++++----
+ src/infallible/par_runner.rs            |  9 +++----
+ 4 files changed, 85 insertions(+), 12 deletions(-)
+
+=== live merge logic today ===
+src/results/val_idx.rs:39:        let mut queue = BinaryHeap::with_capacity(results.len());
+src/results/val_idx.rs:54:                Some(x) => Some(queue.push_then_pop(v, x.idx).0),
+src/collectables/alg/merge_collected/merge_ordered_into.rs:31:    let mut queue = BinaryHeap::with_capacity(results.len());
+src/collectables/alg/merge_collected/merge_ordered_into.rs:50:                Some(queue.push_then_pop(VecPos::new(v, beg, pos.len), pos.idx).0)
+src/collectables/alg/merge_collected/merge_ordered_into.rs:74:    let mut queue = BinaryHeap::with_capacity(results.len());
+src/collectables/alg/merge_collected/merge_ordered_into.rs:92:                Some(queue.push_then_pop(VecPos::new(v, beg, pos.len), pos.idx).0)

@@ -1,0 +1,45 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Reuses candidate 055's harness (../055.MOVE_FOCUS_CYCLE_DETECTION/bench, itself reused by
+# candidate 077): a headless Window with `count` plain Rectangles and nothing focusable, so
+# every Tab press walks the whole item tree, calling `track_focus_item_visibility` once per
+# rejected item - a flat scene with no Clip/Flickable ancestor, i.e. `visibility_clips()` is
+# always empty, exactly the case this patch skips `ChangeTracker::init` for.
+#
+# This candidate's effect is masked at any real scale by the still-unfixed O(n^2)
+# `visited.contains` scan in `move_focus` (candidate 055, not applied here - see RESULT.md's
+# "Scenario A/B" split). `bench` below only reproduces Scenario A (this patch alone, against
+# real unpatched source) since applying 055's own patch on top is out of scope for this
+# candidate's own patch.diff - see RESULT.md for Scenario B's numbers if 055 is also applied.
+bench:
+    cd bench && cargo build --profile rdebug
+    @echo "Correctness: one Tab press must still find the FocusScope placed after N rectangles:"
+    ./bench/target/rdebug/focus_bench 2000 5 --check
+    @echo "Worst case timing (nothing in the scene is focusable, single Tab press repeated):"
+    for n in 2000 8000 32000 100000; do \
+        echo "-- count=$n --"; \
+        taskset -c 0 ./bench/target/rdebug/focus_bench $n 15; \
+    done
+
+clean:
+    rm -rf clone bench/target

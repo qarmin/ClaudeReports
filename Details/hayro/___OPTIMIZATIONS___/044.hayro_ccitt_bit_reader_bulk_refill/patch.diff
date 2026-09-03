@@ -1,0 +1,104 @@
+diff --git a/hayro-ccitt/src/bit_reader.rs b/hayro-ccitt/src/bit_reader.rs
+index 5ed9ea89..904adc14 100644
+--- a/hayro-ccitt/src/bit_reader.rs
++++ b/hayro-ccitt/src/bit_reader.rs
+@@ -7,6 +7,13 @@ use core::fmt::Debug;
+ pub(crate) struct BitReader<'a> {
+     data: &'a [u8],
+     bit_offset: usize,
++    // A left-justified queue of not-yet-consumed bits: the top `buffer_bits` bits of `buffer`
++    // (starting at bit 63) are the next bits to be popped, immediately following `bit_offset`.
++    // Keeping `bit_offset` itself always in sync with "bits actually consumed" (rather than
++    // "bits loaded") means `byte_pos`/`bit_pos`/`at_end` below stay correct without knowing
++    // about the buffer at all.
++    buffer: u64,
++    buffer_bits: u32,
+ }
+ 
+ impl<'a> BitReader<'a> {
+@@ -15,24 +22,65 @@ impl<'a> BitReader<'a> {
+         Self {
+             data,
+             bit_offset: 0,
++            buffer: 0,
++            buffer_bits: 0,
++        }
++    }
++
++    /// Loads more whole bytes into `buffer` from the stream position right after what's already
++    /// buffered, stopping at the end of `data`. A no-op if nothing more is available.
++    #[inline(always)]
++    fn refill(&mut self) {
++        while self.buffer_bits <= 56 {
++            let load_byte_pos = (self.bit_offset + self.buffer_bits as usize) >> 3;
++            let Some(&byte) = self.data.get(load_byte_pos) else {
++                break;
++            };
++            self.buffer |= (byte as u64) << (56 - self.buffer_bits);
++            self.buffer_bits += 8;
+         }
+     }
+ 
+     #[inline(always)]
+     pub(crate) fn read_bit(&mut self) -> Result<u32> {
+-        let byte_pos = self.byte_pos();
+-        let byte = *self.data.get(byte_pos).ok_or(DecodeError::UnexpectedEof)? as u32;
+-        let shift = 7 - self.bit_pos();
++        if self.buffer_bits == 0 {
++            self.refill();
++            if self.buffer_bits == 0 {
++                return Err(DecodeError::UnexpectedEof);
++            }
++        }
++
++        let bit = self.buffer >> 63;
++        self.buffer <<= 1;
++        self.buffer_bits -= 1;
+         self.bit_offset += 1;
+-        Ok((byte >> shift) & 1)
++
++        Ok(bit as u32)
+     }
+ 
+     #[inline(always)]
+     pub(crate) fn read_bits(&mut self, num_bits: usize) -> Result<u32> {
++        // `result` is a u32, same implicit limit the original bit-by-bit implementation had.
++        debug_assert!(num_bits <= 32);
++
+         let mut result = 0_u32;
++        let mut remaining = num_bits;
+ 
+-        for i in (0..num_bits).rev() {
+-            result |= (self.read_bit()?) << i;
++        while remaining > 0 {
++            if self.buffer_bits == 0 {
++                self.refill();
++                if self.buffer_bits == 0 {
++                    return Err(DecodeError::UnexpectedEof);
++                }
++            }
++
++            let take = remaining.min(self.buffer_bits as usize);
++            let bits = (self.buffer >> (64 - take)) as u32;
++            result = (result << take) | bits;
++            self.buffer <<= take;
++            self.buffer_bits -= take as u32;
++            self.bit_offset += take;
++            remaining -= take;
+         }
+ 
+         Ok(result)
+@@ -50,6 +98,13 @@ impl<'a> BitReader<'a> {
+         if !bit_pos.is_multiple_of(8) {
+             self.bit_offset += 8 - bit_pos;
+         }
++
++        // The buffer may hold bits that were only "peeked" past this new, aligned position (or
++        // may no longer start exactly at `bit_offset`) - drop it and let the next read refill
++        // from the correct spot. `align` is called at most once per row, never in the per-bit
++        // hot path, so this is not worth optimizing away.
++        self.buffer = 0;
++        self.buffer_bits = 0;
+     }
+ 
+     #[inline(always)]

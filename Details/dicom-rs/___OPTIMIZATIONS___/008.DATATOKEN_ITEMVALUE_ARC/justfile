@@ -1,0 +1,50 @@
+# Self-contained reproduction for candidate 008.DATATOKEN_ITEMVALUE_ARC.
+#
+# patch.diff includes candidate 001 (InMemFragment: Vec<u8> -> Arc<[u8]>) as a PREREQUISITE -
+# this fix has no effect without it. Applying this patch alone to a pristine clone gives you
+# both candidates combined; there is no meaningful way to apply only the incremental part.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern). Self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cp "{{justfile_directory()}}/testdata/color3d_jpeg_baseline.dcm" clone/
+    echo "=== NOTE: baseline here is PRISTINE upstream (no candidate 001), so this ==="
+    echo "=== reproduces candidates 001+008 COMBINED vs pristine, not 008's isolated ==="
+    echo "=== incremental effect (see RESULT.md for that number, measured against ==="
+    echo "=== a separately-built candidate-001-only binary not reproduced by this justfile) ==="
+    echo "=== write-only paired comparison (RUNS=${RUNS:-9}) ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- write-only clone/color3d_jpeg_baseline.dcm 500
+    echo "=== roundtrip paired comparison (RUNS=${RUNS:-9}) ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- roundtrip clone/color3d_jpeg_baseline.dcm 500
+
+clean:
+    rm -rf clone bin_baseline bin_patched

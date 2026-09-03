@@ -1,0 +1,37 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# This is a logic bug, not a crash: the repro exits 1 while the bug is present (and prints which
+# of the three sites silently accepted a malformed element), and exits 0 once patch.diff is
+# applied. The dev profile is used because nothing here depends on optimization level.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone.
+# Expected: "3 of 3 sites silently accepted a malformed element as the spec default", exit 1.
+reproduce-before:
+    cd repro && cargo run; test "$?" -ne 0 && echo "(non-zero exit expected here: bug reproduced)"; true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro against the patched clone.
+# Expected: "0 of 3 sites ...", plus the control case still decoding, exit 0.
+reproduce-after:
+    cd repro && cargo run
+
+clean:
+    rm -rf clone repro/target

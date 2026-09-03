@@ -1,0 +1,29 @@
+=== Static confirmation (source read, no build) ===
+$ grep -n "dst_width as usize\|dst_height as usize" fuzz/resize_plane_u16/resize_plane_u16.rs
+54:        data.dst_width as usize,
+55:        data.dst_width as usize,
+
+=== repro/ run (3/3 identical) ===
+decoded from real libFuzzer-kept corpus bytes: SrcImage { src_width: 136, src_height: 272, dst_width: 1, dst_height: 257, value: 12593, use_quality: false, premultiply_alpha: true, threading: true }
+src = 136x272, requested dst = 1x257
+call_as_written_before_fix -> target actually resized to: Some((1, 1))
+call_as_written_after_fix  -> target actually resized to: Some((1, 257))
+REPRODUCED: before-fix harness call always ignores dst_height (257) and produces a square 1x1 target instead of the requested 1x257; after-fix call correctly produces 1x257.
+
+=== Fuzz burst against the FIXED harness (unlocks rectangular destinations) ===
+$ cargo +nightly fuzz run --sanitizer none --features avx,sse,nightly_avx512 resize_plane_u16 -- -max_total_time=300
+...
+#241522	DONE   cov: 581 ft: 2607 corp: 314/4312b lim: 985 exec/s: 802 rss: 42Mb
+Done 241522 runs in 301 second(s)
+0 crashes / 0 panics / 0 timeouts / 0 OOM kills. fuzz/artifacts/resize_plane_u16/ empty afterward.
+
+=== Corpus sanity check (standalone scratch binary, /tmp/corpus_check_plane_u16) ===
+Re-decoded every file libFuzzer kept in fuzz/corpus/resize_plane_u16/ (post-fix run) with the
+identical Arbitrary-derived SrcImage struct:
+total parsed: 313, dst_width != dst_height: 288, valid+rectangular: 288
+(92% of the kept corpus is genuinely rectangular, versus 0% structurally possible before the fix)
+
+=== Project test suite (main crate, fuzz/ is workspace-excluded either way) ===
+$ cargo test --lib --release
+BEFORE fix: test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+AFTER  fix: test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out

@@ -1,0 +1,41 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# `repro/` does not use a public-API entry point: the suspect function (`gaussian`) is
+# `pub(crate)`, not exported. Instead `repro/src/math/{consts,gaussian}.rs` each `include!()` the
+# real file at that path from `./clone` verbatim (see the comments in those files) - so
+# `crate::math::gaussian::gaussian` in `repro/src/main.rs` is genuinely the project's own current
+# code, not a hand transcription that could drift from it, and it automatically picks up
+# `patch.diff` once applied to `./clone` with no changes needed to repro/ itself.
+
+repo_url := "https://github.com/awxkee/pic-scale-safe.git"
+base_commit := "83c4801428c436678d7c6b6bea74af800924a469"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug
+# (nonzero exit code, "REPRODUCED" printed with 4 failing checks).
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer demonstrate the bug
+# (exit code 0, "did not reproduce" printed).
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target

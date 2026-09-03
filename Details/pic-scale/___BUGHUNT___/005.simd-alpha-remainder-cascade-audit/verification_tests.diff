@@ -1,0 +1,458 @@
+diff --git a/src/avx2/alpha_f16.rs b/src/avx2/alpha_f16.rs
+index 1d289ea..d85a0de 100644
+--- a/src/avx2/alpha_f16.rs
++++ b/src/avx2/alpha_f16.rs
+@@ -190,3 +190,57 @@ fn avx_unpremultiply_alpha_rgba_f16_row_impl(in_place: &mut [f16]) {
+         unpremultiply_pixel_f16_row(rem);
+     }
+ }
++
++#[cfg(test)]
++mod bughunt_remainder_tests {
++    use super::{avx_premultiply_alpha_rgba_f16, avx_unpremultiply_alpha_rgba_f16};
++    use crate::alpha_handle_f16::{premultiply_pixel_f16_row, unpremultiply_pixel_f16_row};
++    use core::f16;
++
++    fn lcg(state: &mut u64) -> u64 {
++        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
++        *state
++    }
++
++    const TOLERANCE: f32 = 5e-3;
++
++    #[test]
++    fn avx2_f16_remainder_matches_scalar_within_tolerance() {
++        if !std::arch::is_x86_feature_detected!("avx2") || !std::arch::is_x86_feature_detected!("f16c")
++        {
++            return;
++        }
++        for width in 1..260usize {
++            let mut state = 0x9E3779B97F4A7C15u64 ^ (width as u64);
++            let len = width * 4;
++            let mut src = vec![0f16; len];
++            for px in src.chunks_mut(4) {
++                px[0] = ((lcg(&mut state) % 1000) as f32 / 1000.0) as f16;
++                px[1] = ((lcg(&mut state) % 1000) as f32 / 1000.0) as f16;
++                px[2] = ((lcg(&mut state) % 1000) as f32 / 1000.0) as f16;
++                px[3] = ((lcg(&mut state) % 1000) as f32 / 1000.0) as f16;
++            }
++            let mut expected = vec![0f16; len];
++            premultiply_pixel_f16_row(&mut expected, &src);
++            let mut actual = vec![0f16; len];
++            avx_premultiply_alpha_rgba_f16(&mut actual, &src);
++            for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
++                assert!(
++                    (*a as f32 - *e as f32).abs() <= TOLERANCE,
++                    "premultiply width={width} idx={i} actual={a} expected={e}"
++                );
++            }
++
++            let mut expected_un = expected.clone();
++            unpremultiply_pixel_f16_row(&mut expected_un);
++            let mut actual_un = actual.clone();
++            avx_unpremultiply_alpha_rgba_f16(&mut actual_un);
++            for (i, (a, e)) in actual_un.iter().zip(expected_un.iter()).enumerate() {
++                assert!(
++                    (*a as f32 - *e as f32).abs() <= TOLERANCE,
++                    "unpremultiply width={width} idx={i} actual={a} expected={e}"
++                );
++            }
++        }
++    }
++}
+diff --git a/src/avx2/alpha_f32.rs b/src/avx2/alpha_f32.rs
+index cafefc2..08b9d3b 100644
+--- a/src/avx2/alpha_f32.rs
++++ b/src/avx2/alpha_f32.rs
+@@ -221,3 +221,58 @@ fn avx_premultiply_alpha_rgba_f32_row_impl(dst: &mut [f32], src: &[f32]) {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod bughunt_remainder_tests {
++    use super::{avx_premultiply_alpha_rgba_f32, avx_unpremultiply_alpha_rgba_f32};
++    use crate::alpha_handle_f32::{premultiply_rgba_f32_row, unpremultiply_rgba_f32_row};
++
++    fn lcg(state: &mut u64) -> u64 {
++        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
++        *state
++    }
++
++    // Tolerance, not exact-match: direct-division vs reciprocal-then-multiply differ by up to a
++    // few ULPs of f32 (see RESULT.md). A dropped/never-written remainder element would show as a
++    // *much* larger deviation (an unmultiplied/untouched value), not a few ULPs.
++    const TOLERANCE: f32 = 1e-3;
++
++    #[test]
++    fn avx2_f32_remainder_matches_scalar_within_tolerance() {
++        if !std::arch::is_x86_feature_detected!("avx2") {
++            return;
++        }
++        for width in 1..200usize {
++            let mut state = 0x243F6A8885A308D3u64 ^ (width as u64);
++            let len = width * 4;
++            let mut src = vec![0f32; len];
++            for px in src.chunks_mut(4) {
++                px[0] = (lcg(&mut state) % 1000) as f32 / 1000.0;
++                px[1] = (lcg(&mut state) % 1000) as f32 / 1000.0;
++                px[2] = (lcg(&mut state) % 1000) as f32 / 1000.0;
++                px[3] = (lcg(&mut state) % 1000) as f32 / 1000.0;
++            }
++            let mut expected = vec![0f32; len];
++            premultiply_rgba_f32_row(&mut expected, &src);
++            let mut actual = vec![0f32; len];
++            avx_premultiply_alpha_rgba_f32(&mut actual, &src);
++            for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
++                assert!(
++                    (a - e).abs() <= TOLERANCE,
++                    "premultiply width={width} idx={i} actual={a} expected={e}"
++                );
++            }
++
++            let mut expected_un = expected.clone();
++            unpremultiply_rgba_f32_row(&mut expected_un);
++            let mut actual_un = actual.clone();
++            avx_unpremultiply_alpha_rgba_f32(&mut actual_un);
++            for (i, (a, e)) in actual_un.iter().zip(expected_un.iter()).enumerate() {
++                assert!(
++                    (a - e).abs() <= TOLERANCE,
++                    "unpremultiply width={width} idx={i} actual={a} expected={e}"
++                );
++            }
++        }
++    }
++}
+diff --git a/src/avx2/alpha_u16.rs b/src/avx2/alpha_u16.rs
+index d159f66..6deee65 100644
+--- a/src/avx2/alpha_u16.rs
++++ b/src/avx2/alpha_u16.rs
+@@ -468,3 +468,65 @@ fn avx_unpremultiply_alpha_rgba_u16_row_avx(in_place: &mut [u16], bit_depth: usi
+         rem.copy_from_slice(&dst_buffer[..rem.len()]);
+     }
+ }
++
++#[cfg(test)]
++mod bughunt_remainder_tests {
++    use super::{avx_premultiply_alpha_rgba_u16, avx_unpremultiply_alpha_rgba_u16};
++    use crate::alpha_handle_u16::{premultiply_alpha_rgba_row, unpremultiply_alpha_rgba_row};
++
++    fn lcg(state: &mut u64) -> u64 {
++        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
++        *state
++    }
++
++    // Tolerance-based, not exact-match: the AVX2 "any bit depth" executor uses an f32
++    // reciprocal-multiply approximation while the scalar reference uses exact integer division
++    // for bit_depth 16, so a +/-1 LSB drift is expected and unrelated to remainder handling (see
++    // RESULT.md). A dropped/never-written remainder element would show as a *much* larger
++    // deviation (the buffer's leftover zero-init, or the untouched source value), not +/-1.
++    const TOLERANCE: i64 = 20;
++
++    #[test]
++    fn avx2_u16_remainder_matches_scalar_within_tolerance() {
++        if !std::arch::is_x86_feature_detected!("avx2") {
++            return;
++        }
++        for bit_depth in [10usize, 12, 16] {
++            let max_colors = (1u64 << bit_depth) - 1;
++            for width in 1..200usize {
++                let mut state = 0x9E3779B97F4A7C15u64 ^ (width as u64) ^ ((bit_depth as u64) << 40);
++                let len = width * 4;
++                let mut src = vec![0u16; len];
++                for px in src.chunks_mut(4) {
++                    px[0] = (lcg(&mut state) % (max_colors + 1)) as u16;
++                    px[1] = (lcg(&mut state) % (max_colors + 1)) as u16;
++                    px[2] = (lcg(&mut state) % (max_colors + 1)) as u16;
++                    px[3] = (lcg(&mut state) % (max_colors + 1)) as u16;
++                }
++                let mut expected = vec![0u16; len];
++                premultiply_alpha_rgba_row(&mut expected, &src, bit_depth);
++                let mut actual = vec![0u16; len];
++                avx_premultiply_alpha_rgba_u16(&mut actual, &src, bit_depth);
++                for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
++                    let diff = (*a as i64 - *e as i64).abs();
++                    assert!(
++                        diff <= TOLERANCE,
++                        "premultiply width={width} bit_depth={bit_depth} idx={i} actual={a} expected={e}"
++                    );
++                }
++
++                let mut expected_un = expected.clone();
++                unpremultiply_alpha_rgba_row(&mut expected_un, bit_depth);
++                let mut actual_un = actual.clone();
++                avx_unpremultiply_alpha_rgba_u16(&mut actual_un, bit_depth);
++                for (i, (a, e)) in actual_un.iter().zip(expected_un.iter()).enumerate() {
++                    let diff = (*a as i64 - *e as i64).abs();
++                    assert!(
++                        diff <= TOLERANCE,
++                        "unpremultiply width={width} bit_depth={bit_depth} idx={i} actual={a} expected={e}"
++                    );
++                }
++            }
++        }
++    }
++}
+diff --git a/src/avx2/alpha_u8.rs b/src/avx2/alpha_u8.rs
+index 85ff6b3..d23e61d 100644
+--- a/src/avx2/alpha_u8.rs
++++ b/src/avx2/alpha_u8.rs
+@@ -355,4 +355,31 @@ mod tests {
+ 
+         assert_eq!(actual, expected);
+     }
++
++    #[test]
++    fn avx2_premultiply_remainder_matches_scalar_reference() {
++        if !std::arch::is_x86_feature_detected!("avx2") {
++            return;
++        }
++        for width in 1..260usize {
++            let mut state: u64 = 0x9E3779B97F4A7C15u64 ^ (width as u64);
++            let mut lcg = move || {
++                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
++                state
++            };
++            let len = width * 4;
++            let mut src = vec![0u8; len];
++            for px in src.chunks_mut(4) {
++                px[0] = (lcg() % 256) as u8;
++                px[1] = (lcg() % 256) as u8;
++                px[2] = (lcg() % 256) as u8;
++                px[3] = (lcg() % 256) as u8;
++            }
++            let mut expected = vec![0u8; len];
++            premultiply_alpha_rgba_row_impl(&mut expected, &src);
++            let mut actual = vec![0u8; len];
++            avx_premultiply_alpha_rgba(&mut actual, &src);
++            assert_eq!(actual, expected, "width={width}");
++        }
++    }
+ }
+diff --git a/src/sse/alpha_f16.rs b/src/sse/alpha_f16.rs
+index 2905774..38bbd22 100644
+--- a/src/sse/alpha_f16.rs
++++ b/src/sse/alpha_f16.rs
+@@ -200,3 +200,56 @@ fn sse_unpremultiply_alpha_rgba_f16_row_impl<const F16C: bool>(in_place: &mut [f
+         unpremultiply_pixel_f16_row(rem);
+     }
+ }
++
++#[cfg(test)]
++mod bughunt_remainder_tests {
++    use super::{sse_premultiply_alpha_rgba_f16, sse_unpremultiply_alpha_rgba_f16};
++    use crate::alpha_handle_f16::{premultiply_pixel_f16_row, unpremultiply_pixel_f16_row};
++    use core::f16;
++
++    fn lcg(state: &mut u64) -> u64 {
++        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
++        *state
++    }
++
++    const TOLERANCE: f32 = 5e-3;
++
++    #[test]
++    fn sse_f16_remainder_matches_scalar_within_tolerance() {
++        if !std::arch::is_x86_feature_detected!("sse4.1") {
++            return;
++        }
++        for width in 1..260usize {
++            let mut state = 0x9E3779B97F4A7C15u64 ^ (width as u64);
++            let len = width * 4;
++            let mut src = vec![0f16; len];
++            for px in src.chunks_mut(4) {
++                px[0] = ((lcg(&mut state) % 1000) as f32 / 1000.0) as f16;
++                px[1] = ((lcg(&mut state) % 1000) as f32 / 1000.0) as f16;
++                px[2] = ((lcg(&mut state) % 1000) as f32 / 1000.0) as f16;
++                px[3] = ((lcg(&mut state) % 1000) as f32 / 1000.0) as f16;
++            }
++            let mut expected = vec![0f16; len];
++            premultiply_pixel_f16_row(&mut expected, &src);
++            let mut actual = vec![0f16; len];
++            sse_premultiply_alpha_rgba_f16(&mut actual, &src);
++            for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
++                assert!(
++                    (*a as f32 - *e as f32).abs() <= TOLERANCE,
++                    "premultiply width={width} idx={i} actual={a} expected={e}"
++                );
++            }
++
++            let mut expected_un = expected.clone();
++            unpremultiply_pixel_f16_row(&mut expected_un);
++            let mut actual_un = actual.clone();
++            sse_unpremultiply_alpha_rgba_f16(&mut actual_un);
++            for (i, (a, e)) in actual_un.iter().zip(expected_un.iter()).enumerate() {
++                assert!(
++                    (*a as f32 - *e as f32).abs() <= TOLERANCE,
++                    "unpremultiply width={width} idx={i} actual={a} expected={e}"
++                );
++            }
++        }
++    }
++}
+diff --git a/src/sse/alpha_f32.rs b/src/sse/alpha_f32.rs
+index b6240df..5d1df02 100644
+--- a/src/sse/alpha_f32.rs
++++ b/src/sse/alpha_f32.rs
+@@ -121,3 +121,55 @@ fn sse_premultiply_alpha_rgba_f32_row_impl(dst: &mut [f32], src: &[f32]) {
+         premultiply_rgba_f32_row(rem, src_rem);
+     }
+ }
++
++#[cfg(test)]
++mod bughunt_remainder_tests {
++    use super::{sse_premultiply_alpha_rgba_f32, sse_unpremultiply_alpha_rgba_f32};
++    use crate::alpha_handle_f32::{premultiply_rgba_f32_row, unpremultiply_rgba_f32_row};
++
++    fn lcg(state: &mut u64) -> u64 {
++        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
++        *state
++    }
++
++    const TOLERANCE: f32 = 1e-3;
++
++    #[test]
++    fn sse_f32_remainder_matches_scalar_within_tolerance() {
++        if !std::arch::is_x86_feature_detected!("sse4.1") {
++            return;
++        }
++        for width in 1..200usize {
++            let mut state = 0x243F6A8885A308D3u64 ^ (width as u64);
++            let len = width * 4;
++            let mut src = vec![0f32; len];
++            for px in src.chunks_mut(4) {
++                px[0] = (lcg(&mut state) % 1000) as f32 / 1000.0;
++                px[1] = (lcg(&mut state) % 1000) as f32 / 1000.0;
++                px[2] = (lcg(&mut state) % 1000) as f32 / 1000.0;
++                px[3] = (lcg(&mut state) % 1000) as f32 / 1000.0;
++            }
++            let mut expected = vec![0f32; len];
++            premultiply_rgba_f32_row(&mut expected, &src);
++            let mut actual = vec![0f32; len];
++            sse_premultiply_alpha_rgba_f32(&mut actual, &src);
++            for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
++                assert!(
++                    (a - e).abs() <= TOLERANCE,
++                    "premultiply width={width} idx={i} actual={a} expected={e}"
++                );
++            }
++
++            let mut expected_un = expected.clone();
++            unpremultiply_rgba_f32_row(&mut expected_un);
++            let mut actual_un = actual.clone();
++            sse_unpremultiply_alpha_rgba_f32(&mut actual_un);
++            for (i, (a, e)) in actual_un.iter().zip(expected_un.iter()).enumerate() {
++                assert!(
++                    (a - e).abs() <= TOLERANCE,
++                    "unpremultiply width={width} idx={i} actual={a} expected={e}"
++                );
++            }
++        }
++    }
++}
+diff --git a/src/sse/alpha_u16.rs b/src/sse/alpha_u16.rs
+index c286920..6736322 100644
+--- a/src/sse/alpha_u16.rs
++++ b/src/sse/alpha_u16.rs
+@@ -425,3 +425,65 @@ fn premultiply_alpha_sse_rgba_u16_row_impl(dst: &mut [u16], src: &[u16], bit_dep
+         pma_sse41_rgba16_dispatch(dst, src, bit_depth, Sse41PremultiplyExecutorAny::default())
+     }
+ }
++
++#[cfg(test)]
++mod bughunt_remainder_tests {
++    use super::{premultiply_alpha_sse_rgba_u16, unpremultiply_alpha_sse_rgba_u16};
++    use crate::alpha_handle_u16::{premultiply_alpha_rgba_row, unpremultiply_alpha_rgba_row};
++
++    fn lcg(state: &mut u64) -> u64 {
++        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
++        *state
++    }
++
++    // Tolerance, not exact-match: the SSE "any bit depth" executor uses an f32 reciprocal-
++    // multiply approximation while the scalar reference uses exact integer division for
++    // bit_depth 16, so a small drift is expected and unrelated to remainder handling (see
++    // RESULT.md). A dropped/never-written remainder element would show as a *much* larger
++    // deviation, not a handful of LSBs.
++    const TOLERANCE: i64 = 20;
++
++    #[test]
++    fn sse_u16_remainder_matches_scalar_within_tolerance() {
++        if !std::arch::is_x86_feature_detected!("sse4.1") {
++            return;
++        }
++        for bit_depth in [10usize, 12, 16] {
++            let max_colors = (1u64 << bit_depth) - 1;
++            for width in 1..200usize {
++                let mut state = 0x9E3779B97F4A7C15u64 ^ (width as u64) ^ ((bit_depth as u64) << 40);
++                let len = width * 4;
++                let mut src = vec![0u16; len];
++                for px in src.chunks_mut(4) {
++                    px[0] = (lcg(&mut state) % (max_colors + 1)) as u16;
++                    px[1] = (lcg(&mut state) % (max_colors + 1)) as u16;
++                    px[2] = (lcg(&mut state) % (max_colors + 1)) as u16;
++                    px[3] = (lcg(&mut state) % (max_colors + 1)) as u16;
++                }
++                let mut expected = vec![0u16; len];
++                premultiply_alpha_rgba_row(&mut expected, &src, bit_depth);
++                let mut actual = vec![0u16; len];
++                premultiply_alpha_sse_rgba_u16(&mut actual, &src, bit_depth);
++                for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
++                    let diff = (*a as i64 - *e as i64).abs();
++                    assert!(
++                        diff <= TOLERANCE,
++                        "premultiply width={width} bit_depth={bit_depth} idx={i} actual={a} expected={e}"
++                    );
++                }
++
++                let mut expected_un = expected.clone();
++                unpremultiply_alpha_rgba_row(&mut expected_un, bit_depth);
++                let mut actual_un = actual.clone();
++                unpremultiply_alpha_sse_rgba_u16(&mut actual_un, bit_depth);
++                for (i, (a, e)) in actual_un.iter().zip(expected_un.iter()).enumerate() {
++                    let diff = (*a as i64 - *e as i64).abs();
++                    assert!(
++                        diff <= TOLERANCE,
++                        "unpremultiply width={width} bit_depth={bit_depth} idx={i} actual={a} expected={e}"
++                    );
++                }
++            }
++        }
++    }
++}
+diff --git a/src/sse/alpha_u8.rs b/src/sse/alpha_u8.rs
+index 6d0494f..4662863 100644
+--- a/src/sse/alpha_u8.rs
++++ b/src/sse/alpha_u8.rs
+@@ -333,4 +333,31 @@ mod tests {
+ 
+         assert_eq!(actual, expected);
+     }
++
++    #[test]
++    fn sse_premultiply_remainder_matches_scalar_reference() {
++        if !std::arch::is_x86_feature_detected!("sse4.1") {
++            return;
++        }
++        for width in 1..260usize {
++            let mut state: u64 = 0x9E3779B97F4A7C15u64 ^ (width as u64);
++            let mut lcg = move || {
++                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
++                state
++            };
++            let len = width * 4;
++            let mut src = vec![0u8; len];
++            for px in src.chunks_mut(4) {
++                px[0] = (lcg() % 256) as u8;
++                px[1] = (lcg() % 256) as u8;
++                px[2] = (lcg() % 256) as u8;
++                px[3] = (lcg() % 256) as u8;
++            }
++            let mut expected = vec![0u8; len];
++            premultiply_alpha_rgba_row_impl(&mut expected, &src);
++            let mut actual = vec![0u8; len];
++            sse_premultiply_alpha_rgba(&mut actual, &src);
++            assert_eq!(actual, expected, "width={width}");
++        }
++    }
+ }

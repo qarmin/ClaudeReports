@@ -1,0 +1,31 @@
+diff --git a/src/scaler.rs b/src/scaler.rs
+index 24978f6..47f6e86 100644
+--- a/src/scaler.rs
++++ b/src/scaler.rs
+@@ -37,6 +37,7 @@ use crate::plan::{
+     DefaultPlanner, HorizontalConvolvePlan, NoopPlan, ResampleNearestPlan, Resampling,
+     TrampolineFiltering, VerticalConvolvePlan,
+ };
++use crate::support::check_image_size_overflow;
+ use crate::threading_policy::ThreadingPolicy;
+ use crate::validation::PicScaleError;
+ use crate::{
+@@ -858,6 +859,18 @@ impl Scaler {
+                 _phantom_data: PhantomData,
+             }));
+         }
++        // `Ar30Plan::scratch_size` (src/plan/ar30_plan.rs) computes
++        // `source_size.width * source_size.height * 3 * size_of::<u16>()` in plain
++        // unchecked `usize` arithmetic to size the intermediate RGB16 scratch buffer.
++        // `plan_rgb_resampling16` below only validates `destination_size` for overflow,
++        // so an oversized `source_size` must be rejected here before it reaches that
++        // unchecked multiplication.
++        if check_image_size_overflow(source_size.width, source_size.height, 3, size_of::<u16>() as isize)
++        {
++            return Err(PicScaleError::Generic(
++                "Source width or height overflows isize".to_string(),
++            ));
++        }
+         let inner_plan = self.plan_rgb_resampling16(source_size, destination_size, 10)?;
+         let mut _decomposer: Arc<dyn Ar30Destructuring + Send + Sync> =
+             Arc::new(Ar30DestructuringImpl::<AR30_ORDER> { rgb30: ar30_type });

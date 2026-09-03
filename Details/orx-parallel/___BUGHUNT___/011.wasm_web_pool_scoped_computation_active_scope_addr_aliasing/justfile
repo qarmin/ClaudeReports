@@ -1,0 +1,47 @@
+# Self-contained reproduction for candidate 011
+# (wasm_web_pool_scoped_computation_active_scope_addr_aliasing).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# `WasmWebPool::scoped_computation_impl` (src/pool/pool_impl/wasm_web.rs) is wasm32+atomics-only
+# code, so this can't be exercised on the host target at all. `repro/add_repro_hooks.diff` adds a
+# small whitebox test hook directly to the crate (calling the real public
+# `ParThreadPool::scoped_computation` entry point at various nesting depths, and bypassing only
+# the browser-JS-dependent worker bootstrap that is orthogonal to the bug) plus three tiny
+# `src/bin/*.rs` drivers; `repro/`'s own Cargo project then builds those as real wasm32+atomics
+# binaries and runs them under a real wasm engine (`wasmtime`, with the WASM threads/shared-memory
+# proposal enabled) - no browser needed, but no bytes/state are hand-authored to stand in for
+# what the real entry point does. See RESULT.md for the full reasoning.
+
+repo_url := "https://github.com/orxfun/orx-parallel.git"
+base_commit := "b9214fbeb714e4bb8f8858676a818cef2f21b097"
+
+# Full cycle: clone pristine, splice in the whitebox hook, prove the bug exists, apply the real
+# fix, prove it's gone.
+test: clone apply-hook reproduce-before apply-fix reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-hook:
+    cd clone && git apply "{{justfile_directory()}}/repro/add_repro_hooks.diff"
+
+# Builds the three repro wasm32 binaries from ./clone and runs each under wasmtime.
+# Expected: `bughunt_baseline.wasm` (no nesting) completes; `bughunt_nested.wasm` (nested once)
+# and `bughunt_depth3.wasm` (nested twice) both TRAP inside `scoped_computation_impl` - that trap
+# IS the reproduction (the single process-wide active-scope slot got aliased by the nested call).
+reproduce-before:
+    cd repro && cargo run --release
+
+apply-fix:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - all three complete normally.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

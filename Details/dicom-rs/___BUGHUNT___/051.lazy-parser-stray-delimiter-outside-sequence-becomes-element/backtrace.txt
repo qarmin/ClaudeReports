@@ -1,0 +1,55 @@
+Captured output from `just test` (fresh clone of pristine upstream df2b9e42, reproduce-before,
+apply patch.diff, reproduce-after), run twice independently for determinism confirmation.
+
+=== Run 1 ===
+
+--- reproduce-before (pristine df2b9e42) ---
+stray Item followed by delimiters: BUG - produced a SequenceStart token with reserved tag (FFFE,E000) (len Length(Undefined))
+stray Item followed by delimiters: token: SequenceEnd
+stray Item followed by delimiters: token: ItemEnd
+stray Item followed by delimiters: token: SequenceEnd
+stray SequenceDelimiter (FFFE,E0DD): BUG - produced an ElementHeader token with reserved tag (FFFE,E0DD) (vr UN, len Length(0))
+stray SequenceDelimiter (FFFE,E0DD): token: LazyValue { header: DataElementHeader { tag: Tag(0xFFFE, 0xE0DD), vr: UN, len: Length(0) } }
+BUG REPRODUCED: a stray delimiter/item marker outside of a sequence was turned into an ordinary token carrying a reserved tag.
+(exit code: 1, as expected: bug reproduced)
+
+--- reproduce-after (patched clone) ---
+stray Item followed by delimiters: rejected with a clean parse error: Unexpected item tag (FFFE,E000) while reading element header
+stray Item followed by delimiters: no bogus reserved-tag token produced
+stray SequenceDelimiter (FFFE,E0DD): no bogus reserved-tag token produced
+No corruption observed: stray markers are cleanly rejected or ignored.
+(exit code: 0, as expected: bug fixed)
+
+=== Run 2 (independent, fresh clone) ===
+
+--- reproduce-before (pristine df2b9e42) ---
+stray Item followed by delimiters: BUG - produced a SequenceStart token with reserved tag (FFFE,E000) (len Length(Undefined))
+stray Item followed by delimiters: token: SequenceEnd
+stray Item followed by delimiters: token: ItemEnd
+stray Item followed by delimiters: token: SequenceEnd
+stray SequenceDelimiter (FFFE,E0DD): BUG - produced an ElementHeader token with reserved tag (FFFE,E0DD) (vr UN, len Length(0))
+stray SequenceDelimiter (FFFE,E0DD): token: LazyValue { header: DataElementHeader { tag: Tag(0xFFFE, 0xE0DD), vr: UN, len: Length(0) } }
+BUG REPRODUCED: a stray delimiter/item marker outside of a sequence was turned into an ordinary token carrying a reserved tag.
+(exit code: 1, as expected: bug reproduced)
+
+--- reproduce-after (patched clone) ---
+stray Item followed by delimiters: rejected with a clean parse error: Unexpected item tag (FFFE,E000) while reading element header
+stray Item followed by delimiters: no bogus reserved-tag token produced
+stray SequenceDelimiter (FFFE,E0DD): no bogus reserved-tag token produced
+No corruption observed: stray markers are cleanly rejected or ignored.
+(exit code: 0, as expected: bug fixed)
+
+=== Notes on the "stray Item followed by delimiters" trace, pristine tree ===
+
+Only the first token (the bogus `SequenceStart` for tag (FFFE,E000)) is the primary defect this
+byte sequence demonstrates in `LazyDataSetReader`. The remaining trace (`SequenceEnd`, `ItemEnd`,
+`SequenceEnd`) differs from the equivalent trace against the eager `DataSetReader` in candidate
+050's repro (which manufactures a *second* bogus element from the same bytes) because
+`LazyDataSetReader`'s Item Delimitation handling (prior to this fix) unconditionally pops
+`seq_delimiters` and flips `in_sequence = true` without checking whether anything was actually
+open - so the trailing `(FFFE,E00D)` bytes are absorbed into an incorrect but merely confusing
+`ItemEnd` token (not a reserved-tag element) rather than falling through to the generic
+element-header catch-all as they do in the eager reader. The `try_read` helper in this repro
+still correctly reports `bug_a = true` from the first bogus `SequenceStart` token alone. The
+second, independent gap (a stray `SequenceDelimiter` on its own falling into the generic
+element-header catch-all) is demonstrated cleanly and directly by the second, standalone input.

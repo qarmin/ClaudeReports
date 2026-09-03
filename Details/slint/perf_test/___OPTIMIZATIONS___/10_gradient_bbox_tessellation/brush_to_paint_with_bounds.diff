@@ -1,0 +1,217 @@
+diff --git a/internal/renderers/femtovg/itemrenderer.rs b/internal/renderers/femtovg/itemrenderer.rs
+index b1ff658e9..6b0e5ef8f 100644
+--- a/internal/renderers/femtovg/itemrenderer.rs
++++ b/internal/renderers/femtovg/itemrenderer.rs
+@@ -102,6 +102,25 @@ pub struct GLItemRenderer<'a, R: femtovg::Renderer + TextureImporter> {
+     metrics: RenderingMetrics,
+ }
+ 
++/// The stops of a Slint gradient as femtovg wants them, with the extra stop at 1.0 that femtovg
++/// needs to keep the last color from being extrapolated.
++///
++/// Returns an iterator instead of a `Vec`: femtovg's `*_gradient_stops` take
++/// `impl IntoIterator`, and this runs once per gradient-filled primitive per frame, so the
++/// collect was one allocation per primitive for nothing. The stops iterator is walked twice
++/// (once for the last stop, once for the values), which is cheap - gradients have a handful of
++/// stops.
++fn gradient_stops<'a>(
++    stops: impl Iterator<Item = &'a i_slint_core::graphics::GradientStop> + Clone,
++) -> impl Iterator<Item = (f32, femtovg::Color)> {
++    let extra = stops
++        .clone()
++        .last()
++        .filter(|last| last.position != 1.0)
++        .map(|last| (1.0, to_femtovg_color(&last.color)));
++    stops.map(|stop| (stop.position, to_femtovg_color(&stop.color))).chain(extra)
++}
++
+ fn rect_with_radius_to_path(
+     rect: PhysicalRect,
+     border_radius: PhysicalBorderRadius,
+@@ -220,7 +239,9 @@ fn draw_rectangle(
+         }
+         // TODO: cache path in item to avoid re-tesselation
+         let path = rect_to_path(geometry);
+-        let paint = match self.brush_to_paint(rect.background(), &path) {
++        let paint = match self
++            .brush_to_paint_with_bounds(rect.background(), geometry.to_box2d().cast_unit())
++        {
+             Some(paint) => paint,
+             None => return,
+         }
+@@ -264,16 +285,18 @@ fn draw_border_rectangle(
+         // In case of a transparent border, we want the background to cover the whole rectangle, which is
+         // not how femtovg's stroke works. So fill the background separately in the else branch if the
+         // border is not opaque.
+-        let (mut background_path, mut maybe_border_path) = if opaque_border {
++        let (mut background_path, mut maybe_border_path, background_bounds, border_bounds) =
++            if opaque_border {
+             // In CSS the border is entirely towards the inside of the boundary
+             // geometry, while in femtovg the line with for a stroke is 50% in-
+             // and 50% outwards. We choose the CSS model, so the inner rectangle
+             // is adjusted accordingly.
+             adjust_rect_and_border_for_inner_drawing(&mut geometry, &mut border_width);
+ 
+-            (rect_with_radius_to_path(geometry, stroke_border_radius), None)
++            (rect_with_radius_to_path(geometry, stroke_border_radius), None, geometry, geometry)
+         } else {
+             let background_path = rect_with_radius_to_path(geometry, fill_radius);
++            let background_bounds = geometry;
+ 
+             // In CSS the border is entirely towards the inside of the boundary
+             // geometry, while in femtovg the line with for a stroke is 50% in-
+@@ -283,16 +306,14 @@ fn draw_border_rectangle(
+ 
+             let border_path = rect_with_radius_to_path(geometry, stroke_border_radius);
+ 
+-            (background_path, Some(border_path))
++            (background_path, Some(border_path), background_bounds, geometry)
+         };
+ 
+-        let fill_paint = self.brush_to_paint(rect.background(), &background_path);
++        let fill_paint = self
++            .brush_to_paint_with_bounds(rect.background(), background_bounds.to_box2d().cast_unit());
+ 
+         let border_paint = self
+-            .brush_to_paint(
+-                rect.border_color(),
+-                maybe_border_path.as_ref().unwrap_or(&background_path),
+-            )
++            .brush_to_paint_with_bounds(rect.border_color(), border_bounds.to_box2d().cast_unit())
+             .map(|mut paint| {
+                 paint.set_line_width(border_width.get());
+                 paint
+@@ -956,8 +977,8 @@ fn platform_text_fill_brush(
+         brush: Brush,
+         size: LogicalSize,
+     ) -> Option<Self::PlatformBrush> {
+-        let text_path = rect_to_path((size * self.scale_factor).into());
+-        self.brush_to_paint(brush, &text_path).map(GlyphBrush::Fill)
++        let bounds: PhysicalRect = (size * self.scale_factor).into();
++        self.brush_to_paint_with_bounds(brush, bounds.to_box2d().cast_unit()).map(GlyphBrush::Fill)
+     }
+ 
+     fn platform_brush_for_color(
+@@ -977,8 +998,8 @@ fn platform_text_stroke_brush(
+         physical_stroke_width: f32,
+         size: LogicalSize,
+     ) -> Option<Self::PlatformBrush> {
+-        let text_path = rect_to_path((size * self.scale_factor).into());
+-        match self.brush_to_paint(stroke_brush.clone(), &text_path) {
++        let bounds: PhysicalRect = (size * self.scale_factor).into();
++        match self.brush_to_paint_with_bounds(stroke_brush.clone(), bounds.to_box2d().cast_unit()) {
+             Some(mut paint) => {
+                 paint.set_line_width(physical_stroke_width);
+                 Some(GlyphBrush::Stroke(paint))
+@@ -1270,7 +1291,10 @@ fn colorize_image(
+         image_rect.rect(0., 0., image_size.width, image_size.height);
+ 
+         // We fill the entire image, there is no need to apply anti-aliasing around the edges
+-        let brush_paint = match self.brush_to_paint(colorize_brush, &image_rect) {
++        let brush_paint = match self.brush_to_paint_with_bounds(
++            colorize_brush,
++            euclid::default::Box2D::from_size([image_size.width, image_size.height].into()),
++        ) {
+             Some(paint) => paint.with_anti_alias(false),
+             None => return original_cache_entry,
+         };
+@@ -1516,15 +1540,35 @@ fn draw_image_impl(
+         }
+     }
+ 
++    /// Measures the path to find the gradient's reference box. Prefer
++    /// [`Self::brush_to_paint_with_bounds`] when the caller already knows the rectangle the path
++    /// was built from: `path_bounding_box` resets the transform, so femtovg tessellates the path
++    /// a second time (its tessellation cache is keyed by the transform) - one extra tessellation
++    /// per gradient-filled primitive per frame.
+     fn brush_to_paint(&self, brush: Brush, path: &femtovg::Path) -> Option<femtovg::Paint> {
++        if brush.is_transparent() {
++            return None;
++        }
++        let bounds = if matches!(brush, Brush::SolidColor(_)) {
++            // Solid colors do not look at the bounds at all.
++            euclid::default::Box2D::zero()
++        } else {
++            path_bounding_box(&self.canvas, path)
++        };
++        self.brush_to_paint_with_bounds(brush, bounds)
++    }
++
++    fn brush_to_paint_with_bounds(
++        &self,
++        brush: Brush,
++        path_bounds: euclid::default::Box2D<f32>,
++    ) -> Option<femtovg::Paint> {
+         if brush.is_transparent() {
+             return None;
+         }
+         Some(match brush {
+             Brush::SolidColor(color) => femtovg::Paint::color(to_femtovg_color(&color)),
+             Brush::LinearGradient(gradient) => {
+-                let path_bounds = path_bounding_box(&self.canvas, path);
+-
+                 let path_width = path_bounds.width();
+                 let path_height = path_bounds.height();
+ 
+@@ -1533,23 +1577,15 @@ fn brush_to_paint(&self, brush: Brush, path: &femtovg::Path) -> Option<femtovg::
+                     [path_width, path_height].into(),
+                 );
+ 
+-                let mut stops: Vec<_> = gradient
+-                    .stops()
+-                    .map(|stop| (stop.position, to_femtovg_color(&stop.color)))
+-                    .collect();
+-
+-                // Add an extra stop at 1.0 with the same color as the last stop
+-                if let Some(last_stop) = stops.last().cloned()
+-                    && last_stop.0 != 1.0
+-                {
+-                    stops.push((1.0, last_stop.1));
+-                }
+-
+-                femtovg::Paint::linear_gradient_stops(start.x, start.y, end.x, end.y, stops)
++                femtovg::Paint::linear_gradient_stops(
++                    start.x,
++                    start.y,
++                    end.x,
++                    end.y,
++                    gradient_stops(gradient.stops()),
++                )
+             }
+             Brush::RadialGradient(gradient) => {
+-                let path_bounds = path_bounding_box(&self.canvas, path);
+-
+                 let path_width = path_bounds.width();
+                 let path_height = path_bounds.height();
+ 
+@@ -1564,23 +1600,15 @@ fn brush_to_paint(&self, brush: Brush, path: &femtovg::Path) -> Option<femtovg::
+                     self.scale_factor.get(),
+                 );
+ 
+-                let mut stops: Vec<_> = gradient
+-                    .stops()
+-                    .map(|stop| (stop.position, to_femtovg_color(&stop.color)))
+-                    .collect();
+-
+-                // Add an extra stop at 1.0 with the same color as the last stop
+-                if let Some(last_stop) = stops.last().cloned()
+-                    && last_stop.0 != 1.0
+-                {
+-                    stops.push((1.0, last_stop.1));
+-                }
+-
+-                femtovg::Paint::radial_gradient_stops(cx, cy, 0., radius, stops)
++                femtovg::Paint::radial_gradient_stops(
++                    cx,
++                    cy,
++                    0.,
++                    radius,
++                    gradient_stops(gradient.stops()),
++                )
+             }
+             Brush::ConicGradient(gradient) => {
+-                let path_bounds = path_bounding_box(&self.canvas, path);
+-
+                 let path_width = path_bounds.width();
+                 let path_height = path_bounds.height();
+ 

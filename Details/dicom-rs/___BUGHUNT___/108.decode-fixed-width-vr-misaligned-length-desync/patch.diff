@@ -1,0 +1,168 @@
+diff --git a/parser/src/stateful/decode.rs b/parser/src/stateful/decode.rs
+index 39e8e856..f6133325 100644
+--- a/parser/src/stateful/decode.rs
++++ b/parser/src/stateful/decode.rs
+@@ -51,6 +51,21 @@ pub enum Error {
+         backtrace: Backtrace,
+     },
+ 
++    #[snafu(display(
++        "Value length {} of element tagged {} at position {} is not a multiple of {}",
++        len,
++        tag,
++        position,
++        multiple_of
++    ))]
++    InvalidValueLength {
++        tag: Tag,
++        position: u64,
++        len: usize,
++        multiple_of: usize,
++        backtrace: Backtrace,
++    },
++
+     #[snafu(display("Could not decode element header at position {}", position))]
+     DecodeElementHeader {
+         position: u64,
+@@ -433,11 +448,38 @@ where
+             })
+     }
+ 
+-    fn read_value_tag(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
++    /// Like `require_known_length`, but also checks that the length is a
++    /// multiple of `elem_size` (the binary width of one value for a
++    /// fixed-width VR), returning the element count.
++    ///
++    /// A length that isn't a multiple of the element size cannot simply be
++    /// rounded down: `self.from` is a sequential stream, so reading fewer
++    /// bytes than the header's own declared length leaves the leftover
++    /// bytes unconsumed, while `self.position` still advances by the full
++    /// declared length - desynchronizing the parser's own bookkeeping from
++    /// the actual stream cursor and corrupting everything read afterwards.
++    fn require_known_length_multiple_of(
++        &self,
++        header: &DataElementHeader,
++        elem_size: usize,
++    ) -> Result<usize> {
+         let len = self.require_known_length(header)?;
++        if len % elem_size != 0 {
++            return InvalidValueLengthSnafu {
++                tag: header.tag,
++                position: self.position,
++                len,
++                multiple_of: elem_size,
++            }
++            .fail();
++        }
++        Ok(len / elem_size)
++    }
+ 
++    fn read_value_tag(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
+         // tags
+-        let ntags = len >> 2;
++        let ntags = self.require_known_length_multiple_of(header, 4)?;
++        let len = ntags * 4;
+         let parts: Result<_> = n_times(ntags)
+             .map(|_| {
+                 self.basic
+@@ -529,9 +571,8 @@ where
+ 
+     fn read_value_ss(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
+         // sequence of 16-bit signed integers
+-        let len = self.require_known_length(header)?;
+-
+-        let n = len >> 1;
++        let n = self.require_known_length_multiple_of(header, 2)?;
++        let len = n * 2;
+         let mut vec = smallvec![0; n];
+         self.basic
+             .decode_ss_into(&mut self.from, &mut vec[..])
+@@ -544,9 +585,9 @@ where
+     }
+ 
+     fn read_value_fl(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
+-        let len = self.require_known_length(header)?;
+         // sequence of 32-bit floats
+-        let n = len >> 2;
++        let n = self.require_known_length_multiple_of(header, 4)?;
++        let len = n * 4;
+         let mut vec = smallvec![0.; n];
+         self.basic
+             .decode_fl_into(&mut self.from, &mut vec[..])
+@@ -737,9 +778,9 @@ where
+     }
+ 
+     fn read_value_od(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
+-        let len = self.require_known_length(header)?;
+         // sequence of 64-bit floats
+-        let n = len >> 3;
++        let n = self.require_known_length_multiple_of(header, 8)?;
++        let len = n * 8;
+         let mut vec = smallvec![0.; n];
+         self.basic
+             .decode_fd_into(&mut self.from, &mut vec[..])
+@@ -751,10 +792,9 @@ where
+     }
+ 
+     fn read_value_ul(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
+-        let len = self.require_known_length(header)?;
+         // sequence of 32-bit unsigned integers
+-
+-        let n = len >> 2;
++        let n = self.require_known_length_multiple_of(header, 4)?;
++        let len = n * 4;
+         let mut vec = smallvec![0u32; n];
+         self.basic
+             .decode_ul_into(&mut self.from, &mut vec[..])
+@@ -779,10 +819,9 @@ where
+     }
+ 
+     fn read_value_us(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
+-        let len = self.require_known_length(header)?;
+         // sequence of 16-bit unsigned integers
+-
+-        let n = len >> 1;
++        let n = self.require_known_length_multiple_of(header, 2)?;
++        let len = n * 2;
+         let mut vec = smallvec![0; n];
+         self.basic
+             .decode_us_into(&mut self.from, &mut vec[..])
+@@ -801,10 +840,9 @@ where
+     }
+ 
+     fn read_value_uv(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
+-        let len = self.require_known_length(header)?;
+         // sequence of 64-bit unsigned integers
+-
+-        let n = len >> 3;
++        let n = self.require_known_length_multiple_of(header, 8)?;
++        let len = n * 8;
+         let mut vec = smallvec![0; n];
+         self.basic
+             .decode_uv_into(&mut self.from, &mut vec[..])
+@@ -816,10 +854,9 @@ where
+     }
+ 
+     fn read_value_sl(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
+-        let len = self.require_known_length(header)?;
+         // sequence of 32-bit signed integers
+-
+-        let n = len >> 2;
++        let n = self.require_known_length_multiple_of(header, 4)?;
++        let len = n * 4;
+         let mut vec = smallvec![0; n];
+         self.basic
+             .decode_sl_into(&mut self.from, &mut vec[..])
+@@ -831,10 +868,9 @@ where
+     }
+ 
+     fn read_value_sv(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
+-        let len = self.require_known_length(header)?;
+         // sequence of 64-bit signed integers
+-
+-        let n = len >> 3;
++        let n = self.require_known_length_multiple_of(header, 8)?;
++        let len = n * 8;
+         let mut vec = smallvec![0; n];
+         self.basic
+             .decode_sv_into(&mut self.from, &mut vec[..])

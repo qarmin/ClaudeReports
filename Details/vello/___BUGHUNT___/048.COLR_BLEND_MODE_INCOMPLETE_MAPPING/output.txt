@@ -1,0 +1,85 @@
+=== BEFORE (base_commit 7516831426fb70f36d62c521c5477f6a7265b36a, unpatched vello/src/scene.rs) ===
+Ran `cargo run --release` 3 times against a `vello`/`vello_encoding` path-dependency build of the
+unpatched worktree - identical output all 3 times (deterministic: no seed, no layout dependency,
+plain scene encoding of a fixed font glyph):
+
+$ cargo run --release
+     Running `target/release/colr_blend_mode_incomplete_mapping_repro`
+Encoded BEGIN_CLIP blend_mode words: [
+    0x8003,
+    0x0003,
+    0x0003,
+]
+PaintComposite(mode=Multiply) was encoded as Compose::SrcOver + Mix=0 (expected Mix::Multiply=1; Mix::Normal=0 is what the bug produces)
+REPRODUCED - skrifa::color::CompositeMode::Multiply was mapped to plain Compose::SrcOver (Mix::Normal) instead of BlendMode::new(Mix::Multiply, Compose::SrcOver)
+$ echo "exit code: $?"
+exit code: 1
+
+=== AFTER (patch.diff applied to vello/src/scene.rs) ===
+Ran `cargo run --release` 3 times against a rebuilt path-dependency build with patch.diff applied -
+identical output all 3 times:
+
+$ cargo run --release
+     Running `target/release/colr_blend_mode_incomplete_mapping_repro`
+Encoded BEGIN_CLIP blend_mode words: [
+    0x8003,
+    0x0003,
+    0x0103,
+]
+PaintComposite(mode=Multiply) was encoded as Compose::SrcOver + Mix=1 (expected Mix::Multiply=1; Mix::Normal=0 is what the bug produces)
+did not reproduce - Mix::Multiply was correctly encoded
+$ echo "exit code: $?"
+exit code: 0
+
+The only bit that changes between the two runs is the third BEGIN_CLIP's Mix nibble (0x0003 ->
+0x0103): the outer `push_layer(CompositeMode::SrcOver)` wrapper that `skrifa`'s own paint-graph
+traversal always emits around a `PaintComposite` node (see RESULT.md's root cause) stays at 0x0003
+in both cases - it was never wrong, since `SrcOver` is one of the explicitly handled Porter-Duff
+arms in the original `match`. Only the second, real `push_layer(*mode)` call - the one that carries
+the font's actual `CompositeMode::Multiply` - changes from Mix::Normal (bug) to Mix::Multiply (fix).
+
+=== Existing test suite, `cargo test -p vello_tests` (VELLO_SKIP_LFS_SNAPSHOTS=all), same worktree ===
+
+Before (unpatched):
+  compare_gpu_cpu:        9 passed; 0 failed; 1 ignored
+  emoji:                  6 passed; 0 failed; 0 ignored
+  hinting:                4 passed; 0 failed; 0 ignored
+  known_issues:           2 passed; 0 failed; 0 ignored
+  property:               6 passed; 0 failed; 0 ignored
+  regression:             10 passed; 0 failed; 0 ignored
+  smoke_snapshots:        8 passed; 0 failed; 0 ignored
+  snapshot_test_scenes:   19 passed; 0 failed; 0 ignored
+  TOTAL: 64 passed, 0 failed, 1 ignored
+
+After (patched):
+  compare_gpu_cpu:        9 passed; 0 failed; 1 ignored
+  emoji:                  6 passed; 0 failed; 0 ignored
+  hinting:                4 passed; 0 failed; 0 ignored
+  known_issues:           2 passed; 0 failed; 0 ignored
+  property:               6 passed; 0 failed; 0 ignored
+  regression:             10 passed; 0 failed; 0 ignored
+  smoke_snapshots:        8 passed; 0 failed; 0 ignored
+  snapshot_test_scenes:   19 passed; 0 failed; 0 ignored
+  TOTAL: 64 passed, 0 failed, 1 ignored
+
+Identical before/after (no regression from the fix); none of these existing tests exercise a COLR
+`PaintComposite` with a "Mix" blend mode, which is exactly why this gap was unnoticed since PR #615
+introduced it in 2024.
+
+`cargo test -p vello` (the classic vello crate's own unit/doc tests): 0 unit tests, 1 ignored doc
+test, both before and after - vello has no unit tests of its own; all real coverage of this code
+path lives in vello_tests.
+
+=== clippy corroboration ===
+
+$ cargo clippy -p vello --all-targets -- -W clippy::match_same_arms
+warning: these match arms have identical bodies
+    --> vello/src/scene.rs:1036:13
+     |
+1036 |             skrifa::color::CompositeMode::SrcOver => Compose::SrcOver,
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1047 |             _ => Compose::SrcOver,
+     |             ^^^^^^^^^^^^^^^^^^^^^^
+     = help: if this is unintentional make the arms return different values
+     = note: requested on the command line with `-W clippy::match-same-arms`

@@ -1,0 +1,2789 @@
+diff --git a/internal/core/Cargo.toml b/internal/core/Cargo.toml
+index de6db3c6b..edcc2d690 100644
+--- a/internal/core/Cargo.toml
++++ b/internal/core/Cargo.toml
+@@ -57,6 +57,9 @@ svg = ["dep:resvg", "i-slint-common/svg-text"]
+ box-shadow-cache = []
+ 
+ testing = []
++# Temporary instrumentation for perf_test/___OPTIMIZATIONS___/08: counts dependency
++# registrations and duplicates. Not for production builds.
++dep-stats = ["std"]
+ 
+ shared-fontique = ["i-slint-common/shared-fontique"]
+ 
+diff --git a/internal/core/graphics/brush.rs b/internal/core/graphics/brush.rs
+index dd932ef55..576a49149 100644
+--- a/internal/core/graphics/brush.rs
++++ b/internal/core/graphics/brush.rs
+@@ -243,7 +243,7 @@ pub fn angle(&self) -> f32 {
+     }
+     /// Returns the color stops of the linear gradient.
+     /// The stops are sorted by positions.
+-    pub fn stops(&self) -> impl Iterator<Item = &GradientStop> {
++    pub fn stops(&self) -> impl Iterator<Item = &GradientStop> + Clone {
+         // skip the first fake stop that just contains the angle
+         self.0.iter().skip(1)
+     }
+@@ -305,7 +305,7 @@ fn radius(&self) -> f32 {
+     }
+ 
+     /// Returns the color stops of the radial gradient.
+-    pub fn stops(&self) -> impl Iterator<Item = &GradientStop> {
++    pub fn stops(&self) -> impl Iterator<Item = &GradientStop> + Clone {
+         self.0.iter().skip(Self::HEADER)
+     }
+ 
+@@ -614,7 +614,7 @@ fn center_y(&self) -> f32 {
+ 
+     /// Returns the color stops of the conic gradient.
+     /// The stops are already rotated according to the `from_angle` specified in `new()`.
+-    pub fn stops(&self) -> impl Iterator<Item = &GradientStop> {
++    pub fn stops(&self) -> impl Iterator<Item = &GradientStop> + Clone {
+         self.0.iter().skip(Self::HEADER)
+     }
+ 
+diff --git a/internal/core/item_rendering.rs b/internal/core/item_rendering.rs
+index df3693212..76054033f 100644
+--- a/internal/core/item_rendering.rs
++++ b/internal/core/item_rendering.rs
+@@ -142,6 +142,32 @@ pub fn is_empty(&self) -> bool {
+         self.map.borrow().is_empty()
+     }
+ 
++    /// Calls `f` for every cached value.
++    pub fn for_each(&self, mut f: impl FnMut(&T)) {
++        for per_component in self.map.borrow().values() {
++            for entry in per_component.values() {
++                f(&entry.data);
++            }
++        }
++    }
++
++    /// Drops every entry `keep` rejects and returns how many survived.
++    ///
++    /// Nothing else shrinks this cache short of the owning component being destroyed, so a cache
++    /// whose entries are expensive needs a bound of its own; see `TextLayoutCache`.
++    pub fn retain(&self, mut keep: impl FnMut(&T) -> bool) -> usize {
++        let mut kept = 0;
++        self.map.borrow_mut().retain(|_, per_component| {
++            per_component.retain(|_, entry| {
++                let keep_entry = keep(&entry.data);
++                kept += usize::from(keep_entry);
++                keep_entry
++            });
++            !per_component.is_empty()
++        });
++        kept
++    }
++
+     /// Returns a [`RefMut`](std::cell::RefMut) referencing the cached value associated with
+     /// `item_rc`, updating the cache entry first if necessary using `update_fn`.
+     ///
+@@ -197,30 +223,41 @@ pub fn render_item_children(
+ ) {
+     let mut actual_visitor =
+         |component: &ItemTreeRc, index: u32, item: Pin<ItemRef>| -> VisitChildrenResult {
+-            renderer.save_state();
+             let item_rc = ItemRc::new(component.clone(), index);
+ 
+             let (do_draw, item_geometry) = renderer.filter_item(&item_rc, window_adapter);
+ 
+-            let item_origin = item_geometry.origin;
+-            renderer.translate(item_origin.to_vector());
+-
+             // Don't render items that are clipped, with the exception of the Clip or Flickable since
+             // they themselves clip their content.
+-            let render_result = if do_draw
++            let renders = do_draw
+                || item.as_ref().clips_children()
+                // HACK, the geometry of the box shadow does not include the shadow, because when the shadow is the root for repeated elements it would translate the children
+                || ItemRef::downcast_pin::<BoxShadow>(item).is_some()
+                // Transform and Opacity should also be applied regardless if the item itself is clipped or not
+                || ItemRef::downcast_pin::<Transform>(item).is_some()
+                || ItemRef::downcast_pin::<Opacity>(item).is_some()
+-               || ItemRef::downcast_pin::<Layer>(item).is_some()
++               || ItemRef::downcast_pin::<Layer>(item).is_some();
++
++            // Only an item whose `render` runs can change the renderer state beyond the translation
++            // below, and only that needs the state stack. For everything else - most of a large tree,
++            // all of it culled - the translation is undone directly.
++            if renders {
++                renderer.save_state();
++            }
++
++            let item_origin = item_geometry.origin;
++            renderer.translate(item_origin.to_vector());
++
++            let render_result = if renders
+             {
+-                item.as_ref().render(
+-                    &mut (renderer as &mut dyn ItemRenderer),
+-                    &item_rc,
+-                    item_geometry.size,
+-                )
++                // A culled item reaching here is one of the kinds rendered anyway, and `filter_item`
++                // is free not to have computed its size - see `PartialRenderer::filter_item`.
++                let size = if do_draw {
++                    item_geometry.size
++                } else {
++                    crate::properties::evaluate_no_tracking(|| item_rc.geometry()).size
++                };
++                item.as_ref().render(&mut (renderer as &mut dyn ItemRenderer), &item_rc, size)
+             } else {
+                 RenderingResult::ContinueRenderingChildren
+             };
+@@ -228,7 +265,11 @@ pub fn render_item_children(
+             if matches!(render_result, RenderingResult::ContinueRenderingChildren) {
+                 render_item_children(renderer, component, index as isize, window_adapter);
+             }
+-            renderer.restore_state();
++            if renders {
++                renderer.restore_state();
++            } else {
++                renderer.translate(-item_origin.to_vector());
++            }
+             VisitChildrenResult::CONTINUE
+         };
+     vtable::new_vref!(let mut actual_visitor : VRefMut<ItemVisitorVTable> for ItemVisitor = &mut actual_visitor);
+diff --git a/internal/core/model/adapters.rs b/internal/core/model/adapters.rs
+index a72990253..2638abc5c 100644
+--- a/internal/core/model/adapters.rs
++++ b/internal/core/model/adapters.rs
+@@ -720,13 +720,27 @@ fn row_added(self: Pin<&Self>, index: usize, count: usize) {
+             return;
+         }
+ 
+-        // Adjust the existing sorted row indices to match the updated source model
+-        for row in self.mapping.borrow_mut().iter_mut() {
+-            if *row >= index {
+-                *row += count;
++        // Adjust the existing sorted row indices to match the updated source model.
++        //
++        // Skipped when the rows were appended: every existing index is then below `index`, so the
++        // scan cannot change anything -- and it is O(mapping), run once per `row_added` call.
++        // Appending 200 rows one at a time to a 200 000-row sorted model spent 200 full scans
++        // finding nothing.
++        let appended_at_end = index >= self.wrapped_model.row_count().saturating_sub(count);
++        if !appended_at_end {
++            for row in self.mapping.borrow_mut().iter_mut() {
++                if *row >= index {
++                    *row += count;
++                }
+             }
+         }
+ 
++        // `Vec::insert` moves the tail once per row, which is O(mapping) each. Batching the
++        // insertions into one merge pass was tried and is **worse**: `VecModel::push` emits
++        // `row_added(index, 1)` per row, so `count` is 1 here and a "batch" merge allocates and
++        // copies the whole mapping for a single insertion - measured at 63 ms against 6.8 ms for
++        // 200 appends into a 200 000-row model. Removing this cost needs a batched *source*
++        // notification (`push_slice`), not a change here.
+         for row in index..(index + count) {
+             let insertion_index = if let Some(added_data) = self.wrapped_model.row_data(row) {
+                 self.mapping.borrow().partition_point(|existing_row| {
+@@ -1558,3 +1572,42 @@ fn remove_range(&self, range: core::ops::Range<usize>) {
+     origin_model.insert(45, 3007);
+     check_all();
+ }
++
++#[test]
++fn test_sort_model_row_added_index_adjustment() {
++    // `row_added` skips its index-adjustment scan when the rows were appended, because no existing
++    // mapping entry can then need adjusting. This pins that the skip is only taken when it is
++    // correct: inserting in the middle or at the front still has to shift the entries above it.
++    use tests_helper::*;
++
++    for insert_at in [0usize, 3, 7, 10] {
++        let origin = Rc::new(VecModel::from(alloc::vec![50, 10, 40, 20, 30, 90, 60, 80, 70, 0]));
++        let sorted = Rc::new(SortModel::new_ascending(origin.clone()));
++        let checker = ModelChecker::new(sorted.clone());
++
++        // The values are chosen so the new rows land in the middle of the sorted order, which is
++        // where a stale mapping index would show up as a wrong value rather than a panic.
++        origin.insert(insert_at, 35);
++        origin.insert(insert_at, 45);
++        checker.check();
++
++        assert_eq!(
++            (0..sorted.row_count()).filter_map(|row| sorted.row_data(row)).collect::<alloc::vec::Vec<_>>(),
++            alloc::vec![0, 10, 20, 30, 35, 40, 45, 50, 60, 70, 80, 90],
++            "inserting at {insert_at}"
++        );
++    }
++
++    // Appending: the skipped path.
++    let origin = Rc::new(VecModel::from(alloc::vec![50, 10, 40, 20, 30]));
++    let sorted = Rc::new(SortModel::new_ascending(origin.clone()));
++    let checker = ModelChecker::new(sorted.clone());
++    origin.push(35);
++    origin.push(5);
++    origin.push(100);
++    checker.check();
++    assert_eq!(
++        (0..sorted.row_count()).filter_map(|row| sorted.row_data(row)).collect::<alloc::vec::Vec<_>>(),
++        alloc::vec![5, 10, 20, 30, 35, 40, 50, 100]
++    );
++}
+diff --git a/internal/core/partial_renderer.rs b/internal/core/partial_renderer.rs
+index 24f9974ef..528f4e14f 100644
+--- a/internal/core/partial_renderer.rs
++++ b/internal/core/partial_renderer.rs
+@@ -567,6 +567,16 @@ fn adjust_transforms_for_child(
+         );
+     }
+ 
++    /// Whether anything of `item_bounding_rect` falls inside both the current clip and the region
++    /// being repainted.
++    fn draws(&self, item_bounding_rect: &LogicalRect) -> bool {
++        self.get_current_clip().intersection(item_bounding_rect).is_some_and(|clipped_geom| {
++            let screen_geom =
++                self.current_transform().outer_transformed_rect(&clipped_geom.cast()).cast();
++            self.dirty_region.draw_intersects(screen_geom)
++        })
++    }
++
+     fn mark_dirty_rect(
+         &mut self,
+         rect: &LogicalRect,
+@@ -645,27 +655,39 @@ fn filter_item(
+         window_adapter: &Rc<dyn WindowAdapter>,
+     ) -> (bool, LogicalRect) {
+         let item = item_rc.borrow();
++        let rendering_data = item.cached_rendering_data_offset();
+ 
+-        // Query untracked, as the bounding rect calculation already registers a dependency on the geometry.
+-        let item_geometry = crate::properties::evaluate_no_tracking(|| item_rc.geometry());
++        // The bounding rect, and - for a plain item - the origin, both straight out of the cache
++        // that `compute_dirty_regions` refreshed for every item earlier this frame.
++        let cached = {
++            let mut cache = self.cache.borrow_mut();
++            rendering_data.get_entry(&mut cache).map(|entry| match &entry.data {
++                CachedItemBoundingBoxAndTransform::RegularItem { bounding_rect, offset } => {
++                    (*bounding_rect, Some(*offset))
++                }
++                data => (*data.bounding_rect(), None),
++            })
++        };
+ 
+-        let rendering_data = item.cached_rendering_data_offset();
+-        let mut cache = self.cache.borrow_mut();
+-        let item_bounding_rect = match rendering_data.get_entry(&mut cache) {
+-            Some(PartialRenderingCachedData { data, tracker: _ }) => *data.bounding_rect(),
+-            None => {
+-                // This item was created between the computation of the dirty region and the actual rendering.
+-                item_rc.bounding_rect(&item_geometry, window_adapter)
+-            }
++        let Some((item_bounding_rect, cached_offset)) = cached else {
++            // This item was created between the computation of the dirty region and the actual rendering.
++            let item_geometry = crate::properties::evaluate_no_tracking(|| item_rc.geometry());
++            let item_bounding_rect = item_rc.bounding_rect(&item_geometry, window_adapter);
++            return (self.draws(&item_bounding_rect), item_geometry);
+         };
+ 
+-        let clipped_geom = self.get_current_clip().intersection(&item_bounding_rect);
+-        let draw = clipped_geom.is_some_and(|clipped_geom| {
+-            let screen_geom =
+-                self.current_transform().outer_transformed_rect(&clipped_geom.cast()).cast();
+-            self.dirty_region.draw_intersects(screen_geom)
+-        });
++        let draw = self.draws(&item_bounding_rect);
++
++        // A culled item's *size* is only read by `item.render(..)`, which `render_item_children`
++        // skips for it - except for the handful of item kinds it renders anyway, and it reads the
++        // geometry itself for those. Everything else needs no more than the origin, to translate
++        // before recursing into the children, and that is the offset already in the cache.
++        if !draw && let Some(offset) = cached_offset {
++            return (false, LogicalRect::new(offset.to_point(), Default::default()));
++        }
+ 
++        // Query untracked, as the bounding rect calculation already registers a dependency on the geometry.
++        let item_geometry = crate::properties::evaluate_no_tracking(|| item_rc.geometry());
+         (draw, item_geometry)
+     }
+ 
+diff --git a/internal/core/properties.rs b/internal/core/properties.rs
+index a093bb4e2..48a9b3d3a 100644
+--- a/internal/core/properties.rs
++++ b/internal/core/properties.rs
+@@ -27,6 +27,54 @@ struct SingleLinkedListPinNode<T> {
+         value: T,
+     }
+ 
++    /// A pool of unlinked nodes kept for reuse, owned by the caller rather than by any one list.
++    ///
++    /// A binding re-reads the same properties every time it is evaluated, so freeing its whole
++    /// dependency list and allocating an identical one on the next evaluation is pure churn -- and
++    /// that is where essentially all of a frame's allocations come from (92-100% of every scene
++    /// measured). [`SingleLinkedListPinHead::recycle_into`] unlinks the nodes without giving the
++    /// memory back, and [`SingleLinkedListPinHead::push_front`] takes from the pool first.
++    ///
++    /// The pool is deliberately *not* a second chain inside the list head: `PropertyTracker`'s
++    /// layout is mirrored by `PropertyTrackerOpaque` for the C++ API, so the head has to stay one
++    /// pointer wide. Sharing one pool across all bindings is also better than one each - a binding
++    /// that shrinks hands its nodes to the others instead of sitting on them.
++    pub struct NodePool<T>(NodePtr<T>);
++
++    impl<T> NodePool<T> {
++        pub const fn new() -> Self {
++            Self(None)
++        }
++    }
++
++    impl<T> Default for NodePool<T> {
++        fn default() -> Self {
++            Self::new()
++        }
++    }
++
++    impl<T> Drop for NodePool<T> {
++        fn drop(&mut self) {
++            free_chain(self.0.take());
++        }
++    }
++
++    /// Frees a chain of nodes, dropping each value in place first.
++    fn free_chain<T>(mut cur: NodePtr<T>) {
++        // Iterative to avoid stack overflow on long chains.
++        while let Some(node) = cur {
++            // Safety: we own this node; drop_in_place keeps the value at its pinned address.
++            unsafe {
++                cur = (*node.as_ptr()).next;
++                core::ptr::drop_in_place(&raw mut (*node.as_ptr()).value);
++                alloc::alloc::dealloc(
++                    node.as_ptr().cast(),
++                    core::alloc::Layout::new::<SingleLinkedListPinNode<T>>(),
++                );
++            }
++        }
++    }
++
+     pub struct SingleLinkedListPinHead<T>(NodePtr<T>);
+     impl<T> Default for SingleLinkedListPinHead<T> {
+         fn default() -> Self {
+@@ -36,39 +84,59 @@ fn default() -> Self {
+ 
+     impl<T> Drop for SingleLinkedListPinHead<T> {
+         fn drop(&mut self) {
+-            // Iterative drop to avoid stack overflow on long lists.
+-            let mut cur = self.0.take();
+-            while let Some(node) = cur {
+-                // Safety: we own this node.
+-                // drop_in_place keeps the value at its pinned address.
+-                unsafe {
+-                    cur = (*node.as_ptr()).next;
+-                    core::ptr::drop_in_place(&raw mut (*node.as_ptr()).value);
+-                    alloc::alloc::dealloc(
+-                        node.as_ptr().cast(),
+-                        core::alloc::Layout::new::<SingleLinkedListPinNode<T>>(),
+-                    );
+-                }
+-            }
++            free_chain(self.0.take());
+         }
+     }
+ 
+     impl<T> SingleLinkedListPinHead<T> {
+-        pub fn push_front(&mut self, value: T) -> Pin<&T> {
+-            let node = SingleLinkedListPinNode { next: self.0.take(), value };
+-            // Safety: raw allocation, written once and never moved
+-            let ptr = unsafe {
+-                let layout = core::alloc::Layout::new::<SingleLinkedListPinNode<T>>();
+-                let mem = alloc::alloc::alloc(layout) as *mut SingleLinkedListPinNode<T>;
+-                assert!(!mem.is_null(), "allocation failed");
+-                core::ptr::write(mem, node);
+-                NonNull::new_unchecked(mem)
++        pub fn push_front(&mut self, value: T, pool: &mut NodePool<T>) -> Pin<&T> {
++            let ptr = match pool.0 {
++                // Reuse an allocation from a previous round. The address is unchanged, which is
++                // what keeps the node pinned, and nothing points at it any more: `recycle_into`
++                // unlinked it from whatever list it was registered in.
++                Some(node) => unsafe {
++                    pool.0 = (*node.as_ptr()).next;
++                    core::ptr::drop_in_place(&raw mut (*node.as_ptr()).value);
++                    core::ptr::write(&raw mut (*node.as_ptr()).value, value);
++                    (*node.as_ptr()).next = self.0;
++                    node
++                },
++                None => {
++                    let node = SingleLinkedListPinNode { next: self.0, value };
++                    // Safety: raw allocation, written once and never moved
++                    unsafe {
++                        let layout = core::alloc::Layout::new::<SingleLinkedListPinNode<T>>();
++                        let mem = alloc::alloc::alloc(layout) as *mut SingleLinkedListPinNode<T>;
++                        assert!(!mem.is_null(), "allocation failed");
++                        core::ptr::write(mem, node);
++                        NonNull::new_unchecked(mem)
++                    }
++                }
+             };
+             self.0 = Some(ptr);
+             // Safety: the value is pinned because we never move it out of the allocation
+             unsafe { Pin::new_unchecked(&(*ptr.as_ptr()).value) }
+         }
+ 
++        /// Empties the list into `pool`, keeping the allocations for the next round.
++        ///
++        /// `unlink` must detach the value from anything still pointing at it -- for a
++        /// `DependencyNode` that is `remove()`. It is called instead of dropping the value, and the
++        /// value stays initialized: `push_front` drops it when it reuses the node, so a pooled node
++        /// that is never reused is still dropped exactly once, by `Drop for NodePool`.
++        pub fn recycle_into(&mut self, pool: &mut NodePool<T>, unlink: impl Fn(Pin<&T>)) {
++            let mut cur = self.0.take();
++            while let Some(node) = cur {
++                // Safety: we own this node and it stays at its pinned address.
++                unsafe {
++                    cur = (*node.as_ptr()).next;
++                    unlink(Pin::new_unchecked(&(*node.as_ptr()).value));
++                    (*node.as_ptr()).next = pool.0;
++                    pool.0 = Some(node);
++                }
++            }
++        }
++
+         #[allow(unused)]
+         pub fn iter(&self) -> impl Iterator<Item = Pin<&T>> {
+             struct I<'a, T>(&'a NodePtr<T>);
+@@ -97,10 +165,11 @@ pub fn is_empty(&self) -> bool {
+ 
+     #[test]
+     fn test_list() {
++        let mut pool = NodePool::default();
+         let mut head = SingleLinkedListPinHead::default();
+-        head.push_front(1);
+-        head.push_front(2);
+-        head.push_front(3);
++        head.push_front(1, &mut pool);
++        head.push_front(2, &mut pool);
++        head.push_front(3, &mut pool);
+         assert_eq!(
+             head.iter().map(|x: Pin<&i32>| *x.get_ref()).collect::<std::vec::Vec<i32>>(),
+             std::vec![3, 2, 1]
+@@ -109,11 +178,67 @@ fn test_list() {
+     #[test]
+     fn big_list() {
+         // should not stack overflow
++        let mut pool = NodePool::default();
+         let mut head = SingleLinkedListPinHead::default();
+         for x in 0..100000 {
+-            head.push_front(x);
++            head.push_front(x, &mut pool);
+         }
+     }
++
++    #[test]
++    fn recycled_nodes_are_reused_and_values_replaced() {
++        let mut pool = NodePool::default();
++        let mut head = SingleLinkedListPinHead::default();
++        let addresses = |head: &SingleLinkedListPinHead<i32>| {
++            head.iter().map(|x| x.get_ref() as *const i32).collect::<std::vec::Vec<_>>()
++        };
++
++        for x in 1..=3 {
++            head.push_front(x, &mut pool);
++        }
++        let mut first_round = addresses(&head);
++        first_round.sort_unstable();
++
++        head.recycle_into(&mut pool, |_| {});
++        assert!(head.is_empty());
++
++        for x in 4..=6 {
++            head.push_front(x, &mut pool);
++        }
++        // Same three allocations, new values: nothing was returned to the allocator.
++        let mut second_round = addresses(&head);
++        second_round.sort_unstable();
++        assert_eq!(first_round, second_round);
++        assert_eq!(
++            head.iter().map(|x: Pin<&i32>| *x.get_ref()).collect::<std::vec::Vec<i32>>(),
++            std::vec![6, 5, 4]
++        );
++    }
++
++    #[test]
++    fn recycled_values_are_dropped_exactly_once() {
++        use core::cell::Cell;
++        std::thread_local!(static DROPS: Cell<usize> = const { Cell::new(0) });
++        struct CountDrops;
++        impl Drop for CountDrops {
++            fn drop(&mut self) {
++                DROPS.with(|d| d.set(d.get() + 1));
++            }
++        }
++
++        {
++            let mut pool = NodePool::default();
++            let mut head = SingleLinkedListPinHead::default();
++            head.push_front(CountDrops, &mut pool);
++            head.push_front(CountDrops, &mut pool);
++            head.recycle_into(&mut pool, |_| {});
++            // Reusing a pooled node drops the value it held.
++            head.push_front(CountDrops, &mut pool);
++            assert_eq!(DROPS.with(Cell::get), 1);
++        }
++        // One live node in the head, one left in the pool: both dropped when they go out of scope.
++        assert_eq!(DROPS.with(Cell::get), 3);
++    }
+ }
+ 
+ pub(crate) mod dependency_tracker {
+@@ -205,6 +330,20 @@ pub fn append(&self, node: Pin<&DependencyNode<T>>) {
+             }
+         }
+ 
++        /// Returns true when the first node of the list carries `binding`.
++        ///
++        /// [`Self::append`] inserts at the front and a binding's nodes are unlinked when the
++        /// binding is re-evaluated (dropping its `dep_nodes`), so a match means that this
++        /// binding already has a live dependency on this property and does not need a second
++        /// node. Reading the actual list rather than a remembered address also means a
++        /// destroyed-and-reallocated property cannot be mistaken for a registered one.
++        pub fn front_is(&self, binding: T) -> bool
++        where
++            T: Copy + PartialEq,
++        {
++            unsafe { self.0.get().as_ref().is_some_and(|node| node.binding == binding) }
++        }
++
+         pub fn for_each(&self, mut f: impl FnMut(&T)) {
+             unsafe {
+                 let mut next = self.0.get();
+@@ -295,6 +434,51 @@ fn drop(&mut self) {
+ 
+ type DependencyListHead = dependency_tracker::DependencyListHead<*const BindingHolder>;
+ type DependencyNode = dependency_tracker::DependencyNode<*const BindingHolder>;
++type NodePool = single_linked_list_pin::NodePool<DependencyNode>;
++
++/// Unlinked dependency nodes kept for reuse, shared by every binding on this thread.
++///
++/// See [`single_linked_list_pin::NodePool`] for why it lives here rather than inside each list.
++/// Follows the same `std` / `unsafe-single-threaded` split as [`current_binding_storage`].
++pub(crate) mod node_pool {
++    use super::NodePool;
++    use core::cell::RefCell;
++
++    #[cfg(feature = "std")]
++    std::thread_local! {
++        static POOL: RefCell<NodePool> = RefCell::new(NodePool::default());
++    }
++
++    #[cfg(feature = "std")]
++    pub(super) fn with<R>(f: impl FnOnce(&mut NodePool) -> R) -> R {
++        // A thread-local destructor can run while a binding is still being torn down; falling back
++        // to a fresh pool then just means those nodes are allocated and freed normally.
++        match POOL.try_with(|pool| pool.as_ptr()) {
++            // Safety: the pool is thread-local and `f` cannot re-enter `with` - `push_front` and
++            // `recycle_into` only touch the nodes.
++            Ok(pool) => f(unsafe { &mut *pool }),
++            // A thread-local destructor can run while a binding is still being torn down; falling
++            // back to a fresh pool then just means those nodes are allocated and freed normally.
++            Err(_) => f(&mut NodePool::default()),
++        }
++    }
++
++    #[cfg(not(feature = "std"))]
++    struct PoolCell(RefCell<NodePool>);
++    // Safety: the unsafe-single-threaded feature means only one thread accesses this
++    #[cfg(not(feature = "std"))]
++    unsafe impl Send for PoolCell {}
++    #[cfg(not(feature = "std"))]
++    unsafe impl Sync for PoolCell {}
++
++    #[cfg(not(feature = "std"))]
++    static POOL: PoolCell = PoolCell(RefCell::new(NodePool::new()));
++
++    #[cfg(not(feature = "std"))]
++    pub(super) fn with<R>(f: impl FnOnce(&mut NodePool) -> R) -> R {
++        f(&mut POOL.0.borrow_mut())
++    }
++}
+ 
+ use alloc::boxed::Box;
+ use core::cell::{Cell, RefCell, UnsafeCell};
+@@ -463,11 +647,22 @@ fn register_self_as_dependency(
+         property_that_will_notify: *mut DependencyListHead,
+         #[cfg(slint_debug_property)] _other_debug_name: &str,
+     ) {
++        #[cfg(feature = "dep-stats")]
++        dep_stats::record(self_ptr as usize, property_that_will_notify as usize);
++        // The same property is often read several times while one binding is evaluated - a
++        // renderer walking the children of a layout reads that layout's cache once per child,
++        // for example. The second and later reads would add nodes carrying information the
++        // first one already carries, so skip them.
++        if unsafe { (*property_that_will_notify).front_is(self_ptr) } {
++            #[cfg(feature = "dep-stats")]
++            dep_stats::record_skipped();
++            return;
++        }
+         let node = DependencyNode::new(self_ptr);
+         // Safety: self_ptr is valid and pinned
+         unsafe {
+             let dep_nodes = &mut *(*self_ptr).dep_nodes.get();
+-            let node = dep_nodes.push_front(node);
++            let node = node_pool::with(|pool| dep_nodes.push_front(node, pool));
+             DependencyListHead::append(&*property_that_will_notify, node);
+         }
+     }
+@@ -741,8 +936,13 @@ unsafe fn update<T>(&self, value: *mut T) {
+                 // Safety: binding is Some so binding_ptr is too
+                 let binding_ptr = unsafe { binding_ptr.unwrap_unchecked() };
+ 
+-                // clear all the nodes so that we can start from scratch
+-                unsafe { *(*binding_ptr).dep_nodes.get() = Default::default() };
++                // Unregister all the nodes so that we can start from scratch, keeping their
++                // allocations: this binding is about to register the same properties again.
++                unsafe {
++                    node_pool::with(|pool| {
++                        (*(*binding_ptr).dep_nodes.get()).recycle_into(pool, |node| node.remove())
++                    })
++                };
+                 let r = unsafe {
+                     current_binding_storage::set(Some(binding_ptr), || {
+                         ((*binding_ptr).vtable.evaluate)(binding_ptr, value as *mut c_void)
+@@ -1313,8 +1513,12 @@ pub fn evaluate<R>(self: Pin<&Self>, f: impl FnOnce() -> R) -> R {
+     /// If this is called during the evaluation of another property binding or property tracker, then
+     /// any changes to accessed properties will not propagate to the other tracker.
+     pub fn evaluate_as_dependency_root<R>(self: Pin<&Self>, f: impl FnOnce() -> R) -> R {
+-        // clear all the nodes so that we can start from scratch
+-        unsafe { *self.holder.dep_nodes.get() = Default::default() };
++        // Unregister all the nodes so that we can start from scratch, keeping their allocations.
++        unsafe {
++            node_pool::with(|pool| {
++                (*self.holder.dep_nodes.get()).recycle_into(pool, |node| node.remove())
++            })
++        };
+ 
+         let holder_ptr = &raw const self.holder as *const BindingHolder;
+         let r = current_binding_storage::set(Some(holder_ptr), f);
+@@ -1546,3 +1750,100 @@ fn test_nested_property_tracker_evaluate_if_dirty() {
+ 
+ #[cfg(feature = "ffi")]
+ pub(crate) mod ffi;
++
++/// Temporary instrumentation for perf_test/___OPTIMIZATIONS___/08: how many dependency
++/// registrations happen per frame, and how many of them repeat a (binding, property) pair that
++/// was already registered since the last [`dep_stats::reset`].
++#[cfg(feature = "dep-stats")]
++pub mod dep_stats {
++    use core::cell::Cell;
++    use std::cell::RefCell;
++    use std::collections::HashSet;
++
++    /// How many previous registrations a hypothetical per-binding cache would remember.
++    const RING: usize = 4;
++
++    std::thread_local! {
++        static SEEN: RefCell<HashSet<(usize, usize)>> = RefCell::new(HashSet::new());
++        static TOTAL: Cell<u64> = const { Cell::new(0) };
++        static DUPLICATES: Cell<u64> = const { Cell::new(0) };
++        /// Duplicates a 1-entry "last registered pair" cache would catch.
++        static CONSECUTIVE: Cell<u64> = const { Cell::new(0) };
++        /// Duplicates a RING-entry cache would catch.
++        static IN_RING: Cell<u64> = const { Cell::new(0) };
++        static SKIPPED: Cell<u64> = const { Cell::new(0) };
++        static LAST: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
++        static RECENT: RefCell<[(usize, usize); RING]> = const { RefCell::new([(0, 0); RING]) };
++        static RECENT_NEXT: Cell<usize> = const { Cell::new(0) };
++    }
++
++    pub(crate) fn record(binding: usize, property: usize) {
++        TOTAL.with(|total| total.set(total.get() + 1));
++        let pair = (binding, property);
++
++        if LAST.with(|last| last.replace(pair)) == pair {
++            CONSECUTIVE.with(|hits| hits.set(hits.get() + 1));
++        }
++
++        let in_ring = RECENT.with(|recent| {
++            let mut recent = recent.borrow_mut();
++            if recent.contains(&pair) {
++                true
++            } else {
++                let slot = RECENT_NEXT.with(|next| {
++                    let slot = next.get();
++                    next.set((slot + 1) % RING);
++                    slot
++                });
++                recent[slot] = pair;
++                false
++            }
++        });
++        if in_ring {
++            IN_RING.with(|hits| hits.set(hits.get() + 1));
++        }
++
++        let fresh = SEEN.with(|seen| seen.borrow_mut().insert(pair));
++        if !fresh {
++            DUPLICATES.with(|duplicates| duplicates.set(duplicates.get() + 1));
++        }
++    }
++
++    pub(crate) fn record_skipped() {
++        SKIPPED.with(|skipped| skipped.set(skipped.get() + 1));
++    }
++
++    pub fn reset() {
++        SEEN.with(|seen| seen.borrow_mut().clear());
++        TOTAL.with(|total| total.set(0));
++        DUPLICATES.with(|duplicates| duplicates.set(0));
++        CONSECUTIVE.with(|hits| hits.set(0));
++        IN_RING.with(|hits| hits.set(0));
++        SKIPPED.with(|skipped| skipped.set(0));
++        LAST.with(|last| last.set((0, 0)));
++        RECENT.with(|recent| *recent.borrow_mut() = [(0, 0); RING]);
++    }
++
++    pub struct Stats {
++        pub registrations: u64,
++        pub duplicates: u64,
++        pub distinct: u64,
++        /// Duplicates that repeat the immediately preceding registration.
++        pub consecutive: u64,
++        /// Duplicates a 4-entry per-binding cache would catch.
++        pub in_ring: u64,
++        /// Registrations actually skipped by the front-of-list check.
++        pub skipped: u64,
++    }
++
++    pub fn report() -> Stats {
++        Stats {
++            registrations: TOTAL.with(|total| total.get()),
++            duplicates: DUPLICATES.with(|duplicates| duplicates.get()),
++            distinct: SEEN.with(|seen| seen.borrow().len() as u64),
++            consecutive: CONSECUTIVE.with(|hits| hits.get()),
++            in_ring: IN_RING.with(|hits| hits.get()),
++            skipped: SKIPPED.with(|skipped| skipped.get()),
++        }
++    }
++}
+diff --git a/internal/core/properties/change_tracker.rs b/internal/core/properties/change_tracker.rs
+index 8018485dd..9379281fc 100644
+--- a/internal/core/properties/change_tracker.rs
++++ b/internal/core/properties/change_tracker.rs
+@@ -190,7 +190,9 @@ impl<T: PartialEq, EF: Fn(&Data) -> T + 'static, NF: Fn(&Data, &T) + 'static, Da
+             // Safety: raw is valid and we own it
+             unsafe {
+                 let dep_nodes = &mut *(*core::ptr::addr_of!((*raw).dep_nodes)).get();
+-                let node = dep_nodes.push_front(DependencyNode::new(raw as *const BindingHolder));
++                let node = super::node_pool::with(|pool| {
++                    dep_nodes.push_front(DependencyNode::new(raw as *const BindingHolder), pool)
++                });
+                 CHANGED_NODES.with(|changed_nodes| {
+                     changed_nodes.append(node);
+                 });
+diff --git a/internal/core/textlayout/sharedparley.rs b/internal/core/textlayout/sharedparley.rs
+index f9dfd7155..97d021cb1 100644
+--- a/internal/core/textlayout/sharedparley.rs
++++ b/internal/core/textlayout/sharedparley.rs
+@@ -70,13 +70,16 @@ pub fn clear_registered_static_fonts(&mut self) {
+ mod tests;
+ 
+ pub use cache::TextLayoutCache;
++#[cfg(feature = "testing")]
++pub use cache::paragraph_shape_count;
+ pub use draw::{GlyphRenderer, RectangleBorder};
+ 
+ use cache::cached_paragraphs;
+ use layout::{Layout, LayoutOptions, layout};
+ use selection::{SelectionRendering, SelectionSpans};
+ use shaping::{
+-    LayoutWithoutLineBreaksBuilder, create_text_paragraphs, shape_paragraphs, shaping_builder,
++    LayoutWithoutLineBreaksBuilder, PlainParagraphSource, create_text_paragraphs, shape_paragraphs,
++    shaping_builder,
+ };
+ 
+ /// Lays out the shaped text of an item and runs `f` over the result.
+@@ -98,9 +101,17 @@ fn with_text_layout<R>(
+     layout_builder: &LayoutWithoutLineBreaksBuilder,
+     options: LayoutOptions,
+     window: &crate::api::Window,
+-    f: impl FnOnce(&Layout) -> R,
++    f: impl FnOnce(&Layout<'_>) -> R,
+ ) -> Option<R> {
+     let ctx = crate::window::WindowInner::from_pub(window).try_context()?;
++
++    // A second read of the same property the shaping registers in the cache entry's dependency
++    // tracker: the entry is only served while it is clean, so this is the very text the paragraph
++    // ranges below index into. Held for the whole call so that a paragraph whose glyphs were
++    // dropped can be shaped again from its range alone.
++    let text_value = text.text();
++    let source = PlainParagraphSource::new(layout_builder, &text_value, ctx.font_context());
++
+     let mut font_ctx = ctx.font_context().borrow_mut();
+ 
+     let text_wrap = layout_builder.text_wrap;
+@@ -111,8 +122,15 @@ fn with_text_layout<R>(
+         });
+ 
+     let line_breaking = guard.take_line_breaking();
+-    let layout =
+-        layout(layout_builder, &mut font_ctx, guard.take(), scale_factor, options, line_breaking);
++    let layout = layout(
++        layout_builder,
++        &mut font_ctx,
++        guard.take(),
++        scale_factor,
++        options,
++        line_breaking,
++        source.as_ref(),
++    );
+     drop(font_ctx);
+ 
+     if layout.broke_lines {
+@@ -262,27 +280,29 @@ pub fn link_under_cursor(
+     .flatten()
+ }
+ 
+-fn link_in_layout(layout: &Layout, cursor: PhysicalPoint) -> Option<std::string::String> {
+-    layout.paragraph_by_y(cursor.y_length()).and_then(|paragraph| {
++fn link_in_layout(layout: &Layout<'_>, cursor: PhysicalPoint) -> Option<std::string::String> {
++    layout.paragraph_by_y(cursor.y_length()).and_then(|index| {
++        let paragraph = &layout.paragraphs[index];
+         let paragraph_y: f64 = paragraph.y.cast::<f64>().get();
++        let glyphs = layout.glyphs(index)?;
+ 
+         paragraph
+             .links
+             .iter()
+             .find(|(range, _)| {
+                 let start = parley::editing::Cursor::from_byte_index(
+-                    &paragraph.layout,
++                    &glyphs,
+                     range.start,
+                     Default::default(),
+                 );
+                 let end = parley::editing::Cursor::from_byte_index(
+-                    &paragraph.layout,
++                    &glyphs,
+                     range.end,
+                     Default::default(),
+                 );
+                 let mut clicked = false;
+                 let link_range = parley::Selection::new(start, end);
+-                link_range.geometry_with(&paragraph.layout, |mut bounding_box, _line| {
++                link_range.geometry_with(&glyphs, |mut bounding_box, _line| {
+                     bounding_box.y0 += paragraph_y;
+                     bounding_box.y1 += paragraph_y;
+                     clicked = bounding_box.union(parley::BoundingBox::new(
+@@ -483,7 +503,10 @@ pub fn text_content_widths(
+         .iter()
+         .take(text_item.line_limit().unwrap_or(usize::MAX))
+         .fold((0., 0.), |(min, max), p| {
+-            let w = p.layout.calculate_content_widths();
++            // `create_text_paragraphs` shapes every paragraph, so the glyphs are always there.
++            let Some(w) = p.glyphs().map(|glyphs| glyphs.calculate_content_widths()) else {
++                return (min, max);
++            };
+             (f32::max(min, w.min), f32::max(max, w.max))
+         });
+     Some(crate::renderer::ContentWidths {
+diff --git a/internal/core/textlayout/sharedparley/cache.rs b/internal/core/textlayout/sharedparley/cache.rs
+index 33a486cd0..4c59ff9ce 100644
+--- a/internal/core/textlayout/sharedparley/cache.rs
++++ b/internal/core/textlayout/sharedparley/cache.rs
+@@ -33,13 +33,27 @@ struct CachedParagraphs {
+     /// them back when it drops. Finding `None` here therefore means the previous caller returned
+     /// without handing them back, and the entry has to be reshaped rather than served empty.
+     paragraphs: Option<Vec<TextParagraph>>,
++    /// Value of [`TextLayoutCache::clock`] when this entry was last served, so the sweep can tell
++    /// what is still on screen from what was laid out once and never looked at again.
++    last_used: u64,
+ }
+ 
+ type InnerTextLayoutCache = crate::item_rendering::ItemCache<CachedParagraphs>;
+ 
+ /// Cache for shaped text paragraphs (before line breaking), keyed by ItemRc.
++/// Entries the cache keeps before sweeping. An entry is a whole item's shaped text -- ~4.7 KB for
++/// a one-line label -- and only a few dozen are ever on screen, so this is generous rather than
++/// tight; the point is that the cache is bounded at all, not that it is small.
++const ENTRY_LIMIT: usize = 1024;
++
+ pub struct TextLayoutCache {
+     inner: InnerTextLayoutCache,
++    /// Monotonic counter stamped onto entries as they are served.
++    clock: std::cell::Cell<u64>,
++    /// Entries added since the last sweep, plus what the last sweep kept. Only ever an estimate:
++    /// `release` and `component_destroyed` remove entries without telling us, which can only make
++    /// the real count lower than this one, so the sweep triggers early rather than late.
++    live: std::cell::Cell<usize>,
+     #[cfg(feature = "testing")]
+     cache_miss_count: std::cell::Cell<u64>,
+     #[cfg(feature = "testing")]
+@@ -51,6 +65,8 @@ impl Default for TextLayoutCache {
+     fn default() -> Self {
+         Self {
+             inner: Default::default(),
++            clock: std::cell::Cell::new(0),
++            live: std::cell::Cell::new(0),
+             #[cfg(feature = "testing")]
+             cache_miss_count: std::cell::Cell::new(0),
+             #[cfg(feature = "testing")]
+@@ -72,6 +88,25 @@ pub fn component_destroyed(&self, component: crate::item_tree::ItemTreeRef) {
+     }
+     pub fn clear_all(&self) {
+         self.inner.clear_all();
++        self.live.set(0);
++    }
++
++    /// Drops the least recently served half of the cache once it grows past [`ENTRY_LIMIT`].
++    ///
++    /// Evicting is always safe: an entry that goes missing is reshaped on next use, which is the
++    /// same path an invalidated one already takes. What it costs is that reshape, so the sweep
++    /// keeps whatever has been served recently -- on screen means served every frame.
++    ///
++    /// Halving rather than trimming to the limit keeps this amortized: a sweep is O(entries), and
++    /// dropping half means the next one is [`ENTRY_LIMIT`]/2 insertions away.
++    fn sweep(&self) {
++        let mut stamps = Vec::with_capacity(self.live.get());
++        self.inner.for_each(|entry| stamps.push(entry.last_used));
++        let Some(cutoff) = eviction_cutoff(&mut stamps, ENTRY_LIMIT) else {
++            self.live.set(stamps.len());
++            return;
++        };
++        self.live.set(self.inner.retain(|entry| entry.last_used >= cutoff));
+     }
+ }
+ 
+@@ -83,6 +118,17 @@ pub fn cache_miss_count(&self) -> u64 {
+     pub fn reset_cache_miss_count(&self) {
+         self.cache_miss_count.set(0);
+     }
++    /// How many individual paragraphs were shaped. Unlike [`Self::cache_miss_count`], which counts
++    /// *entries* that had to be rebuilt, this counts the actual parley layouts built -- the two
++    /// stopped being proportional once a large document started shaping its paragraphs on demand
++    /// rather than all at once. Process-wide rather than per cache, because a paragraph is shaped
++    /// from behind a `&Layout`, which has no way back to the cache it came from.
++    pub fn paragraph_shape_count(&self) -> u64 {
++        PARAGRAPH_SHAPES.with(std::cell::Cell::get)
++    }
++    pub fn reset_paragraph_shape_count(&self) {
++        PARAGRAPH_SHAPES.with(|count| count.set(0));
++    }
+     /// How many times a layout pass had to break the lines of a cached item again rather than
+     /// reuse the retained breaking.
+     pub fn layout_miss_count(&self) -> u64 {
+@@ -96,6 +142,40 @@ pub(super) fn count_layout_miss(&self) {
+     }
+ }
+ 
++#[cfg(feature = "testing")]
++std::thread_local! {
++    static PARAGRAPH_SHAPES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
++}
++
++#[cfg(feature = "testing")]
++pub(super) fn count_paragraph_shape() {
++    PARAGRAPH_SHAPES.with(|count| count.set(count.get() + 1));
++}
++
++/// How many paragraphs have been shaped on this thread. Same counter as
++/// [`TextLayoutCache::paragraph_shape_count`], reachable without a cache: the windowed benchmark
++/// has no way to get at a renderer's `TextLayoutCache`, and "how much shaping happened" is exactly
++/// the question to ask of a GPU renderer.
++#[cfg(feature = "testing")]
++pub fn paragraph_shape_count() -> u64 {
++    PARAGRAPH_SHAPES.with(std::cell::Cell::get)
++}
++
++
++/// The `last_used` stamp at and above which entries survive a sweep, or `None` when the cache is
++/// within `limit` and nothing needs to go.
++///
++/// Reorders `stamps`. Stamps are unique -- the clock advances on every access -- so retaining
++/// `>= cutoff` keeps exactly `limit / 2` entries.
++fn eviction_cutoff(stamps: &mut [u64], limit: usize) -> Option<u64> {
++    if stamps.len() <= limit {
++        return None;
++    }
++    let nth = stamps.len() - limit / 2;
++    let (_, cutoff, _) = stamps.select_nth_unstable(nth);
++    Some(*cutoff)
++}
++
+ /// RAII guard: takes the shaped paragraphs out of the cache on creation, puts them back on drop.
+ pub(super) struct CachedParagraphsGuard<'a> {
+     paragraphs: Option<Vec<TextParagraph>>,
+@@ -179,11 +259,26 @@ pub(super) fn cached_paragraphs<'a>(
+         cache.inner.release(item_rc);
+     }
+ 
++    // Before the entry is checked out: `sweep` borrows the cache mutably and the guard below holds
++    // that borrow for as long as the caller keeps the paragraphs.
++    if cache.live.get() > ENTRY_LIMIT {
++        cache.sweep();
++    }
++    let clock = cache.clock.get() + 1;
++    cache.clock.set(clock);
++
+     let mut entry = cache.inner.get_or_update_cache_entry_ref(item_rc, || {
+         #[cfg(feature = "testing")]
+         cache.cache_miss_count.set(cache.cache_miss_count.get() + 1);
+-        CachedParagraphs { wrap, paragraphs: Some(shape(font_context)), line_breaking: None }
++        cache.live.set(cache.live.get() + 1);
++        CachedParagraphs {
++            wrap,
++            paragraphs: Some(shape(font_context)),
++            line_breaking: None,
++            last_used: clock,
++        }
+     });
++    entry.last_used = clock;
+     let paragraphs = entry.paragraphs.take().unwrap_or_default();
+     CachedParagraphsGuard {
+         paragraphs: Some(paragraphs),
+@@ -191,3 +286,54 @@ pub(super) fn cached_paragraphs<'a>(
+         container: Some(entry),
+     }
+ }
++
++#[cfg(test)]
++mod eviction_tests {
++    use alloc::vec::Vec;
++
++    use super::eviction_cutoff;
++
++    fn survivors(stamps: &[u64], limit: usize) -> Option<usize> {
++        let mut scratch = stamps.to_vec();
++        let cutoff = eviction_cutoff(&mut scratch, limit)?;
++        Some(stamps.iter().filter(|stamp| **stamp >= cutoff).count())
++    }
++
++    #[test]
++    fn a_cache_within_the_limit_is_left_alone() {
++        assert_eq!(survivors(&[], 8), None);
++        assert_eq!(survivors(&[1, 2, 3], 8), None);
++        // The limit itself must not trigger a sweep, or a cache sitting exactly at it would sweep
++        // on every single access.
++        assert_eq!(survivors(&(1..=8).collect::<Vec<_>>(), 8), None);
++    }
++
++    #[test]
++    fn one_past_the_limit_keeps_half() {
++        assert_eq!(survivors(&(1..=9).collect::<Vec<_>>(), 8), Some(4));
++    }
++
++    #[test]
++    fn the_survivors_are_the_most_recently_used() {
++        let stamps: Vec<u64> = (1..=100).collect();
++        let mut scratch = stamps.clone();
++        let cutoff = eviction_cutoff(&mut scratch, 8).unwrap();
++        assert_eq!(cutoff, 97, "keeps the newest 4 of 100");
++        assert!(stamps.iter().filter(|s| **s >= cutoff).all(|s| *s > 96));
++    }
++
++    #[test]
++    fn order_of_arrival_does_not_matter() {
++        let shuffled = [50, 3, 99, 1, 42, 7, 88, 2, 61, 5];
++        assert_eq!(survivors(&shuffled, 4), Some(2));
++        let mut scratch = shuffled.to_vec();
++        assert_eq!(eviction_cutoff(&mut scratch, 4), Some(88));
++    }
++
++    #[test]
++    fn a_far_oversized_cache_still_drops_to_half_the_limit() {
++        // What the first sweep after a large non-virtualized list is laid out has to do: 180 000
++        // entries down to 512 in one pass, not 180 000 down to 179 999.
++        assert_eq!(survivors(&(1..=180_000).collect::<Vec<_>>(), 1024), Some(512));
++    }
++}
+diff --git a/internal/core/textlayout/sharedparley/draw.rs b/internal/core/textlayout/sharedparley/draw.rs
+index 9f214f8de..9f126dedc 100644
+--- a/internal/core/textlayout/sharedparley/draw.rs
++++ b/internal/core/textlayout/sharedparley/draw.rs
+@@ -86,13 +86,28 @@ pub(super) fn visible_band(item_renderer: &impl GlyphRenderer) -> Range<Physical
+     top..(top + clip.height_length() * scale_factor)
+ }
+ 
++/// The horizontal counterpart of [`visible_band`].
++///
++/// Lines are culled vertically but glyph *runs* were never culled horizontally, so a `no-wrap` line
++/// wider than the viewport submitted every glyph on it to the renderer. That is not only wasted
++/// work: the software renderer casts a glyph's device rect to `i16`, and `euclid`'s `cast()`
++/// unwraps, so a run far enough to the right **panics** - reachable with a ~5 000 character line at
++/// a 13 px font. Skipping runs that cannot reach the clip fixes both.
++pub(super) fn visible_columns(item_renderer: &impl GlyphRenderer) -> Range<PhysicalLength> {
++    let scale_factor = item_renderer.scale_factor();
++    let clip = item_renderer.get_current_clip();
++    let left = clip.origin.x_length() * scale_factor;
++    left..(left + clip.width_length() * scale_factor)
++}
++
+ impl TextParagraph {
+     fn draw<R: GlyphRenderer>(
+         &self,
+-        layout: &Layout,
++        layout: &Layout<'_>,
+         paragraph_index: usize,
+         visible_extent: Option<ElisionCut>,
+         visible_band: &Range<PhysicalLength>,
++        visible_columns: Option<&Range<PhysicalLength>>,
+         item_renderer: &mut R,
+         default_fill_brush: &<R as GlyphRenderer>::PlatformBrush,
+         default_stroke_brush: &Option<<R as GlyphRenderer>::PlatformBrush>,
+@@ -101,7 +116,13 @@ fn draw<R: GlyphRenderer>(
+     ) {
+         let para_y = layout.y_offset + self.y;
+ 
+-        let line_count = self.layout.lines().len();
++        // The one place a drawn paragraph's glyphs are asked for; a large document only keeps the
++        // ones a draw like this reached for (see `Layout::glyphs`).
++        let Some(glyphs) = layout.glyphs(paragraph_index) else {
++            return;
++        };
++
++        let line_count = glyphs.lines().len();
+ 
+         // For `overflow: elide` with a height limit (`overflow: clip` applies a hard pixel clip
+         // instead) and for `max-lines`, `visible_extent` decides -- across all paragraphs -- the
+@@ -123,9 +144,15 @@ fn draw<R: GlyphRenderer>(
+             _ => (line_count.saturating_sub(1), false),
+         };
+ 
+-        self.draw_inline_code_backgrounds(item_renderer, para_y, default_text_color, last_drawn);
++        self.draw_inline_code_backgrounds(
++            &glyphs,
++            item_renderer,
++            para_y,
++            default_text_color,
++            last_drawn,
++        );
+ 
+-        for (index, line) in self.layout.lines().enumerate() {
++        for (index, line) in glyphs.lines().enumerate() {
+             // Stop once we are past the last kept line of the last kept paragraph.
+             if index > last_drawn {
+                 break;
+@@ -170,6 +197,21 @@ fn draw<R: GlyphRenderer>(
+             for item in line.items() {
+                 match item {
+                     parley::PositionedLayoutItem::GlyphRun(glyph_run) => {
++                        // Runs that cannot reach the clip horizontally. Padded by one line height
++                        // for ink that overhangs the run's advance (italics, swashes), the same
++                        // slack the vertical cull uses. Skipped only when nothing is being elided:
++                        // the ellipsis is placed from the run that overflows, so dropping runs
++                        // under `overflow: elide` could lose it.
++                        if let Some(columns) = visible_columns {
++                            let run_start = PhysicalLength::new(glyph_run.offset());
++                            let run_end =
++                                PhysicalLength::new(glyph_run.offset() + glyph_run.advance());
++                            if run_end + line_height < columns.start
++                                || run_start - line_height > columns.end
++                            {
++                                continue;
++                            }
++                        }
+                         let ellipsis = if last_line {
+                             let (truncated_glyphs, ellipsis) = layout.glyphs_with_elision(
+                                 &glyph_run,
+@@ -183,6 +225,7 @@ fn draw<R: GlyphRenderer>(
+                                 default_fill_brush,
+                                 default_stroke_brush,
+                                 para_y,
++                                visible_columns,
+                                 &mut truncated_glyphs.into_iter(),
+                                 selection.map(|selection| &selection.foreground),
+                                 line_spans.unwrap_or_default(),
+@@ -195,6 +238,7 @@ fn draw<R: GlyphRenderer>(
+                                 default_fill_brush,
+                                 default_stroke_brush,
+                                 para_y,
++                                visible_columns,
+                                 &mut glyph_run.positioned_glyphs(),
+                                 selection.map(|selection| &selection.foreground),
+                                 line_spans.unwrap_or_default(),
+@@ -227,6 +271,7 @@ fn draw<R: GlyphRenderer>(
+     /// without any user-facing styling property.
+     fn draw_inline_code_backgrounds<R: GlyphRenderer>(
+         &self,
++        glyphs: &parley::Layout<Brush>,
+         item_renderer: &mut R,
+         para_y: PhysicalLength,
+         default_text_color: Color,
+@@ -265,7 +310,7 @@ fn draw_inline_code_backgrounds<R: GlyphRenderer>(
+ 
+         // Capsules only under lines that are drawn: lines past the visible-extent cut
+         // (`overflow: elide` height limit or `max-lines`) don't render their glyphs either.
+-        for line in self.layout.lines().take(last_drawn + 1) {
++        for line in glyphs.lines().take(last_drawn + 1) {
+             for item in line.items() {
+                 let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                     continue;
+@@ -347,6 +392,11 @@ fn draw_glyph_run_with_selection<R: GlyphRenderer>(
+         default_fill_brush: &<R as GlyphRenderer>::PlatformBrush,
+         default_stroke_brush: &Option<<R as GlyphRenderer>::PlatformBrush>,
+         para_y: PhysicalLength,
++        // Glyphs outside this horizontal band are dropped. A `no-wrap` line of uniform style is a
++        // *single* glyph run spanning the whole line, so culling runs is not enough - the glyphs
++        // themselves have to be filtered, or a 5 000 character line hands the software renderer a
++        // device rect it cannot cast to `i16` and it panics. `None` when eliding.
++        visible_columns: Option<&Range<PhysicalLength>>,
+         glyphs_it: &mut dyn Iterator<Item = parley::layout::Glyph>,
+         // The selection foreground, and the spans it covers on this run's line. Both empty when
+         // there is no selection, which `run_coverage` reports as `Unselected`.
+@@ -355,6 +405,17 @@ fn draw_glyph_run_with_selection<R: GlyphRenderer>(
+     ) {
+         let run_x = glyph_run.offset()..glyph_run.offset() + glyph_run.advance();
+ 
++        // Bidi reorders glyphs within a run, so this filters rather than truncating.
++        let columns = visible_columns.cloned();
++        let mut glyphs_it = glyphs_it.filter(move |glyph| {
++            columns.as_ref().is_none_or(|columns| {
++                let start = PhysicalLength::new(glyph.x);
++                let end = PhysicalLength::new(glyph.x + glyph.advance);
++                end >= columns.start && start <= columns.end
++            })
++        });
++        let glyphs_it: &mut dyn Iterator<Item = parley::layout::Glyph> = &mut glyphs_it;
++
+         match run_coverage(&run_x, line_spans) {
+             RunCoverage::Unselected => Self::draw_glyph_run(
+                 glyph_run,
+@@ -612,7 +673,7 @@ fn draw_glyph_run<R: GlyphRenderer>(
+     }
+ }
+ 
+-impl Layout {
++impl Layout<'_> {
+     pub(super) fn draw<R: GlyphRenderer>(
+         &self,
+         item_renderer: &mut R,
+@@ -631,6 +692,8 @@ pub(super) fn draw<R: GlyphRenderer>(
+         // skipping what lies outside it safe under any transform. The band only filters what is
+         // *drawn*; it never influences elision or `max-lines` accounting.
+         let visible_band = visible_band(item_renderer);
++        // Only when nothing is elided; see the run cull in `TextParagraph::draw`.
++        let visible_columns = (!self.is_eliding()).then(|| visible_columns(item_renderer));
+ 
+         // Paragraphs are stacked in order, so binary-search the first one whose box reaches the
+         // band. Start one paragraph earlier and stop one past the band: glyph ink may overhang
+@@ -639,7 +702,7 @@ pub(super) fn draw<R: GlyphRenderer>(
+         let first = self
+             .paragraphs
+             .partition_point(|p| {
+-                self.y_offset + p.y + PhysicalLength::new(p.layout.height()) < visible_band.start
++                self.y_offset + p.y + PhysicalLength::new(p.metrics.height) < visible_band.start
+             })
+             .saturating_sub(1);
+         let mut past_band = false;
+@@ -653,6 +716,7 @@ pub(super) fn draw<R: GlyphRenderer>(
+                 paragraph_index,
+                 visible_extent,
+                 &visible_band,
++                visible_columns.as_ref(),
+                 item_renderer,
+                 &default_fill_brush,
+                 &default_stroke_brush,
+diff --git a/internal/core/textlayout/sharedparley/layout.rs b/internal/core/textlayout/sharedparley/layout.rs
+index 539d160a4..a6c903b29 100644
+--- a/internal/core/textlayout/sharedparley/layout.rs
++++ b/internal/core/textlayout/sharedparley/layout.rs
+@@ -4,8 +4,17 @@
+ //! From shaped paragraphs to a [`Layout`]: line breaking, alignment, and the elision and
+ //! `max-lines` cuts, plus the queries the entry points ask of the result.
+ 
+-use super::shaping::{Brush, TextParagraph};
++use super::shaping::{
++    Brush, ParagraphMetrics, PlainParagraphSource, RETAINED_PARAGRAPHS, TextParagraph,
++};
+ use super::*;
++use core::cell::{Cell, Ref};
++
++/// How many paragraphs either side of the ones something asked for keep their glyphs when the
++/// document is shaped lazily. Wide enough that scrolling back over what was just read costs no
++/// re-shaping, small enough that the retained glyphs stay a rounding error next to the document
++/// (a paragraph's `parley::Layout` is a few KB, so this window is under a megabyte).
++const RETENTION_MARGIN: usize = 64;
+ 
+ #[derive(Default)]
+ pub(super) struct LayoutOptions {
+@@ -50,6 +59,18 @@ struct LineBreakingInputs {
+ }
+ 
+ impl LineBreakingInputs {
++    /// Whether these inputs agree with `other` on everything except the width the lines were
++    /// broken for.
++    ///
++    /// Only meaningful together with [`RetainedLineBreaking::metrics_reusable_at_any_width`]: parley
++    /// derives a line's advance, height and break positions without the width, and only uses it as
++    /// the alignment container (`inline_max_coord`). So under `no-wrap` the *metrics* of a pass are
++    /// the same for any width, while the *glyph positions* are not -- which is why the caller that
++    /// reuses metrics across a width change has to drop the glyphs it kept.
++    fn matches_except_width(&self, other: &Self) -> bool {
++        Self { max_physical_width: other.max_physical_width, ..*self } == *other
++    }
++
+     fn new(options: &LayoutOptions, max_physical_width: Option<PhysicalLength>) -> Self {
+         Self {
+             max_physical_width,
+@@ -78,6 +99,20 @@ pub(super) struct RetainedLineBreaking {
+     max_width: PhysicalLength,
+     height: PhysicalLength,
+     elision_info: Option<ElisionInfo>,
++    /// The width the paragraphs still holding glyphs were aligned against, which is not
++    /// necessarily the width of the last pass: a measuring call changes the width without ever
++    /// asking for a glyph. `Layout::glyphs` compares against it and re-shapes the window when they
++    /// have drifted apart, so alternating measure and draw passes don't throw the window away.
++    glyph_width: Option<PhysicalLength>,
++    /// Half-open index range that contains every paragraph still holding glyphs. Not exact - it is
++    /// only ever widened by shaping and narrowed by dropping - but it bounds the scans that have to
++    /// find shaped paragraphs, which would otherwise be O(document) on every frame.
++    shaped: (usize, usize),
++    /// Set when the pass that produced these ran under `no-wrap` (so nothing retained here depends
++    /// on the width) *and* was free to drop glyphs (so the ones aligned against the old width can
++    /// be produced again). A call that differs only in the width then reuses these instead of
++    /// re-shaping the document; see [`LineBreakingInputs::matches_except_width`].
++    metrics_reusable_at_any_width: bool,
+ }
+ 
+ /// Where vertical alignment puts the text within the box. Per call, not retained: it depends on
+@@ -94,21 +129,51 @@ fn vertical_offset(
+     }
+ }
+ 
+-pub(super) fn layout(
++pub(super) fn layout<'a>(
+     layout_builder: &LayoutWithoutLineBreaksBuilder,
+     font_context: &mut parley::FontContext,
+     mut paragraphs: Vec<TextParagraph>,
+     scale_factor: ScaleFactor,
+     options: LayoutOptions,
+     line_breaking: Option<RetainedLineBreaking>,
+-) -> Layout {
++    source: Option<&'a PlainParagraphSource<'a>>,
++) -> Layout<'a> {
+     let max_physical_width = options.max_width.map(|max_width| max_width * scale_factor);
+     let max_physical_height = options.max_height.map(|max_height| max_height * scale_factor);
+ 
++    // Which paragraphs keep their glyphs.
++    //
++    // Anything whose retained values depend on the width has to keep them all, because a width
++    // change would otherwise re-shape the whole document to recompute them - and a width change is
++    // what a window resize is, once per frame of the drag. Measured on an 11 MB document: 96 ms
++    // per resize step with the glyphs kept, 1.79 s without. That rules out both wrapping modes
++    // (where the line breaking itself depends on the width), `max-lines` and `overflow: elide`
++    // (whose cut is computed across the whole document from per-line metrics, which don't survive
++    // dropping the glyphs). Under `no-wrap` nothing retained here depends on the width - see
++    // `width_independent_metrics` - so that is where the glyphs can go.
++    //
++    // Computed the same way on both paths below so that the retention doesn't depend on whether
++    // the breaking was reused.
++    let width_independent_metrics = layout_builder.text_wrap == TextWrap::NoWrap
++        && options.max_lines.is_none()
++        && !(options.text_overflow == TextOverflow::Elide && max_physical_width.is_some());
++    let retain_all =
++        source.is_none() || paragraphs.len() <= RETAINED_PARAGRAPHS || !width_independent_metrics;
++
++    // Reusing metrics across a width change is only safe when the glyphs can be produced again on
++    // demand: `Layout::glyphs` drops the ones aligned against the old width, and a document that
++    // retains everything has no way to get them back.
++    let metrics_reusable_at_any_width = width_independent_metrics && !retain_all;
++
+     let inputs = LineBreakingInputs::new(&options, max_physical_width);
+-    if let Some(line_breaking) =
+-        line_breaking.filter(|line_breaking| line_breaking.inputs == inputs)
+-    {
++    if let Some(line_breaking) = line_breaking.filter(|line_breaking| {
++        line_breaking.inputs == inputs
++            || (line_breaking.metrics_reusable_at_any_width
++                && metrics_reusable_at_any_width
++                && line_breaking.inputs.matches_except_width(&inputs))
++    }) {
++        let glyph_width = line_breaking.glyph_width;
++        let shaped = line_breaking.shaped;
+         return Layout {
+             y_offset: vertical_offset(
+                 max_physical_height,
+@@ -123,6 +188,12 @@ pub(super) fn layout(
+             line_limit_cut: line_breaking.line_limit_cut,
+             line_breaking_inputs: inputs,
+             broke_lines: false,
++            source,
++            retain_all,
++            metrics_reusable_at_any_width,
++            glyph_width: Cell::new(glyph_width),
++            shaped: Cell::new(shaped),
++            touched: Cell::new(None),
+         };
+     }
+ 
+@@ -150,15 +221,42 @@ pub(super) fn layout(
+         None
+     };
+ 
++    // The one pass over the whole document: shape what isn't shaped yet, break it, record the
++    // metrics every other path needs, and -- unless everything is retained -- drop the glyphs
++    // again right away, so a large document never has more than a window of them resident at once.
+     let mut para_y = 0.0;
+     for para in paragraphs.iter_mut() {
+-        para.layout.break_all_lines(max_physical_width.map(|width| width.get()));
+-        para.layout.align(inputs.alignment, parley::AlignmentOptions::default());
++        if !para.is_shaped()
++            && let Some(glyphs) =
++                source.and_then(|source| source.shape_with(font_context, para.range.clone()))
++        {
++            #[cfg(feature = "testing")]
++            cache::count_paragraph_shape();
++            para.set_glyphs(glyphs);
++        }
++
++        para.metrics = match para.glyphs_mut() {
++            Some(glyphs) => {
++                glyphs.break_all_lines(max_physical_width.map(|width| width.get()));
++                glyphs.align(inputs.alignment, parley::AlignmentOptions::default());
++                ParagraphMetrics {
++                    width: glyphs.full_width(),
++                    height: glyphs.height(),
++                    line_count: glyphs.lines().len(),
++                }
++            }
++            None => ParagraphMetrics::default(),
++        };
+ 
+         para.y = PhysicalLength::new(para_y);
+-        para_y += para.layout.height();
++        para_y += para.metrics.height;
++
++        if !retain_all {
++            para.drop_glyphs();
++        }
+     }
+ 
++    let paragraph_count = paragraphs.len();
+     let line_limit_cut =
+         options.max_lines.and_then(|max_lines| line_limit_cut(&paragraphs, max_lines));
+     let visible_paragraph_count =
+@@ -173,20 +271,24 @@ pub(super) fn layout(
+             // for that, but we can't at the glyph run level, so the glyph runs always *do* include whitespace glyphs,
+             // and as such we must also accept the full width here including trailing whitespace, otherwise text with
+             // trailing whitespace will assigned a smaller width for rendering and thus the ellipsis will be placed.
+-            match line_limit_cut {
++            match (line_limit_cut, p.glyphs()) {
+                 // In the paragraph where the line limit lands, only the kept lines count towards
+                 // the width; `full_width()` would also span the dropped lines below the cut. Per
+                 // line, mirror parley's `full_width` formula (Slint doesn't use indentation).
+-                Some((last_paragraph, last_line)) if paragraph_index == last_paragraph => p
+-                    .layout
+-                    .lines()
+-                    .take(last_line + 1)
+-                    .map(|line| {
+-                        let metrics = line.metrics();
+-                        PhysicalLength::new(metrics.inline_min_coord + metrics.advance)
+-                    })
+-                    .fold(PhysicalLength::zero(), PhysicalLength::max),
+-                _ => PhysicalLength::new(p.layout.full_width()),
++                // An active line limit implies `retain_all`, so the glyphs are always there.
++                (Some((last_paragraph, last_line)), Some(glyphs))
++                    if paragraph_index == last_paragraph =>
++                {
++                    glyphs
++                        .lines()
++                        .take(last_line + 1)
++                        .map(|line| {
++                            let metrics = line.metrics();
++                            PhysicalLength::new(metrics.inline_min_coord + metrics.advance)
++                        })
++                        .fold(PhysicalLength::zero(), PhysicalLength::max)
++                }
++                _ => PhysicalLength::new(p.metrics.width),
+             }
+         })
+         .fold(PhysicalLength::zero(), PhysicalLength::max);
+@@ -195,16 +297,15 @@ pub(super) fn layout(
+     let height = match line_limit_cut {
+         Some((last_paragraph, last_line)) => {
+             let para = &paragraphs[last_paragraph];
+-            let line = para
+-                .layout
+-                .lines()
+-                .nth(last_line)
+-                .expect("line_limit_cut returns an existing line index");
+-            para.y + PhysicalLength::new(line.metrics().block_max_coord)
++            let block_max_coord = para
++                .glyphs()
++                .and_then(|glyphs| Some(glyphs.lines().nth(last_line)?.metrics().block_max_coord))
++                .unwrap_or(para.metrics.height);
++            para.y + PhysicalLength::new(block_max_coord)
+         }
+         None => paragraphs
+             .last()
+-            .map_or(PhysicalLength::zero(), |p| p.y + PhysicalLength::new(p.layout.height())),
++            .map_or(PhysicalLength::zero(), |p| p.y + PhysicalLength::new(p.metrics.height)),
+     };
+ 
+     let y_offset = vertical_offset(max_physical_height, options.vertical_align, height);
+@@ -219,6 +320,13 @@ pub(super) fn layout(
+         line_limit_cut,
+         line_breaking_inputs: inputs,
+         broke_lines: true,
++        source,
++        retain_all,
++        metrics_reusable_at_any_width,
++        glyph_width: Cell::new(max_physical_width),
++        // The pass above either kept every paragraph's glyphs or dropped every one of them.
++        shaped: Cell::new(if retain_all { (0, paragraph_count) } else { (0, 0) }),
++        touched: Cell::new(None),
+     }
+ }
+ 
+@@ -226,14 +334,14 @@ pub(super) fn layout(
+ /// paragraph) of the last kept line. Returns `None` when all lines fit the limit, so an active
+ /// cut always means that at least one line was dropped.
+ fn line_limit_cut(paragraphs: &[TextParagraph], max_lines: usize) -> Option<(usize, usize)> {
+-    let total_lines: usize = paragraphs.iter().map(|p| p.layout.lines().len()).sum();
++    let total_lines: usize = paragraphs.iter().map(|p| p.metrics.line_count).sum();
+     if total_lines <= max_lines {
+         return None;
+     }
+ 
+     let mut seen_lines = 0;
+     for (paragraph_index, para) in paragraphs.iter().enumerate() {
+-        let line_count = para.layout.lines().len();
++        let line_count = para.metrics.line_count;
+         // seen_lines < max_lines holds on entry, so the cut line index can't underflow and
+         // lands within this paragraph's lines.
+         if seen_lines + line_count >= max_lines {
+@@ -268,7 +376,7 @@ pub(super) struct ElisionCut {
+     pub(super) needs_ellipsis: bool,
+ }
+ 
+-pub(super) struct Layout {
++pub(super) struct Layout<'a> {
+     pub(super) paragraphs: Vec<TextParagraph>,
+     pub(super) y_offset: PhysicalLength,
+     pub(super) max_width: PhysicalLength,
+@@ -283,13 +391,50 @@ pub(super) struct Layout {
+     /// Whether this layout ran the full breaking pass rather than reusing a [`RetainedLineBreaking`].
+     /// Read by the `layout_miss_count` test counter.
+     pub(super) broke_lines: bool,
++    /// Re-shapes a paragraph whose glyphs were dropped. `None` when every paragraph keeps them.
++    source: Option<&'a PlainParagraphSource<'a>>,
++    /// Whether every paragraph keeps its glyphs, in which case [`Self::dismantle`] drops none.
++    retain_all: bool,
++    /// Travels into [`RetainedLineBreaking::metrics_reusable_at_any_width`].
++    metrics_reusable_at_any_width: bool,
++    /// See [`RetainedLineBreaking::glyph_width`].
++    glyph_width: Cell<Option<PhysicalLength>>,
++    /// See [`RetainedLineBreaking::shaped`].
++    shaped: Cell<(usize, usize)>,
++    /// The lowest and highest paragraph index [`Self::glyphs`] was asked for, which is what
++    /// [`Self::dismantle`] keeps a window around. `None` means nothing asked -- a pure measuring
++    /// call -- and then the window from the previous call stands.
++    touched: Cell<Option<(usize, usize)>>,
+ }
+ 
+-impl Layout {
++impl Layout<'_> {
+     /// Takes the layout apart into what the cache entry retains: the paragraphs (holding their
+     /// broken lines and y positions) and the [`RetainedLineBreaking`] that lets the next [`layout`] call
+     /// with equal inputs skip the breaking.
++    ///
++    /// This is also where the glyph retention window is applied: whatever asked for glyphs during
++    /// this call keeps them, plus [`RETENTION_MARGIN`] paragraphs either side so that scrolling
++    /// back over what was just drawn doesn't re-shape.
+     pub(super) fn dismantle(self) -> (Vec<TextParagraph>, RetainedLineBreaking) {
++        let mut shaped = self.shaped.get();
++        if let (false, Some((first, last))) = (self.retain_all, self.touched.get()) {
++            let keep = first.saturating_sub(RETENTION_MARGIN)
++                ..(last + 1).saturating_add(RETENTION_MARGIN).min(self.paragraphs.len());
++            // Only what could be holding glyphs is walked. Walking the document instead costs
++            // O(paragraphs) *per frame* -- two `with_text_layout` calls each scanning 100 000
++            // `RefCell`s measured as +1.0 ms/frame on a GPU, four times the cost of the shaping
++            // this candidate actually added.
++            for index in shaped.0..shaped.1 {
++                if !keep.contains(&index) {
++                    self.paragraphs[index].drop_glyphs();
++                }
++            }
++            shaped = (shaped.0.max(keep.start), shaped.1.min(keep.end));
++            if shaped.0 >= shaped.1 {
++                shaped = (0, 0);
++            }
++        }
++
+         (
+             self.paragraphs,
+             RetainedLineBreaking {
+@@ -298,12 +443,74 @@ pub(super) fn dismantle(self) -> (Vec<TextParagraph>, RetainedLineBreaking) {
+                 max_width: self.max_width,
+                 height: self.height,
+                 elision_info: self.elision_info,
++                glyph_width: self.glyph_width.get(),
++                metrics_reusable_at_any_width: self.metrics_reusable_at_any_width,
++                shaped,
+             },
+         )
+     }
++
++    /// The shaped glyphs of paragraph `index`, re-shaping and re-breaking it if they were dropped.
++    ///
++    /// Every consumer that needs glyphs rather than [`ParagraphMetrics`] goes through here, so that
++    /// the "is it still resident?" question is answered in exactly one place. `None` only for an
++    /// out-of-range index or when the paragraph cannot be shaped at all (a styled document never
++    /// drops its glyphs, so that case doesn't arise for one).
++    pub(super) fn glyphs(&self, index: usize) -> Option<Ref<'_, parley::Layout<Brush>>> {
++        let paragraph = self.paragraphs.get(index)?;
++        let source = self.source;
++
++        // The retained glyphs were aligned against a width that is no longer the one in force --
++        // typically because a measuring pass (no width) ran in between. The metrics survive that
++        // (see `width_independent_metrics`), the glyph positions don't. Only dropped when they can
++        // be produced again: a document that has no source keeps whatever it has, because the
++        // alternative is rendering nothing at all.
++        if source.is_some()
++            && self.glyph_width.get() != self.line_breaking_inputs.max_physical_width
++        {
++            let shaped = self.shaped.get();
++            for index in shaped.0..shaped.1 {
++                self.paragraphs[index].drop_glyphs();
++            }
++            self.shaped.set((0, 0));
++            self.glyph_width.set(self.line_breaking_inputs.max_physical_width);
++        }
++
++        if !paragraph.is_shaped() {
++            let mut glyphs = source?.shape(paragraph.range.clone())?;
++            #[cfg(feature = "testing")]
++            cache::count_paragraph_shape();
++            // Break it exactly as the metrics pass did, so a re-shaped paragraph is
++            // indistinguishable from one that was never dropped.
++            glyphs.break_all_lines(
++                self.line_breaking_inputs.max_physical_width.map(|width| width.get()),
++            );
++            glyphs.align(self.line_breaking_inputs.alignment, parley::AlignmentOptions::default());
++            paragraph.set_glyphs(glyphs);
++            let shaped = self.shaped.get();
++            self.shaped.set(if shaped.0 >= shaped.1 {
++                (index, index + 1)
++            } else {
++                (shaped.0.min(index), shaped.1.max(index + 1))
++            });
++        }
++
++        self.touched.set(Some(match self.touched.get() {
++            Some((first, last)) => (first.min(index), last.max(index)),
++            None => (index, index),
++        }));
++
++        paragraph.glyphs()
++    }
+ }
+ 
+-impl Layout {
++impl Layout<'_> {
++    /// Whether an ellipsis may be placed. The draw path skips its horizontal glyph-run cull then,
++    /// because the ellipsis is positioned from the run that overflows the width.
++    pub(super) fn is_eliding(&self) -> bool {
++        self.elision_info.is_some()
++    }
++
+     /// The paragraphs that have at least one line to show. Only differs from `paragraphs` when a
+     /// `max-lines` limit drops lines: paragraphs entirely below the cut don't take part in
+     /// hit-testing or selection.
+@@ -351,9 +558,11 @@ pub(super) fn first_line_exceeds_height(&self) -> bool {
+         let Some(max_physical_height) = self.max_physical_height else {
+             return false;
+         };
+-        self.paragraphs.first().and_then(|paragraph| paragraph.layout.lines().next()).is_some_and(
+-            |line| !line_fits_height(line.metrics().block_max_coord, max_physical_height),
+-        )
++        self.glyphs(0)
++            .and_then(|glyphs| Some(glyphs.lines().next()?.metrics().block_max_coord))
++            .is_some_and(|block_max_coord| {
++                !line_fits_height(block_max_coord, max_physical_height)
++            })
+     }
+ 
+     /// Whether a line of `paragraph` (with the metrics block range `block_min`..`block_max` in the
+@@ -391,8 +600,9 @@ fn elision_extent(&self) -> Option<ElisionCut> {
+         // The deepest line still within the box, scanning paragraphs and their lines from the
+         // bottom up. Bottom/center alignment clips lines off the top, so the visible block can
+         // start partway down, but its last line is always the lowest one that fits.
+-        let last_within_box = self.paragraphs.iter().enumerate().rev().find_map(|(pi, para)| {
+-            para.layout
++        let last_within_box = (0..self.paragraphs.len()).rev().find_map(|pi| {
++            let para = &self.paragraphs[pi];
++            self.glyphs(pi)?
+                 .lines()
+                 .enumerate()
+                 .rev()
+@@ -410,7 +620,7 @@ fn elision_extent(&self) -> Option<ElisionCut> {
+             .iter()
+             .enumerate()
+             .rev()
+-            .find_map(|(pi, para)| para.layout.lines().len().checked_sub(1).map(|li| (pi, li)));
++            .find_map(|(pi, para)| para.metrics.line_count.checked_sub(1).map(|li| (pi, li)));
+ 
+         let (last_paragraph, last_line) = last_within_box.unwrap_or((0, 0));
+         let needs_ellipsis =
+@@ -421,11 +631,17 @@ fn elision_extent(&self) -> Option<ElisionCut> {
+     /// Returns the last paragraph starting at or before the given byte offset. An offset in the
+     /// gap between two paragraph ranges (between a '\r' and its '\n') thus maps to the preceding
+     /// paragraph; callers have to clamp their local offset to the paragraph's range.
+-    fn paragraph_by_byte_offset(&self, byte_offset: usize) -> Option<&TextParagraph> {
+-        self.visible_paragraphs().iter().take_while(|p| p.range.start <= byte_offset).last()
++    fn paragraph_by_byte_offset(&self, byte_offset: usize) -> Option<usize> {
++        self.visible_paragraphs()
++            .iter()
++            .enumerate()
++            .take_while(|(_, p)| p.range.start <= byte_offset)
++            .last()
++            .map(|(index, _)| index)
+     }
+ 
+-    pub(super) fn paragraph_by_y(&self, y: PhysicalLength) -> Option<&TextParagraph> {
++    /// Index into `paragraphs` of the paragraph covering `y` (in item coordinates).
++    pub(super) fn paragraph_by_y(&self, y: PhysicalLength) -> Option<usize> {
+         // Positions on lines dropped by `max-lines` (within the cut paragraph, when the item is
+         // taller than the visible text) don't hit-test: nothing is rendered there.
+         if self.below_line_limit(y) {
+@@ -435,32 +651,40 @@ pub(super) fn paragraph_by_y(&self, y: PhysicalLength) -> Option<&TextParagraph>
+         // Adjust for vertical alignment
+         let y = y - self.y_offset;
+ 
++        let visible = self.visible_paragraphs();
++        if visible.is_empty() {
++            return None;
++        }
+         if y < PhysicalLength::zero() {
+-            return self.visible_paragraphs().first();
++            return Some(0);
+         }
+ 
+-        let idx = self.visible_paragraphs().binary_search_by(|paragraph| {
++        let idx = visible.binary_search_by(|paragraph| {
+             if y < paragraph.y {
+                 core::cmp::Ordering::Greater
+-            } else if y >= paragraph.y + PhysicalLength::new(paragraph.layout.height()) {
++            } else if y >= paragraph.y + PhysicalLength::new(paragraph.metrics.height) {
+                 core::cmp::Ordering::Less
+             } else {
+                 core::cmp::Ordering::Equal
+             }
+         });
+ 
+-        match idx {
+-            Ok(i) => self.visible_paragraphs().get(i),
+-            Err(_) => self.visible_paragraphs().last(),
+-        }
++        Some(match idx {
++            Ok(i) if i < visible.len() => i,
++            _ => visible.len() - 1,
++        })
+     }
+ 
+     pub(super) fn byte_offset_from_point(&self, pos: PhysicalPoint) -> usize {
+-        let Some(paragraph) = self.paragraph_by_y(pos.y_length()) else {
++        let Some(index) = self.paragraph_by_y(pos.y_length()) else {
+             return 0;
+         };
++        let paragraph = &self.paragraphs[index];
++        let Some(glyphs) = self.glyphs(index) else {
++            return paragraph.range.start;
++        };
+         let cursor = parley::editing::Cursor::from_point(
+-            &paragraph.layout,
++            &glyphs,
+             pos.x,
+             (pos.y_length() - self.y_offset - paragraph.y).get(),
+         );
+@@ -472,17 +696,18 @@ pub(super) fn cursor_rect_for_byte_offset(
+         byte_offset: usize,
+         cursor_width: PhysicalLength,
+     ) -> PhysicalRect {
+-        let Some(paragraph) = self.paragraph_by_byte_offset(byte_offset) else {
++        let Some(index) = self.paragraph_by_byte_offset(byte_offset) else {
++            return PhysicalRect::new(PhysicalPoint::default(), PhysicalSize::new(1.0, 1.0));
++        };
++        let paragraph = &self.paragraphs[index];
++        let Some(glyphs) = self.glyphs(index) else {
+             return PhysicalRect::new(PhysicalPoint::default(), PhysicalSize::new(1.0, 1.0));
+         };
+ 
+         let local_offset = (byte_offset - paragraph.range.start).min(paragraph.range.len());
+-        let cursor = parley::editing::Cursor::from_byte_index(
+-            &paragraph.layout,
+-            local_offset,
+-            Default::default(),
+-        );
+-        let rect = cursor.geometry(&paragraph.layout, cursor_width.get());
++        let cursor =
++            parley::editing::Cursor::from_byte_index(&glyphs, local_offset, Default::default());
++        let rect = cursor.geometry(&glyphs, cursor_width.get());
+ 
+         PhysicalRect::new(
+             PhysicalPoint::from_lengths(
+diff --git a/internal/core/textlayout/sharedparley/selection.rs b/internal/core/textlayout/sharedparley/selection.rs
+index 9fb19d4c3..efac5e724 100644
+--- a/internal/core/textlayout/sharedparley/selection.rs
++++ b/internal/core/textlayout/sharedparley/selection.rs
+@@ -102,7 +102,7 @@ pub(super) fn run_coverage(run_x: &Range<f32>, spans: &[SelectionSpan]) -> RunCo
+     if overlapping { RunCoverage::Partial } else { RunCoverage::Unselected }
+ }
+ 
+-impl Layout {
++impl Layout<'_> {
+     /// Resolves `selection_range` into per-line horizontal spans, for the lines whose boxes may
+     /// intersect `visible_band` (a physical y range in item coordinates; spans feed drawing only,
+     /// so off-screen lines need none). Pass an unbounded band to resolve everything.
+@@ -118,15 +118,29 @@ pub(super) fn selection_geometry(
+     ) -> SelectionSpans {
+         let mut spans = Vec::new();
+ 
+-        for (paragraph_index, paragraph) in self.visible_paragraphs().iter().enumerate() {
++        // Paragraphs are stacked in order, so binary-search the first one that can reach the band
++        // instead of walking the document to it -- a selection spanning 400 000 paragraphs was
++        // costing ~0.8 ms per frame in skipped iterations alone. Start one paragraph earlier and
++        // stop one past the band, for the same reason the draw loop does: ink may overhang the
++        // line box, and the per-paragraph test below trims those two edge paragraphs.
++        let visible = self.visible_paragraphs();
++        let first = visible
++            .partition_point(|p| {
++                self.y_offset + p.y + PhysicalLength::new(p.metrics.height) < visible_band.start
++            })
++            .saturating_sub(1);
++
++        for paragraph_index in first..visible.len() {
++            let paragraph = &self.paragraphs[paragraph_index];
+             // Like the draw cull, padded by an (average) line height for ink that overhangs its
+             // line box: such a line still draws, so it still needs its spans.
+             let paragraph_top = self.y_offset + paragraph.y;
+-            let paragraph_height = PhysicalLength::new(paragraph.layout.height());
+-            let line_pad = paragraph_height / paragraph.layout.lines().len().max(1) as f32;
+-            if paragraph_top + paragraph_height + line_pad < visible_band.start
+-                || paragraph_top - line_pad > visible_band.end
+-            {
++            let paragraph_height = PhysicalLength::new(paragraph.metrics.height);
++            let line_pad = paragraph_height / paragraph.metrics.line_count.max(1) as f32;
++            if paragraph_top - line_pad > visible_band.end {
++                break;
++            }
++            if paragraph_top + paragraph_height + line_pad < visible_band.start {
+                 continue;
+             }
+ 
+@@ -140,20 +154,18 @@ pub(super) fn selection_geometry(
+             let local_start = selection_start - paragraph.range.start;
+             let local_end = selection_end - paragraph.range.start;
+ 
++            // Only reached for paragraphs the band lets through, so a large document doesn't
++            // re-shape itself to resolve a selection that spans it.
++            let Some(glyphs) = self.glyphs(paragraph_index) else {
++                continue;
++            };
++
+             let selection = parley::editing::Selection::new(
+-                parley::editing::Cursor::from_byte_index(
+-                    &paragraph.layout,
+-                    local_start,
+-                    Default::default(),
+-                ),
+-                parley::editing::Cursor::from_byte_index(
+-                    &paragraph.layout,
+-                    local_end,
+-                    Default::default(),
+-                ),
++                parley::editing::Cursor::from_byte_index(&glyphs, local_start, Default::default()),
++                parley::editing::Cursor::from_byte_index(&glyphs, local_end, Default::default()),
+             );
+ 
+-            selection.geometry_with(&paragraph.layout, |rect, line| {
++            selection.geometry_with(&glyphs, |rect, line| {
+                 // Snap the horizontal edges to device pixels once, here, so that the highlight
+                 // rectangle and the glyph clip derived from the same span are pixel-identical.
+                 let x = (rect.x0 as f32).round()..(rect.x1 as f32).round();
+diff --git a/internal/core/textlayout/sharedparley/shaping.rs b/internal/core/textlayout/sharedparley/shaping.rs
+index 8e8ec8bbc..9f3497185 100644
+--- a/internal/core/textlayout/sharedparley/shaping.rs
++++ b/internal/core/textlayout/sharedparley/shaping.rs
+@@ -281,8 +281,17 @@ pub(super) fn create_text_paragraphs(
+                 .collect();
+ 
+             let layout = layout_builder.build(font_context, text, formatting, Some(link_color));
+-
+-            TextParagraph { range, y: PhysicalLength::default(), layout, links, code_ranges }
++            #[cfg(feature = "testing")]
++            super::cache::count_paragraph_shape();
++
++            TextParagraph {
++                range,
++                y: PhysicalLength::default(),
++                metrics: ParagraphMetrics::default(),
++                glyphs: RefCell::new(Some(alloc::boxed::Box::new(layout))),
++                links,
++                code_ranges,
++            }
+         };
+ 
+     let mut paragraphs = Vec::with_capacity(1);
+@@ -359,12 +368,78 @@ pub(super) fn content_widths_builder(
+ /// with what the item's cache entry was shaped with.
+ #[cfg(test)]
+ pub(super) fn plain_builder_for_tests() -> LayoutWithoutLineBreaksBuilder {
+-    LayoutWithoutLineBreaksBuilder::new(None, TextWrap::NoWrap, None, ScaleFactor::new(1.0))
++    builder_for_tests(TextWrap::NoWrap)
++}
++
++#[cfg(test)]
++pub(super) fn builder_for_tests(text_wrap: TextWrap) -> LayoutWithoutLineBreaksBuilder {
++    LayoutWithoutLineBreaksBuilder::new(None, text_wrap, None, ScaleFactor::new(1.0))
++}
++
++/// Documents with more paragraphs than this are shaped one paragraph at a time, on demand, and
++/// only keep the glyphs of the paragraphs near the ones something asked for -- see
++/// [`PlainParagraphSource`] and `layout::Layout::glyphs`. Below the threshold a document's glyphs
++/// are cheap enough to keep in full, and keeping them avoids ever re-shaping.
++pub(super) const RETAINED_PARAGRAPHS: usize = 128;
++
++/// Re-shapes a single paragraph of a plain-text document.
++///
++/// Only plain text: a paragraph's glyphs can be reproduced from its byte range alone, whereas a
++/// styled paragraph also carries formatting spans and links, so styled documents keep the glyphs
++/// of every paragraph like they always did.
++///
++/// The builder is the same one the enclosing `with_text_layout` call passes to `layout`, and the
++/// text is the same value the shaping registered in the cache entry's dependency tracker, so a
++/// paragraph re-shaped here is byte-for-byte what the eager pass would have produced.
++pub(super) struct PlainParagraphSource<'a> {
++    builder: &'a LayoutWithoutLineBreaksBuilder,
++    text: crate::SharedString,
++    /// Borrowed only for the duration of one `shape` call: the glyph drawing that asks for the
++    /// paragraph re-enters the font context itself.
++    font_context: &'a RefCell<super::FontContext>,
++}
++
++impl<'a> PlainParagraphSource<'a> {
++    pub(super) fn new(
++        builder: &'a LayoutWithoutLineBreaksBuilder,
++        text: &PlainOrStyledText,
++        font_context: &'a RefCell<super::FontContext>,
++    ) -> Option<Self> {
++        match text {
++            PlainOrStyledText::Plain(text) => {
++                Some(Self { builder, text: text.clone(), font_context })
++            }
++            PlainOrStyledText::Styled(_) => None,
++        }
++    }
++
++    pub(super) fn shape_with(
++        &self,
++        font_context: &mut parley::FontContext,
++        range: Range<usize>,
++    ) -> Option<parley::Layout<Brush>> {
++        let text = self.text.as_str().get(range)?;
++        Some(self.builder.build(font_context, text, core::iter::empty(), None))
++    }
++
++    /// Like [`Self::shape_with`], for callers that don't already hold the font context. Fails
++    /// rather than panicking if it is borrowed, which would mean re-entering shaping from within
++    /// shaping -- a paragraph that can't be shaped is simply not drawn.
++    pub(super) fn shape(&self, range: Range<usize>) -> Option<parley::Layout<Brush>> {
++        let mut font_context = self.font_context.try_borrow_mut().ok()?;
++        self.shape_with(&mut font_context, range)
++    }
+ }
+ 
+ /// Shapes `text` the way both the drawing and the measuring paths need it, so that they can share
+ /// one cache entry. `text_wrap` is passed separately because `text_size` measures the unwrapped
+ /// width of items that are otherwise wrapped.
++///
++/// Past [`RETAINED_PARAGRAPHS`] paragraphs of plain text this only splits the document into
++/// paragraph ranges and leaves the glyphs to `layout`, which produces them one at a time and keeps
++/// only the ones near what is being drawn. The *property reads* are the same either way -- which
++/// is what the cache entry's dependency tracker records, and why the lazy path may not shortcut
++/// any of them.
+ pub(super) fn shape_paragraphs(
+     text: Pin<&dyn crate::item_rendering::RenderString>,
+     item_rc: Option<&crate::item_tree::ItemRc>,
+@@ -373,16 +448,97 @@ pub(super) fn shape_paragraphs(
+     font_context: &mut parley::FontContext,
+ ) -> Vec<TextParagraph> {
+     let builder = shaping_builder(text, item_rc, text_wrap, scale_factor);
+-    create_text_paragraphs(&builder, font_context, text.text(), text.link_color())
++    // Read before the split: the lazy path below produces no glyphs, but the cache entry's
++    // dependency tracker still has to see every property the eager path would have read.
++    let link_color = text.link_color();
++    let text = text.text();
++
++    if let PlainOrStyledText::Plain(plain) = &text {
++        // Cheaper than `paragraph_ranges().count()`, and the whole document is scanned for '\n'
++        // by the split below anyway.
++        let paragraph_count = plain.as_str().bytes().filter(|byte| *byte == b'\n').count() + 1;
++        if paragraph_count > RETAINED_PARAGRAPHS {
++            return paragraph_ranges(plain.as_str()).map(TextParagraph::unshaped).collect();
++        }
++    }
++
++    create_text_paragraphs(&builder, font_context, text, link_color)
++}
++
++/// What a paragraph contributes to the enclosing [`super::layout::Layout`], extracted from the
++/// shaped glyphs by the line breaking pass.
++///
++/// This is deliberately everything the measuring, hit-testing and draw-culling paths need, so that
++/// they never have to touch [`TextParagraph::glyphs`] -- which is what lets the glyphs be dropped
++/// for paragraphs that are nowhere near the visible band. Per-*line* metrics are not here: only
++/// paragraphs that are actually drawn need them, and those hold their glyphs.
++#[derive(Default, Clone, Copy)]
++pub(super) struct ParagraphMetrics {
++    /// `parley::Layout::full_width()` of the broken lines.
++    pub(super) width: f32,
++    /// `parley::Layout::height()` of the broken lines.
++    pub(super) height: f32,
++    pub(super) line_count: usize,
+ }
+ 
+ pub(super) struct TextParagraph {
+     pub(super) range: Range<usize>,
+     pub(super) y: PhysicalLength,
+-    pub(super) layout: parley::Layout<Brush>,
++    /// Valid once the breaking pass has run over this paragraph; see [`ParagraphMetrics`].
++    pub(super) metrics: ParagraphMetrics,
++    /// The shaped and broken glyphs, or `None` when they were dropped (or never produced) because
++    /// the paragraph is far from anything that has to be painted. Boxed so an unshaped paragraph
++    /// costs a pointer rather than a whole `parley::Layout`, of which a large document has one per
++    /// line. Interior mutability because [`super::layout::Layout::glyphs`] re-shapes on demand,
++    /// from behind the `&Layout` that every consumer gets.
++    glyphs: RefCell<Option<alloc::boxed::Box<parley::Layout<Brush>>>>,
+     pub(super) links: std::vec::Vec<(Range<usize>, std::string::String)>,
+     /// Byte ranges within the paragraph's text that carry `Style::Code`. Drawn with a
+     /// translucent rounded background by `draw` for visual parity with common markdown
+     /// renderers.
+     pub(super) code_ranges: std::vec::Vec<Range<usize>>,
+ }
++
++impl TextParagraph {
++    /// A paragraph whose glyphs have not been produced yet. Only plain text can be built this way:
++    /// re-shaping needs nothing but `range` and the document text, whereas a styled paragraph also
++    /// carries formatting spans (see [`PlainParagraphSource`]).
++    pub(super) fn unshaped(range: Range<usize>) -> Self {
++        Self {
++            range,
++            y: PhysicalLength::default(),
++            metrics: ParagraphMetrics::default(),
++            glyphs: RefCell::new(None),
++            links: Default::default(),
++            code_ranges: Default::default(),
++        }
++    }
++
++    /// The shaped glyphs, if this paragraph is currently holding them. Reach for
++    /// [`super::layout::Layout::glyphs`] instead unless the paragraph is known to be shaped: it
++    /// re-shapes on demand, which is the whole point of the glyphs being droppable.
++    pub(super) fn glyphs(&self) -> Option<core::cell::Ref<'_, parley::Layout<Brush>>> {
++        core::cell::Ref::filter_map(self.glyphs.borrow(), |glyphs| {
++            glyphs.as_deref()
++        })
++        .ok()
++    }
++
++    /// The shaped glyphs for the breaking pass, which owns the paragraphs and is the only place
++    /// they are mutated.
++    pub(super) fn glyphs_mut(&mut self) -> Option<&mut parley::Layout<Brush>> {
++        self.glyphs.get_mut().as_deref_mut()
++    }
++
++    pub(super) fn is_shaped(&self) -> bool {
++        self.glyphs.borrow().is_some()
++    }
++
++    pub(super) fn set_glyphs(&self, glyphs: parley::Layout<Brush>) {
++        *self.glyphs.borrow_mut() = Some(alloc::boxed::Box::new(glyphs));
++    }
++
++    pub(super) fn drop_glyphs(&self) {
++        *self.glyphs.borrow_mut() = None;
++    }
++}
+diff --git a/internal/core/textlayout/sharedparley/tests.rs b/internal/core/textlayout/sharedparley/tests.rs
+index c177fc0af..211fdfde7 100644
+--- a/internal/core/textlayout/sharedparley/tests.rs
++++ b/internal/core/textlayout/sharedparley/tests.rs
+@@ -10,9 +10,9 @@ fn paragraphs(text: &str) -> Vec<&str> {
+     paragraph_ranges(text).map(|r| &text[r]).collect()
+ }
+ 
+-fn layout_text_with_options(text: &str, options: LayoutOptions) -> Layout {
+-    // Don't load system fonts: that goes through fontconfig FFI, which Miri
+-    // can't execute. Use the bundled Inter font instead.
++/// Don't load system fonts: that goes through fontconfig FFI, which Miri can't execute. Use the
++/// bundled Inter font instead.
++fn test_font_context() -> parley::FontContext {
+     let mut font_ctx = parley::FontContext {
+         collection: fontique::Collection::new(fontique::CollectionOptions {
+             system_fonts: false,
+@@ -26,6 +26,11 @@ fn layout_text_with_options(text: &str, options: LayoutOptions) -> Layout {
+         fontique::GenericFamily::SansSerif,
+         families.iter().map(|(id, _)| *id),
+     );
++    font_ctx
++}
++
++fn layout_text_with_options(text: &str, options: LayoutOptions) -> Layout<'static> {
++    let mut font_ctx = test_font_context();
+     let builder = super::shaping::plain_builder_for_tests();
+     let paragraphs = create_text_paragraphs(
+         &builder,
+@@ -33,15 +38,15 @@ fn layout_text_with_options(text: &str, options: LayoutOptions) -> Layout {
+         PlainOrStyledText::Plain(text.into()),
+         Color::default(),
+     );
+-    layout(&builder, &mut font_ctx, paragraphs, ScaleFactor::new(1.0), options, None)
++    layout(&builder, &mut font_ctx, paragraphs, ScaleFactor::new(1.0), options, None, None)
+ }
+ 
+-fn layout_text(text: &str) -> Layout {
++fn layout_text(text: &str) -> Layout<'static> {
+     layout_text_with_options(text, LayoutOptions::default())
+ }
+ 
+ fn visual_line_count(text: &str) -> usize {
+-    layout_text(text).paragraphs.iter().map(|p| p.layout.lines().len()).sum()
++    layout_text(text).paragraphs.iter().map(|p| p.metrics.line_count).sum()
+ }
+ 
+ #[test]
+@@ -122,7 +127,7 @@ fn test_paragraph_ranges_crlf() {
+     assert_eq!(paragraphs("hello\rworld"), ["hello\rworld"]);
+ }
+ 
+-fn layout_with_max_lines(text: &str, max_lines: usize) -> Layout {
++fn layout_with_max_lines(text: &str, max_lines: usize) -> Layout<'static> {
+     layout_text_with_options(
+         text,
+         LayoutOptions { max_lines: Some(max_lines), ..LayoutOptions::default() },
+@@ -175,15 +180,16 @@ fn test_max_lines_caps_preferred_width() {
+     // The per-line width formula used for the cut paragraph mirrors parley's `full_width`;
+     // pin the equivalence so a change in parley's formula doesn't silently diverge.
+     let unlimited = layout_text("ab\rlonger");
+-    let per_line_max = unlimited.paragraphs[0]
+-        .layout
++    let per_line_max = unlimited
++        .glyphs(0)
++        .unwrap()
+         .lines()
+         .map(|line| {
+             let metrics = line.metrics();
+             metrics.inline_min_coord + metrics.advance
+         })
+         .fold(0.0f32, f32::max);
+-    assert_eq!(per_line_max, unlimited.paragraphs[0].layout.full_width());
++    assert_eq!(per_line_max, unlimited.glyphs(0).unwrap().full_width());
+ }
+ 
+ #[test]
+@@ -213,7 +219,246 @@ fn test_max_lines_caps_height() {
+     assert!(limited.height > PhysicalLength::zero());
+     // The capped height matches the bottom of the last kept line.
+     let first_line_bottom = PhysicalLength::new(
+-        limited.paragraphs[0].layout.lines().next().unwrap().metrics().block_max_coord,
++        limited.glyphs(0).unwrap().lines().next().unwrap().metrics().block_max_coord,
+     );
+     assert_eq!(limited.height, first_line_bottom);
+ }
++
++/// A document long enough that `layout` shapes its paragraphs one at a time and drops the glyphs
++/// again -- see `shaping::RETAINED_PARAGRAPHS`.
++fn long_document() -> std::string::String {
++    (0..300)
++        .map(|line| std::format!("line {line} with a few words on it"))
++        .collect::<Vec<_>>()
++        .join("\n")
++}
++
++/// The whole point of shaping lazily is that a paragraph re-shaped on demand is indistinguishable
++/// from one that was never dropped. Everything a consumer can observe is compared between the two.
++#[test]
++fn lazily_shaped_paragraphs_match_eagerly_shaped_ones() {
++    let text = long_document();
++    let plain = PlainOrStyledText::Plain(text.as_str().into());
++    let builder = super::shaping::plain_builder_for_tests();
++    let cursor_width = PhysicalLength::new(1.0);
++    let offsets = [0, 1, 17, text.len() / 3, text.len() / 2, text.len() - 1, text.len()];
++
++    let mut font_ctx = test_font_context();
++    let eager_paragraphs =
++        create_text_paragraphs(&builder, &mut font_ctx, plain, Color::default());
++    let eager = layout(
++        &builder,
++        &mut font_ctx,
++        eager_paragraphs,
++        ScaleFactor::new(1.0),
++        LayoutOptions::default(),
++        None,
++        None,
++    );
++
++    let font_ctx = RefCell::new(FontContext::new(test_font_context()));
++    let plain = PlainOrStyledText::Plain(text.as_str().into());
++    let source = super::shaping::PlainParagraphSource::new(&builder, &plain, &font_ctx)
++        .expect("plain text has a paragraph source");
++    let unshaped =
++        paragraph_ranges(&text).map(super::shaping::TextParagraph::unshaped).collect::<Vec<_>>();
++    let lazy = layout(
++        &builder,
++        &mut font_ctx.borrow_mut(),
++        unshaped,
++        ScaleFactor::new(1.0),
++        LayoutOptions::default(),
++        None,
++        Some(&source),
++    );
++
++    // Otherwise the comparison below is between two eagerly shaped documents and proves nothing.
++    assert_eq!(
++        lazy.paragraphs.iter().filter(|paragraph| paragraph.is_shaped()).count(),
++        0,
++        "the metrics pass should have dropped every paragraph's glyphs"
++    );
++
++    assert_eq!(eager.paragraphs.len(), lazy.paragraphs.len());
++    assert_eq!(eager.height, lazy.height);
++    assert_eq!(eager.max_width, lazy.max_width);
++    for (index, (eager_paragraph, lazy_paragraph)) in
++        eager.paragraphs.iter().zip(lazy.paragraphs.iter()).enumerate()
++    {
++        assert_eq!(eager_paragraph.range, lazy_paragraph.range, "paragraph {index}");
++        assert_eq!(eager_paragraph.y, lazy_paragraph.y, "paragraph {index}");
++        assert_eq!(eager_paragraph.metrics.width, lazy_paragraph.metrics.width, "paragraph {index}");
++        assert_eq!(
++            eager_paragraph.metrics.height,
++            lazy_paragraph.metrics.height,
++            "paragraph {index}"
++        );
++        assert_eq!(
++            eager_paragraph.metrics.line_count,
++            lazy_paragraph.metrics.line_count,
++            "paragraph {index}"
++        );
++    }
++
++    for offset in offsets {
++        assert_eq!(
++            eager.cursor_rect_for_byte_offset(offset, cursor_width),
++            lazy.cursor_rect_for_byte_offset(offset, cursor_width),
++            "cursor rect at {offset}"
++        );
++    }
++    for y in [0.0, 10.0, 500.0, 3000.0] {
++        for x in [0.0, 25.0, 400.0] {
++            let point = PhysicalPoint::new(x, y);
++            assert_eq!(
++                eager.byte_offset_from_point(point),
++                lazy.byte_offset_from_point(point),
++                "byte offset at {point:?}"
++            );
++        }
++    }
++
++    let band = PhysicalLength::new(0.0)..PhysicalLength::new(f32::INFINITY);
++    let selection = 40..600;
++    assert_eq!(
++        std::format!("{:?}", eager.selection_geometry(selection.clone(), &band)),
++        std::format!("{:?}", lazy.selection_geometry(selection, &band)),
++    );
++}
++
++/// Dismantling keeps the paragraphs that asked for glyphs, plus a margin either side, and drops
++/// the rest -- that window is the entire memory story of this candidate.
++#[test]
++fn dismantling_keeps_only_a_window_of_shaped_paragraphs() {
++    let text = long_document();
++    let plain = PlainOrStyledText::Plain(text.as_str().into());
++    let builder = super::shaping::plain_builder_for_tests();
++    let font_ctx = RefCell::new(FontContext::new(test_font_context()));
++    let source = super::shaping::PlainParagraphSource::new(&builder, &plain, &font_ctx)
++        .expect("plain text has a paragraph source");
++    let mut paragraphs =
++        paragraph_ranges(&text).map(super::shaping::TextParagraph::unshaped).collect::<Vec<_>>();
++    let mut line_breaking = None;
++
++    // (paragraphs to ask for, paragraphs expected to hold glyphs afterwards). The margin is 64
++    // either side of everything asked for *in this pass*, but it only protects glyphs from being
++    // dropped -- it never shapes ahead.
++    let passes = [
++        (100..110, std::vec![100..110]),
++        // Still within 150 - 64, so the first window survives a pass that moved on.
++        (150..160, std::vec![100..110, 150..160]),
++        // 0 + 64 no longer reaches either of them.
++        (0..1, std::vec![0..1]),
++    ];
++
++    for (asked_for, expected) in passes {
++        let layout = layout(
++            &builder,
++            &mut font_ctx.borrow_mut(),
++            paragraphs,
++            ScaleFactor::new(1.0),
++            LayoutOptions::default(),
++            line_breaking,
++            Some(&source),
++        );
++        for index in asked_for.clone() {
++            assert!(layout.glyphs(index).is_some(), "paragraph {index} should shape on demand");
++        }
++        (paragraphs, line_breaking) = {
++            let (paragraphs, retained) = layout.dismantle();
++            (paragraphs, Some(retained))
++        };
++
++        for (index, paragraph) in paragraphs.iter().enumerate() {
++            let expected = expected.iter().any(|range| range.contains(&index));
++            assert_eq!(
++                paragraph.is_shaped(),
++                expected,
++                "paragraph {index} after asking for {asked_for:?}"
++            );
++        }
++    }
++}
++
++/// A document short enough to keep every paragraph's glyphs must not pay for any of the above.
++#[test]
++fn short_documents_keep_every_paragraph_shaped() {
++    let layout = layout_text("one\ntwo\nthree");
++    assert!(layout.paragraphs.iter().all(|paragraph| paragraph.is_shaped()));
++    let (paragraphs, _) = layout.dismantle();
++    assert!(paragraphs.iter().all(|paragraph| paragraph.is_shaped()));
++}
++
++/// Wrapped text keeps every paragraph's glyphs, however long the document.
++///
++/// Under `word-wrap` the line breaking itself depends on the width, so the metrics of a pass are
++/// only valid for the width it ran at. Dropping the glyphs would mean re-shaping the whole document
++/// on every width change - and a window resize is one width change per frame of the drag, measured
++/// at 96 ms with the glyphs kept against 1.79 s without.
++#[test]
++fn wrapped_documents_keep_every_paragraph_shaped() {
++    let text = long_document();
++    let plain = PlainOrStyledText::Plain(text.as_str().into());
++
++    for (wrap, expect_shaped) in
++        [(TextWrap::NoWrap, false), (TextWrap::WordWrap, true), (TextWrap::CharWrap, true)]
++    {
++        let builder = super::shaping::builder_for_tests(wrap);
++        let font_ctx = RefCell::new(FontContext::new(test_font_context()));
++        let source = super::shaping::PlainParagraphSource::new(&builder, &plain, &font_ctx)
++            .expect("plain text has a paragraph source");
++        let unshaped = paragraph_ranges(&text)
++            .map(super::shaping::TextParagraph::unshaped)
++            .collect::<Vec<_>>();
++        let layout = layout(
++            &builder,
++            &mut font_ctx.borrow_mut(),
++            unshaped,
++            ScaleFactor::new(1.0),
++            LayoutOptions { max_width: Some(LogicalLength::new(200.0)), ..Default::default() },
++            None,
++            Some(&source),
++        );
++        assert_eq!(
++            layout.paragraphs.iter().all(|paragraph| paragraph.is_shaped()),
++            expect_shaped,
++            "{wrap:?}"
++        );
++    }
++}
++
++/// `max-lines` and `overflow: elide` derive their cut from per-line metrics of paragraphs anywhere
++/// in the document, which don't survive dropping the glyphs.
++#[test]
++fn line_limited_and_elided_documents_keep_every_paragraph_shaped() {
++    let text = long_document();
++    let plain = PlainOrStyledText::Plain(text.as_str().into());
++    let builder = super::shaping::plain_builder_for_tests();
++
++    for options in [
++        LayoutOptions { max_lines: Some(10), ..Default::default() },
++        LayoutOptions {
++            text_overflow: TextOverflow::Elide,
++            max_width: Some(LogicalLength::new(200.0)),
++            max_height: Some(LogicalLength::new(100.0)),
++            ..Default::default()
++        },
++    ] {
++        let font_ctx = RefCell::new(FontContext::new(test_font_context()));
++        let source = super::shaping::PlainParagraphSource::new(&builder, &plain, &font_ctx)
++            .expect("plain text has a paragraph source");
++        let unshaped = paragraph_ranges(&text)
++            .map(super::shaping::TextParagraph::unshaped)
++            .collect::<Vec<_>>();
++        let layout = layout(
++            &builder,
++            &mut font_ctx.borrow_mut(),
++            unshaped,
++            ScaleFactor::new(1.0),
++            options,
++            None,
++            Some(&source),
++        );
++        assert!(layout.paragraphs.iter().all(|paragraph| paragraph.is_shaped()));
++    }
++}
+diff --git a/internal/renderers/femtovg/itemrenderer.rs b/internal/renderers/femtovg/itemrenderer.rs
+index b1ff658e9..471ed29b9 100644
+--- a/internal/renderers/femtovg/itemrenderer.rs
++++ b/internal/renderers/femtovg/itemrenderer.rs
+@@ -102,11 +102,78 @@ pub struct GLItemRenderer<'a, R: femtovg::Renderer + TextureImporter> {
+     metrics: RenderingMetrics,
+ }
+ 
++/// The stops of a Slint gradient as femtovg wants them, with the extra stop at 1.0 that femtovg
++/// needs to keep the last color from being extrapolated.
++///
++/// Returns an iterator instead of a `Vec`: femtovg's `*_gradient_stops` take
++/// `impl IntoIterator`, and this runs once per gradient-filled primitive per frame, so the
++/// collect was one allocation per primitive for nothing. The stops iterator is walked twice
++/// (once for the last stop, once for the values), which is cheap - gradients have a handful of
++/// stops.
++fn gradient_stops<'a>(
++    stops: impl Iterator<Item = &'a i_slint_core::graphics::GradientStop> + Clone,
++) -> impl Iterator<Item = (f32, femtovg::Color)> {
++    let extra = stops
++        .clone()
++        .last()
++        .filter(|last| last.position != 1.0)
++        .map(|last| (1.0, to_femtovg_color(&last.color)));
++    stops.map(|stop| (stop.position, to_femtovg_color(&stop.color))).chain(extra)
++}
++
++std::thread_local! {
++    /// Scratch paths handed out by [`ScratchPath`]. Building a `femtovg::Path` allocates its verb
++    /// and coordinate vectors, and the renderer builds one per rectangle per frame, so the vectors
++    /// (and, with femtovg's `PathCache` reuse, the tessellation buffers) are recycled instead.
++    static PATH_POOL: RefCell<Vec<femtovg::Path>> = const { RefCell::new(Vec::new()) };
++}
++
++/// A `femtovg::Path` borrowed from a thread-local pool and returned, cleared, on drop.
++/// Deref-coerces to `&femtovg::Path`, so call sites pass `&path` as before.
++struct ScratchPath(Option<femtovg::Path>);
++
++impl ScratchPath {
++    fn new() -> Self {
++        Self(Some(
++            PATH_POOL.with(|pool| pool.borrow_mut().pop()).unwrap_or_default(),
++        ))
++    }
++}
++
++impl core::ops::Deref for ScratchPath {
++    type Target = femtovg::Path;
++    fn deref(&self) -> &femtovg::Path {
++        self.0.as_ref().expect("the path is only taken in Drop")
++    }
++}
++
++impl core::ops::DerefMut for ScratchPath {
++    fn deref_mut(&mut self) -> &mut femtovg::Path {
++        self.0.as_mut().expect("the path is only taken in Drop")
++    }
++}
++
++impl Drop for ScratchPath {
++    /// Bounded so that deeply nested clips cannot make the pool grow without limit.
++    fn drop(&mut self) {
++        const POOL_LIMIT: usize = 8;
++        if let Some(mut path) = self.0.take() {
++            path.clear();
++            PATH_POOL.with(|pool| {
++                let mut pool = pool.borrow_mut();
++                if pool.len() < POOL_LIMIT {
++                    pool.push(path);
++                }
++            });
++        }
++    }
++}
++
+ fn rect_with_radius_to_path(
+     rect: PhysicalRect,
+     border_radius: PhysicalBorderRadius,
+-) -> femtovg::Path {
+-    let mut path = femtovg::Path::new();
++) -> ScratchPath {
++    let mut path = ScratchPath::new();
+     let x = rect.origin.x;
+     let y = rect.origin.y;
+     let width = rect.size.width;
+@@ -135,7 +202,7 @@ fn rect_with_radius_to_path(
+     path
+ }
+ 
+-fn rect_to_path(r: PhysicalRect) -> femtovg::Path {
++fn rect_to_path(r: PhysicalRect) -> ScratchPath {
+     rect_with_radius_to_path(r, PhysicalBorderRadius::default())
+ }
+ 
+@@ -175,7 +242,7 @@ fn clip_path_for_rect_alike_item(
+     mut radius: LogicalBorderRadius,
+     mut border_width: LogicalLength,
+     scale_factor: ScaleFactor,
+-) -> femtovg::Path {
++) -> ScratchPath {
+     // Femtovg renders evenly 50% inside and 50% outside of the border width. The
+     // adjust_rect_and_border_for_inner_drawing adjusts the rect so that for drawing it
+     // would be entirely an *inner* border. However for clipping we want the rect that's
+@@ -220,7 +287,9 @@ fn draw_rectangle(
+         }
+         // TODO: cache path in item to avoid re-tesselation
+         let path = rect_to_path(geometry);
+-        let paint = match self.brush_to_paint(rect.background(), &path) {
++        let paint = match self
++            .brush_to_paint_with_bounds(rect.background(), geometry.to_box2d().cast_unit())
++        {
+             Some(paint) => paint,
+             None => return,
+         }
+@@ -264,35 +333,37 @@ fn draw_border_rectangle(
+         // In case of a transparent border, we want the background to cover the whole rectangle, which is
+         // not how femtovg's stroke works. So fill the background separately in the else branch if the
+         // border is not opaque.
+-        let (mut background_path, mut maybe_border_path) = if opaque_border {
+-            // In CSS the border is entirely towards the inside of the boundary
+-            // geometry, while in femtovg the line with for a stroke is 50% in-
+-            // and 50% outwards. We choose the CSS model, so the inner rectangle
+-            // is adjusted accordingly.
+-            adjust_rect_and_border_for_inner_drawing(&mut geometry, &mut border_width);
+-
+-            (rect_with_radius_to_path(geometry, stroke_border_radius), None)
+-        } else {
+-            let background_path = rect_with_radius_to_path(geometry, fill_radius);
+-
+-            // In CSS the border is entirely towards the inside of the boundary
+-            // geometry, while in femtovg the line with for a stroke is 50% in-
+-            // and 50% outwards. We choose the CSS model, so the inner rectangle
+-            // is adjusted accordingly.
+-            adjust_rect_and_border_for_inner_drawing(&mut geometry, &mut border_width);
+-
+-            let border_path = rect_with_radius_to_path(geometry, stroke_border_radius);
+-
+-            (background_path, Some(border_path))
+-        };
++        let (mut background_path, mut maybe_border_path, background_bounds, border_bounds) =
++            if opaque_border {
++                // In CSS the border is entirely towards the inside of the boundary
++                // geometry, while in femtovg the line with for a stroke is 50% in-
++                // and 50% outwards. We choose the CSS model, so the inner rectangle
++                // is adjusted accordingly.
++                adjust_rect_and_border_for_inner_drawing(&mut geometry, &mut border_width);
++
++                (rect_with_radius_to_path(geometry, stroke_border_radius), None, geometry, geometry)
++            } else {
++                let background_path = rect_with_radius_to_path(geometry, fill_radius);
++                let background_bounds = geometry;
++
++                // In CSS the border is entirely towards the inside of the boundary
++                // geometry, while in femtovg the line with for a stroke is 50% in-
++                // and 50% outwards. We choose the CSS model, so the inner rectangle
++                // is adjusted accordingly.
++                adjust_rect_and_border_for_inner_drawing(&mut geometry, &mut border_width);
++
++                let border_path = rect_with_radius_to_path(geometry, stroke_border_radius);
++
++                (background_path, Some(border_path), background_bounds, geometry)
++            };
+ 
+-        let fill_paint = self.brush_to_paint(rect.background(), &background_path);
++        let fill_paint = self.brush_to_paint_with_bounds(
++            rect.background(),
++            background_bounds.to_box2d().cast_unit(),
++        );
+ 
+         let border_paint = self
+-            .brush_to_paint(
+-                rect.border_color(),
+-                maybe_border_path.as_ref().unwrap_or(&background_path),
+-            )
++            .brush_to_paint_with_bounds(rect.border_color(), border_bounds.to_box2d().cast_unit())
+             .map(|mut paint| {
+                 paint.set_line_width(border_width.get());
+                 paint
+@@ -956,8 +1027,8 @@ fn platform_text_fill_brush(
+         brush: Brush,
+         size: LogicalSize,
+     ) -> Option<Self::PlatformBrush> {
+-        let text_path = rect_to_path((size * self.scale_factor).into());
+-        self.brush_to_paint(brush, &text_path).map(GlyphBrush::Fill)
++        let bounds: PhysicalRect = (size * self.scale_factor).into();
++        self.brush_to_paint_with_bounds(brush, bounds.to_box2d().cast_unit()).map(GlyphBrush::Fill)
+     }
+ 
+     fn platform_brush_for_color(
+@@ -977,8 +1048,8 @@ fn platform_text_stroke_brush(
+         physical_stroke_width: f32,
+         size: LogicalSize,
+     ) -> Option<Self::PlatformBrush> {
+-        let text_path = rect_to_path((size * self.scale_factor).into());
+-        match self.brush_to_paint(stroke_brush.clone(), &text_path) {
++        let bounds: PhysicalRect = (size * self.scale_factor).into();
++        match self.brush_to_paint_with_bounds(stroke_brush.clone(), bounds.to_box2d().cast_unit()) {
+             Some(mut paint) => {
+                 paint.set_line_width(physical_stroke_width);
+                 Some(GlyphBrush::Stroke(paint))
+@@ -1270,7 +1341,10 @@ fn colorize_image(
+         image_rect.rect(0., 0., image_size.width, image_size.height);
+ 
+         // We fill the entire image, there is no need to apply anti-aliasing around the edges
+-        let brush_paint = match self.brush_to_paint(colorize_brush, &image_rect) {
++        let brush_paint = match self.brush_to_paint_with_bounds(
++            colorize_brush,
++            euclid::default::Box2D::from_size([image_size.width, image_size.height].into()),
++        ) {
+             Some(paint) => paint.with_anti_alias(false),
+             None => return original_cache_entry,
+         };
+@@ -1516,15 +1590,35 @@ fn draw_image_impl(
+         }
+     }
+ 
++    /// Measures the path to find the gradient's reference box. Prefer
++    /// [`Self::brush_to_paint_with_bounds`] when the caller already knows the rectangle the path
++    /// was built from: `path_bounding_box` resets the transform, so femtovg tessellates the path
++    /// a second time (its tessellation cache is keyed by the transform) - one extra tessellation
++    /// per gradient-filled primitive per frame.
+     fn brush_to_paint(&self, brush: Brush, path: &femtovg::Path) -> Option<femtovg::Paint> {
++        if brush.is_transparent() {
++            return None;
++        }
++        let bounds = if matches!(brush, Brush::SolidColor(_)) {
++            // Solid colors do not look at the bounds at all.
++            euclid::default::Box2D::zero()
++        } else {
++            path_bounding_box(&self.canvas, path)
++        };
++        self.brush_to_paint_with_bounds(brush, bounds)
++    }
++
++    fn brush_to_paint_with_bounds(
++        &self,
++        brush: Brush,
++        path_bounds: euclid::default::Box2D<f32>,
++    ) -> Option<femtovg::Paint> {
+         if brush.is_transparent() {
+             return None;
+         }
+         Some(match brush {
+             Brush::SolidColor(color) => femtovg::Paint::color(to_femtovg_color(&color)),
+             Brush::LinearGradient(gradient) => {
+-                let path_bounds = path_bounding_box(&self.canvas, path);
+-
+                 let path_width = path_bounds.width();
+                 let path_height = path_bounds.height();
+ 
+@@ -1533,23 +1627,15 @@ fn brush_to_paint(&self, brush: Brush, path: &femtovg::Path) -> Option<femtovg::
+                     [path_width, path_height].into(),
+                 );
+ 
+-                let mut stops: Vec<_> = gradient
+-                    .stops()
+-                    .map(|stop| (stop.position, to_femtovg_color(&stop.color)))
+-                    .collect();
+-
+-                // Add an extra stop at 1.0 with the same color as the last stop
+-                if let Some(last_stop) = stops.last().cloned()
+-                    && last_stop.0 != 1.0
+-                {
+-                    stops.push((1.0, last_stop.1));
+-                }
+-
+-                femtovg::Paint::linear_gradient_stops(start.x, start.y, end.x, end.y, stops)
++                femtovg::Paint::linear_gradient_stops(
++                    start.x,
++                    start.y,
++                    end.x,
++                    end.y,
++                    gradient_stops(gradient.stops()),
++                )
+             }
+             Brush::RadialGradient(gradient) => {
+-                let path_bounds = path_bounding_box(&self.canvas, path);
+-
+                 let path_width = path_bounds.width();
+                 let path_height = path_bounds.height();
+ 
+@@ -1564,23 +1650,15 @@ fn brush_to_paint(&self, brush: Brush, path: &femtovg::Path) -> Option<femtovg::
+                     self.scale_factor.get(),
+                 );
+ 
+-                let mut stops: Vec<_> = gradient
+-                    .stops()
+-                    .map(|stop| (stop.position, to_femtovg_color(&stop.color)))
+-                    .collect();
+-
+-                // Add an extra stop at 1.0 with the same color as the last stop
+-                if let Some(last_stop) = stops.last().cloned()
+-                    && last_stop.0 != 1.0
+-                {
+-                    stops.push((1.0, last_stop.1));
+-                }
+-
+-                femtovg::Paint::radial_gradient_stops(cx, cy, 0., radius, stops)
++                femtovg::Paint::radial_gradient_stops(
++                    cx,
++                    cy,
++                    0.,
++                    radius,
++                    gradient_stops(gradient.stops()),
++                )
+             }
+             Brush::ConicGradient(gradient) => {
+-                let path_bounds = path_bounding_box(&self.canvas, path);
+-
+                 let path_width = path_bounds.width();
+                 let path_height = path_bounds.height();
+ 
+diff --git a/internal/renderers/software/lib.rs b/internal/renderers/software/lib.rs
+index 503070b1c..34264ef18 100644
+--- a/internal/renderers/software/lib.rs
++++ b/internal/renderers/software/lib.rs
+@@ -2227,6 +2227,16 @@ struct SceneBuilder<'a, T> {
+     rotation: RotationInfo,
+     #[cfg(feature = "systemfonts")]
+     text_layout_cache: &'a sharedparley::TextLayoutCache,
++    /// Rasterized scalable sources (SVG), keyed by source and target size.
++    ///
++    /// `render_to_buffer` rasterizes an SVG on every call, and it is called from inside the draw
++    /// function - so N items sharing one source used to run resvg N times per frame. This builder
++    /// lives for exactly one frame, which bounds the cache by what was drawn rather than by a
++    /// constant nobody can size correctly.
++    scalable_source_cache: std::collections::HashMap<
++        (i_slint_core::graphics::ImageCacheKey, u32, u32),
++        SharedImageBuffer,
++    >,
+ }
+ 
+ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
+@@ -2254,6 +2264,7 @@ fn new(
+             rotation: RotationInfo { orientation, screen_size },
+             #[cfg(feature = "systemfonts")]
+             text_layout_cache,
++            scalable_source_cache: Default::default(),
+         }
+     }
+ 
+@@ -2412,7 +2423,23 @@ fn draw_image_impl(
+                 } else {
+                     target_rect.size.cast()
+                 };
+-                if let Some(buffer) = image_inner.render_to_buffer(Some(svg_target_size)) {
++                let cache_key = i_slint_core::graphics::ImageCacheKey::new(image_inner)
++                    .map(|key| (key, svg_target_size.width, svg_target_size.height));
++                let cached = cache_key
++                    .as_ref()
++                    .and_then(|key| self.scalable_source_cache.get(key))
++                    .cloned();
++                let rendered = match cached {
++                    Some(buffer) => Some(buffer),
++                    None => {
++                        let buffer = image_inner.render_to_buffer(Some(svg_target_size));
++                        if let (Some(key), Some(buffer)) = (cache_key, buffer.as_ref()) {
++                            self.scalable_source_cache.insert(key, buffer.clone());
++                        }
++                        buffer
++                    }
++                };
++                if let Some(buffer) = rendered {
+                     let buf_size = buffer.size().cast::<f32>();
+ 
+                     let alpha = if colorize.alpha() > 0 {

@@ -1,0 +1,93 @@
+=== Step 1: clean rebuild of backend at base commit 4cd7da5 ===
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `/home/rafal/Projekty/Obce/rustc_codegen_gcc/build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+    Finished `release` profile [optimized] target(s) in 0.01s
+
+=== Step 2: compile shl_repro.rs through the real backend, release/-O ===
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `/home/rafal/Projekty/Obce/rustc_codegen_gcc/build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+
+=== Step 3: run the compiled binary 5 times (unmodified gcc_shl) ===
+all shl checks passed
+run 1 exit code: 0
+all shl checks passed
+run 2 exit code: 0
+all shl checks passed
+run 3 exit code: 0
+all shl checks passed
+run 4 exit code: 0
+all shl checks passed
+run 5 exit code: 0
+=== Step 4: root-cause instrumentation - eprintln! added to both mixed-sign branches (temporary, reverted after) ===
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `/home/rafal/Projekty/Obce/rustc_codegen_gcc/build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+   Compiling rustc_codegen_gcc v0.1.0 (/home/rafal/Projekty/Obce/rustc_codegen_gcc/.worktrees/candidate-023)
+    Finished `release` profile [optimized] target(s) in 5.68s
+
+=== Step 5: rebuild+run shl_repro.rs to confirm real branch coverage and widths ===
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `/home/rafal/Projekty/Obce/rustc_codegen_gcc/build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+DEBUG_SHL_BRANCH unsigned_a_signed_b a_size=4 b_size=4
+DEBUG_SHL_BRANCH signed_a_unsigned_b a_size=4 b_size=4
+DEBUG_SHL_BRANCH signed_a_unsigned_b a_size=8 b_size=8
+DEBUG_SHL_BRANCH unsigned_a_signed_b a_size=8 b_size=8
+DEBUG_SHL_BRANCH unsigned_a_signed_b a_size=1 b_size=1
+DEBUG_SHL_BRANCH signed_a_unsigned_b a_size=2 b_size=2
+
+all shl checks passed
+exit code: 0
+=== Step 6: mutation-testing sanity check - deliberately inject a wrong bit into the unsigned_a_signed_b branch's result (result XOR 1), to confirm the repro harness actually detects a real deviation and isn't vacuously passing ===
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `/home/rafal/Projekty/Obce/rustc_codegen_gcc/build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+   Compiling rustc_codegen_gcc v0.1.0 (/home/rafal/Projekty/Obce/rustc_codegen_gcc/.worktrees/candidate-023)
+    Finished `release` profile [optimized] target(s) in 5.75s
+
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `/home/rafal/Projekty/Obce/rustc_codegen_gcc/build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+DEBUG_SHL_BRANCH unsigned_a_signed_b a_size=4 b_size=4
+DEBUG_SHL_BRANCH signed_a_unsigned_b a_size=4 b_size=4
+DEBUG_SHL_BRANCH signed_a_unsigned_b a_size=8 b_size=8
+DEBUG_SHL_BRANCH unsigned_a_signed_b a_size=8 b_size=8
+DEBUG_SHL_BRANCH unsigned_a_signed_b a_size=1 b_size=1
+DEBUG_SHL_BRANCH signed_a_unsigned_b a_size=2 b_size=2
+
+
+thread 'main' (323359) panicked at shl_repro.rs:9:5:
+assertion `left == right` failed: u32 << i32 mismatch: got 0x9 expected 0x8
+  left: 9
+ right: 8
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit code: 101
+
+=== Step 7: revert instrumentation/mutation (git checkout -- src/int.rs), rebuild clean, final re-confirmation ===
+git diff --stat after revert: (empty = clean)
+all shl checks passed
+final confirmation exit: 0
+=== Appendix: discarded first mutation-testing attempt - forcing a genuine WIDTH mismatch (casting 'a' to i8 instead of b_type) between the shift operands, to see whether a real width mismatch here would silently compute a wrong value or fail loudly ===
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `/home/rafal/Projekty/Obce/rustc_codegen_gcc/build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+   Compiling rustc_codegen_gcc v0.1.0 (/home/rafal/Projekty/Obce/rustc_codegen_gcc/.worktrees/candidate-023)
+    Finished `release` profile [optimized] target(s) in 7.09s
+
+error: the compiler unexpectedly panicked. This is a bug
+
+note: we would appreciate a bug report: https://github.com/rust-lang/rust/issues/new?labels=C-bug%2C+I-ICE%2C+T-compiler&template=ice.md
+
+note: please make sure that you have updated to the latest nightly
+
+note: please attach the file at `/home/rafal/Projekty/Obce/rustc_codegen_gcc/.worktrees/candidate-023/rustc-ice-2026-09-02T09_25_13-351900.txt` to your bug report
+
+note: rustc 1.99.0-nightly (504869653 2026-08-03) running on x86_64-unknown-linux-gnu
+
+note: compiler flags: -Z codegen-backend=/home/rafal/Projekty/Obce/rustc_codegen_gcc/.worktrees/candidate-023/target/release/librustc_codegen_gcc.so
+
+query stack during panic:
+end of query stack
+-- Note: the y.sh rustc invocation itself failed (rustc ICE, non-zero exit) -- libgccjit aborts compilation outright (ICE) rather than silently computing a wrong value for a genuine width mismatch between shift operands; this is why the final mutation test (see 'Step 6' above) instead injected a same-width one-bit XOR to test for a silent wrong-value bug specifically, which is the class of bug this candidate was actually checking for.

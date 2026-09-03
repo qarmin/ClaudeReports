@@ -1,0 +1,59 @@
+# Self-contained re-run of candidate 007 (value_lane_dyn caller audit).
+#
+# Everything this needs is either in this folder or fetched by `just clone` into ./clone
+# (gitignored) - nothing reaches outside the folder it lives in.
+#
+# This candidate's status is *Not reproducible*: five of the six `CValue::value_lane_dyn` call
+# sites agreed with LLVM on every input tried, so there is no patch.diff and no `reproduce-after`.
+# `just test` therefore does two things:
+#   1. `check-callers`    - the audit itself. Must print "identical" for every program (exit 0).
+#   2. `positive-control` - the already-confirmed `llvm.x86.avx2.permd` masking bug (candidate
+#                           001), run through the *same* harness. Must print "DIFFERENT". This is
+#                           the negative control for the null result: it proves the harness really
+#                           does detect a missing-index-mask bug in this exact code, so
+#                           "identical" above is evidence and not just a silent harness failure.
+#
+# Requires: rustup (the pinned nightly from the clone's rust-toolchain.toml), an x86-64 host with
+# AVX2, and network access for the first `./y.sh build`.
+
+# Override with `just repo_url=https://github.com/rust-lang/rustc_codegen_cranelift.git test`
+# if the machine has no SSH key/known_hosts entry for github.com.
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+clif := justfile_directory() / "clone"
+
+test: clone build check-callers positive-control
+
+clone:
+    rm -rf {{clif}}
+    git clone {{repo_url}} {{clif}}
+    cd {{clif}} && git checkout {{base_commit}}
+
+# ~2-4 min cold. Produces clone/dist/rustc-clif plus a cg_clif-built sysroot.
+build:
+    cd {{clif}} && ./y.sh build
+
+# The audit: every reachable value_lane_dyn caller must agree with LLVM. Expected exit 0.
+check-callers:
+    ulimit -c 0 && bash {{justfile_directory()}}/checks/diff_run.sh {{clif}} \
+        {{justfile_directory()}}/checks/pshufb.rs \
+        {{justfile_directory()}}/checks/extract_dyn.rs
+
+# Negative control for the null result: the confirmed permd bug must still show up as DIFFERENT
+# through the same harness, so this recipe inverts the exit status on purpose.
+positive-control:
+    #!/usr/bin/env bash
+    ulimit -c 0
+    if bash {{justfile_directory()}}/checks/diff_run.sh {{clif}} \
+           {{justfile_directory()}}/checks/permd_control.rs; then
+        echo "UNEXPECTED: the permd control agreed with LLVM - the harness is not detecting the"
+        echo "known candidate-001 bug, so the 'identical' results above prove nothing."
+        exit 1
+    fi
+    echo "control OK: harness detects the known missing-index-mask bug"
+
+# Optional wider run: generated sweep over the same call sites (needs the sweep script from the
+# workspace, ___BUGHUNT___/tools/lane_dyn_sweep.py - not part of this standalone folder).
+
+clean:
+    rm -rf {{clif}}

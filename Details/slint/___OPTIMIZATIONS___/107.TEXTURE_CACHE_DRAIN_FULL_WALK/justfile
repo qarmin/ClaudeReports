@@ -1,0 +1,58 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# Note: fully reproducing the bench additionally needs `perf_test/` copied in manually next to
+# `clone/` - it is untracked in the main slint repo's git history, so `just clone` alone will not
+# fetch it. This candidate also needed a new `--image-unique` flag and
+# `generator::make_unique_gallery_images` added to `perf_test` (the existing `--image-distinct`
+# sources have no valid `ImageCacheKey` and so never populate `TextureCache` at all - see
+# RESULT.md). Full copies of the touched files are in `perf_test_fixes/`; drop them into your
+# `perf_test/src/` before building if your copy predates this candidate.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Needs a display or Xvfb (`LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -s "-screen 0 1280x900x24"`), since
+# this candidate is femtovg-specific and there is no headless (`--bench`, software-renderer) path
+# that reaches `TextureCache::drain()`.
+bench:
+    # NOTE: the perf_test_fixes/ overlay below is now redundant - ../harness/perf_test
+    # (copied in by clone: above) is the current, cumulative perf_test source, which
+    # already includes this candidate's scene/flag additions plus everything added by
+    # later candidates. Overlaying an old snapshot on top would silently regress it, so
+    # the lines that used to do that were removed.
+    cd clone/perf_test && cargo build --profile rdebug --bin perf_test
+    @echo "Later frames, cache size == --count (all distinct, all visible):"
+    LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1280x900x24" \
+        ./clone/target/rdebug/perf_test --renderer femtovg --mode images \
+        --count 6000 --image-unique --image-size 4 --image-cell 6 --frames 10
+    @echo "For the paired before/after comparison in RESULT.md: build once per patch.diff"
+    @echo "applied/unapplied into two separate clones, then (from the main project's"
+    @echo "___OPTIMIZATIONS___/tools/, not this folder):"
+    @echo "  RUNS=9 TASKSET=3 paired_femtovg_later_frames.sh <base-bin> <patched-bin> \\"
+    @echo "      --mode images --count 6000 --image-unique --image-size 4 --image-cell 6 --frames 10"
+
+clean:
+    rm -rf clone

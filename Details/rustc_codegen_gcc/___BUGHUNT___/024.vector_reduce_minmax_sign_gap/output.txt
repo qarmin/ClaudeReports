@@ -1,0 +1,52 @@
+$ rustc -Zcodegen-backend=librustc_codegen_gcc.so --sysroot build_sysroot/sysroot -C link-arg=-lc -o /tmp/vector_reduce_minmax_sign repro/vector_reduce_minmax_sign.rs
+(compiled cleanly, no warnings/errors)
+
+$ /tmp/vector_reduce_minmax_sign
+$ echo $?
+0
+
+--- Instrumentation run (temporary eprintln! added in vector_reduce_min,
+    src/builder.rs:2348, reverted afterwards via `git checkout -- src/builder.rs`) ---
+
+$ ./y.sh build --release
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `.../build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+   Compiling rustc_codegen_gcc v0.1.0 (.../rustc_codegen_gcc)
+    Finished `release` profile [optimized] target(s) in 5.95s
+
+$ rustc -Zcodegen-backend=librustc_codegen_gcc.so --sysroot build_sysroot/sysroot -C link-arg=-lc -o /tmp/vector_reduce_minmax_sign_instr repro/vector_reduce_minmax_sign.rs 2>&1 | grep BUGHUNT024
+BUGHUNT024: vector_reduce_min elem is_signed=false is_unsigned=true
+BUGHUNT024: vector_reduce_min elem is_signed=true is_unsigned=false
+BUGHUNT024: vector_reduce_min elem is_signed=false is_unsigned=true
+BUGHUNT024: vector_reduce_min elem is_signed=true is_unsigned=false
+BUGHUNT024: vector_reduce_min elem is_signed=false is_unsigned=true
+BUGHUNT024: vector_reduce_min elem is_signed=true is_unsigned=false
+BUGHUNT024: vector_reduce_min elem is_signed=false is_unsigned=true
+BUGHUNT024: vector_reduce_min elem is_signed=true is_unsigned=false
+BUGHUNT024: vector_reduce_min elem is_signed=false is_unsigned=true
+BUGHUNT024: vector_reduce_min elem is_signed=true is_unsigned=false
+BUGHUNT024: vector_reduce_min elem is_signed=false is_unsigned=true
+BUGHUNT024: vector_reduce_min elem is_signed=true is_unsigned=false
+BUGHUNT024: vector_reduce_min elem is_signed=false is_unsigned=true
+BUGHUNT024: vector_reduce_min elem is_signed=true is_unsigned=false
+BUGHUNT024: vector_reduce_min elem is_signed=false is_unsigned=true
+BUGHUNT024: vector_reduce_min elem is_signed=true is_unsigned=false
+BUGHUNT024: vector_reduce_min elem is_signed=false is_unsigned=true
+BUGHUNT024: vector_reduce_min elem is_signed=true is_unsigned=false
+BUGHUNT024: vector_reduce_min elem is_signed=false is_unsigned=true
+BUGHUNT024: vector_reduce_min elem is_signed=true is_unsigned=false
+BUGHUNT024: vector_reduce_min elem is_signed=false is_unsigned=true
+BUGHUNT024: vector_reduce_min elem is_signed=true is_unsigned=false
+
+$ /tmp/vector_reduce_minmax_sign_instr
+$ echo $?
+0
+
+(22 vector_reduce_min invocations total: 11 unsigned-destination calls all report
+is_signed=false/is_unsigned=true, 11 signed-destination calls all report is_signed=true/
+is_unsigned=false - including the 8 calls that reach vector_reduce_min via a `mem::transmute`
+from the opposite-signed vector type, the exact shape this candidate was raised to check. The
+GCC-level element sign always matches the Rust-level destination type at the point
+`vector_reduce_min`/`max` is called, so `difference_or_zero`'s `ComparisonOp::GreaterThanEquals`
+always compares with the correct signedness.)

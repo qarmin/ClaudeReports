@@ -1,0 +1,61 @@
+Real captured output from a temporary #[cfg(test)] probe module added directly to
+src/filter_weights.rs (pub(crate) items, so only reachable from inside the crate itself -
+reverted afterward with `git checkout -- src/filter_weights.rs`, git status confirmed clean).
+Injected via inject_probe.py in this same candidate folder.
+
+Build: `cargo test --lib bughunt_probe -- --nocapture --test-threads=1` (debug profile,
+unoptimized + debuginfo), then repeated once more in debug, then once in release
+(`cargo test --release --lib bughunt_probe -- --nocapture --test-threads=1`).
+
+=== run 1 (debug) ===
+running 2 tests
+test filter_weights::bughunt_probe::probe_public_api_divergence ... zero-sum rows (idx, start, taps): [(3, 0, 3), (6, 0, 3)]
+mismatches = []
+ok
+test filter_weights::bughunt_probe::probe_zero_sum_row_leaks_onto_second_tap ... scratch = [32767.0, 1.0, 0.0, 0.0]
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=== run 2 (debug, repeat) ===
+running 2 tests
+test filter_weights::bughunt_probe::probe_public_api_divergence ... zero-sum rows (idx, start, taps): [(3, 0, 3), (6, 0, 3)]
+mismatches = []
+ok
+test filter_weights::bughunt_probe::probe_zero_sum_row_leaks_onto_second_tap ... scratch = [32767.0, 1.0, 0.0, 0.0]
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=== run 3 (release) ===
+running 2 tests
+test filter_weights::bughunt_probe::probe_public_api_divergence ... zero-sum rows (idx, start, taps): [(3, 0, 3), (6, 0, 3)]
+mismatches = []
+ok
+test filter_weights::bughunt_probe::probe_zero_sum_row_leaks_onto_second_tap ... scratch = [32767.0, 1.0, 0.0, 0.0]
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Reading the two probes:
+
+- `probe_zero_sum_row_leaks_onto_second_tap` directly confirms the suspected mechanism at the
+  `quantize_kernel` function level: for an all-zero-weight row, `scratch` ends up as
+  `[32767.0, 1.0, 0.0, 0.0]`, NOT `[32768.0, 0.0, 0.0, 0.0]` as candidate 010's spot check assumed.
+  `precision_scale` (32768 at the crate's real `PRECISION = 15` constant) exceeds `i16::MAX`
+  (32767) by exactly 1, so the redistribution loop caps tap 0 (`order[0]`) at `upper_bound =
+  32767.0` and is forced to spill the leftover 1.0 unit onto the *second* tap (`order[1]`) on the
+  next loop iteration - it does NOT reconstruct a clean single-tap nearest-sample fallback in
+  general, contrary to what was assumed after only the one `HaasnSoft 1x1->100x1` spot check.
+
+- `probe_public_api_divergence` is the "so does this actually break anything visible through the
+  public API" check: it finds the real zero-sum rows `generate_weights` produces for `HaasnSoft`
+  3->10 (idx 3 and 6, both `start=0, taps=3` - the same case family candidate 010 used), then
+  drives the real public `resize_plane8`/`resize_plane16` (bit_depth=12) entry points with the
+  most divergent boundary source values possible at each bit depth (`0`/`255` for 8-bit,
+  `0`/`4095` for 12-bit - the only bit depths ever reachable through this quantization path, see
+  RESULT.md's root-cause section for why). `mismatches = []` in every run: the actual output byte
+  always exactly equals `src[start]` (the nearest-fallback expectation), even at these extremes.
+  This matches the arithmetic bound in RESULT.md: flipping the floor-division result needs an
+  inter-tap source-value delta of at least ~16384, which exceeds the max representable value
+  (4095) at any bit depth (8/10/12) the fixed-point/i16-quantization path is ever reached with.

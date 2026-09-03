@@ -1,0 +1,65 @@
+diff --git a/sparse_strips/vello_common/src/encode.rs b/sparse_strips/vello_common/src/encode.rs
+index e3b5075f..4d513cb4 100644
+--- a/sparse_strips/vello_common/src/encode.rs
++++ b/sparse_strips/vello_common/src/encode.rs
+@@ -8,7 +8,7 @@ use crate::color::palette::css::BLACK;
+ use crate::color::{ColorSpaceTag, HueDirection, Srgb, gradient};
+ use crate::kurbo::{Affine, Point, Vec2};
+ use crate::math::{FloatExt, compute_erf7};
+-use crate::paint::{Image, ImageSource, IndexedPaint, Paint, PremulColor, Tint};
++use crate::paint::{Color, Image, ImageSource, IndexedPaint, Paint, PremulColor, Tint, TintMode};
+ use crate::peniko::{ColorStop, ColorStops, Extend, Gradient, GradientKind, ImageQuality};
+ use crate::util::f32_to_u8;
+ use alloc::borrow::Cow;
+@@ -481,15 +481,34 @@ impl EncodeExt for Image {
+         &self,
+         paints: &mut Vec<EncodedPaint>,
+         transform: Affine,
+-        tint: Option<Tint>,
++        mut tint: Option<Tint>,
+     ) -> Paint {
+         let idx = paints.len();
+ 
+         let mut sampler = self.sampler;
+ 
++        // Both `TintMode`s scale linearly with the tint's alpha channel
++        // (`sample_premul * tint_premul` for `Multiply`, `tint_premul *
++        // sample.alpha` for `AlphaMask`), so folding `sampler.alpha` into the
++        // tint's alpha (synthesizing a white `Multiply` tint if there is none)
++        // reproduces the same result as a dedicated image-opacity path would,
++        // without needing one.
+         if sampler.alpha != 1.0 {
+-            // If the sampler alpha is not 1.0, we need to force alpha compositing.
+-            unimplemented!("Applying opacity to image commands");
++            let alpha = sampler.alpha;
++            tint = Some(match tint {
++                Some(t) => {
++                    let [r, g, b, a] = t.color.components;
++                    Tint {
++                        color: Color::new([r, g, b, a * alpha]),
++                        mode: t.mode,
++                    }
++                }
++                None => Tint {
++                    color: Color::new([1.0, 1.0, 1.0, alpha]),
++                    mode: TintMode::Multiply,
++                },
++            });
++            sampler.alpha = 1.0;
+         }
+ 
+         let c = transform.as_coeffs();
+@@ -511,10 +530,9 @@ impl EncodeExt for Image {
+         let (x_advance, y_advance) = x_y_advances(&transform);
+ 
+         // If the tint color has alpha < 1.0, the image will have opacities
+-        // even if the source pixels are all opaque.
+-        let has_opacity = tint.as_ref().is_some_and(|t| t.color.components[3] < 1.0)
+-            // Not supported yet, but just to future-proof.
+-            || sampler.alpha != 1.0;
++        // even if the source pixels are all opaque. `sampler.alpha` needs no
++        // separate check here: it was already folded into the tint above.
++        let has_opacity = tint.as_ref().is_some_and(|t| t.color.components[3] < 1.0);
+ 
+         let encoded = EncodedImage {
+             may_have_transparency: self.image.may_have_transparency() || has_opacity,

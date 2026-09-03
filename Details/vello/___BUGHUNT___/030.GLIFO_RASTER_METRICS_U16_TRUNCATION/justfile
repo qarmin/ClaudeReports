@@ -1,0 +1,45 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including attached to a GitHub issue) and
+# `just test` still works, with no dependency on the main project checkout this candidate was
+# originally found in.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+# The `-c filter.lfs.*` overrides make this work even when `git-lfs` isn't installed on the
+# machine running `just test` - this candidate's repro never touches any LFS-tracked asset (it
+# ships its own tiny hand-built font), so it's safe to just let those come through as inert
+# pointer text instead of requiring a git-lfs install.
+clone:
+    rm -rf clone
+    git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false \
+        clone {{repo_url}} clone
+    cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false \
+        checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug
+# (nonzero exit code, "REPRODUCED" printed: rendering a well-formed-but-pathological font - tiny
+# unitsPerEm, a glyph outline near the format's own i16 coordinate limit - at an ordinary,
+# atlas-cacheable font_size of 128px produces a fully blank pixmap instead of visible glyph
+# coverage). The leading `-` tells `just` not to abort the `test` chain on this recipe's expected
+# nonzero exit code.
+reproduce-before:
+    -cd repro && cargo run
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer demonstrate the bug (exit
+# code 0, "did not reproduce" printed, the glyph falls back to direct/uncached rendering and the
+# pixmap has real coverage).
+reproduce-after:
+    cd repro && cargo run
+
+clean:
+    rm -rf clone

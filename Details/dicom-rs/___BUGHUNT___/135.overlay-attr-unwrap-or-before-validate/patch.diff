@@ -1,0 +1,172 @@
+diff --git a/pixeldata/src/overlay.rs b/pixeldata/src/overlay.rs
+index 94c09871..92dc426b 100644
+--- a/pixeldata/src/overlay.rs
++++ b/pixeldata/src/overlay.rs
+@@ -14,7 +14,8 @@
+ //! [1]: https://dicom.nema.org/medical/dicom/current/output/chtml/part03/sect_C.9.2.html
+ //! [2]: https://dicom.nema.org/medical/dicom/current/output/chtml/part03/sect_C.9.3.html
+ 
+-use dicom_core::DataDictionary;
++use dicom_core::{DataDictionary, Tag, header::HasLength};
++use dicom_dictionary_std::tags;
+ use dicom_object::{FileDicomObject, InMemDicomObject};
+ use snafu::{Backtrace, Snafu};
+ 
+@@ -243,6 +244,31 @@ fn unpack_overlay_bits(packed: &[u8], num_pixels: usize) -> Vec<u8> {
+         .collect()
+ }
+ 
++/// Resolve an attribute which the DICOM standard gives a default value for.
++///
++/// An element which is absent or carries no value resolves to `default`,
++/// but one which is present with a value that could not be read
++/// is reported instead of being silently mistaken for the default
++/// by the conformance checks which follow every call to this.
++fn u16_or_default<D>(
++    obj: &FileDicomObject<InMemDicomObject<D>>,
++    tag: Tag,
++    read: std::result::Result<u16, attribute::GetAttributeError>,
++    default: u16,
++) -> Result<u16>
++where
++    D: DataDictionary + Clone,
++{
++    match read {
++        Ok(value) => Ok(value),
++        Err(e) => match obj.element_opt(tag) {
++            Ok(Some(elem)) if !elem.is_empty() => Err(e.into()),
++            Ok(_) => Ok(default),
++            Err(_) => Err(e.into()),
++        },
++    }
++}
++
+ /// Decode all overlay planes present in the object,
+ /// scanning the repeating groups `6000` to `601E`.
+ pub(crate) fn decode_overlays<D>(
+@@ -302,7 +328,12 @@ where
+     let data = match attribute::overlay_data(obj, group)? {
+         Some(packed) => {
+             // standard overlay plane recorded in Overlay Data (60xx,3000)
+-            let bits_allocated = attribute::overlay_bits_allocated(obj, group).unwrap_or(1);
++            let bits_allocated = u16_or_default(
++                obj,
++                Tag(group, 0x0100),
++                attribute::overlay_bits_allocated(obj, group),
++                1,
++            )?;
+             if bits_allocated != 1 {
+                 return UnsupportedBitsAllocatedSnafu {
+                     group,
+@@ -311,7 +342,12 @@ where
+                 .fail()
+                 .map_err(Into::into);
+             }
+-            let bit_position = attribute::overlay_bit_position(obj, group).unwrap_or(0);
++            let bit_position = u16_or_default(
++                obj,
++                Tag(group, 0x0102),
++                attribute::overlay_bit_position(obj, group),
++                0,
++            )?;
+             if bit_position != 0 {
+                 return UnsupportedBitPositionSnafu {
+                     group,
+@@ -377,7 +413,12 @@ where
+         .fail()
+         .map_err(Into::into);
+     }
+-    let samples_per_pixel = attribute::samples_per_pixel(obj).unwrap_or(1);
++    let samples_per_pixel = u16_or_default(
++        obj,
++        tags::SAMPLES_PER_PIXEL,
++        attribute::samples_per_pixel(obj),
++        1,
++    )?;
+     if samples_per_pixel != 1 {
+         return EmbeddedSamplesPerPixelSnafu {
+             group,
+@@ -669,6 +710,83 @@ mod tests {
+         assert!(obj.decode_overlay(0).is_err());
+     }
+ 
++    #[test]
++    fn unreadable_attribute_is_not_taken_for_the_default() {
++        // a non-conformant Overlay Bits Allocated which is also unreadable
++        // (encoded with the wrong VR) must not pass as the default of 1
++        let mut obj = dummy_dicom();
++        put_overlay_plane(&mut obj, 0x6000, 4, 8);
++        obj.put_element(DataElement::new(
++            Tag(0x6000, 0x0100),
++            VR::SS,
++            dicom_value!(I16, 16),
++        ));
++        assert!(obj.decode_overlay(0).is_err());
++
++        // likewise for Overlay Bit Position against its default of 0
++        let mut obj = dummy_dicom();
++        put_overlay_plane(&mut obj, 0x6000, 4, 8);
++        obj.put_element(DataElement::new(
++            Tag(0x6000, 0x0102),
++            VR::SS,
++            dicom_value!(I16, 3),
++        ));
++        assert!(obj.decode_overlay(0).is_err());
++
++        // and for Samples per Pixel in the embedded overlay path
++        let mut obj = dummy_dicom();
++        obj.put_element(DataElement::new(
++            dicom_dictionary_std::tags::ROWS,
++            VR::US,
++            dicom_value!(U16, 2),
++        ));
++        obj.put_element(DataElement::new(
++            dicom_dictionary_std::tags::COLUMNS,
++            VR::US,
++            dicom_value!(U16, 4),
++        ));
++        obj.put_element(DataElement::new(
++            dicom_dictionary_std::tags::BITS_ALLOCATED,
++            VR::US,
++            dicom_value!(U16, 16),
++        ));
++        obj.put_element(DataElement::new(
++            dicom_dictionary_std::tags::SAMPLES_PER_PIXEL,
++            VR::SS,
++            dicom_value!(I16, 3),
++        ));
++        obj.put_element(DataElement::new(
++            dicom_dictionary_std::tags::PIXEL_DATA,
++            VR::OW,
++            PrimitiveValue::U16(vec![0x8000u16; 24].into()),
++        ));
++        put_overlay_plane(&mut obj, 0x6000, 2, 4);
++        obj.remove_element(Tag(0x6000, 0x3000));
++        obj.put_element(DataElement::new(
++            Tag(0x6000, 0x0102),
++            VR::US,
++            dicom_value!(U16, 15),
++        ));
++        assert!(obj.decode_overlay(0).is_err());
++
++        // an absent element still resolves to its standard default
++        let mut obj = dummy_dicom();
++        put_overlay_plane(&mut obj, 0x6000, 4, 8);
++        obj.remove_element(Tag(0x6000, 0x0100));
++        obj.remove_element(Tag(0x6000, 0x0102));
++        assert!(obj.decode_overlay(0).unwrap().is_some());
++
++        // so does an element which is present but carries no value
++        let mut obj = dummy_dicom();
++        put_overlay_plane(&mut obj, 0x6000, 4, 8);
++        obj.put_element(DataElement::new(
++            Tag(0x6000, 0x0100),
++            VR::US,
++            PrimitiveValue::Empty,
++        ));
++        assert!(obj.decode_overlay(0).unwrap().is_some());
++    }
++
+     #[test]
+     fn decode_overlay_error_cases() {
+         // overlay data too short

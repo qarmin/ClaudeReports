@@ -1,0 +1,54 @@
+diff --git a/symphonia-codec-alac/src/lib.rs b/symphonia-codec-alac/src/lib.rs
+index 3213410..7e9a09d 100644
+--- a/symphonia-codec-alac/src/lib.rs
++++ b/symphonia-codec-alac/src/lib.rs
+@@ -208,12 +208,13 @@ impl ElementChannel {
+             // Value of the sample preceeding the first past sample.
+             let past0 = out[i - order - 1];
+ 
+-            // Run the FIR filter.
++            // Run the FIR filter. With a 32-bit coded depth `clip_msbs` is a no-op, so the
++            // residuals span the entire i32 range and every operation below must wrap.
+             let sum = self.lpc_coeffs[..order]
+                 .iter()
+                 .rev()
+                 .zip(&out[i - order..i])
+-                .map(|(&coeff, &s)| coeff.wrapping_mul(s - past0))
++                .map(|(&coeff, &s)| coeff.wrapping_mul(s.wrapping_sub(past0)))
+                 .fold(0i32, |sum, s| sum.wrapping_add(s));
+ 
+             // Rewrite `1 << (self.shift - 1)` as `(1 << self.shift) >> 1` to prevent overflowing
+@@ -230,12 +231,14 @@ impl ElementChannel {
+                 if res > 0 {
+                     // Positive residual case.
+                     for (j, (coeff, &sample)) in iter {
+-                        let val = past0 - sample;
++                        let val = past0.wrapping_sub(sample);
+                         let sign = val.signum();
+ 
+                         *coeff -= sign;
+ 
+-                        res -= (1 + j as i32) * ((sign * val) >> self.shift);
++                        res = res.wrapping_sub(
++                            (1 + j as i32).wrapping_mul(sign.wrapping_mul(val) >> self.shift),
++                        );
+ 
+                         if res <= 0 {
+                             break;
+@@ -245,12 +248,14 @@ impl ElementChannel {
+                 else {
+                     // Negative residual case.
+                     for (j, (coeff, &sample)) in iter {
+-                        let val = past0 - sample;
++                        let val = past0.wrapping_sub(sample);
+                         let sign = val.signum();
+ 
+                         *coeff += sign;
+ 
+-                        res -= (1 + j as i32) * ((-sign * val) >> self.shift);
++                        res = res.wrapping_sub(
++                            (1 + j as i32).wrapping_mul((-sign).wrapping_mul(val) >> self.shift),
++                        );
+ 
+                         if res >= 0 {
+                             break;

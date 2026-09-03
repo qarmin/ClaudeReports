@@ -1,0 +1,29 @@
+diff --git a/kurbo/src/fit.rs b/kurbo/src/fit.rs
+index 1f739cb..81c3fca 100644
+--- a/kurbo/src/fit.rs
++++ b/kurbo/src/fit.rs
+@@ -643,7 +643,23 @@ fn fit_to_bezpath_opt_inner(
+         } else {
+             range.end
+         };
+-        let (c, _) = fit_to_cubic(source, t0..t1, accuracy).unwrap();
++        // `fit_to_cubic`'s error metric is not monotonic in `accuracy`: a range accepted by
++        // the search pass above at a tightened accuracy `x` is not guaranteed to also fit at
++        // the final `accuracy` (a larger `accuracy` can flip `fit_to_cubic` onto its
++        // short-chord line-fit shortcut, which can fail on a chord that doubles back on
++        // itself even though the general cubic solver used at the smaller `x` would have
++        // succeeded). Fall back to a straight line for this piece rather than panicking,
++        // mirroring the equivalent escape hatch in `fit_to_bezpath_rec`.
++        let c = match fit_to_cubic(source, t0..t1, accuracy) {
++            Some((c, _)) => c,
++            None => {
++                let start_p = source.sample_pt_tangent(t0, 1.0).p;
++                let end_p = source.sample_pt_tangent(t1, -1.0).p;
++                let p1 = start_p.lerp(end_p, 1.0 / 3.0);
++                let p2 = end_p.lerp(start_p, 1.0 / 3.0);
++                CubicBez::new(start_p, p1, p2, end_p)
++            }
++        };
+         if i == 0 && range.start == 0.0 {
+             path.move_to(c.p0);
+         }

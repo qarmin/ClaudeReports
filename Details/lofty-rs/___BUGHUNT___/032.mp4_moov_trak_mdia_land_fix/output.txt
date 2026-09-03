@@ -1,0 +1,45 @@
+Captured output from `just test` (full clone-based repro, base_commit 5c6565e36d35b9ea7de049daa67acc0be0fd3b01),
+run from this candidate folder.
+
+=== reproduce-before (pristine clone, patch.diff not yet applied) ===
+
+original file: ilst tag present = true
+malformed file (mdia size +16, udta/ilst bytes untouched): read_from -> Ok, ilst tag present = false
+REPRODUCED - tag was silently lost: the file parsed successfully (no error at all) but the untouched, still-present ilst tag data was never found because `find_child_atom`'s header-inclusive budget let a malformed `mdia` atom skip past `trak`'s real end into `udta`'s header, desyncing the rest of the moov parse.
+
+(exit code 1)
+
+=== apply (git apply patch.diff) === succeeded, no output
+
+=== reproduce-after (same clone, patch.diff applied) ===
+
+original file: ilst tag present = true
+malformed file: read_from -> Err: FileParseError { ty: Some(Mp4), .. }
+did not reproduce - the malformed input was rejected instead of silently losing the tag
+
+(exit code 0)
+
+=== Reconfirmation directly against the main project's own working tree (this session, before
+this candidate folder was finalized), before landing the fix ===
+
+Temporary, non-committed scratch test (`lofty/tests/probe_032_scratch_test.rs`, deleted before
+this candidate folder was written) built the same +16-mutated `has-tags.m4a` and called the real
+public `Mp4File::read_from` via `cargo test -p lofty --test probe_032_scratch_test -- --nocapture`,
+run 3 times:
+
+Run 1: +16: read_from -> Ok, ilst present = false
+Run 2: +16: read_from -> Ok, ilst present = false
+Run 3: +16: read_from -> Ok, ilst present = false
+
+=== Same scratch test, 3 more runs, with this candidate's fix applied directly to
+lofty/src/mp4/moov.rs (the same patch captured in patch.diff) ===
+
+Run 1: +16: read_from -> Err: FileParseError { ty: Some(Mp4), .. }
+Run 2: +16: read_from -> Err: FileParseError { ty: Some(Mp4), .. }
+Run 3: +16: read_from -> Err: FileParseError { ty: Some(Mp4), .. }
+
+=== Project test suite (cargo test -p lofty --lib --tests -- --test-threads=1) ===
+
+Before fix: 647 passed; 0 failed; 73 ignored (646 from the project's own suite + 1 from the
+temporary scratch test file, which is not part of the project's own suite)
+After fix:  647 passed; 0 failed; 73 ignored (identical - no change, no new failures)

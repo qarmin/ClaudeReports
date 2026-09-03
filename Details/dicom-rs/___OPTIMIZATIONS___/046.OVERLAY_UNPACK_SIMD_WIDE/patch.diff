@@ -1,0 +1,90 @@
+diff --git a/pixeldata/src/overlay.rs b/pixeldata/src/overlay.rs
+index 94c09871..ccb9da1b 100644
+--- a/pixeldata/src/overlay.rs
++++ b/pixeldata/src/overlay.rs
+@@ -231,16 +231,82 @@ impl OverlayPlane {
+     }
+ }
+ 
++/// 256-entry lookup table mapping each packed byte
++/// to its 8 unpacked output bytes (LSB first).
++const UNPACK_BITS_TABLE: [[u8; 8]; 256] = {
++    let mut table = [[0u8; 8]; 256];
++    let mut byte = 0usize;
++    while byte < 256 {
++        let mut bit = 0usize;
++        while bit < 8 {
++            table[byte][bit] = ((byte >> bit) & 1) as u8;
++            bit += 1;
++        }
++        byte += 1;
++    }
++    table
++};
++
+ /// Unpack a 1-bit packed overlay bitmap
+ /// into one byte (0 or 1) per pixel.
+ ///
+ /// Overlay data is packed in row-major order,
+ /// least significant bit first within each byte,
+ /// with all frames in sequence without padding in between.
++#[cfg(target_arch = "x86_64")]
+ fn unpack_overlay_bits(packed: &[u8], num_pixels: usize) -> Vec<u8> {
+-    (0..num_pixels)
+-        .map(|i| (packed[i >> 3] >> (i & 0x7)) & 1)
+-        .collect()
++    if std::is_x86_feature_detected!("bmi2") {
++        // SAFETY: guarded by the runtime feature check above.
++        unsafe { unpack_overlay_bits_bmi2(packed, num_pixels) }
++    } else {
++        unpack_overlay_bits_table(packed, num_pixels)
++    }
++}
++
++#[cfg(not(target_arch = "x86_64"))]
++fn unpack_overlay_bits(packed: &[u8], num_pixels: usize) -> Vec<u8> {
++    unpack_overlay_bits_table(packed, num_pixels)
++}
++
++/// Table-driven fallback (candidate 022): one input byte -> 8 output bytes
++/// via a single lookup, instead of a bit-at-a-time shift-and-mask.
++fn unpack_overlay_bits_table(packed: &[u8], num_pixels: usize) -> Vec<u8> {
++    let full_bytes = num_pixels / 8;
++    let mut out = Vec::with_capacity(num_pixels);
++    for &b in &packed[..full_bytes] {
++        out.extend_from_slice(&UNPACK_BITS_TABLE[b as usize]);
++    }
++    let rem = num_pixels - full_bytes * 8;
++    if rem > 0 {
++        out.extend_from_slice(&UNPACK_BITS_TABLE[packed[full_bytes] as usize][..rem]);
++    }
++    out
++}
++
++/// `pdep`-based bit expansion (BMI2): depositing the 8 packed bits of a byte
++/// into the low bit of each of the 8 bytes of a `u64` reproduces exactly the
++/// same LSB-first unpacked output as the table lookup, in a single
++/// instruction with no memory access - a wider-than-byte replacement for
++/// candidate 022's per-byte table lookup.
++#[cfg(target_arch = "x86_64")]
++#[target_feature(enable = "bmi2")]
++unsafe fn unpack_overlay_bits_bmi2(packed: &[u8], num_pixels: usize) -> Vec<u8> {
++    use std::arch::x86_64::_pdep_u64;
++
++    const MASK: u64 = 0x0101_0101_0101_0101;
++
++    let full_bytes = num_pixels / 8;
++    let mut out = Vec::with_capacity(num_pixels);
++    for &b in &packed[..full_bytes] {
++        let expanded = _pdep_u64(b as u64, MASK);
++        out.extend_from_slice(&expanded.to_le_bytes());
++    }
++    let rem = num_pixels - full_bytes * 8;
++    if rem > 0 {
++        let expanded = _pdep_u64(packed[full_bytes] as u64, MASK).to_le_bytes();
++        out.extend_from_slice(&expanded[..rem]);
++    }
++    out
+ }
+ 
+ /// Decode all overlay planes present in the object,

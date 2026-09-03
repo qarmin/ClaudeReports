@@ -1,0 +1,37 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate found no source bug (Status: Not reproducible), so there is no patch.diff and no
+# repro/ crate. What this justfile reproduces instead is the actual evidence behind that result:
+# this session's own temporary differential/property tests (SIMD alpha premultiply/unpremultiply
+# vs. the scalar reference, at every remainder-triggering width for every listed backend/dtype)
+# both pass against a pristine clone, before and after applying them, with no source change
+# involved.
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+test: clone baseline apply-verification-tests new-tests full-suite
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# The project's own test suite before this candidate's tests are added, for a before/after count.
+baseline:
+    cd clone && cargo test --lib --features nightly_f16
+
+# Not a fix - adds this session's own temporary remainder-boundary tests (see
+# verification_tests.diff) to src/avx2/alpha_{u8,u16,f32,f16}.rs and src/sse/alpha_{u8,u16,f32,f16}.rs.
+apply-verification-tests:
+    cd clone && git apply "{{justfile_directory()}}/verification_tests.diff"
+
+new-tests:
+    cd clone && cargo test --lib --features nightly_f16 remainder
+
+# Confirms the temporary test-only additions don't disturb the rest of the suite.
+full-suite:
+    cd clone && cargo test --lib --features nightly_f16
+
+clean:
+    rm -rf clone

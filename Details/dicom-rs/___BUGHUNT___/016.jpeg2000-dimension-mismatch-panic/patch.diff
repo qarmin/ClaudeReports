@@ -1,0 +1,44 @@
+diff --git a/transfer-syntax-registry/src/adapters/jpeg2k.rs b/transfer-syntax-registry/src/adapters/jpeg2k.rs
+index 27f0e851..699ac82a 100644
+--- a/transfer-syntax-registry/src/adapters/jpeg2k.rs
++++ b/transfer-syntax-registry/src/adapters/jpeg2k.rs
+@@ -70,18 +70,36 @@ impl PixelDataReader for Jpeg2000Adapter {
+         // down to 8 bits per sample
+         let components = image.components();
+ 
++        // the number of samples expected per component, from the object's own declared
++        // dimensions - the JPEG 2000 codestream's own embedded dimensions are independent of
++        // these and are not required to agree with them
++        let expected_samples_per_component = rows as usize * cols as usize;
++
+         // write each component into the destination buffer
+         for (component_i, component) in components.iter().enumerate() {
+-            if component_i > samples_per_pixel as usize {
++            if component_i >= samples_per_pixel as usize {
+                 warn!(
+-                    "JPEG 2000 image has more components than expected ({} > {})",
++                    "JPEG 2000 image has more components than expected ({} >= {})",
+                     component_i, samples_per_pixel
+                 );
+                 break;
+             }
+ 
++            let component_data = component.data();
++            ensure_whatever!(
++                component_data.len() <= expected_samples_per_component,
++                "JPEG 2000 component {} decoded to {} samples, more than the {} expected from \
++                 the declared Rows/Columns ({} x {}) - possible dimension mismatch between the \
++                 DICOM object's metadata and the embedded codestream",
++                component_i,
++                component_data.len(),
++                expected_samples_per_component,
++                rows,
++                cols,
++            );
++
+             // write in standard layout
+-            for (i, sample) in component.data().iter().enumerate() {
++            for (i, sample) in component_data.iter().enumerate() {
+                 let offset = base_offset
+                     + i * samples_per_pixel as usize * bytes_per_sample as usize
+                     + component_i * bytes_per_sample as usize;

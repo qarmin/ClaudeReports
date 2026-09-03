@@ -1,0 +1,101 @@
+$ cargo run -p dicom-object --example scratch_109_seq_len
+
+input bytes: 32 bytes, SQ declared len = 20
+output bytes: 48 bytes
+re-parsed successfully (bug not present): 1 item(s) in sequence, PatientID = "5678"
+
+(re-run 3/3 times, identical output each time - deterministic, no bug observed)
+
+Source of the scratch example that produced this (removed from the working tree afterward,
+per this skill's "always revert" rule - not a permanent repro/ since Status is Not reproducible):
+
+//! Scratch check for candidate 109: does `DataSetSequence`'s own outer declared `length`
+//! field go stale (and get written verbatim) after a caller inserts/removes an item directly
+//! via `Value::Sequence(seq).items_mut()` inside `update_value_at`, given a sequence read from
+//! wire with an EXPLICIT (defined) length?
+use dicom_core::header::Tag;
+use dicom_core::value::Value;
+use dicom_core::{DataElement, VR};
+use dicom_object::InMemDicomObject;
+use dicom_parser::dataset::write::{DataSetWriterOptions, ExplicitLengthSqItemStrategy};
+use dicom_transfer_syntax_registry::{TransferSyntaxIndex, TransferSyntaxRegistry};
+
+fn main() {
+    let ts = TransferSyntaxRegistry.get("1.2.840.10008.1.2.1").unwrap();
+
+    // top-level SQ (0008,1140), EXPLICIT (defined) length, one item containing PatientID.
+    let mut bytes: Vec<u8> = Vec::new();
+    bytes.extend_from_slice(&[0x08, 0x00, 0x40, 0x11]);
+    bytes.extend_from_slice(b"SQ");
+    bytes.extend_from_slice(&[0x00, 0x00]); // reserved
+
+    // item content: PatientID (0010,0020) VR=LO len=4 "1234"
+    let mut item_content = Vec::new();
+    item_content.extend_from_slice(&[0x10, 0x00, 0x20, 0x00]);
+    item_content.extend_from_slice(b"LO");
+    item_content.extend_from_slice(&4u16.to_le_bytes());
+    item_content.extend_from_slice(b"1234");
+
+    let mut item_bytes = Vec::new();
+    item_bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0]);
+    item_bytes.extend_from_slice(&(item_content.len() as u32).to_le_bytes());
+    item_bytes.extend_from_slice(&item_content);
+
+    let sq_len = item_bytes.len() as u32; // EXPLICIT, defined length for the whole SQ
+    bytes.extend_from_slice(&sq_len.to_le_bytes());
+    bytes.extend_from_slice(&item_bytes);
+
+    println!("input bytes: {} bytes, SQ declared len = {}", bytes.len(), sq_len);
+
+    let mut obj = InMemDicomObject::read_dataset_with_ts(bytes.as_slice(), ts)
+        .expect("should parse the well-formed input dataset");
+
+    // Directly push a brand-new item, then remove the original item, via the public
+    // Value::Sequence(...).items_mut() API, through update_value_at - "insert/remove a whole
+    // item" without touching any leaf value inside an existing item.
+    obj.update_value_at(Tag(0x0008, 0x1140), |v| {
+        if let Value::Sequence(seq) = v {
+            let new_item = InMemDicomObject::from_element_iter([DataElement::new(
+                Tag(0x0010, 0x0020),
+                VR::LO,
+                "5678",
+            )]);
+            seq.items_mut().push(new_item);
+            seq.items_mut().remove(0); // remove the original item read from the wire
+        } else {
+            panic!("expected a sequence value");
+        }
+    })
+    .expect("selector should resolve");
+
+    let mut out = Vec::new();
+    let options = DataSetWriterOptions::default()
+        .explicit_length_sq_item_strategy(ExplicitLengthSqItemStrategy::NoChange);
+    obj.write_dataset_with_ts_options(&mut out, ts, options)
+        .expect("write should succeed regardless of the bug");
+
+    println!("output bytes: {} bytes", out.len());
+
+    match InMemDicomObject::read_dataset_with_ts(out.as_slice(), ts) {
+        Ok(reparsed) => {
+            let items = reparsed
+                .get(Tag(0x0008, 0x1140))
+                .unwrap()
+                .items()
+                .unwrap();
+            println!(
+                "re-parsed successfully (bug not present): {} item(s) in sequence, PatientID = {:?}",
+                items.len(),
+                items[0].get(Tag(0x0010, 0x0020)).unwrap().to_str().unwrap()
+            );
+        }
+        Err(e) => {
+            println!("BUG REPRODUCED: re-parsing the writer's own output failed: {e}");
+            let mut source = std::error::Error::source(&e);
+            while let Some(s) = source {
+                println!("  caused by: {s}");
+                source = std::error::Error::source(s);
+            }
+        }
+    }
+}

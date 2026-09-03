@@ -1,0 +1,294 @@
+diff --git a/internal/renderers/femtovg/images.rs b/internal/renderers/femtovg/images.rs
+index 67cc08569..6e8b70eb4 100644
+--- a/internal/renderers/femtovg/images.rs
++++ b/internal/renderers/femtovg/images.rs
+@@ -7,7 +7,7 @@
+ #[cfg(not(target_arch = "wasm32"))]
+ use i_slint_core::graphics::BorrowedOpenGLTexture;
+ use i_slint_core::graphics::euclid;
+-use i_slint_core::graphics::{ImageCacheKey, IntSize, SharedImageBuffer};
++use i_slint_core::graphics::{ImageCacheKey, IntRect, IntSize, SharedImageBuffer};
+ use i_slint_core::items::ImageTiling;
+ use i_slint_core::lengths::PhysicalPx;
+ use i_slint_core::{ImageInner, items::ImageRendering};
+@@ -300,6 +300,69 @@ pub(crate) fn clear(&mut self) {
+     }
+ }
+ 
++/// Identifies a clipped/tiled texture derived from a base image, so that repeated
++/// draws of the same source with the same tiling geometry can reuse one GPU texture
++/// instead of re-blitting it on every frame.
++#[derive(PartialEq, Eq, Hash)]
++pub struct TiledTextureCacheKey {
++    source_image_id: femtovg::ImageId,
++    clip_rect: IntRect,
++    texture_width: usize,
++    texture_height: usize,
++    rendering: ImageRendering,
++}
++
++impl TiledTextureCacheKey {
++    pub fn new(
++        source_image_id: femtovg::ImageId,
++        clip_rect: IntRect,
++        texture_width: usize,
++        texture_height: usize,
++        rendering: ImageRendering,
++    ) -> Self {
++        Self { source_image_id, clip_rect, texture_width, texture_height, rendering }
++    }
++}
++
++// Cache for the clipped/tiled textures created by `draw_image_impl` for
++// `ImageTiling::Repeat`/`Round`. Unlike `TextureCache`, nothing outside of this cache
++// keeps these textures alive, so entries are retained across frames by marking them
++// used on lookup and pruning whatever wasn't looked up in `drain()` (called once per
++// frame, mirroring `TextureCache::drain()`).
++pub struct TiledTextureCache<R: femtovg::Renderer + TextureImporter>(
++    HashMap<TiledTextureCacheKey, (Rc<Texture<R>>, bool)>,
++);
++
++impl<R: femtovg::Renderer + TextureImporter> Default for TiledTextureCache<R> {
++    fn default() -> Self {
++        Self(Default::default())
++    }
++}
++
++impl<R: femtovg::Renderer + TextureImporter> TiledTextureCache<R> {
++    pub(crate) fn lookup_or_create(
++        &mut self,
++        cache_key: TiledTextureCacheKey,
++        image_create_fn: impl FnOnce() -> Option<Rc<Texture<R>>>,
++    ) -> Option<Rc<Texture<R>>> {
++        if let Some((texture, used)) = self.0.get_mut(&cache_key) {
++            *used = true;
++            return Some(texture.clone());
++        }
++        let new_texture = image_create_fn()?;
++        self.0.insert(cache_key, (new_texture.clone(), true));
++        Some(new_texture)
++    }
++
++    pub(crate) fn drain(&mut self) {
++        self.0.retain(|_, (_, used)| core::mem::take(used));
++    }
++
++    pub(crate) fn clear(&mut self) {
++        self.0.clear();
++    }
++}
++
+ fn image_buffer_to_image_source(
+     buffer: &SharedImageBuffer,
+ ) -> (femtovg::ImageSource<'_>, femtovg::ImageFlags) {
+diff --git a/internal/renderers/femtovg/itemrenderer.rs b/internal/renderers/femtovg/itemrenderer.rs
+index 6eb271c99..0208dc2f2 100644
+--- a/internal/renderers/femtovg/itemrenderer.rs
++++ b/internal/renderers/femtovg/itemrenderer.rs
+@@ -31,7 +31,7 @@
+ use crate::images::TextureImporter;
+ 
+ use super::PhysicalSize;
+-use super::images::{Texture, TextureCacheKey};
++use super::images::{Texture, TextureCacheKey, TiledTextureCacheKey};
+ use super::{PhysicalBorderRadius, PhysicalLength, PhysicalPoint, PhysicalRect, font_cache};
+ 
+ pub(super) type FemtovgBoxShadowCache<R> = BoxShadowCache<ItemGraphicsCacheEntry<R>>;
+@@ -87,6 +87,7 @@ pub struct GLItemRenderer<'a, R: femtovg::Renderer + TextureImporter> {
+     graphics_cache: &'a ItemGraphicsCache<R>,
+     layer_cache: &'a LayerCache<R>,
+     texture_cache: &'a RefCell<super::images::TextureCache<R>>,
++    tiled_texture_cache: &'a RefCell<super::images::TiledTextureCache<R>>,
+     box_shadow_cache: &'a FemtovgBoxShadowCache<R>,
+     canvas: CanvasRc<R>,
+     // Textures from layering or tiling that were scheduled for rendering where we can't delete the femtovg::ImageId yet
+@@ -1047,6 +1048,7 @@ pub(super) fn new(
+         graphics_cache: &'a ItemGraphicsCache<R>,
+         layer_cache: &'a LayerCache<R>,
+         texture_cache: &'a RefCell<super::images::TextureCache<R>>,
++        tiled_texture_cache: &'a RefCell<super::images::TiledTextureCache<R>>,
+         box_shadow_cache: &'a FemtovgBoxShadowCache<R>,
+         text_layout_cache: &'a sharedparley::TextLayoutCache,
+         window: &'a i_slint_core::api::Window,
+@@ -1058,6 +1060,7 @@ pub(super) fn new(
+             graphics_cache,
+             layer_cache,
+             texture_cache,
++            tiled_texture_cache,
+             box_shadow_cache,
+             canvas: canvas.clone(),
+             textures_to_delete_after_flush: Default::default(),
+@@ -1329,47 +1332,75 @@ fn draw_image_impl(
+                         scale_w * fit.clip_rect.width() as f32,
+                         scale_h * fit.clip_rect.height() as f32,
+                     );
++                    let texture_width = texture_size.width as usize;
++                    let texture_height = texture_size.height as usize;
++
++                    // The clipped/tiled copy only depends on the source texture and the
++                    // fit geometry, not on anything that changes every frame, so it's
++                    // cached and reused across frames instead of being blitted anew each
++                    // time (see `tiled_texture_cache`'s doc comment).
++                    let cache_key = TiledTextureCacheKey::new(
++                        image_id,
++                        fit.clip_rect,
++                        texture_width,
++                        texture_height,
++                        item.rendering(),
++                    );
+ 
+-                    let clipped_image = self
+-                        .canvas
++                    let clipped_texture = self
++                        .tiled_texture_cache
+                         .borrow_mut()
+-                        .create_image_empty(
+-                            texture_size.width as usize,
+-                            texture_size.height as usize,
+-                            femtovg::PixelFormat::Rgba8,
+-                            femtovg::ImageFlags::PREMULTIPLIED
+-                                | femtovg::ImageFlags::REPEAT_X
+-                                | femtovg::ImageFlags::REPEAT_Y
+-                                | scaling_flags,
+-                        )
+-                        .expect("internal error allocating temporary texture for image tiling");
+-
+-                    let mut image_rect = femtovg::Path::new();
+-                    image_rect.rect(0., 0., texture_size.width, texture_size.height);
+-                    self.canvas.borrow_mut().save_with(|canvas| {
+-                        canvas.reset();
+-                        canvas.scale(1., -1.); // Image are rendered upside down
+-                        canvas.translate(0., -scale_h * (fit.clip_rect.height() as f32));
+-                        canvas.set_render_target(femtovg::RenderTarget::Image(clipped_image));
+-                        canvas.global_composite_operation(femtovg::CompositeOperation::Copy);
+-                        canvas.fill_path(
+-                            &image_rect,
+-                            &femtovg::Paint::image(
+-                                image_id,
+-                                -scale_w * fit.clip_rect.origin.x as f32,
+-                                -scale_h * fit.clip_rect.origin.y as f32,
+-                                buf_size.cast().width,
+-                                buf_size.cast().height,
+-                                0.,
+-                                1.0,
+-                            ),
++                        .lookup_or_create(cache_key, || {
++                            let clipped_image = self
++                                .canvas
++                                .borrow_mut()
++                                .create_image_empty(
++                                    texture_width,
++                                    texture_height,
++                                    femtovg::PixelFormat::Rgba8,
++                                    femtovg::ImageFlags::PREMULTIPLIED
++                                        | femtovg::ImageFlags::REPEAT_X
++                                        | femtovg::ImageFlags::REPEAT_Y
++                                        | scaling_flags,
++                                )
++                                .expect(
++                                    "internal error allocating temporary texture for image tiling",
++                                );
++
++                            let mut image_rect = femtovg::Path::new();
++                            image_rect.rect(0., 0., texture_size.width, texture_size.height);
++                            self.canvas.borrow_mut().save_with(|canvas| {
++                                canvas.reset();
++                                canvas.scale(1., -1.); // Image are rendered upside down
++                                canvas
++                                    .translate(0., -scale_h * (fit.clip_rect.height() as f32));
++                                canvas.set_render_target(femtovg::RenderTarget::Image(
++                                    clipped_image,
++                                ));
++                                canvas.global_composite_operation(
++                                    femtovg::CompositeOperation::Copy,
++                                );
++                                canvas.fill_path(
++                                    &image_rect,
++                                    &femtovg::Paint::image(
++                                        image_id,
++                                        -scale_w * fit.clip_rect.origin.x as f32,
++                                        -scale_h * fit.clip_rect.origin.y as f32,
++                                        buf_size.cast().width,
++                                        buf_size.cast().height,
++                                        0.,
++                                        1.0,
++                                    ),
++                                );
++                                canvas.set_render_target(self.current_render_target());
++                            });
++
++                            Some(Texture::adopt(&self.canvas, clipped_image))
++                        })
++                        .expect(
++                            "internal error allocating temporary texture for image tiling",
+                         );
+-                        canvas.set_render_target(self.current_render_target());
+-                    });
+-                    self.textures_to_delete_after_flush
+-                        .borrow_mut()
+-                        .push(Texture::adopt(&self.canvas, clipped_image));
+-                    (clipped_image, Default::default(), texture_size)
++                    (clipped_texture.id, Default::default(), texture_size)
+                 } else {
+                     (image_id, fit.clip_rect.origin.cast::<f32>(), buf_size)
+                 };
+diff --git a/internal/renderers/femtovg/lib.rs b/internal/renderers/femtovg/lib.rs
+index 04ad6b482..61504db0d 100644
+--- a/internal/renderers/femtovg/lib.rs
++++ b/internal/renderers/femtovg/lib.rs
+@@ -107,6 +107,7 @@ pub struct FemtoVGRenderer<B: GraphicsBackend> {
+     graphics_cache: itemrenderer::ItemGraphicsCache<B::Renderer>,
+     layer_cache: itemrenderer::LayerCache<B::Renderer>,
+     texture_cache: RefCell<images::TextureCache<B::Renderer>>,
++    tiled_texture_cache: RefCell<images::TiledTextureCache<B::Renderer>>,
+     box_shadow_cache: itemrenderer::FemtovgBoxShadowCache<B::Renderer>,
+     text_layout_cache: sharedparley::TextLayoutCache,
+     rendering_metrics_collector: RefCell<Option<Rc<RenderingMetricsCollector>>>,
+@@ -125,6 +126,7 @@ pub(crate) fn new_internal(graphics_backend: B) -> Self {
+             graphics_cache: Default::default(),
+             layer_cache: Default::default(),
+             texture_cache: Default::default(),
++            tiled_texture_cache: Default::default(),
+             box_shadow_cache: Default::default(),
+             text_layout_cache: Default::default(),
+             rendering_metrics_collector: Default::default(),
+@@ -247,6 +249,7 @@ fn internal_render_with_post_callback(
+                     &self.graphics_cache,
+                     &self.layer_cache,
+                     &self.texture_cache,
++                    &self.tiled_texture_cache,
+                     &self.box_shadow_cache,
+                     &self.text_layout_cache,
+                     window,
+@@ -300,6 +303,7 @@ fn internal_render_with_post_callback(
+                 // Delete any images and layer images (and their FBOs) before making the context not current anymore, to
+                 // avoid GPU memory leaks.
+                 self.texture_cache.borrow_mut().drain();
++                self.tiled_texture_cache.borrow_mut().drain();
+                 drop(item_renderer);
+                 Ok(())
+             })
+@@ -374,6 +378,7 @@ fn set_window_adapter(&self, window_adapter: &Rc<dyn WindowAdapter>) {
+                 self.graphics_cache.clear_all();
+                 self.layer_cache.clear_all();
+                 self.texture_cache.borrow_mut().clear();
++                self.tiled_texture_cache.borrow_mut().clear();
+                 self.box_shadow_cache.clear();
+             })
+             .ok();
+@@ -458,6 +463,7 @@ fn new_suspended() -> Self {
+             graphics_cache: Default::default(),
+             layer_cache: Default::default(),
+             texture_cache: Default::default(),
++            tiled_texture_cache: Default::default(),
+             box_shadow_cache: Default::default(),
+             text_layout_cache: Default::default(),
+             rendering_metrics_collector: Default::default(),
+@@ -483,6 +489,7 @@ fn clear_graphics_context(&self) -> Result<(), i_slint_core::platform::PlatformE
+             self.graphics_cache.clear_all();
+             self.layer_cache.clear_all();
+             self.texture_cache.borrow_mut().clear();
++            self.tiled_texture_cache.borrow_mut().clear();
+             self.box_shadow_cache.clear();
+         })?;
+ 

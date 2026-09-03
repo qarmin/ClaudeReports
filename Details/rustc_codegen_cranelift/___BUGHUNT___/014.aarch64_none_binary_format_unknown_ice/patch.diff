@@ -1,0 +1,48 @@
+diff --git a/src/driver/aot.rs b/src/driver/aot.rs
+index d6c25cf5..ab64dfcd 100644
+--- a/src/driver/aot.rs
++++ b/src/driver/aot.rs
+@@ -49,7 +49,12 @@ fn make_module(tcx: TyCtxt<'_>, cgu_name: &str) -> AotModule {
+         cgu_name.to_owned() + ".o",
+         cranelift_module::default_libcall_names(),
+     )
+-    .unwrap();
++    .unwrap_or_else(|err| {
++        tcx.sess.dcx().fatal(format!(
++            "can't emit object files for {}: {}",
++            tcx.sess.target.llvm_target, err
++        ))
++    });
+ 
+     // Disable function sections by default on MSVC as it causes significant slowdowns with link.exe.
+     // Maybe link.exe has exponential behavior when there are many sections with the same name? Also
+diff --git a/src/lib.rs b/src/lib.rs
+index 6d2a3537..8c446775 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -261,10 +261,23 @@ fn enable_verifier(sess: &Session) -> bool {
+ fn target_tuple(sess: &Session) -> target_lexicon::Triple {
+     // Use versioned target tuple to make `OperatingSystem::MacOSX(...)`
+     // contain a value, which we use when emitting `LC_BUILD_VERSION`.
+-    match back::versioned_llvm_target(sess).parse() {
++    let mut tuple: target_lexicon::Triple = match back::versioned_llvm_target(sess).parse() {
+         Ok(tuple) => tuple,
+         Err(err) => sess.dcx().fatal(format!("target not recognized: {}", err)),
+-    }
++    };
++
++    // target-lexicon infers the binary format from the os/env of the llvm target tuple, which
++    // gives `Unknown` for bare metal tuples like `aarch64-unknown-none`. The rustc target spec
++    // always knows the real object format, so use it instead of the inferred one.
++    tuple.binary_format = match sess.target.binary_format {
++        rustc_target::spec::BinaryFormat::Coff => target_lexicon::BinaryFormat::Coff,
++        rustc_target::spec::BinaryFormat::Elf => target_lexicon::BinaryFormat::Elf,
++        rustc_target::spec::BinaryFormat::MachO => target_lexicon::BinaryFormat::Macho,
++        rustc_target::spec::BinaryFormat::Wasm => target_lexicon::BinaryFormat::Wasm,
++        rustc_target::spec::BinaryFormat::Xcoff => target_lexicon::BinaryFormat::Xcoff,
++    };
++
++    tuple
+ }
+ 
+ fn build_isa(sess: &Session, jit: bool) -> Arc<dyn TargetIsa + 'static> {

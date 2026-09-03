@@ -1,0 +1,50 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# Extra host requirements beyond a Rust nightly toolchain:
+#   * an x86_64 host (the binaries built in PART 2 are x86_64 and are executed natively; no
+#     emulator is needed)
+#   * the rust-src component of the pinned nightly (rust-toolchain.toml asks for it), because
+#     there is no rustup rust-std for x86_64-unknown-trusty nor for the custom target specs -
+#     `core` is compiled from source
+#
+# `just build-clif` takes a few minutes the first time (it builds cg_clif and its sysroot).
+
+# Swap to https://github.com/rust-lang/rustc_codegen_cranelift.git if you have no SSH key set up.
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone build-clif reproduce-before apply build-clif reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-clif:
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build
+
+# LLVM vs the pristine cg_clif. Expected: LLVM builds+runs and prints 7890598189674834828 for
+# every target spec, cg_clif ICEs in build_isa (src/lib.rs) with BadName("generic") /
+# BadName("znver5") -> run.sh exits 1.
+reproduce-before:
+    -ulimit -c 0 && CLIF_ROOT="{{justfile_directory()}}/clone" bash repro/run.sh
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro against the patched clone: cg_clif must now build core + the program itself for all
+# three target specs, and the binaries it produces must print 7890598189674834828 -> exit 0.
+reproduce-after:
+    ulimit -c 0 && CLIF_ROOT="{{justfile_directory()}}/clone" bash repro/run.sh
+
+# Blast-radius sweep: every x86 cpu name llvm accepts, as a custom target spec's "cpu" field.
+sweep:
+    ulimit -c 0 && CLIF_ROOT="{{justfile_directory()}}/clone" bash repro/sweep_target_spec_cpu.sh
+
+clean:
+    rm -rf clone repro/work repro/trusty_lib/target

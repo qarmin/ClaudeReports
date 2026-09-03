@@ -1,0 +1,210 @@
+Candidate 018 - vcvtps2ph_256_unimplemented - real captured output
+==================================================================
+
+Machine: Ryzen 9 7900 (Zen 4, F16C present), Linux. cg_clif @ 2bc05d45 (Cranelift 0.135),
+rustc nightly-2026-08-24 (rust-toolchain.toml). repro/ built by the real dist/cargo-clif,
+debug profile, [profile.*] opt-level = 0.
+
+Commands (from ___BUGHUNT___/018.vcvtps2ph_256_unimplemented/):
+  CLIF_ROOT=<unpatched cg_clif> just llvm clif      # -> the abort in section 1
+  CLIF_ROOT=<patched cg_clif>   just llvm clif diff # -> section 2
+  CLIF_ROOT=<patched cg_clif>   just disasm         # -> appendix A
+  CLIF_ROOT=<...>               just family         # -> appendix B
+
+
+1. UNPATCHED cg_clif - the real binary aborts
+---------------------------------------------
+
+$ CARGO_TARGET_DIR=target-clif-unpatched <main tree>/dist/cargo-clif run --bin vcvtps2ph_256_unimplemented
+   Compiling vcvtps2ph_256_unimplemented v0.0.0 (.../018.vcvtps2ph_256_unimplemented/repro)
+warning: unsupported x86 llvm intrinsic llvm.x86.vcvtps2ph.256; replacing with trap
+
+warning: `vcvtps2ph_256_unimplemented` (bin "vcvtps2ph_256_unimplemented") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.76s
+     Running `target-clif-unpatched/debug/vcvtps2ph_256_unimplemented`
+
+thread 'main' (2163519) panicked at library/core/src/panicking.rs:225:5:
+llvm.x86.vcvtps2ph.256 is not yet supported.
+See https://github.com/rust-lang/rustc_codegen_cranelift/issues/171
+Please open an issue at https://github.com/rust-lang/rustc_codegen_cranelift/issues
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+thread caused non-unwinding panic. aborting.
+clif exit=134
+
+Note the crate BUILDS successfully - the failure is a compile-time warning turned into an
+unconditional run-time trap. Not one line of the program's own output is ever printed, because
+the very first thing main() does is call _mm256_cvtps_ph.
+
+Repeatability, same unpatched binary, 5 consecutive runs:
+
+  run1 exit=134
+  run2 exit=134
+  run3 exit=134
+  run4 exit=134
+  run5 exit=134
+
+LLVM (the oracle), same source, exit 0 - see section 2 for its full 86 lines.
+
+
+2. PATCHED cg_clif - byte-identical to LLVM
+-------------------------------------------
+
+$ diff repro/llvm.out repro/clif.out && echo identical
+identical
+
+Repeatability, same patched binary, 5 consecutive runs, sha256 of stdout:
+
+  c842b076d9c9b49d00fd8653c4f37c4b13a66b4fba98fe419a82508b35f057dc
+  c842b076d9c9b49d00fd8653c4f37c4b13a66b4fba98fe419a82508b35f057dc
+  c842b076d9c9b49d00fd8653c4f37c4b13a66b4fba98fe419a82508b35f057dc
+  c842b076d9c9b49d00fd8653c4f37c4b13a66b4fba98fe419a82508b35f057dc
+  c842b076d9c9b49d00fd8653c4f37c4b13a66b4fba98fe419a82508b35f057dc
+LLVM's own stdout, for comparison:
+  c842b076d9c9b49d00fd8653c4f37c4b13a66b4fba98fe419a82508b35f057dc
+
+The full 86 lines, identical from both backends (all values are raw f16 bit patterns; the
+`ps2ph.256 imm=I in=N` line must equal the two halves of the `ps2ph.128 imm=I in=N` line
+lane for lane):
+
+ps2ph.256 imm=0 in=0 -> [3c00, 4000, 4200, 4400, 3800, b800, 7bff, 3555]
+ps2ph.256 imm=0 in=1 -> [0000, 8000, 0000, 8000, 0001, 0001, 00a8, 0400]
+ps2ph.256 imm=0 in=2 -> [7bff, 7c00, 7c00, 7c00, fbff, fc00, fc00, 7c00]
+ps2ph.256 imm=0 in=3 -> [7c00, fc00, 7e00, fe00, 7c00, fc00, 0000, 8000]
+ps2ph.256 imm=0 in=4 -> [3c01, 3c00, 3c02, 4000, 3bff, 3fff, 0002, 0001]
+ps2ph.256 imm=0 in=5 -> [2e66, 3266, 34cd, 399a, 3e00, 4100, be00, c100]
+ps2ph.256 imm=0 in=6 -> [63ff, 6400, 67ff, 6800, e800, 6c00, 7000, 7400]
+ps2ph.256 imm=0 in=7 -> [0000, 8000, 7e00, fe00, 4000, 7bff, 7c00, 0200]
+ps2ph.256 imm=1 in=0 -> [3c00, 4000, 4200, 4400, 3800, b800, 7bff, 3555]
+ps2ph.256 imm=1 in=1 -> [0000, 8000, 0000, 8001, 0001, 0001, 00a7, 0400]
+ps2ph.256 imm=1 in=2 -> [7bff, 7bff, 7bff, 7bff, fc00, fc00, fc00, 7bff]
+ps2ph.256 imm=1 in=3 -> [7c00, fc00, 7e00, fe00, 7bff, fc00, 0000, 8001]
+ps2ph.256 imm=1 in=4 -> [3c00, 3c00, 3c01, 4000, 3bff, 3fff, 0001, 0000]
+ps2ph.256 imm=1 in=5 -> [2e66, 3266, 34cc, 3999, 3e00, 4100, be00, c100]
+ps2ph.256 imm=1 in=6 -> [63ff, 6400, 67ff, 6800, e801, 6c00, 7000, 7400]
+ps2ph.256 imm=1 in=7 -> [0000, 8001, 7e00, fe00, 3fff, 7bff, 7bff, 0200]
+ps2ph.256 imm=2 in=0 -> [3c00, 4000, 4200, 4400, 3800, b800, 7bff, 3556]
+ps2ph.256 imm=2 in=1 -> [0000, 8000, 0001, 8000, 0002, 0001, 00a8, 0400]
+ps2ph.256 imm=2 in=2 -> [7c00, 7c00, 7c00, 7c00, fbff, fbff, fbff, 7c00]
+ps2ph.256 imm=2 in=3 -> [7c00, fc00, 7e00, fe00, 7c00, fbff, 0001, 8000]
+ps2ph.256 imm=2 in=4 -> [3c01, 3c01, 3c02, 4001, 3bff, 3fff, 0002, 0001]
+ps2ph.256 imm=2 in=5 -> [2e67, 3267, 34cd, 399a, 3e00, 4100, be00, c100]
+ps2ph.256 imm=2 in=6 -> [63ff, 6401, 67ff, 6801, e800, 6c01, 7001, 7401]
+ps2ph.256 imm=2 in=7 -> [0001, 8000, 7e00, fe00, 4000, 7c00, 7c00, 0200]
+ps2ph.256 imm=3 in=0 -> [3c00, 4000, 4200, 4400, 3800, b800, 7bff, 3555]
+ps2ph.256 imm=3 in=1 -> [0000, 8000, 0000, 8000, 0001, 0001, 00a7, 0400]
+ps2ph.256 imm=3 in=2 -> [7bff, 7bff, 7bff, 7bff, fbff, fbff, fbff, 7bff]
+ps2ph.256 imm=3 in=3 -> [7c00, fc00, 7e00, fe00, 7bff, fbff, 0000, 8000]
+ps2ph.256 imm=3 in=4 -> [3c00, 3c00, 3c01, 4000, 3bff, 3fff, 0001, 0000]
+ps2ph.256 imm=3 in=5 -> [2e66, 3266, 34cc, 3999, 3e00, 4100, be00, c100]
+ps2ph.256 imm=3 in=6 -> [63ff, 6400, 67ff, 6800, e800, 6c00, 7000, 7400]
+ps2ph.256 imm=3 in=7 -> [0000, 8000, 7e00, fe00, 3fff, 7bff, 7bff, 0200]
+ps2ph.256 imm=4 in=0 -> [3c00, 4000, 4200, 4400, 3800, b800, 7bff, 3555]
+ps2ph.256 imm=4 in=1 -> [0000, 8000, 0000, 8000, 0001, 0001, 00a8, 0400]
+ps2ph.256 imm=4 in=2 -> [7bff, 7c00, 7c00, 7c00, fbff, fc00, fc00, 7c00]
+ps2ph.256 imm=4 in=3 -> [7c00, fc00, 7e00, fe00, 7c00, fc00, 0000, 8000]
+ps2ph.256 imm=4 in=4 -> [3c01, 3c00, 3c02, 4000, 3bff, 3fff, 0002, 0001]
+ps2ph.256 imm=4 in=5 -> [2e66, 3266, 34cd, 399a, 3e00, 4100, be00, c100]
+ps2ph.256 imm=4 in=6 -> [63ff, 6400, 67ff, 6800, e800, 6c00, 7000, 7400]
+ps2ph.256 imm=4 in=7 -> [0000, 8000, 7e00, fe00, 4000, 7bff, 7c00, 0200]
+ps2ph.128 imm=0 in=0 -> [3c00, 4000, 4200, 4400, 0000, 0000, 0000, 0000] [3800, b800, 7bff, 3555, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=0 in=1 -> [0000, 8000, 0000, 8000, 0000, 0000, 0000, 0000] [0001, 0001, 00a8, 0400, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=0 in=2 -> [7bff, 7c00, 7c00, 7c00, 0000, 0000, 0000, 0000] [fbff, fc00, fc00, 7c00, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=0 in=3 -> [7c00, fc00, 7e00, fe00, 0000, 0000, 0000, 0000] [7c00, fc00, 0000, 8000, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=0 in=4 -> [3c01, 3c00, 3c02, 4000, 0000, 0000, 0000, 0000] [3bff, 3fff, 0002, 0001, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=0 in=5 -> [2e66, 3266, 34cd, 399a, 0000, 0000, 0000, 0000] [3e00, 4100, be00, c100, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=0 in=6 -> [63ff, 6400, 67ff, 6800, 0000, 0000, 0000, 0000] [e800, 6c00, 7000, 7400, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=0 in=7 -> [0000, 8000, 7e00, fe00, 0000, 0000, 0000, 0000] [4000, 7bff, 7c00, 0200, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=1 in=0 -> [3c00, 4000, 4200, 4400, 0000, 0000, 0000, 0000] [3800, b800, 7bff, 3555, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=1 in=1 -> [0000, 8000, 0000, 8001, 0000, 0000, 0000, 0000] [0001, 0001, 00a7, 0400, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=1 in=2 -> [7bff, 7bff, 7bff, 7bff, 0000, 0000, 0000, 0000] [fc00, fc00, fc00, 7bff, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=1 in=3 -> [7c00, fc00, 7e00, fe00, 0000, 0000, 0000, 0000] [7bff, fc00, 0000, 8001, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=1 in=4 -> [3c00, 3c00, 3c01, 4000, 0000, 0000, 0000, 0000] [3bff, 3fff, 0001, 0000, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=1 in=5 -> [2e66, 3266, 34cc, 3999, 0000, 0000, 0000, 0000] [3e00, 4100, be00, c100, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=1 in=6 -> [63ff, 6400, 67ff, 6800, 0000, 0000, 0000, 0000] [e801, 6c00, 7000, 7400, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=1 in=7 -> [0000, 8001, 7e00, fe00, 0000, 0000, 0000, 0000] [3fff, 7bff, 7bff, 0200, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=2 in=0 -> [3c00, 4000, 4200, 4400, 0000, 0000, 0000, 0000] [3800, b800, 7bff, 3556, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=2 in=1 -> [0000, 8000, 0001, 8000, 0000, 0000, 0000, 0000] [0002, 0001, 00a8, 0400, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=2 in=2 -> [7c00, 7c00, 7c00, 7c00, 0000, 0000, 0000, 0000] [fbff, fbff, fbff, 7c00, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=2 in=3 -> [7c00, fc00, 7e00, fe00, 0000, 0000, 0000, 0000] [7c00, fbff, 0001, 8000, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=2 in=4 -> [3c01, 3c01, 3c02, 4001, 0000, 0000, 0000, 0000] [3bff, 3fff, 0002, 0001, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=2 in=5 -> [2e67, 3267, 34cd, 399a, 0000, 0000, 0000, 0000] [3e00, 4100, be00, c100, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=2 in=6 -> [63ff, 6401, 67ff, 6801, 0000, 0000, 0000, 0000] [e800, 6c01, 7001, 7401, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=2 in=7 -> [0001, 8000, 7e00, fe00, 0000, 0000, 0000, 0000] [4000, 7c00, 7c00, 0200, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=3 in=0 -> [3c00, 4000, 4200, 4400, 0000, 0000, 0000, 0000] [3800, b800, 7bff, 3555, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=3 in=1 -> [0000, 8000, 0000, 8000, 0000, 0000, 0000, 0000] [0001, 0001, 00a7, 0400, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=3 in=2 -> [7bff, 7bff, 7bff, 7bff, 0000, 0000, 0000, 0000] [fbff, fbff, fbff, 7bff, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=3 in=3 -> [7c00, fc00, 7e00, fe00, 0000, 0000, 0000, 0000] [7bff, fbff, 0000, 8000, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=3 in=4 -> [3c00, 3c00, 3c01, 4000, 0000, 0000, 0000, 0000] [3bff, 3fff, 0001, 0000, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=3 in=5 -> [2e66, 3266, 34cc, 3999, 0000, 0000, 0000, 0000] [3e00, 4100, be00, c100, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=3 in=6 -> [63ff, 6400, 67ff, 6800, 0000, 0000, 0000, 0000] [e800, 6c00, 7000, 7400, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=3 in=7 -> [0000, 8000, 7e00, fe00, 0000, 0000, 0000, 0000] [3fff, 7bff, 7bff, 0200, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=4 in=0 -> [3c00, 4000, 4200, 4400, 0000, 0000, 0000, 0000] [3800, b800, 7bff, 3555, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=4 in=1 -> [0000, 8000, 0000, 8000, 0000, 0000, 0000, 0000] [0001, 0001, 00a8, 0400, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=4 in=2 -> [7bff, 7c00, 7c00, 7c00, 0000, 0000, 0000, 0000] [fbff, fc00, fc00, 7c00, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=4 in=3 -> [7c00, fc00, 7e00, fe00, 0000, 0000, 0000, 0000] [7c00, fc00, 0000, 8000, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=4 in=4 -> [3c01, 3c00, 3c02, 4000, 0000, 0000, 0000, 0000] [3bff, 3fff, 0002, 0001, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=4 in=5 -> [2e66, 3266, 34cd, 399a, 0000, 0000, 0000, 0000] [3e00, 4100, be00, c100, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=4 in=6 -> [63ff, 6400, 67ff, 6800, 0000, 0000, 0000, 0000] [e800, 6c00, 7000, 7400, 0000, 0000, 0000, 0000]
+ps2ph.128 imm=4 in=7 -> [0000, 8000, 7e00, fe00, 0000, 0000, 0000, 0000] [4000, 7bff, 7c00, 0200, 0000, 0000, 0000, 0000]
+ph2ps.128 -> [1.0, 2.0, 3.0, 4.0]
+ph2ps.256 -> [1.0, 2.0, 3.0, 4.0, 0.5, -0.5, 65504.0, 0.33325195]
+repeat acc=349590
+input-after-use [1.0009764, 2.0009766, 0.9995117, 1.9990234, 0.1, 0.2, 0.3, 0.7] out [3c01, 4000, 3bff, 3fff, 2e66, 3266, 34cd, 399a]
+roundtrip [1.0009766, 2.0, 0.9995117, 1.9990234, 0.099975586, 0.19995117, 0.30004883, 0.7001953]
+done
+
+Appendix A - the patched lowering emits real instructions, it is not a silent no-op
+----------------------------------------------------------------------------------
+
+$ just disasm      # objdump of the PATCHED binary
+objdump -d --no-show-raw-insn repro/target-clif/debug/vcvtps2ph_256_unimplemented | grep -oE '\bvcvtps2ph\s+\S.*' | sort | uniq -c
+      3 vcvtps2ph $0x0,%xmm0,%xmm0
+      3 vcvtps2ph $0x1,%xmm0,%xmm0
+      3 vcvtps2ph $0x2,%xmm0,%xmm0
+      3 vcvtps2ph $0x3,%xmm0,%xmm0
+      3 vcvtps2ph $0x4,%xmm0,%xmm0
+
+Three per immediate: one from the already-implemented `.128` arm (part2 of the repro) plus two
+from the new `.256` arm, one per 128-bit half. The immediate is threaded through correctly
+(imm=0..4 each appear). The same objdump of the UNPATCHED binary shows only one per immediate -
+the `.128` arm - confirming the 256-bit call contributed no instruction at all:
+
+      1 vcvtps2ph $0x0,%xmm0,%xmm0
+      1 vcvtps2ph $0x1,%xmm0,%xmm0
+      1 vcvtps2ph $0x2,%xmm0,%xmm0
+      1 vcvtps2ph $0x3,%xmm0,%xmm0
+      1 vcvtps2ph $0x4,%xmm0,%xmm0
+
+
+Appendix B - the F16C family sweep (repro/family.rs, `just family`)
+-------------------------------------------------------------------
+
+UNPATCHED: diff repro/fam_llvm.out repro/fam_clif.out
+  2,4d1
+  < ps2ph256 [3c00, 4000, 4200, 4400, 3800, b800, 7bff, 3555]
+  < ph2ps128 [1.0, 2.0, 3.0, 4.0]
+  < ph2ps256 [1.0, 2.0, 3.0, 4.0, 0.5, -0.5, 65504.0, 0.33325195]
+
+(the program aborts at ps2ph256, so the two ph2ps lines after it never run either - they are
+themselves fine, see the fam2 control below)
+
+PATCHED: diff repro/fam_llvm.out repro/fam_clif.out
+  (empty - identical)
+
+Control, the same file with only the _mm256_cvtps_ph call removed, against the UNPATCHED
+backend (___BUGHUNT___/tools/diffcheck.sh):
+  === CLIF: exit 0 ===
+  ps2ph128 [3c00, 4000, 4200, 4400, 0000, 0000, 0000, 0000]
+  ph2ps128 [1.0, 2.0, 3.0, 4.0]
+  ph2ps256 [1.0, 2.0, 3.0, 4.0, 0.5, -0.5, 65504.0, 0.33325195]
+  RESULT: identical (exit 0)
+=> llvm.x86.vcvtps2ph.256 is the only member of the F16C family that is missing.
+
+
+Appendix C - ./y.sh test in the worktree, before and after the patch
+--------------------------------------------------------------------
+
+$ ./y.sh test    (full run, including the external repos in download/)
+  before the patch: exit=0
+  after  the patch: exit=0
+  35 [AOT]/[BUILD]/[COPY]/[JIT]/[PATCH]/[TEST] item lines in each log, diffed and identical.

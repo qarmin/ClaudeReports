@@ -1,0 +1,57 @@
+=== BEFORE (pristine, commit 7516831426fb70f36d62c521c5477f6a7265b36a) ===
+--- run 1/3 ---
+Using adapter: AdapterInfo { name: "llvmpipe (LLVM 21.1.8, 256 bits)", vendor: 65541, device: 0, device_type: Cpu, device_pci_bus_id: "", driver: "", driver_info: "4.5 (Core Profile) Mesa 26.0.8-1ubuntu0.3", backend: Gl, subgroup_min_size: 4, subgroup_max_size: 128, transient_saves_memory: false }
+Wrote results to /tmp/bughunt_1198_no_clip.png and /tmp/bughunt_1198_clip.png
+bad_pixels(channels)=4880 / 40000, max_channel_diff=255
+REPRODUCED: push_clip_layer + nested Mix::Multiply differs from the no-clip ground truth in 4880 channel samples (max diff 255/255) - the clip-only layer is still creating a real isolated blend group instead of letting the nested Multiply blend see the genuine backdrop.
+--- run 2/3 ---
+Using adapter: AdapterInfo { name: "llvmpipe (LLVM 21.1.8, 256 bits)", vendor: 65541, device: 0, device_type: Cpu, device_pci_bus_id: "", driver: "", driver_info: "4.5 (Core Profile) Mesa 26.0.8-1ubuntu0.3", backend: Gl, subgroup_min_size: 4, subgroup_max_size: 128, transient_saves_memory: false }
+Wrote results to /tmp/bughunt_1198_no_clip.png and /tmp/bughunt_1198_clip.png
+bad_pixels(channels)=4880 / 40000, max_channel_diff=255
+REPRODUCED: push_clip_layer + nested Mix::Multiply differs from the no-clip ground truth in 4880 channel samples (max diff 255/255) - the clip-only layer is still creating a real isolated blend group instead of letting the nested Multiply blend see the genuine backdrop.
+--- run 3/3 ---
+Using adapter: AdapterInfo { name: "llvmpipe (LLVM 21.1.8, 256 bits)", vendor: 65541, device: 0, device_type: Cpu, device_pci_bus_id: "", driver: "", driver_info: "4.5 (Core Profile) Mesa 26.0.8-1ubuntu0.3", backend: Gl, subgroup_min_size: 4, subgroup_max_size: 128, transient_saves_memory: false }
+Wrote results to /tmp/bughunt_1198_no_clip.png and /tmp/bughunt_1198_clip.png
+bad_pixels(channels)=4880 / 40000, max_channel_diff=255
+REPRODUCED: push_clip_layer + nested Mix::Multiply differs from the no-clip ground truth in 4880 channel samples (max diff 255/255) - the clip-only layer is still creating a real isolated blend group instead of letting the nested Multiply blend see the genuine backdrop.
+=== AFTER (patch.diff applied to vello_shaders) ===
+--- run 1/3 ---
+Using adapter: AdapterInfo { name: "llvmpipe (LLVM 21.1.8, 256 bits)", vendor: 65541, device: 0, device_type: Cpu, device_pci_bus_id: "", driver: "", driver_info: "4.5 (Core Profile) Mesa 26.0.8-1ubuntu0.3", backend: Gl, subgroup_min_size: 4, subgroup_max_size: 128, transient_saves_memory: false }
+Wrote results to /tmp/bughunt_1198_no_clip.png and /tmp/bughunt_1198_clip.png
+bad_pixels(channels)=0 / 40000, max_channel_diff=8
+did not reproduce - clip and no-clip renders match within tolerance
+--- run 2/3 ---
+Using adapter: AdapterInfo { name: "llvmpipe (LLVM 21.1.8, 256 bits)", vendor: 65541, device: 0, device_type: Cpu, device_pci_bus_id: "", driver: "", driver_info: "4.5 (Core Profile) Mesa 26.0.8-1ubuntu0.3", backend: Gl, subgroup_min_size: 4, subgroup_max_size: 128, transient_saves_memory: false }
+Wrote results to /tmp/bughunt_1198_no_clip.png and /tmp/bughunt_1198_clip.png
+bad_pixels(channels)=0 / 40000, max_channel_diff=8
+did not reproduce - clip and no-clip renders match within tolerance
+--- run 3/3 ---
+Using adapter: AdapterInfo { name: "llvmpipe (LLVM 21.1.8, 256 bits)", vendor: 65541, device: 0, device_type: Cpu, device_pci_bus_id: "", driver: "", driver_info: "4.5 (Core Profile) Mesa 26.0.8-1ubuntu0.3", backend: Gl, subgroup_min_size: 4, subgroup_max_size: 128, transient_saves_memory: false }
+Wrote results to /tmp/bughunt_1198_no_clip.png and /tmp/bughunt_1198_clip.png
+bad_pixels(channels)=0 / 40000, max_channel_diff=8
+did not reproduce - clip and no-clip renders match within tolerance
+
+=== Project test suite (scoped to vello, vello_encoding, vello_shaders, vello_tests): `cargo test -p vello -p vello_encoding -p vello_shaders -p vello_tests --no-fail-fast` ===
+
+BEFORE (pristine vello_shaders): 96 passed, 2 failed, 3 ignored
+  - the 2 failures are vello_tests/tests/mix_clip_diff.rs (a scratch diagnostic test written this
+    session, not part of the permanent suite - it exists specifically to detect this bug, so
+    failing on pristine code is expected)
+  - vello_tests/tests/known_issues.rs::clip_blends passes on pristine code (2/2 in that binary),
+    but only because its checked-in reference snapshot (vello_tests/snapshots/clip_blends.png)
+    was captured with this exact bug already present
+
+AFTER (patch.diff applied to vello_shaders): 95 passed, 3 failed, 3 ignored
+  - vello_tests/tests/mix_clip_diff.rs: case1 (the direct differential case) improves from
+    bad_pixels=5280/max_diff=255 to bad_pixels=200/max_diff=8 (residual is ordinary AA-edge
+    rounding, not the bug) but still fails my own scratch test's tolerance; case3 (nested clips +
+    Compose::Xor) is a confounded test on my part (its "no_clip" baseline used an isolated
+    Mix::Normal wrapper instead of a genuine "no separate layer at all" baseline, so it is not a
+    valid equivalence check) - see RESULT.md
+  - vello_tests/tests/known_issues.rs::clip_blends: NEWLY FAILS - this is expected: the fix
+    changes the render to the analytically-correct output, which now differs from the stale
+    checked-in reference snapshot that had the bug baked in. Visually confirmed the new render
+    matches the correct "no clip" ground truth (dark-blue multiplied triangle), see RESULT.md.
+  - all other tests (vello_encoding: 31, compare_gpu_cpu: 9, emoji: 6, hinting: 4, plus
+    property/regression/smoke_snapshots/snapshot_test_scenes: 6+10+8+19) are unaffected, same
+    pass counts before and after.

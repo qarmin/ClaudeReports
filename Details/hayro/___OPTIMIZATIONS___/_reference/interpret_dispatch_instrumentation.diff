@@ -1,0 +1,275 @@
+diff --git a/hayro-interpret/src/interpret/mod.rs b/hayro-interpret/src/interpret/mod.rs
+index 8bb5ae73..50b6be2b 100644
+--- a/hayro-interpret/src/interpret/mod.rs
++++ b/hayro-interpret/src/interpret/mod.rs
+@@ -221,6 +221,86 @@ fn appearance_stream<'a>(annot: &Dict<'a>) -> Option<Stream<'a>> {
+     }
+ }
+ 
++// TEMPORARY profiling instrumentation (perf-optimize investigation, candidate 007), remove
++// before merging. Classifies an operator into a coarse bucket purely by variant, without
++// touching the real match arms below (so the real dispatch logic is unmodified byte-for-byte).
++fn __bucket_for(op: &TypedInstruction<'_, '_>) -> crate::__OpBucket {
++    use crate::__OpBucket::*;
++    match op {
++        TypedInstruction::SaveState(_) | TypedInstruction::RestoreState(_) => StateStack,
++        TypedInstruction::Transform(_) => Transform,
++        TypedInstruction::RectPath(_)
++        | TypedInstruction::MoveTo(_)
++        | TypedInstruction::LineTo(_)
++        | TypedInstruction::CubicTo(_)
++        | TypedInstruction::CubicStartTo(_)
++        | TypedInstruction::CubicEndTo(_)
++        | TypedInstruction::ClosePath(_)
++        | TypedInstruction::EndPath(_)
++        | TypedInstruction::ClipNonZero(_)
++        | TypedInstruction::ClipEvenOdd(_) => PathBuild,
++        TypedInstruction::FillPathEvenOdd(_)
++        | TypedInstruction::FillPathNonZero(_)
++        | TypedInstruction::FillPathNonZeroCompatibility(_)
++        | TypedInstruction::FillAndStrokeEvenOdd(_)
++        | TypedInstruction::FillAndStrokeNonZero(_)
++        | TypedInstruction::CloseAndStrokePath(_)
++        | TypedInstruction::CloseFillAndStrokeEvenOdd(_)
++        | TypedInstruction::CloseFillAndStrokeNonZero(_)
++        | TypedInstruction::StrokePath(_) => PathDraw,
++        TypedInstruction::LineWidth(_)
++        | TypedInstruction::LineCap(_)
++        | TypedInstruction::LineJoin(_)
++        | TypedInstruction::MiterLimit(_)
++        | TypedInstruction::DashPattern(_)
++        | TypedInstruction::RenderingIntent(_)
++        | TypedInstruction::FlatnessTolerance(_)
++        | TypedInstruction::SetGraphicsState(_)
++        | TypedInstruction::ColorSpaceStroke(_)
++        | TypedInstruction::ColorSpaceNonStroke(_)
++        | TypedInstruction::StrokeColor(_)
++        | TypedInstruction::StrokeColorNamed(_)
++        | TypedInstruction::NonStrokeColor(_)
++        | TypedInstruction::NonStrokeColorNamed(_)
++        | TypedInstruction::StrokeColorDeviceGray(_)
++        | TypedInstruction::NonStrokeColorDeviceGray(_)
++        | TypedInstruction::StrokeColorDeviceRgb(_)
++        | TypedInstruction::NonStrokeColorDeviceRgb(_)
++        | TypedInstruction::StrokeColorCmyk(_)
++        | TypedInstruction::NonStrokeColorCmyk(_) => Color,
++        TypedInstruction::TextFont(_) => TextFontOp,
++        TypedInstruction::CharacterSpacing(_)
++        | TypedInstruction::WordSpacing(_)
++        | TypedInstruction::HorizontalScaling(_)
++        | TypedInstruction::TextLeading(_)
++        | TypedInstruction::TextRenderingMode(_)
++        | TypedInstruction::TextRise(_)
++        | TypedInstruction::BeginText(_)
++        | TypedInstruction::EndText(_)
++        | TypedInstruction::NextLine(_)
++        | TypedInstruction::NextLineAndSetLeading(_)
++        | TypedInstruction::SetTextMatrix(_)
++        | TypedInstruction::NextLineUsingLeading(_) => TextState,
++        TypedInstruction::ShowText(_)
++        | TypedInstruction::NextLineAndShowText(_)
++        | TypedInstruction::ShowTextWithParameters(_)
++        | TypedInstruction::ShowTexts(_) => TextShow,
++        TypedInstruction::Shading(_)
++        | TypedInstruction::XObject(_)
++        | TypedInstruction::InlineImage(_)
++        | TypedInstruction::ColorGlyph(_)
++        | TypedInstruction::ShapeGlyph(_)
++        | TypedInstruction::MarkedContentPoint(_)
++        | TypedInstruction::MarkedContentPointWithProperties(_)
++        | TypedInstruction::BeginMarkedContent(_)
++        | TypedInstruction::BeginMarkedContentWithProperties(_)
++        | TypedInstruction::EndMarkedContent(_)
++        | TypedInstruction::BeginCompatibility(_)
++        | TypedInstruction::EndCompatibility(_) => XObjectMisc,
++        _ => Other,
++    }
++}
++
+ /// Interpret the instructions from `ops` and render them into the device.
+ pub fn interpret<'a>(
+     mut ops: TypedIter<'_>,
+@@ -233,7 +313,18 @@ pub fn interpret<'a>(
+ 
+     context.save_state();
+ 
+-    while let Some(op) = ops.next() {
++    loop {
++        let __t_tok = std::time::Instant::now();
++        let next = ops.next();
++        crate::__PHASE_TOKENIZE_NS.fetch_add(
++            __t_tok.elapsed().as_nanos() as u64,
++            std::sync::atomic::Ordering::Relaxed,
++        );
++        crate::__COUNT_OPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++        let Some(op) = next else { break };
++
++        let __bucket = __bucket_for(&op);
++        let __t_op = std::time::Instant::now();
+         match op {
+             TypedInstruction::SaveState(_) => context.save_state(),
+             TypedInstruction::StrokeColorDeviceRgb(s) => {
+@@ -588,7 +679,12 @@ pub fn interpret<'a>(
+                     .map(TextStateFont::Fallback);
+                 }
+ 
+-                text::show_text_string(context, device, resources, s.0);
++                let __t_show = std::time::Instant::now();
++text::show_text_string(context, device, resources, s.0);
++                crate::__PHASE_SHOW_TEXT_NS.fetch_add(
++                    __t_show.elapsed().as_nanos() as u64,
++                    std::sync::atomic::Ordering::Relaxed,
++                );
+             }
+             TypedInstruction::ShowTexts(s) => {
+                 if context.get().text_state.font.is_none() {
+@@ -613,7 +709,12 @@ pub fn interpret<'a>(
+                         _ => {}
+                     }
+                 }
+-                text::show_glyph_run(context, device);
++                let __t_show = std::time::Instant::now();
++text::show_glyph_run(context, device);
++                crate::__PHASE_SHOW_TEXT_NS.fetch_add(
++                    __t_show.elapsed().as_nanos() as u64,
++                    std::sync::atomic::Ordering::Relaxed,
++                );
+             }
+             TypedInstruction::HorizontalScaling(h) => {
+                 context.get_mut().text_state.horizontal_scaling = h.0.as_f32();
+@@ -636,7 +737,12 @@ pub fn interpret<'a>(
+             }
+             TypedInstruction::NextLineAndShowText(n) => {
+                 text::next_line(context, 0.0, -context.get().text_state.leading as f64);
+-                text::show_text_string(context, device, resources, n.0);
++                let __t_show = std::time::Instant::now();
++text::show_text_string(context, device, resources, n.0);
++                crate::__PHASE_SHOW_TEXT_NS.fetch_add(
++                    __t_show.elapsed().as_nanos() as u64,
++                    std::sync::atomic::Ordering::Relaxed,
++                );
+             }
+             TypedInstruction::TextRenderingMode(r) => {
+                 let mode = match r.0.as_i64() {
+@@ -741,12 +847,18 @@ pub fn interpret<'a>(
+                 context.get_mut().text_state.word_space = t.0.as_f32();
+                 context.get_mut().text_state.char_space = t.1.as_f32();
+                 text::next_line(context, 0.0, -context.get().text_state.leading as f64);
+-                text::show_text_string(context, device, resources, t.2);
++                let __t_show = std::time::Instant::now();
++text::show_text_string(context, device, resources, t.2);
++                crate::__PHASE_SHOW_TEXT_NS.fetch_add(
++                    __t_show.elapsed().as_nanos() as u64,
++                    std::sync::atomic::Ordering::Relaxed,
++                );
+             }
+             _ => {
+                 warn!("failed to read an operator");
+             }
+         }
++        crate::__record_bucket(__bucket, __t_op.elapsed().as_nanos() as u64);
+     }
+ 
+     while context.num_states() > num_states {
+diff --git a/hayro-interpret/src/lib.rs b/hayro-interpret/src/lib.rs
+index ff44c42f..1f51866c 100644
+--- a/hayro-interpret/src/lib.rs
++++ b/hayro-interpret/src/lib.rs
+@@ -59,3 +59,97 @@ pub use interpret::*;
+ pub use types::*;
+ pub use util::{RectExt, TransformExt};
+ pub use x_object::soft_mask::*;
++
++// TEMPORARY profiling instrumentation (perf-optimize investigation), remove before merging.
++pub(crate) static __PHASE_SHOW_TEXT_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++/// TEMPORARY profiling hook, not part of the public API.
++#[doc(hidden)]
++pub fn __debug_show_text_ns() -> u64 {
++    __PHASE_SHOW_TEXT_NS.load(std::sync::atomic::Ordering::Relaxed)
++}
++
++pub(crate) static __PHASE_TOKENIZE_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __COUNT_OPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++/// TEMPORARY profiling hook, not part of the public API.
++#[doc(hidden)]
++pub fn __debug_tokenize_ns() -> (u64, u64) {
++    use std::sync::atomic::Ordering::Relaxed;
++    (__PHASE_TOKENIZE_NS.load(Relaxed), __COUNT_OPS.load(Relaxed))
++}
++
++// Finer-grained buckets for the "dispatch overhead not explained by tokenizing or
++// font/glyph resolution" remainder (candidate 007). Each bucket's time is the whole
++// match-arm body, INCLUDING nested calls into fill_path/stroke_path/show_text_string/
++// x_object.draw - for PathDraw and TextShow this overlaps with hayro's own
++// draw_path/draw_glyph_run/draw_image timers, subtract those (via
++// hayro::__debug_op_timings_ns) to get the "prep work before reaching the device call"
++// portion specifically.
++#[derive(Clone, Copy)]
++pub(crate) enum __OpBucket {
++    StateStack,
++    Transform,
++    PathBuild,
++    PathDraw,
++    Color,
++    TextState,
++    TextFontOp,
++    TextShow,
++    XObjectMisc,
++    Other,
++}
++pub(crate) static __PHASE_STATE_STACK_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_TRANSFORM_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_PATH_BUILD_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_PATH_DRAW_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_COLOR_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_TEXT_STATE_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_TEXT_FONT_OP_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_TEXT_SHOW_WHOLE_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_XOBJECT_MISC_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++pub(crate) static __PHASE_OTHER_BUCKET_NS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++
++pub(crate) fn __record_bucket(bucket: __OpBucket, ns: u64) {
++    use std::sync::atomic::Ordering::Relaxed;
++    let counter = match bucket {
++        __OpBucket::StateStack => &__PHASE_STATE_STACK_NS,
++        __OpBucket::Transform => &__PHASE_TRANSFORM_NS,
++        __OpBucket::PathBuild => &__PHASE_PATH_BUILD_NS,
++        __OpBucket::PathDraw => &__PHASE_PATH_DRAW_NS,
++        __OpBucket::Color => &__PHASE_COLOR_NS,
++        __OpBucket::TextState => &__PHASE_TEXT_STATE_NS,
++        __OpBucket::TextFontOp => &__PHASE_TEXT_FONT_OP_NS,
++        __OpBucket::TextShow => &__PHASE_TEXT_SHOW_WHOLE_NS,
++        __OpBucket::XObjectMisc => &__PHASE_XOBJECT_MISC_NS,
++        __OpBucket::Other => &__PHASE_OTHER_BUCKET_NS,
++    };
++    counter.fetch_add(ns, Relaxed);
++}
++
++/// TEMPORARY profiling hook, not part of the public API.
++#[doc(hidden)]
++pub fn __debug_op_buckets_ns() -> [(&'static str, u64); 9] {
++    use std::sync::atomic::Ordering::Relaxed;
++    [
++        ("state_stack", __PHASE_STATE_STACK_NS.load(Relaxed)),
++        ("transform", __PHASE_TRANSFORM_NS.load(Relaxed)),
++        ("path_build", __PHASE_PATH_BUILD_NS.load(Relaxed)),
++        ("path_draw_whole", __PHASE_PATH_DRAW_NS.load(Relaxed)),
++        ("color", __PHASE_COLOR_NS.load(Relaxed)),
++        ("text_state", __PHASE_TEXT_STATE_NS.load(Relaxed)),
++        ("text_font_op", __PHASE_TEXT_FONT_OP_NS.load(Relaxed)),
++        ("text_show_whole", __PHASE_TEXT_SHOW_WHOLE_NS.load(Relaxed)),
++        ("xobject_misc", __PHASE_XOBJECT_MISC_NS.load(Relaxed)),
++    ]
++}

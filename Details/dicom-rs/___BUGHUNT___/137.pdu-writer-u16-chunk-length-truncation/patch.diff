@@ -1,0 +1,47 @@
+diff --git a/ul/src/pdu/writer.rs b/ul/src/pdu/writer.rs
+index a0f1bd06..e435de94 100644
+--- a/ul/src/pdu/writer.rs
++++ b/ul/src/pdu/writer.rs
+@@ -28,6 +28,12 @@ pub enum WriteChunkError {
+         backtrace: Backtrace,
+         source: std::io::Error,
+     },
++    #[snafu(display("Chunk data of {len} bytes exceeds the {max}-byte length field it must be written with"))]
++    ChunkTooLarge {
++        len: usize,
++        max: u32,
++        backtrace: Backtrace,
++    },
+ }
+ 
+ fn write_chunk_u32<F>(writer: &mut dyn Write, func: F) -> std::result::Result<(), WriteChunkError>
+@@ -39,7 +45,13 @@ where
+         .map_err(Box::from)
+         .context(BuildChunkSnafu)?;
+ 
+-    let length = data.len() as u32;
++    let length = u32::try_from(data.len()).map_err(|_| {
++        ChunkTooLargeSnafu {
++            len: data.len(),
++            max: u32::MAX,
++        }
++        .build()
++    })?;
+     writer
+         .write_u32::<BigEndian>(length)
+         .context(WriteLengthSnafu)?;
+@@ -58,7 +70,13 @@ where
+         .map_err(Box::from)
+         .context(BuildChunkSnafu)?;
+ 
+-    let length = data.len() as u16;
++    let length = u16::try_from(data.len()).map_err(|_| {
++        ChunkTooLargeSnafu {
++            len: data.len(),
++            max: u32::from(u16::MAX),
++        }
++        .build()
++    })?;
+     writer
+         .write_u16::<BigEndian>(length)
+         .context(WriteLengthSnafu)?;

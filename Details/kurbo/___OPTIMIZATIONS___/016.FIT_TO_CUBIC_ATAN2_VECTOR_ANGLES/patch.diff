@@ -1,0 +1,81 @@
+diff --git a/kurbo/src/fit.rs b/kurbo/src/fit.rs
+index 1f739cb..a521453 100644
+--- a/kurbo/src/fit.rs
++++ b/kurbo/src/fit.rs
+@@ -398,13 +398,22 @@ pub fn fit_to_cubic(
+         // Special case very short chords; try to fit a line.
+         return try_fit_line(source, accuracy, range, start.p, end.p);
+     }
+-    let th = d.atan2();
+-    fn mod_2pi(th: f64) -> f64 {
+-        let th_scaled = th * core::f64::consts::FRAC_1_PI * 0.5;
+-        core::f64::consts::PI * 2.0 * (th_scaled - th_scaled.round())
+-    }
+-    let th0 = mod_2pi(start.tangent.atan2() - th);
+-    let th1 = mod_2pi(th - end.tangent.atan2());
++    // `cubic_fit` needs only the sine and cosine of the two tangent-to-chord angles, and those
++    // angles are *differences*, so the cross and dot products of the tangent against the chord
++    // give them directly (after normalization) - no angle, and no `atan2`, has to exist.
++    // A zero tangent has no direction; substituting +x reproduces what `Vec2::atan2` reported.
++    let tan0 = if start.tangent == Vec2::ZERO {
++        Vec2::new(1.0, 0.0)
++    } else {
++        start.tangent
++    };
++    let tan1 = if end.tangent == Vec2::ZERO {
++        Vec2::new(1.0, 0.0)
++    } else {
++        end.tangent
++    };
++    let (s0, c0) = unit_sin_cos(d.cross(tan0), d.dot(tan0));
++    let (s1, c1) = unit_sin_cos(tan1.cross(d), d.dot(tan1));
+ 
+     let (mut area, mut x, mut y) = source.moment_integrals(range.clone());
+     let (x0, y0) = (start.p.x, start.p.y);
+@@ -432,12 +441,13 @@ pub fn fit_to_cubic(
+     let mx = moment * chord2_inv.powi(2);
+     // `unit_area` is signed area scaled to unit chord; `mx` is scaled x moment
+ 
+-    let chord = chord2.sqrt();
+-    let aff = Affine::translate(start.p.to_vec2()) * Affine::rotate(th) * Affine::scale(chord);
++    // Rotation by the chord angle composed with scaling by the chord length is exactly the
++    // linear map that sends (1, 0) to `d`, so it can be written down without any trigonometry.
++    let aff = Affine::translate(start.p.to_vec2()) * Affine::new([d.x, d.y, -d.y, d.x, 0.0, 0.0]);
+     let mut curve_dist = CurveDist::from_curve(source, range);
+     let mut best_c = None;
+     let mut best_err2 = None;
+-    for (cand, d0, d1) in cubic_fit(th0, th1, unit_area, mx) {
++    for (cand, d0, d1) in cubic_fit(s0, c0, s1, c1, unit_area, mx) {
+         let c = aff * cand;
+         if let Some(err2) = curve_dist.eval_dist(source, c, acc2) {
+             fn scale_f(d: f64) -> f64 {
+@@ -457,12 +467,24 @@ pub fn fit_to_cubic(
+     }
+ }
+ 
++/// Scale a vector proportional to `(cos th, sin th)` down to unit length, giving `(sin, cos)`.
++fn unit_sin_cos(s: f64, c: f64) -> (f64, f64) {
++    let scale = (s * s + c * c).sqrt().recip();
++    (s * scale, c * scale)
++}
++
+ /// Returns curves matching area and moment, given unit chord.
+-fn cubic_fit(th0: f64, th1: f64, area: f64, mx: f64) -> ArrayVec<(CubicBez, f64, f64), 4> {
+-    // Note: maybe we want to take unit vectors instead of angle? Shouldn't
+-    // matter much either way though.
+-    let (s0, c0) = th0.sin_cos();
+-    let (s1, c1) = th1.sin_cos();
++///
++/// The two tangent angles are given as their sine and cosine rather than as angles, as that is
++/// all this function needs and the caller can produce them without an `atan2`.
++fn cubic_fit(
++    s0: f64,
++    c0: f64,
++    s1: f64,
++    c1: f64,
++    area: f64,
++    mx: f64,
++) -> ArrayVec<(CubicBez, f64, f64), 4> {
+     let a4 = -9.
+         * c0
+         * (((2. * s1 * c1 * c0 + s0 * (2. * c1 * c1 - 1.)) * c0 - 2. * s1 * c1) * c0

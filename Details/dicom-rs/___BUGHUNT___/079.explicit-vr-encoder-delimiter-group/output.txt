@@ -1,0 +1,44 @@
+Captured output of repro/ (`cargo run`), run against the real dicom-rs working tree at
+df2b9e4236298efa3fa37a1f360fc4bf284d586a, driving dicom-encoding's own public Encode/Decode
+traits directly (ExplicitVRLittleEndianEncoder/Decoder, ExplicitVRBigEndianEncoder/Decoder).
+
+=== BEFORE (pristine tree, no patch) ===
+
+   Compiling repro v0.1.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+     Running `target/debug/repro`
+[LE Item/UN] wrote 12 bytes for tag Tag(0xFFFE, 0xE000) vr=UN len=Length(0): [fe, ff, 00, e0, 55, 4e, 00, 00, 00, 00, 00, 00]
+[LE Item/UN] decoded back: tag=Tag(0xFFFE, 0xE000) vr=UN len=Length(20053), consumed=8 of 12 bytes written
+[LE Item/UN] MISMATCH: round trip corrupted the element
+[BE ItemDelim/UI] wrote 8 bytes for tag Tag(0xFFFE, 0xE00D) vr=UI len=Length(0): [ff, fe, e0, 0d, 55, 49, 00, 00]
+[BE ItemDelim/UI] decoded back: tag=Tag(0xFFFE, 0xE00D) vr=UN len=Length(1430847488), consumed=8 of 8 bytes written
+[BE ItemDelim/UI] MISMATCH: round trip corrupted the element
+[LE SeqDelim/OB] wrote 12 bytes for tag Tag(0xFFFE, 0xE0DD) vr=OB len=Length(0): [fe, ff, dd, e0, 4f, 42, 00, 00, 00, 00, 00, 00]
+[LE SeqDelim/OB] decoded back: tag=Tag(0xFFFE, 0xE0DD) vr=UN len=Length(16975), consumed=8 of 12 bytes written
+[LE SeqDelim/OB] MISMATCH: round trip corrupted the element
+[LE ordinary tag] wrote 8 bytes for tag Tag(0x0010, 0x0010) vr=PN len=Length(0): [10, 00, 10, 00, 50, 4e, 00, 00]
+[LE ordinary tag] decoded back: tag=Tag(0x0010, 0x0010) vr=PN len=Length(0), consumed=8 of 8 bytes written
+BUG REPRODUCED: at least one group-0xFFFE header round-tripped incorrectly
+
+(exit code 1)
+
+Reproduced deterministically across repeated runs during investigation (identical bytes/output
+every time - no randomness anywhere in this path).
+
+=== AFTER (patch.diff applied to encoding/src/encode/explicit_be.rs and explicit_le.rs) ===
+
+   Compiling dicom-encoding v0.10.0
+   Compiling repro v0.1.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+     Running `target/debug/repro`
+[LE Item/UN] wrote 8 bytes for tag Tag(0xFFFE, 0xE000) vr=UN len=Length(0): [fe, ff, 00, e0, 00, 00, 00, 00]
+[LE Item/UN] decoded back: tag=Tag(0xFFFE, 0xE000) vr=UN len=Length(0), consumed=8 of 8 bytes written
+[BE ItemDelim/UI] wrote 8 bytes for tag Tag(0xFFFE, 0xE00D) vr=UI len=Length(0): [ff, fe, e0, 0d, 00, 00, 00, 00]
+[BE ItemDelim/UI] decoded back: tag=Tag(0xFFFE, 0xE00D) vr=UN len=Length(0), consumed=8 of 8 bytes written
+[LE SeqDelim/OB] wrote 8 bytes for tag Tag(0xFFFE, 0xE0DD) vr=OB len=Length(0): [fe, ff, dd, e0, 00, 00, 00, 00]
+[LE SeqDelim/OB] decoded back: tag=Tag(0xFFFE, 0xE0DD) vr=UN len=Length(0), consumed=8 of 8 bytes written
+[LE ordinary tag] wrote 8 bytes for tag Tag(0x0010, 0x0010) vr=PN len=Length(0): [10, 00, 10, 00, 50, 4e, 00, 00]
+[LE ordinary tag] decoded back: tag=Tag(0x0010, 0x0010) vr=PN len=Length(0), consumed=8 of 8 bytes written
+all round trips preserved tag+length: BUG FIXED
+
+(exit code 0)

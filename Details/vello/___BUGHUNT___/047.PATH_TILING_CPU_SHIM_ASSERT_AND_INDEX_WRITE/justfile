@@ -1,0 +1,43 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# Status: Not reproducible for this candidate's own target (path_tiling.rs's assert!s / final
+# unchecked write) - see RESULT.md. `reproduce-before` instead runs the real evidence gathered
+# this session: the historical-issue checks (both pass/no-panic, confirming the existing fix
+# still holds) and the two buffer-overflow constructions that panic in *sibling* CPU-shim files
+# instead of path_tiling.rs (see RESULT.md's Root Cause section for why). No patch.diff exists
+# for this candidate, so there is no `apply`/`reproduce-after` step.
+#
+# This machine has no real GPU: point VK_ICD_FILENAMES at a software Vulkan ICD (e.g. Google's
+# SwiftShader) to get a real wgpu::Device without real GPU hardware. Any real GPU backend
+# (Vulkan/Metal/DX12/GL) exercises the exact same GPU/CPU-shim dispatch code in vello_shaders; on
+# a machine with a real GPU, VK_ICD_FILENAMES can simply be dropped (or WGPU_BACKEND unset to let
+# wgpu pick the first working backend).
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+git_no_lfs := "git -c filter.lfs.smudge= -c filter.lfs.clean= -c filter.lfs.process= -c filter.lfs.required=false"
+
+export WGPU_BACKEND := "vulkan"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    {{git_no_lfs}} clone {{repo_url}} clone
+    cd clone && {{git_no_lfs}} checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone. Requires VK_ICD_FILENAMES to point
+# at a working Vulkan ICD if there's no real GPU (see header comment above) - e.g.:
+#   VK_ICD_FILENAMES=/path/to/vk_swiftshader_icd.json just test
+reproduce-before:
+    cd repro && cargo run --release --bin pipeline_checks
+    cd repro && cargo run --release --bin search
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

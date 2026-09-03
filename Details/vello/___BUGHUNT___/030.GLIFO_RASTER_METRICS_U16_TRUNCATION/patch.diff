@@ -1,0 +1,65 @@
+diff --git a/glifo/src/renderer.rs b/glifo/src/renderer.rs
+index 9d5fd365..485a6d39 100644
+--- a/glifo/src/renderer.rs
++++ b/glifo/src/renderer.rs
+@@ -407,7 +407,13 @@ fn insert_and_render_outline(
+     }
+ 
+     let bounds = glyph.bbox.scale_from_origin(glyph.scale);
+-    let raster_metrics = calculate_raster_metrics(&bounds);
++    let Some(raster_metrics) = calculate_raster_metrics(&bounds) else {
++        // The glyph's rasterized size doesn't fit the atlas slot's u16/i16 metrics (e.g. an
++        // extreme font_size or a pathological font with a tiny units-per-em and a huge glyph
++        // bounding box) - fall back to direct rendering rather than silently wrapping into an
++        // under-sized slot.
++        return CacheResult::AtlasFull;
++    };
+ 
+     let subpixel_offset = subpixel_offset(cache_key.subpixel_x);
+ 
+@@ -583,12 +589,19 @@ fn render_colr_glyph_from_atlas(
+ }
+ 
+ /// Calculate raster metrics (pixel bounds, bearings) from a glyph's bounding box.
++///
++/// Returns `None` if the bounding box doesn't fit the atlas slot's `u16`/`i16` metrics (an
++/// extreme `font_size`, or a pathological font whose tiny units-per-em blows up a normally
++/// modest-looking glyph into a huge physical bounding box) - callers must treat this the same
++/// as any other atlas-capacity failure and fall back to direct rendering, rather than silently
++/// wrapping into an under-sized atlas slot.
+ #[expect(
+     clippy::cast_possible_truncation,
+-    reason = "glyph bounds fit in i32/u16/i16 at reasonable ppem values"
++    reason = "the f64->i32 casts below saturate (not wrap) on out-of-range input; the \
++              genuinely truncating i32->u16/i16 narrowing is guarded by try_from below"
+ )]
+ #[inline]
+-pub(crate) fn calculate_raster_metrics(bounds: &Rect) -> RasterMetrics {
++pub(crate) fn calculate_raster_metrics(bounds: &Rect) -> Option<RasterMetrics> {
+     // Floor/ceil round outward from the fractional bounding box. Width gets an
+     // extra pixel to accommodate the horizontal subpixel offset (up to 0.75 px)
+     // applied when rasterising into the atlas; the Y axis has no subpixel shift
+@@ -602,15 +615,17 @@ pub(crate) fn calculate_raster_metrics(bounds: &Rect) -> RasterMetrics {
+     let flipped_min_y = (-bounds.y1).floor() as i32;
+     let flipped_max_y = (-bounds.y0).ceil() as i32;
+ 
+-    let width = (max_x - min_x) as u16;
+-    let height = (flipped_max_y - flipped_min_y) as u16;
++    let width = u16::try_from(max_x - min_x).ok()?;
++    let height = u16::try_from(flipped_max_y - flipped_min_y).ok()?;
++    let bearing_x = i16::try_from(min_x).ok()?;
++    let bearing_y = i16::try_from(flipped_min_y).ok()?;
+ 
+-    RasterMetrics {
++    Some(RasterMetrics {
+         width,
+         height,
+-        bearing_x: min_x as i16,
+-        bearing_y: flipped_min_y as i16,
+-    }
++        bearing_x,
++        bearing_y,
++    })
+ }
+ 
+ /// Choose image sampling quality based on downscale factor.

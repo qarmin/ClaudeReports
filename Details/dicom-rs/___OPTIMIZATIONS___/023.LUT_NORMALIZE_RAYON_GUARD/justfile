@@ -1,0 +1,60 @@
+# Self-contained reproduction for candidate 023.LUT_NORMALIZE_RAYON_GUARD.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern). Self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+# The harness copy referenced below already has this candidate's own Cargo.toml tweak
+# (dicom-pixeldata default-features=false + a forwarding `default` feature) needed to build a
+# no-rayon binary for the single-core measurement - see RESULT.md's harness-change note.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --no-default-features
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline_norayon
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --no-default-features
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched_norayon
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cp "{{justfile_directory()}}/testdata/mono_above.dcm" clone/
+    echo "=== bit-exactness check (VoiLutOption::Normalize path) ==="
+    ./bin_baseline colorspace-normalize clone/mono_above.dcm 1 > /tmp/candidate023_baseline.txt
+    ./bin_patched colorspace-normalize clone/mono_above.dcm 1 > /tmp/candidate023_patched.txt
+    diff <(grep -oE 'checksum=0x[0-9a-f]+' /tmp/candidate023_baseline.txt) \
+         <(grep -oE 'checksum=0x[0-9a-f]+' /tmp/candidate023_patched.txt) \
+        && echo "checksums match: bit-exact" || echo "DIFFERS (unexpected)"
+    echo "=== mono_above.dcm (2048x512, ~1M px, forced VoiLutOption::Normalize), multi-core - expect a ~44% win ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- colorspace-normalize clone/mono_above.dcm 30
+    echo "=== same fixture, single-core (taskset -c 0, no-rayon build) - expect a ~23% win (fusion alone) ==="
+    RUNS="${RUNS:-9}" bash -c '
+        run() { taskset -c 0 "$1" colorspace-normalize clone/mono_above.dcm 30 | grep -oE "p50=[0-9.]+(us|ms)"; }
+        for i in $(seq 1 "${RUNS:-9}"); do
+            echo -n "baseline: "; run ./bin_baseline_norayon
+            echo -n "patched:  "; run ./bin_patched_norayon
+        done
+    '
+
+clean:
+    rm -rf clone bin_baseline bin_patched bin_baseline_norayon bin_patched_norayon

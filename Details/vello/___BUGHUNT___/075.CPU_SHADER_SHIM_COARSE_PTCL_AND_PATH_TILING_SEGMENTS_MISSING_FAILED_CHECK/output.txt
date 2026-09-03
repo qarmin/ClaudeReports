@@ -1,0 +1,81 @@
+=== BEFORE (unpatched, base_commit 7516831426fb70f36d62c521c5477f6a7265b36a) ===
+$ VK_ICD_FILENAMES=/tmp/swiftshader_icd/vk_swiftshader_icd.json WGPU_BACKEND=vulkan RUST_BACKTRACE=1 ./target/release/ptcl_overflow
+
+Rendering a 5824x5824 canvas (one tiny 4x4px fill) via use_cpu:true ...
+
+thread 'main' (370491) panicked at /tmp/vello-worktree-075/vello_shaders/src/cpu/coarse.rs:382:17:
+index out of bounds: the len is 8388608 but the index is 8409857
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::panicking::panic_bounds_check
+   3: vello_shaders::cpu::coarse::coarse
+   4: <vello::wgpu_engine::WgpuEngine>::run_recording
+   5: <vello::Renderer>::render_to_texture
+   6: pollster::block_on::<ptcl_overflow::main::{closure#0}>
+   7: ptcl_overflow::main
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+PANICKED (see stderr above for the real backtrace)
+
+Reproduced identically 3/3 runs (release build, deterministic, no seed involved).
+
+$ VK_ICD_FILENAMES=/tmp/swiftshader_icd/vk_swiftshader_icd.json WGPU_BACKEND=vulkan RUST_BACKTRACE=1 ./target/release/ptcl_dynamic
+
+Rendering a 5776x5776 canvas (60000 tiny same-tile fills) via use_cpu:true ...
+
+thread 'main' (378190) panicked at /tmp/vello-worktree-075/vello_shaders/src/cpu/coarse.rs:68:9:
+index out of bounds: the len is 8388608 but the index is 8388608
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::panicking::panic_bounds_check
+   3: <vello_shaders::cpu::coarse::TileState>::write_path
+   4: vello_shaders::cpu::coarse::coarse
+   5: <vello::wgpu_engine::WgpuEngine>::run_recording
+   6: <vello::Renderer>::render_to_texture
+   7: pollster::block_on::<ptcl_dynamic::main::{closure#0}>
+   8: ptcl_dynamic::main
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+PANICKED (see stderr above for the real backtrace)
+
+Reproduced identically 3/3 runs (release build, deterministic, no seed involved).
+
+=== Re-run from a completely fresh `just clone` (standalone repro/ folder, no dependency on the
+    main checkout), confirming both panics independently of the worktree used to develop them ===
+$ just clone && VK_ICD_FILENAMES=... just reproduce-before
+Rendering a 5824x5824 canvas (one tiny 4x4px fill) via use_cpu:true ...
+thread 'main' (396614) panicked at /tmp/candidate075_test/clone/vello_shaders/src/cpu/coarse.rs:382:17:
+index out of bounds: the len is 8388608 but the index is 8409857
+PANICKED (see stderr above for the real backtrace)
+
+Rendering a 5776x5776 canvas (60000 tiny same-tile fills) via use_cpu:true ...
+thread 'main' (396541) panicked at /tmp/candidate075_test/clone/vello_shaders/src/cpu/coarse.rs:68:9:
+index out of bounds: the len is 8388608 but the index is 8388608
+PANICKED (see stderr above for the real backtrace)
+
+=== AFTER (patched, `patch.diff` applied to the same fresh clone via `just apply`) ===
+$ VK_ICD_FILENAMES=... just reproduce-after
+Rendering a 5824x5824 canvas (one tiny 4x4px fill) via use_cpu:true ...
+rendered OK, no panic
+Rendering a 5776x5776 canvas (60000 tiny same-tile fills) via use_cpu:true ...
+rendered OK, no panic
+
+Reproduced identically 3/3 runs each (both no-panic) against the worktree copy used during
+development, plus once more against the completely fresh `just clone` shown above.
+
+=== Project test suite (vello_shaders/vello_encoding/vello --lib, release) ===
+BEFORE: vello_encoding: 31 passed; 0 failed; 0 ignored (vello_shaders/vello have 0 unit tests)
+AFTER:  vello_encoding: 31 passed; 0 failed; 0 ignored (identical)
+
+=== Project test suite (vello_tests, VELLO_SKIP_LFS_SNAPSHOTS=all, release) ===
+BEFORE:
+  tests/compare_gpu_cpu.rs:        9 passed; 0 failed; 1 ignored
+  tests/emoji.rs:                  6 passed; 0 failed; 0 ignored
+  tests/hinting.rs:                4 passed; 0 failed; 0 ignored
+  tests/known_issues.rs:           2 passed; 0 failed; 0 ignored
+  tests/property.rs:               6 passed; 0 failed; 0 ignored
+  tests/regression.rs:            10 passed; 0 failed; 0 ignored
+  tests/smoke_snapshots.rs:        8 passed; 0 failed; 0 ignored
+  tests/snapshot_test_scenes.rs:  19 passed; 0 failed; 0 ignored
+  TOTAL: 64 passed; 0 failed; 1 ignored
+AFTER: identical (64 passed; 0 failed; 1 ignored)

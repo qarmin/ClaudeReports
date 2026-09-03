@@ -1,0 +1,28 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 6d2a3537..76b20918 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -362,7 +362,22 @@ fn build_isa(sess: &Session, jit: bool) -> Arc<dyn TargetIsa + 'static> {
+             if target_tuple.architecture == target_lexicon::Architecture::X86_64 {
+                 // Only set the target cpu on x86_64 as Cranelift is missing
+                 // the target cpu list for most other targets.
+-                builder.enable(sess.target.cpu.as_ref()).unwrap();
++                //
++                // `sess.target.cpu` is an llvm cpu name. Most of them have an identically named
++                // Cranelift preset, but not all: rustc's default is `generic` (spelled `x86-64`
++                // by Cranelift) and Cranelift's preset list lags llvm's for newer cpus. Fall back
++                // to Cranelift's own defaults, which are the x86-64 baseline, rather than
++                // panicking on a cpu name Cranelift happens not to know.
++                let cpu = match sess.target.cpu.as_ref() {
++                    "generic" => "x86-64",
++                    cpu => cpu,
++                };
++                if builder.enable(cpu).is_err() {
++                    sess.dcx().warn(format!(
++                        "target cpu `{cpu}` isn't supported by Cranelift; \
++                         compiling for the x86-64 baseline instead"
++                    ));
++                }
+             }
+             builder
+         }

@@ -1,0 +1,42 @@
+# Self-contained reproduction for candidate 008 (adaptive_chunk State::record_chunk convergence
+# threshold integer-division truncation).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# The suspect state (`State::avg_ns_per_item`/`converged_samples`/`record_chunk`) is
+# `pub(super)`-only - not reachable through any public API of the crate - so unlike a normal
+# candidate's standalone `repro/` crate, this repro is a `#[cfg(test)]` module spliced directly
+# into the crate's own `src/runner/runner_variants/adaptive_chunk/state.rs` via
+# `repro/add_repro_test.diff`, then run with `cargo test` inside the clone. See RESULT.md for why.
+
+repo_url := "https://github.com/orxfun/orx-parallel.git"
+base_commit := "b9214fbeb714e4bb8f8858676a818cef2f21b097"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Splices the repro test module into the pristine clone and runs it.
+# Expected: `convergence_should_eventually_fire_for_stable_sub_50ns_per_item_samples` FAILS
+# (non-zero exit) - that failure IS the reproduction (converged_samples stuck at 0). The sibling
+# `convergence_does_fire_for_the_same_identical_samples_once_avg_is_above_50ns_per_item` control
+# test still passes, showing this is specific to the sub-50ns/item truncation, not a general
+# convergence-tracking break.
+reproduce-before:
+    cd clone && git apply "{{justfile_directory()}}/repro/add_repro_test.diff"
+    cd clone && cargo test --lib bughunt_candidate_008_tests -- --nocapture
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - both tests pass.
+reproduce-after:
+    cd clone && cargo test --lib bughunt_candidate_008_tests -- --nocapture
+
+clean:
+    rm -rf clone

@@ -1,0 +1,52 @@
+diff --git a/internal/core/item_tree.rs b/internal/core/item_tree.rs
+index 1b354c9c7..bb42baeb7 100644
+--- a/internal/core/item_tree.rs
++++ b/internal/core/item_tree.rs
+@@ -434,28 +434,31 @@ pub(crate) fn visibility_clips(&self) -> Vec<VWeakMapped<ItemTreeVTable, crate::
+ 
+     /// Returns true if this item is visible or only clipped away by a `Flickable`.
+     pub(crate) fn is_visible_or_clipped_by_flickable(&self) -> bool {
+-        if self.is_visible() {
++        let (clip, geometry) = self.absolute_clip_rect_and_geometry();
++        let clip = clip.to_box2d();
++        let geometry = geometry.to_box2d();
++        let visible = !clip.is_empty()
++            && clip.max.x >= geometry.min.x
++            && clip.max.y >= geometry.min.y
++            && clip.min.x <= geometry.max.x
++            && clip.min.y <= geometry.max.y;
++        if visible {
+             return true;
+         }
+ 
+-        // The item is not visible. Walk toward the root and find the first
+-        // clipping ancestor that actually hides the item: if it is a
+-        // Flickable, scrolling can bring the item back into view.
+-        let geometry = self.absolute_clip_rect_and_geometry().1.to_box2d();
++        // Not visible: walk toward the root to find the first clipping ancestor - if it's a
++        // Flickable, scrolling can bring the item back into view. That ancestor's own
++        // "geometry intersected with everything above it" is, by construction, exactly the
++        // `clip` this function already computed above for `self` (nothing between `self` and
++        // the first clipping ancestor contributes any further clipping), so there is no need to
++        // call `absolute_clip_rect_and_geometry` again per ancestor to re-derive the same value:
++        // it is already known to fail this item's visibility check, or `visible` above would
++        // have been true. Only the structural walk (cheap, no geometry math) is needed here.
+         let mut parent = self.parent_item(ParentItemTraversalMode::StopAtPopups);
+         while let Some(ancestor) = parent {
+             if ancestor.borrow().as_ref().clips_children() {
+-                let (clip, ancestor_geo) = ancestor.absolute_clip_rect_and_geometry();
+-                let clip = ancestor_geo.intersection(&clip).unwrap_or_default().to_box2d();
+-                let item_in_clip = !clip.is_empty()
+-                    && clip.max.x >= geometry.min.x
+-                    && clip.max.y >= geometry.min.y
+-                    && clip.min.x <= geometry.max.x
+-                    && clip.min.y <= geometry.max.y;
+-                if !item_in_clip {
+-                    return ancestor.downcast::<crate::items::Flickable>().is_some()
+-                        && ancestor.is_visible_or_clipped_by_flickable();
+-                }
++                return ancestor.downcast::<crate::items::Flickable>().is_some()
++                    && ancestor.is_visible_or_clipped_by_flickable();
+             }
+             parent = ancestor.parent_item(ParentItemTraversalMode::StopAtPopups);
+         }

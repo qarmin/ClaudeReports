@@ -1,0 +1,42 @@
+diff --git a/kurbo/src/bezpath.rs b/kurbo/src/bezpath.rs
+index a290df1..e8a198a 100644
+--- a/kurbo/src/bezpath.rs
++++ b/kurbo/src/bezpath.rs
+@@ -192,6 +192,14 @@ impl BezPath {
+         BezPath(Vec::with_capacity(capacity))
+     }
+ 
++    /// Reserve capacity for at least `additional` more path elements.
++    ///
++    /// This is the equivalent of [`BezPath::with_capacity`] for a path that already exists, and is
++    /// most useful for a path that is reused across several build/clear cycles.
++    pub fn reserve(&mut self, additional: usize) {
++        self.0.reserve(additional);
++    }
++
+     /// Create a path from a vector of path elements.
+     ///
+     /// `BezPath` also implements `FromIterator<PathEl>`, so it works with `collect`:
+diff --git a/kurbo/src/stroke.rs b/kurbo/src/stroke.rs
+index 4c9477d..c982d65 100644
+--- a/kurbo/src/stroke.rs
++++ b/kurbo/src/stroke.rs
+@@ -308,6 +308,18 @@ fn stroke_undashed(
+     ctx.reset();
+     ctx.join_thresh = 2.0 * tolerance / style.width;
+ 
++    let path = path.into_iter();
++    // Every input element contributes at least one element to each of the forward and backward
++    // sides, so the input count is a lower bound for all three buffers. Seeding them removes the
++    // first several reallocations of each `Vec<PathEl>` when the context is freshly created (as
++    // `stroke` does); with a reused context via `stroke_with` the capacity is already there and
++    // these are no-ops. A `size_hint` lower bound of 0 (e.g. the dashing iterator) leaves the
++    // buffers exactly as they were.
++    let n_elements = path.size_hint().0;
++    ctx.output.reserve(n_elements);
++    ctx.forward_path.reserve(n_elements);
++    ctx.backward_path.reserve(n_elements);
++
+     for el in path {
+         let p0 = ctx.last_pt;
+         match el {

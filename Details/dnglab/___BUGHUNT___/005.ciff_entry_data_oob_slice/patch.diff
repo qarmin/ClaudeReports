@@ -1,0 +1,33 @@
+diff --git a/rawler/src/formats/ciff/mod.rs b/rawler/src/formats/ciff/mod.rs
+index cb612990..db5a6f64 100644
+--- a/rawler/src/formats/ciff/mod.rs
++++ b/rawler/src/formats/ciff/mod.rs
+@@ -56,8 +56,15 @@ impl CiffIFD {
+     let mut entries = HashMap::new();
+     let mut subifds = Vec::new();
+ 
++    if end < 4 || end > buf.len() {
++      return Err(format!("CIFF: invalid IFD end {} for buffer of length {}", end, buf.len()));
++    }
+     let valuedata_size = LEu32(buf, end - 4) as usize;
+-    let dircount = LEu16(buf, start + valuedata_size) as usize;
++    let dircount_offset = start
++      .checked_add(valuedata_size)
++      .filter(|&o| o + 2 <= buf.len())
++      .ok_or_else(|| format!("CIFF: invalid directory offset (start {}, valuedata_size {}) for buffer of length {}", start, valuedata_size, buf.len()))?;
++    let dircount = LEu16(buf, dircount_offset) as usize;
+ 
+     for i in 0..dircount {
+       let entry_offset: usize = start + valuedata_size + 2 + i * 10;
+@@ -112,7 +119,10 @@ impl CiffEntry {
+       0x4000 => (8, offset + 2),
+       val => return Err(format!("CIFF: Don't know about data location {:x}", val)),
+     };
+-    let data = &buf[data_offset..data_offset + bytesize];
++    let data = data_offset
++      .checked_add(bytesize)
++      .and_then(|end| buf.get(data_offset..end))
++      .ok_or_else(|| format!("CIFF: entry data range {}..{}+{} out of range for buffer of length {}", data_offset, data_offset, bytesize, buf.len()))?;
+     let count = bytesize >> CiffEntry::element_shift(typ);
+ 
+     Ok(CiffEntry {

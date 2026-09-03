@@ -1,0 +1,60 @@
+=== Approach 2: direct-call debug-assertions test ===
+Temporary #[test] added to sparse_strips/vello_cpu/src/fine/highp/mod.rs (not part of patch.diff -
+this candidate has none; reverted from the worktree after this investigation), calling
+`<F32Kernel as FineKernel<_>>::blend` directly with a hand-constructed `start_y = u16::MAX - 1`
+(65534, a value that violates the tile-height-alignment invariant every real caller upholds) and a
+small `Mask`, under the default `dev` profile (debug-assertions on):
+
+$ cargo test -p vello_cpu --lib fine::highp::boundary_tests -- --nocapture
+   Compiling vello_cpu v0.2.0 (/tmp/vello-wt-059/sparse_strips/vello_cpu)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.48s
+     Running unittests src/lib.rs (target/debug/deps/vello_cpu-7d8dbcf6b0f56229)
+
+running 1 test
+
+thread 'fine::highp::boundary_tests::blend_mask_start_y_near_u16_max_overflows_in_debug' (13145) panicked at sparse_strips/vello_cpu/src/fine/highp/mod.rs:211:53:
+attempt to add with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test fine::highp::boundary_tests::blend_mask_start_y_near_u16_max_overflows_in_debug ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 81 filtered out; finished in 0.00s
+
+Reproduced deterministically 4/4 runs (this capture plus 3 more direct reruns), pinpointing exactly
+the flagged line (mod.rs:211, the `start_y + 3` inside the `start_y + 3 < height` condition). This
+confirms the raw-u16-addition mechanism is real when the tile-alignment invariant is violated - but
+this test bypasses every real call site (it hand-constructs `start_y`, not derived from any real
+`Fine::row_y`), so it does not by itself show the bug is reachable through the actual pipeline; see
+the real end-to-end checks below.
+
+=== Approach 3a: real end-to-end check at height = u16::MAX (65535) ===
+`repro/src/main.rs`'s program, but with `height` set to `u16::MAX` directly (not tile-aligned),
+run against a debug build of the real public API (`RenderContext`/`Mask`/`Pixmap`):
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.46s
+     Running `target/debug/e2e_check`
+
+thread 'main' (13165) panicked at /tmp/vello-wt-059/sparse_strips/vello_common/src/util.rs:189:60:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+This is a DIFFERENT, pre-existing, already-acknowledged limitation, unrelated to candidate 059: it
+comes from `RectU16::snap_to_tile_coordinates` in sparse_strips/vello_common/src/util.rs, whose own
+doc comment (line 174-175 in that file) already states "This method will panic if we have a
+viewport of size u16::MAX and draw at the very edge, but better than returning a wrong result." It
+fires before rendering ever reaches the mask/blend code this candidate is about, which is why the
+candidate's real repro (below) instead uses height=65532 (the largest u16 value that is both
+representable and an exact multiple of Tile::HEIGHT=4) as the true maximum real-world `start_y`
+the flagged code can ever see. Noted as a new suspect for IDEAS.md, not investigated further here.
+
+=== Approach 3b: real end-to-end check at height = 65532 (the true reachable maximum) ===
+`repro/src/main.rs`, run via `just test` against a fresh clone at base_commit
+7516831426fb70f36d62c521c5477f6a7265b36a (see this candidate's own justfile):
+
+$ just test
+[... clone output omitted, see justfile ...]
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.55s
+     Running `target/debug/candidate_059_repro`
+did not reproduce - real end-to-end render completed normally at the maximum tile-aligned canvas height (65532)
+
+Reproduced (as a negative result) 2/2 times: once via direct `cargo run` in the investigation
+worktree, once more via `just test` against an independent fresh clone.

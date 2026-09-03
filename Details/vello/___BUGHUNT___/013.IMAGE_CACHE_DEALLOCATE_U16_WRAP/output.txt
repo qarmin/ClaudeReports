@@ -1,0 +1,61 @@
+$ just test    (fresh clone of https://github.com/linebender/vello.git @ 7516831426fb70f36d62c521c5477f6a7265b36a)
+
+rm -rf clone
+git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false clone https://github.com/linebender/vello.git clone
+Cloning into 'clone'...
+cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false checkout 7516831426fb70f36d62c521c5477f6a7265b36a
+HEAD is now at 75168314 Remove some Vello-Classic-specific info from the root README (#1698)
+cd repro && cargo run --release
+   Compiling vello_common v0.2.0 (.../013.IMAGE_CACHE_DEALLOCATE_U16_WRAP/clone/sparse_strips/vello_common)
+   Compiling repro_013_image_cache_dealloc_u16_wrap v0.1.0 (.../013.IMAGE_CACHE_DEALLOCATE_U16_WRAP/repro)
+    Finished `release` profile [optimized] target(s) in 1.07s
+     Running `target/release/repro`
+atlas_size=(u16::MAX, u16::MAX): 180224 accepted (width, padding) combos exercised through allocate()+deallocate(), zero panics/overflows
+atlas_size=(4096, 4096): 8190 accepted (width, padding) combos exercised through allocate()+deallocate(), zero panics/overflows
+repro_013: PASS - no overflow observed in ImageCache::deallocate for any input reachable through the public API
+
+$ cd repro && cargo run --release   (re-run 2, same clone, no rebuild needed)
+
+    Finished `release` profile [optimized] target(s) in 0.01s
+     Running `target/release/repro`
+atlas_size=(u16::MAX, u16::MAX): 180224 accepted (width, padding) combos exercised through allocate()+deallocate(), zero panics/overflows
+atlas_size=(4096, 4096): 8190 accepted (width, padding) combos exercised through allocate()+deallocate(), zero panics/overflows
+repro_013: PASS - no overflow observed in ImageCache::deallocate for any input reachable through the public API
+
+$ cd repro && cargo run          (debug/dev profile, same clone - run 3)
+
+   Compiling vello_common v0.2.0 (.../013.IMAGE_CACHE_DEALLOCATE_U16_WRAP/clone/sparse_strips/vello_common)
+   Compiling repro_013_image_cache_dealloc_u16_wrap v0.1.0 (.../013.IMAGE_CACHE_DEALLOCATE_U16_WRAP/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.81s
+     Running `target/debug/repro`
+atlas_size=(u16::MAX, u16::MAX): 180224 accepted (width, padding) combos exercised through allocate()+deallocate(), zero panics/overflows
+atlas_size=(4096, 4096): 8190 accepted (width, padding) combos exercised through allocate()+deallocate(), zero panics/overflows
+repro_013: PASS - no overflow observed in ImageCache::deallocate for any input reachable through the public API
+
+------------------------------------------------------------------------------------------------
+
+Earlier, additional boundary-value probe run directly in the isolated worktree
+(/tmp/vello_worktrees/013_image_cache_dealloc_u16_wrap), as a temporary #[ignore]d unit test added
+to sparse_strips/vello_common/src/image_cache.rs (removed afterwards, never committed - see
+RESULT.md "What was tried"):
+
+$ cargo test -p vello_common --lib image_cache -- --ignored --nocapture
+
+running 1 test
+
+thread 'image_cache::tests::probe_013_deallocate_u16_wrap_boundary' (322173) panicked at sparse_strips/vello_common/src/image_cache.rs:395:9:
+probe_013: 114689 accepted (width, padding) combos exercised through allocate+deallocate with no panic
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test image_cache::tests::probe_013_deallocate_u16_wrap_boundary ... FAILED
+
+failures:
+
+failures:
+    image_cache::tests::probe_013_deallocate_u16_wrap_boundary
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 160 filtered out; finished in 0.08s
+
+(The test is written to deliberately panic() at the end with the accepted-combo count once the
+full sweep completes with no earlier panic - the "FAILED" result above is expected and indicates
+the sweep completed without a real overflow panic, not that a bug was found. Widths swept:
+{0, 1, 2, 32767, 65534, 65535} x paddings 0..=65535, atlas_size = (u16::MAX, u16::MAX).)

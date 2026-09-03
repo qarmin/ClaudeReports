@@ -1,0 +1,58 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# Requires a working wgpu adapter reachable via the Vulkan, Metal, DX12 or GL backend. This
+# candidate was measured against a *software* Vulkan implementation (Google SwiftShader, CPU
+# device type) because no real GPU was available in the sandbox this was written in - if you
+# have a real GPU, just run `just test` with no extra setup and it will use it. If you don't,
+# set VK_ICD_FILENAMES to a software Vulkan ICD's JSON descriptor before running (e.g. the
+# SwiftShader build bundled with a Playwright/Chromium install, or lavapipe/Mesa's llvmpipe).
+# The bench prints the adapter it picked so you can tell which one was used.
+#
+# repo_url/base_commit were read via `git remote get-url origin` / `git rev-parse HEAD` in the
+# main project, at the moment patch.diff was captured.
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone at the pinned commit, build a BASELINE binary before touching anything,
+# apply the patch, build a PATCHED binary, then run both and print both results.
+test: clone build-baseline bench-baseline apply build-patched bench-patched
+
+clone:
+    rm -rf clone
+    # `--no-checkout` + disabling the LFS filters before checkout avoids a hard failure on
+    # machines without the `git-lfs` binary installed (this repo's snapshot PNGs are
+    # LFS-tracked; we don't need them for this bench, so a plain "cat" passthrough is fine).
+    git clone --no-checkout {{repo_url}} clone
+    cd clone && git config filter.lfs.smudge "git-lfs smudge -- %f" \
+        && git config filter.lfs.process "" \
+        && git config filter.lfs.required false \
+        && git config filter.lfs.clean "cat" \
+        && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd bench && cargo build --release
+
+bench-baseline:
+    @echo "=== baseline (before patch) ==="
+    cp bench/target/release/gpu_bench ./bin_baseline
+    VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-}" ./bin_baseline 100
+
+build-patched:
+    cd bench && cargo build --release
+
+bench-patched:
+    @echo "=== patched (after patch) ==="
+    cp bench/target/release/gpu_bench ./bin_patched
+    VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-}" ./bin_patched 100
+    @echo "Compare the two 'hash=' fields above: they must be identical (bit-exact output)."
+    @echo "Compare 'p50_us'/'mean_us': this is the CPU-side cost of Renderer::render() only."
+
+clean:
+    rm -rf clone bin_baseline bin_patched bench/target

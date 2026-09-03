@@ -1,0 +1,61 @@
+=== repro/ run against pristine clone @ 7eec7cfde2aed58a1606a48b5c7bd084536f9624 (before patch.diff) ===
+$ cd repro && cargo run --release
+    Finished `release` profile [optimized] target(s) in 7.76s
+     Running `target/release/repro`
+decoded from real libFuzzer-kept corpus bytes: SrcImage { src_width: 1, src_height: 830, dst_width: 1, dst_height: 257, value: 40, use_quality: true, premultiply_alpha: false, threading: true, supersampling: true, multi_stage_upsampling: true }
+src = 1x830, requested dst = 1x257
+call_as_written_before_fix -> target actually resized to: Some((1, 1))
+call_as_written_after_fix  -> target actually resized to: Some((1, 257))
+REPRODUCED: before-fix harness call always ignores dst_height (257) and produces a square 1x1 target instead of the requested 1x257; after-fix call correctly produces 1x257.
+
+Re-run twice more (same build, same input) - identical output both times (3/3 total):
+decoded from real libFuzzer-kept corpus bytes: SrcImage { src_width: 1, src_height: 830, dst_width: 1, dst_height: 257, value: 40, use_quality: true, premultiply_alpha: false, threading: true, supersampling: true, multi_stage_upsampling: true }
+src = 1x830, requested dst = 1x257
+call_as_written_before_fix -> target actually resized to: Some((1, 1))
+call_as_written_after_fix  -> target actually resized to: Some((1, 257))
+REPRODUCED: before-fix harness call always ignores dst_height (257) and produces a square 1x1 target instead of the requested 1x257; after-fix call correctly produces 1x257.
+
+decoded from real libFuzzer-kept corpus bytes: SrcImage { src_width: 1, src_height: 830, dst_width: 1, dst_height: 257, value: 40, use_quality: true, premultiply_alpha: false, threading: true, supersampling: true, multi_stage_upsampling: true }
+src = 1x830, requested dst = 1x257
+call_as_written_before_fix -> target actually resized to: Some((1, 1))
+call_as_written_after_fix  -> target actually resized to: Some((1, 257))
+REPRODUCED: before-fix harness call always ignores dst_height (257) and produces a square 1x1 target instead of the requested 1x257; after-fix call correctly produces 1x257.
+
+=== Real fuzzing campaign run with the harness fix applied (fuzz/resize_plane/resize_plane.rs), this session ===
+$ cd fuzz && cargo +nightly fuzz build --sanitizer none --features avx,sse,nightly_avx512 resize_plane
+   Compiling app-fuzz v0.0.0 (/home/rafal/Projekty/Obce/pic-scale/fuzz)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.15s
+
+$ cargo +nightly fuzz run --sanitizer none --features avx,sse,nightly_avx512 resize_plane -- -max_total_time=300 -rss_limit_mb=4096
+[... libFuzzer coverage-guided run ...]
+#1119017	DONE   cov: 449 ft: 2341 corp: 405/5682b lim: 4096 exec/s: 3717 rss: 41Mb
+Done 1119017 runs in 301 second(s)
+
+Result: 1,119,017 executions in 300s, 0 crashes/panics/overflow-aborts/timeouts/OOM kills.
+fuzz/artifacts/resize_plane/ empty after the run (checked directly).
+
+=== Corpus check: did the fix actually diversify coverage into rectangular destinations? ===
+Standalone scratch binary (/tmp/corpus_check_plane, arbitrary crate, not part of this repo)
+re-decoded every file libFuzzer kept in fuzz/corpus/resize_plane/ (403 files - a file is only kept
+if it triggered new code coverage) with the identical Arbitrary-derived SrcImage struct:
+
+$ cargo run --release -- /home/rafal/Projekty/Obce/pic-scale/fuzz/corpus/resize_plane
+total parsed: 403, dst_width != dst_height: 368, valid+rectangular: 367
+
+367 of 403 kept corpus entries (91%) decode to a valid, genuinely rectangular (dst_width !=
+dst_height) destination size - confirming the one-line fix genuinely unlocks new coverage the
+unpatched harness could never reach (before the fix, every executed resize_plane call has
+dst_width == dst_height by construction, regardless of what dst_height decodes to - this is true
+of 100% of executions, provable directly from the source text: the pre-fix call site literally uses
+the token `data.dst_width` twice, see patch.diff).
+
+=== Project test suite (main crate; fuzz/ is excluded from the workspace, see Cargo.toml
+    `exclude = [..., "fuzz", ...]`, so this fix cannot affect it - run anyway for completeness) ===
+
+Before (fuzz/resize_plane/resize_plane.rs unpatched):
+$ cargo test --lib --release
+test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+After (fuzz/resize_plane/resize_plane.rs patched):
+$ cargo test --lib --release
+test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

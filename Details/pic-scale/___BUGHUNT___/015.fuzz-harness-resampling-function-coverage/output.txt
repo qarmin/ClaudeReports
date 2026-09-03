@@ -1,0 +1,138 @@
+=== Static confirmation: grep -rn "ResamplingFunction" fuzz/*/*.rs (only lines that pick a variant shown) ===
+resize_cbcr16/resize_cbcr16.rs:60:        ResamplingFunction::Bilinear,
+colorspaces/colorspaces.rs:47,57,66,75:        ResamplingFunction::Bilinear,
+resize_rgba_u16/resize_rgba_u16.rs:64:        ResamplingFunction::Lanczos3,
+resize_rgba/resize_rgba.rs:66:        ResamplingFunction::Bilinear,
+resize_rgb_u16/resize_rgb_u16.rs:61:        ResamplingFunction::Lanczos3,
+resize_rgb_f32/resize_rgb_f32.rs:55:        ResamplingFunction::Bilinear,
+resize_rgb/resize_rgb.rs:61:        ResamplingFunction::Bilinear,
+resize_rgba_f32/resize_rgba_f32.rs:59:        ResamplingFunction::Bilinear,
+resize_cbcr8/resize_cbcr8.rs:60:        ResamplingFunction::Bilinear,
+resize_cbcr_f32/resize_cbcr_f32.rs:60:        ResamplingFunction::Bilinear,
+resize_rgb_f16/resize_rgb_f16.rs:61:        ResamplingFunction::Lanczos3,
+resize_rgba_f16/resize_rgba_f16.rs:65:        ResamplingFunction::Lanczos3,
+resize_plane_u16/resize_plane_u16.rs:56:        ResamplingFunction::Lanczos3,
+resize_plane_f32/resize_plane_f32.rs:55:        ResamplingFunction::Bilinear,
+resize_plane/resize_plane.rs:58:        ResamplingFunction::Bilinear,
+resize_cbcr_f16/resize_cbcr_f16.rs:65:        ResamplingFunction::Bilinear,
+
+Tally: Bilinear x11 harnesses (10 targets + 1 harness with 4 internal call sites in colorspaces.rs),
+Lanczos3 x5 harnesses. Every one of the 16 [[bin]] targets: exactly one hardcoded variant, no
+Arbitrary-derived sampler field in any of the 16 SrcImage structs.
+
+=== Diff of the 3 one-off local harness patches used to test diversified coverage (applied, run, then reverted) ===
+diff --git a/fuzz/resize_plane/resize_plane.rs b/fuzz/resize_plane/resize_plane.rs
+index f3b535a..017f85f 100644
+--- a/fuzz/resize_plane/resize_plane.rs
++++ b/fuzz/resize_plane/resize_plane.rs
+@@ -47,6 +47,7 @@ pub struct SrcImage {
+     pub threading: bool,
+     pub supersampling: bool,
+     pub multi_stage_upsampling: bool,
++    pub sampler_variant: u32,
+ }
+
+ fuzz_target!(|data: SrcImage| {
+@@ -55,7 +56,7 @@ fuzz_target!(|data: SrcImage| {
+         data.src_height as usize,
+         data.dst_width as usize,
+         data.dst_width as usize,
+-        ResamplingFunction::Bilinear,
++        ResamplingFunction::from(data.sampler_variant),
+         data.use_quality,
+         data.value,
+         if data.threading {
+diff --git a/fuzz/resize_rgb_u16/resize_rgb_u16.rs b/fuzz/resize_rgb_u16/resize_rgb_u16.rs
+index bbcafde..5c32765 100644
+--- a/fuzz/resize_rgb_u16/resize_rgb_u16.rs
++++ b/fuzz/resize_rgb_u16/resize_rgb_u16.rs
+@@ -44,6 +44,7 @@ pub struct SrcImage {
+     pub value: u16,
+     pub use_quality: bool,
+     pub threading: bool,
++    pub sampler_variant: u32,
+ }
+
+ fuzz_target!(|data: SrcImage| {
+@@ -58,7 +59,7 @@ fuzz_target!(|data: SrcImage| {
+         data.src_height as usize,
+         data.dst_width as usize,
+         data.dst_height as usize,
+-        ResamplingFunction::Lanczos3,
++        ResamplingFunction::from(data.sampler_variant),
+         quality,
+         if data.threading {
+             ThreadingPolicy::Adaptive
+diff --git a/fuzz/resize_rgba/resize_rgba.rs b/fuzz/resize_rgba/resize_rgba.rs
+index 863defe..806928b 100644
+--- a/fuzz/resize_rgba/resize_rgba.rs
++++ b/fuzz/resize_rgba/resize_rgba.rs
+@@ -49,6 +49,7 @@ pub struct SrcImage {
+     pub threading: bool,
+     pub supersampling: bool,
+     pub multi_stage_upsampling: bool,
++    pub sampler_variant: u32,
+ }
+
+ fuzz_target!(|data: SrcImage| {
+@@ -63,7 +64,7 @@ fuzz_target!(|data: SrcImage| {
+         data.src_height as usize,
+         data.dst_width as usize,
+         data.dst_height as usize,
+-        ResamplingFunction::Bilinear,
++        ResamplingFunction::from(data.sampler_variant),
+         quality,
+         if data.threading {
+             ThreadingPolicy::Adaptive
+
+=== cargo +nightly fuzz build --sanitizer none --features avx,sse,nightly_avx512 resize_rgba ===
+    Finished `release` profile [optimized + debuginfo] target(s) in 24.77s
+
+=== cargo +nightly fuzz run --sanitizer none --features avx,sse,nightly_avx512 resize_rgba -- -max_total_time=300 -rss_limit_mb=4096 (tail) ===
+"\005\000\000\000" # Uses: 414
+"\002\000\200>" # Uses: 419
+"\031\000\000\000\000\000\000\000" # Uses: 423
+"\377\377\377\377\377\377\377\023" # Uses: 411
+...
+Done 365102 runs in 301 second(s)
+(no ERROR/panic/SUMMARY:/deadly-signal/leaked/timeout/out-of-memory lines in the full log;
+fuzz/artifacts/resize_rgba/ empty after the run)
+
+=== cargo +nightly fuzz run --sanitizer none --features avx,sse,nightly_avx512 resize_plane -- -max_total_time=180 -rss_limit_mb=4096 (tail) ===
+"\242w\000\000\000\000\000\000" # Uses: 58
+"\001\000\000\000\000\000\000," # Uses: 64
+...
+Done 284593 runs in 181 second(s)
+(no ERROR/panic/SUMMARY:/deadly-signal/leaked/timeout/out-of-memory lines in the full log;
+fuzz/artifacts/resize_plane/ empty after the run)
+
+=== cargo +nightly fuzz run --sanitizer none --features avx,sse,nightly_avx512 resize_rgb_u16 -- -max_total_time=180 -rss_limit_mb=4096 (tail) ===
+"\016\000\000\000" # Uses: 122
+"M\022\000\000\000\000\000\000" # Uses: 108
+...
+Done 58925 runs in 181 second(s)
+(no ERROR/panic/SUMMARY:/deadly-signal/leaked/timeout/out-of-memory lines in the full log;
+fuzz/artifacts/resize_rgb_u16/ empty after the run)
+
+=== find fuzz -maxdepth 2 -iname 'crash-*' -o -iname 'oom-*' -o -iname 'timeout-*' (after all 3 runs) ===
+(no output - none found)
+
+=== Corpus-decode verification (standalone /tmp/corpus_check{,2} scratch binary, arbitrary crate) ===
+$ corpus_check /home/rafal/Projekty/Obce/pic-scale/fuzz/corpus/resize_rgba
+total files: 1536, parsed ok: 1536, distinct sampler variants (0-52 space): 53
+[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52]
+
+$ corpus_check /home/rafal/Projekty/Obce/pic-scale/fuzz/corpus/resize_plane
+total files: 1460, parsed ok: 1460, distinct sampler variants (0-52 space): 53
+[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52]
+
+$ corpus_check2 /home/rafal/Projekty/Obce/pic-scale/fuzz/corpus/resize_rgb_u16   (own SrcImage layout: value:u16, no premultiply_alpha/supersampling/multi_stage_upsampling)
+total files: 930, parsed ok: 930, distinct sampler variants (0-52 space): 49
+[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 23, 24, 26, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52]
+
+=== git status after reverting the 3 one-off harness patches ===
+ M .gitignore
+?? ___BUGHUNT___/
+?? ___OPTIMIZATIONS___/
+(fuzz/resize_rgba/resize_rgba.rs, fuzz/resize_plane/resize_plane.rs, fuzz/resize_rgb_u16/resize_rgb_u16.rs
+all back to their original committed state - `git checkout --` applied before this file was written)

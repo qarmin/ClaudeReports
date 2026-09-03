@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate is a real change to the tested project's own source (src/huffman.rs,
+# src/decoder.rs) - patch.diff applies cleanly against base_commit below. It is self-contained
+# given the whole ___OPTIMIZATIONS___ folder (harness_dir below references the canonical
+# bench_decode harness kept once at ___OPTIMIZATIONS___/harness/bench_decode), not fully
+# standalone with zero other setup - see ___OPTIMIZATIONS___/README.md's "Instrumentation added
+# for this workspace" / SKILL.md's "Bench harnesses: grow a few, don't multiply".
+
+repo_url := "https://github.com/image-rs/jpeg-decoder.git"
+base_commit := "eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c"
+harness_dir := "../harness/bench_decode"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/bench_decode
+    sed -i 's#path = "\.\./\.\./\.\."#path = ".."#' clone/bench_decode/Cargo.toml
+
+build-baseline:
+    cd clone/bench_decode && cargo +stable build --release
+    cp clone/bench_decode/target/release/bench_decode ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    touch clone/src/huffman.rs clone/src/decoder.rs
+    cd clone/bench_decode && cargo +stable build --release
+    cp clone/bench_decode/target/release/bench_decode ./bin_patched
+
+bench:
+    @echo "=== baseline vs patched: benches/large_image.jpg, 50 iters ==="
+    ./bin_baseline clone/benches/large_image.jpg 50
+    ./bin_patched  clone/benches/large_image.jpg 50
+    @echo "=== baseline vs patched: tests/reftest/images/lossless/1/jpeg_lossless_sel1-rgb.jpg, 30 iters ==="
+    ./bin_baseline clone/tests/reftest/images/lossless/1/jpeg_lossless_sel1-rgb.jpg 30
+    ./bin_patched  clone/tests/reftest/images/lossless/1/jpeg_lossless_sel1-rgb.jpg 30
+
+clean:
+    rm -rf clone bin_baseline bin_patched

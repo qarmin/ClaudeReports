@@ -1,0 +1,33 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Standalone bench crate in ./bench (no existing project benchmark reaches
+# Brush::interpolate directly - see RESULT.md). Depends on `{ path = "../clone/internal/core" }`.
+bench:
+    cd bench && cargo build --release
+    ./bench/target/release/gradient_interpolate_bench --mode linear --stops 8 --iters 2000000 --batch 2000
+    ./bench/target/release/gradient_interpolate_bench --mode radial --stops 8 --iters 2000000 --batch 2000
+    ./bench/target/release/gradient_interpolate_bench --mode conic --stops 8 --iters 2000000 --batch 2000
+    ./bench/target/release/gradient_interpolate_bench --mode solid-linear --stops 8 --iters 2000000 --batch 2000
+
+clean:
+    rm -rf clone bench/target

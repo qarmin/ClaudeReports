@@ -1,0 +1,36 @@
+=== BEFORE (pristine kurbo, commit ca27349) - repro/ run, real captured output ===
+$ cargo run --release
+    Finished `release` profile [optimized] target(s) in 0.01s
+     Running `target/release/repro`
+expand.xx == 0.0, expand.yy == -2.0:
+  Bevel: [MoveTo((0.0, -2.0)), LineTo((10.0, -2.0)), LineTo((10.0, 0.0)), LineTo((10.0, 10.0)), LineTo((10.0, 12.0)), LineTo((0.0, 2.0)), LineTo((0.0, -2.0)), ClosePath]
+  Miter: [MoveTo((0.0, -2.0)), LineTo((10.0, -2.0)), LineTo((10.0, 0.0)), LineTo((10.0, 10.0)), LineTo((10.0, 12.0)), LineTo((0.0, 2.0)), LineTo((0.0, -2.0)), ClosePath]
+  Round: [MoveTo((0.0, -2.0)), LineTo((10.0, -2.0)), LineTo((10.0, 0.0)), LineTo((10.0, 10.0)), LineTo((10.0, 12.0)), LineTo((0.0, 2.0)), LineTo((0.0, -2.0)), ClosePath]
+sanity check (expand.xx = -1e-6, same corner): Miter != Bevel -> true
+REPRODUCED: with expand.xx == 0.0 exactly, Join::Miter and Join::Round both silently produced identical output to Join::Bevel, even though the sanity check above proves this corner needs a real Miter/Round join under the same sign convention.
+$ echo "exit code: $?"
+exit code: 1
+
+(re-run 2 more times, same build, same input - identical output and exit code both times;
+ this is pure deterministic arithmetic with no randomness/threading involved, so 3/3 identical
+ runs is the expected and observed repeatability)
+
+=== AFTER (patched kurbo, patch.diff applied to expand.rs) - repro/ run, real captured output ===
+$ cargo run --release
+   Compiling kurbo v0.13.1 (.../kurbo)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 1.01s
+     Running `target/release/repro`
+expand.xx == 0.0, expand.yy == -2.0:
+  Bevel: [MoveTo((0.0, -2.0)), LineTo((10.0, -2.0)), LineTo((10.0, 0.0)), LineTo((10.0, 10.0)), LineTo((10.0, 12.0)), LineTo((0.0, 2.0)), LineTo((0.0, -2.0)), ClosePath]
+  Miter: [MoveTo((0.0, -2.0)), LineTo((10.0, -2.0)), LineTo((10.0, 12.0)), LineTo((-4.0, -2.0)), ClosePath]
+  Round: [MoveTo((0.0, -2.0)), LineTo((10.0, -2.0)), LineTo((10.0, 10.0)), CurveTo((10.0, 8.0), (10.0, 8.895430500338414), (10.0, 10.0)), CurveTo((10.0, 11.104569499661586), (10.0, 12.0), (10.0, 12.0)), LineTo((0.0, 2.0)), CurveTo((0.0, 2.0), (0.0, 1.1045694996615865), (0.0, -1.2246467991473532e-16)), CurveTo((0.0, -1.104569499661587), (0.0, -2.0), (0.0, -2.0)), ClosePath]
+sanity check (expand.xx = -1e-6, same corner): Miter != Bevel -> true
+did not reproduce - Join::Miter/Join::Round diverged from Join::Bevel as expected even with expand.xx == 0.0
+$ echo "exit code: $?"
+exit code: 0
+
+=== Project test suite, before vs after patch (cargo test --lib and --doc, kurbo/ crate) ===
+Before (pristine): 187 passed; 0 failed  (--lib)   |   55 passed; 0 failed  (--doc)
+After  (patched) : 187 passed; 0 failed  (--lib)   |   55 passed; 0 failed  (--doc)
+No regressions, no new failures.

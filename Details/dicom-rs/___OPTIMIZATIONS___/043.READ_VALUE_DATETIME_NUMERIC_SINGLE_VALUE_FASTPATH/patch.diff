@@ -1,0 +1,89 @@
+diff --git a/parser/src/stateful/decode.rs b/parser/src/stateful/decode.rs
+index 39e8e856..9ba2ab3a 100644
+--- a/parser/src/stateful/decode.rs
++++ b/parser/src/stateful/decode.rs
+@@ -582,6 +582,18 @@ where
+             }
+             .fail();
+         }
++        // fast path: a single value (no backslash delimiter) skips the split-iterator + collect
++        // machinery below - see read_value_strs' own single-value fast path (candidate 042) for
++        // the same mechanism applied to this family of text-parsing decode functions.
++        if !buf.contains(&b'\\') {
++            let date = parse_date_partial(buf)
++                .map(|t| t.0)
++                .context(DeserializeValueSnafu {
++                    position: self.position,
++                })?;
++            self.position += len as u64;
++            return Ok(PrimitiveValue::Date(smallvec![date]));
++        }
+         let vec: Result<_> = buf
+             .split(|b| *b == b'\\')
+             .map(|part| {
+@@ -611,6 +623,17 @@ where
+             return Ok(PrimitiveValue::Empty);
+         }
+ 
++        if !buf.contains(&b'\\') {
++            let codec = DefaultCharacterSetCodec;
++            let txt = codec.decode(buf).context(DecodeTextSnafu {
++                position: self.position,
++            })?;
++            let value = txt.trim().parse::<f64>().context(ReadFloatSnafu {
++                position: self.position,
++            })?;
++            self.position += len as u64;
++            return Ok(PrimitiveValue::F64(smallvec![value]));
++        }
+         let parts: Result<_> = buf
+             .split(|b| *b == b'\\')
+             .map(|slice| {
+@@ -653,6 +676,13 @@ where
+             }
+             .fail();
+         }
++        if !buf.contains(&b'\\') {
++            let dt = parse_datetime_partial(buf).context(DeserializeValueSnafu {
++                position: self.position,
++            })?;
++            self.position += len as u64;
++            return Ok(PrimitiveValue::DateTime(smallvec![dt]));
++        }
+         let vec: Result<_> = buf
+             .split(|b| *b == b'\\')
+             .map(|part| {
+@@ -680,6 +710,17 @@ where
+             return Ok(PrimitiveValue::Empty);
+         }
+ 
++        if !buf.contains(&b'\\') {
++            let codec = DefaultCharacterSetCodec;
++            let txt = codec.decode(buf).context(DecodeTextSnafu {
++                position: self.position,
++            })?;
++            let value = txt.trim().parse::<i32>().context(ReadIntSnafu {
++                position: self.position,
++            })?;
++            self.position += len as u64;
++            return Ok(PrimitiveValue::I32(smallvec![value]));
++        }
+         let parts: Result<_> = buf
+             .split(|v| *v == b'\\')
+             .map(|slice| {
+@@ -722,6 +763,15 @@ where
+             }
+             .fail();
+         }
++        if !buf.contains(&b'\\') {
++            let time = parse_time_partial(buf)
++                .map(|t| t.0)
++                .context(DeserializeValueSnafu {
++                    position: self.position,
++                })?;
++            self.position += len as u64;
++            return Ok(PrimitiveValue::Time(smallvec![time]));
++        }
+         let vec: std::result::Result<_, _> = buf
+             .split(|b| *b == b'\\')
+             .map(|part| {

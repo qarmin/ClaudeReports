@@ -1,0 +1,37 @@
+====================================================================
+candidate 011: wasm_web_pool_scoped_computation_active_scope_addr_aliasing
+captured by actually running repro/ (just clone && just test), 2026-08-30T21:04:01Z
+====================================================================
+
+---- reproduce-before (fresh clone at b9214fbeb714e4bb8f8858676a818cef2f21b097 + add_repro_hooks.diff, no fix) ----
+Building repro wasm binaries from /home/rafal/Projekty/Obce/orx-parallel/___BUGHUNT___/011.wasm_web_pool_scoped_computation_active_scope_addr_aliasing/repro/../clone ...
+  |
+  --> src/pool/pool_impl/mod.rs:32:16
+32 | pub(super) use wasm_web::init_wasm_thread_pool;
+=== Results ===
+bughunt_baseline.wasm    [single scope, no nesting]: completed normally (return code 0)
+bughunt_nested.wasm      [scope nested inside another still-active scope (2 levels)]: TRAPPED
+    error while executing at wasm backtrace:
+        0: 0x768ae - bughunt_nested.wasm!std[a19d41b44d568f24]::sys::pal::wasm::common::abort_internal
+        1: 0x6b1ff - bughunt_nested.wasm!std[a19d41b44d568f24]::process::abort
+        2: 0x62e09 - bughunt_nested.wasm!__rustc[30b16945e0834bb5]::__rust_abort
+bughunt_depth3.wasm      [scope nested 3 levels deep]: TRAPPED
+    error while executing at wasm backtrace:
+        0: 0x76856 - bughunt_depth3.wasm!std[a19d41b44d568f24]::sys::pal::wasm::common::abort_internal
+        1: 0x6b1a7 - bughunt_depth3.wasm!std[a19d41b44d568f24]::process::abort
+        2: 0x62db1 - bughunt_depth3.wasm!__rustc[30b16945e0834bb5]::__rust_abort
+==> at least one nested-scope case trapped inside scoped_computation_impl: the single process-wide active-scope slot was aliased by the nested call (candidate 011, pre-fix / unpatched behavior).
+
+---- apply patch.diff (the fix) ----
+patch.diff applied cleanly
+
+---- reproduce-after (same clone, now patched) ----
+Building repro wasm binaries from /home/rafal/Projekty/Obce/orx-parallel/___BUGHUNT___/011.wasm_web_pool_scoped_computation_active_scope_addr_aliasing/repro/../clone ...
+  |
+  --> src/pool/pool_impl/mod.rs:32:16
+32 | pub(super) use wasm_web::init_wasm_thread_pool;
+=== Results ===
+bughunt_baseline.wasm    [single scope, no nesting]: completed normally (return code 0)
+bughunt_nested.wasm      [scope nested inside another still-active scope (2 levels)]: completed normally (return code 0)
+bughunt_depth3.wasm      [scope nested 3 levels deep]: completed normally (return code 0)
+==> all cases (including the nested ones) completed normally: no aliasing observed (candidate 011, post-fix / patched behavior).

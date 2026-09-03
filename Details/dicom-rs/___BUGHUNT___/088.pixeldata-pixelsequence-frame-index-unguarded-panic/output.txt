@@ -1,0 +1,46 @@
+Standalone repro/, run against a real round-tripped DICOM file (built via the public
+FileMetaTableBuilder/InMemDicomObject/DataElement API, written with write_to_file, then read back
+with the real dicom_object::open_file entry point) and the real public
+PixelDecoder::decode_pixel_data_frame API.
+
+=== BEFORE (pristine df2b9e4236298efa3fa37a1f360fc4bf284d586a, unpatched pixeldata/src/lib.rs) ===
+$ RUST_BACKTRACE=1 cargo run
+
+== valid frame indices (0 and 1) ==
+frame 0: Ok
+frame 1: Ok
+== out-of-range frame index (2) - fragments.len() == number_of_frames == 2 ==
+calling decode_pixel_data_frame(2)...
+
+thread 'main' (113869) panicked at /home/rafal/Projekty/Obce/dicom-rs/pixeldata/src/lib.rs:2511:21:
+index out of bounds: the len is 2 but the index is 2
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:80:14
+   2: core::panicking::panic_bounds_check
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:271:5
+   3: <dicom_object::FileDicomObject<dicom_object::mem::InMemDicomObject> as dicom_pixeldata::PixelDecoder>::decode_pixel_data_frame
+             at /home/rafal/Projekty/Obce/dicom-rs/pixeldata/src/lib.rs:2511:21
+   4: repro::main
+             at ./src/main.rs:80:15
+   5: <fn() as core::ops::function::FnOnce<()>>::call_once
+             at /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+Reproduced deterministically 3/3 additional runs of the equivalent in-tree unit test
+(`temp_candidate_check_pixelsequence_frame_oob`, added temporarily to pixeldata/src/lib.rs and
+reverted before this record was written) plus this standalone repro/ run - identical panic
+message and location every time, no layout/seed/timing dependency.
+
+=== AFTER (patch.diff applied to pixeldata/src/lib.rs) ===
+$ cargo run
+
+== valid frame indices (0 and 1) ==
+frame 0: Ok
+frame 1: Ok
+== out-of-range frame index (2) - fragments.len() == number_of_frames == 2 ==
+calling decode_pixel_data_frame(2)...
+frame 2: Err(Frame #2 is out of range) (graceful error, bug is fixed)
+no panic occurred

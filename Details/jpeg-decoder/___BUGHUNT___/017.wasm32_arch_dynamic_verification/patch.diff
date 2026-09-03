@@ -1,0 +1,25 @@
+diff --git a/src/parser.rs b/src/parser.rs
+index b17e7e9..a05f81f 100644
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -304,6 +304,20 @@ fn update_component_sizes(size: Dimensions, components: &mut [Component]) -> Res
+ 
+         component.block_size.width = mcu_size.width * component.horizontal_sampling_factor as u16;
+         component.block_size.height = mcu_size.height * component.vertical_sampling_factor as u16;
++
++        // Workers later compute block_size.width * block_size.height * dct_scale * dct_scale as
++        // a `usize` buffer length (src/worker/{immediate,rayon}.rs); on a 32-bit target (e.g.
++        // wasm32) a sufficiently large, otherwise-legal SOF (up to 65535x65535 per the JPEG spec)
++        // overflows that multiplication before any allocation happens. Bound the result against
++        // isize::MAX, not just usize::MAX/checked_mul's own overflow: a product that fits in
++        // usize but exceeds isize::MAX still panics with "capacity overflow" out of
++        // Vec::resize/with_capacity on a 32-bit target, which checked_mul alone would not catch.
++        (component.block_size.width as usize)
++            .checked_mul(component.block_size.height as usize)
++            .and_then(|m| m.checked_mul(component.dct_scale))
++            .and_then(|m| m.checked_mul(component.dct_scale))
++            .filter(|&m| m <= isize::MAX as usize)
++            .ok_or_else(|| Error::Format("decoded component buffer size exceeds addressable memory".to_owned()))?;
+     }
+ 
+     Ok(mcu_size)

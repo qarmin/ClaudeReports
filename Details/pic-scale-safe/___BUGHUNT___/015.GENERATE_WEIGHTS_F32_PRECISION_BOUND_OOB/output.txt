@@ -1,0 +1,123 @@
+=== Before fix, debug build (`cargo run` in repro/, against pristine master @ 83c4801428c436678d7c6b6bea74af800924a469) ===
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running `target/debug/repro`
+thread 'main' (36196) panicked at /home/rafal/test/pic-scale-safe/src/fixed_point_horizontal.rs:73:28:
+range end index 16777220 out of range for slice of length 16777219
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+case1 (resize_plane8, width=16_777_219 -> 1): PANICKED (slice OOB)
+
+thread 'main' (36196) panicked at /home/rafal/test/pic-scale-safe/src/floating_point_horizontal.rs:75:28:
+range end index 16777220 out of range for slice of length 16777219
+case2 (resize_plane_f32, width=16_777_219 -> 1): PANICKED (slice OOB)
+sanity (resize_plane8, width=1_000_000 -> 10): ok, got 10 output pixels
+REPRODUCED - generate_weights' float-domain in_size clamp lets FilterBounds.size exceed the true source width for widths > 2^24, causing an out-of-bounds slice panic in fixed_point_horizontal.rs/floating_point_horizontal.rs
+
+(repeated 3/3 times in debug builds, and 1/1 additional time below in release, all with the
+identical panic location/message)
+
+=== Before fix, release build (`cargo run --release`) ===
+
+    Finished `release` profile [optimized] target(s) in 0.00s
+     Running `target/release/repro`
+thread 'main' (36207) panicked at /home/rafal/test/pic-scale-safe/src/fixed_point_horizontal.rs:73:28:
+range end index 16777220 out of range for slice of length 16777219
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+case1 (resize_plane8, width=16_777_219 -> 1): PANICKED (slice OOB)
+
+thread 'main' (36207) panicked at /home/rafal/test/pic-scale-safe/src/floating_point_horizontal.rs:75:28:
+range end index 16777220 out of range for slice of length 16777219
+case2 (resize_plane_f32, width=16_777_219 -> 1): PANICKED (slice OOB)
+sanity (resize_plane8, width=1_000_000 -> 10): ok, got 10 output pixels
+REPRODUCED - generate_weights' float-domain in_size clamp lets FilterBounds.size exceed the true source width for widths > 2^24, causing an out-of-bounds slice panic in fixed_point_horizontal.rs/floating_point_horizontal.rs
+
+=== After fix (patch.diff applied to src/compute_weights.rs), debug build ===
+
+   Compiling pic-scale-safe v0.1.11 (/home/rafal/test/pic-scale-safe)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.27s
+     Running `target/debug/repro`
+case1 (resize_plane8, width=16_777_219 -> 1): did not panic, Ok([0])
+case2 (resize_plane_f32, width=16_777_219 -> 1): did not panic, Ok([0.0])
+sanity (resize_plane8, width=1_000_000 -> 10): ok, got 10 output pixels
+did not reproduce - both >2^24-width cases resized without panicking, and the sanity case still produced the correct output length
+
+=== After fix, release build ===
+
+   Compiling pic-scale-safe v0.1.11 (/home/rafal/test/pic-scale-safe)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 0.94s
+     Running `target/release/repro`
+case1 (resize_plane8, width=16_777_219 -> 1): did not panic, Ok([0])
+case2 (resize_plane_f32, width=16_777_219 -> 1): did not panic, Ok([0.0])
+sanity (resize_plane8, width=1_000_000 -> 10): ok, got 10 output pixels
+did not reproduce - both >2^24-width cases resized without panicking, and the sanity case still produced the correct output length
+
+=== In-tree probe (src/compute_weights.rs, cfg(test) module, `cargo test --lib bughunt_015_probe -- --nocapture`), before fix ===
+
+running 1 test
+Spline16: safe_width=4611686018427387887 max_size=0 max_end=2305843009213693952
+Spline64: safe_width=4611686018427387887 max_size=0 max_end=2305843009213693952
+in_size=16777219 out_size=1 overflow_bound=Some((0, 0, 16777220))
+in_size=16777219 out_size=2 overflow_bound=Some((1, 4194305, 12582915))
+in_size=16777219 out_size=3 overflow_bound=Some((2, 8388610, 8388610))
+in_size=16777219 out_size=5 overflow_bound=Some((4, 11744054, 5033166))
+in_size=16777219 out_size=7 overflow_bound=Some((6, 13182101, 3595119))
+in_size=16777219 out_size=10 overflow_bound=Some((9, 14260637, 2516583))
+in_size=16777219 out_size=100 overflow_bound=Some((99, 16525562, 251658))
+in_size=16777219 out_size=1000 overflow_bound=Some((999, 16752055, 25165))
+in_size=16777219 out_size=10000 overflow_bound=Some((9999, 16774704, 2516))
+in_size=16777219 out_size=100000 overflow_bound=Some((99999, 16776968, 252))
+in_size=16777219 out_size=1000000 overflow_bound=Some((999999, 16777194, 26))
+in_size=16777219 out_size=16777218 overflow_bound=None
+in_size=16777219 out_size=16777217 overflow_bound=Some((16777215, 16777220, 0))
+in_size=16777219 out_size=16777216 overflow_bound=Some((16777215, 16777220, 0))
+in_size=16777219 out_size=8388609 overflow_bound=Some((8388608, 16777216, 4))
+test compute_weights::bughunt_015_probe::probe_bound_size_never_exceeds_in_size ... ok
+
+(each `overflow_bound=Some((bound_index, start, size))` entry is a FilterBounds whose
+start+size already exceeds the true in_size=16777219 *inside generate_weights itself*, before any
+downstream slicing - confirming the root cause independent of the fixed_point/floating_point
+horizontal-pass slicing that actually panics)
+
+=== Same probe, after fix ===
+
+running 1 test
+Spline16: safe_width=4611686018427387887 max_size=0 max_end=2305843009213693952
+Spline64: safe_width=4611686018427387887 max_size=0 max_end=2305843009213693952
+in_size=16777219 out_size=1 overflow_bound=None
+in_size=16777219 out_size=2 overflow_bound=None
+in_size=16777219 out_size=3 overflow_bound=None
+in_size=16777219 out_size=5 overflow_bound=None
+in_size=16777219 out_size=7 overflow_bound=None
+in_size=16777219 out_size=10 overflow_bound=None
+in_size=16777219 out_size=100 overflow_bound=None
+in_size=16777219 out_size=1000 overflow_bound=None
+in_size=16777219 out_size=10000 overflow_bound=None
+in_size=16777219 out_size=100000 overflow_bound=None
+in_size=16777219 out_size=1000000 overflow_bound=None
+in_size=16777219 out_size=16777218 overflow_bound=None
+in_size=16777219 out_size=16777217 overflow_bound=None
+in_size=16777219 out_size=16777216 overflow_bound=None
+in_size=16777219 out_size=8388609 overflow_bound=None
+test compute_weights::bughunt_015_probe::probe_bound_size_never_exceeds_in_size ... ok
+
+=== Project test suite, before fix (`cargo test --all-features --workspace`) ===
+
+app: running 1 test
+test image_wrapper::tests::test_rescaling ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+pic-scale-safe (lib): running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+=== Project test suite, after fix ===
+
+app: running 1 test
+test image_wrapper::tests::test_rescaling ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+pic-scale-safe (lib): running 1 test (the bughunt_015_probe scaffolding added and later removed
+for this session; not part of the shipped patch.diff)
+test compute_weights::bughunt_015_probe::probe_bound_size_never_exceeds_in_size ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out

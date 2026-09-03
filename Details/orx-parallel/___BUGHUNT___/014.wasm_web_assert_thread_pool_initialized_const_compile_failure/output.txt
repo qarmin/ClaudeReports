@@ -1,0 +1,61 @@
+=== BEFORE (unpatched, base_commit b9214fbeb714e4bb8f8858676a818cef2f21b097) ===
+Command: cd repro && cargo build --target wasm32-unknown-unknown
+(repro/Cargo.toml depends on orx-parallel via `path = "../clone", default-features = false,
+features = ["wasm"]`, exactly matching docs/wasm.md's "Which feature to enable" snippet, built
+for wasm32 WITHOUT the extra `-C target-feature=+atomics` RUSTFLAGS docs/wasm.md describes as a
+separate, additional step.)
+
+   Compiling orx-parallel v3.4.0 (/tmp/scratch014b/cand/clone)
+error[E0080]: evaluation panicked: Wasm web threading requires atomics-enabled wasm build flags; see docs/wasm.md.
+   --> /tmp/scratch014b/cand/clone/src/pool/pool_impl/wasm_web.rs:313:9
+    |
+313 | /         assert!(
+314 | |             cfg!(target_feature = "atomics"),
+315 | |             "Wasm web threading requires atomics-enabled wasm build flags; see docs/wasm.md."
+316 | |         );
+    | |_________^ evaluation of `pool::pool_impl::wasm_web::assert_wasm_thread_pool_initialized::{constant#0}` failed here
+
+note: erroneous constant encountered
+   --> /tmp/scratch014b/cand/clone/src/pool/pool_impl/wasm_web.rs:312:5
+    |
+312 | /     const {
+313 | |         assert!(
+314 | |             cfg!(target_feature = "atomics"),
+315 | |             "Wasm web threading requires atomics-enabled wasm build flags; see docs/wasm.md."
+316 | |         );
+317 | |     }
+    | |_____^
+
+For more information about this error, try `rustc --explain E0080`.
+error: could not compile `orx-parallel` (lib) due to 1 previous error
+
+Exit code: 101 (identical across repeated runs, reproduced 2/2 direct-in-tree runs plus this
+downstream-crate run = 3/3 total; compile-time const evaluation, fully deterministic).
+
+=== AFTER (patch.diff applied to the clone) ===
+Command: cd repro && cargo build --target wasm32-unknown-unknown
+
+   Compiling orx-parallel v3.4.0 (/tmp/scratch014b/cand/clone)
+   Compiling repro v0.1.0 (/tmp/scratch014b/cand/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.26s
+
+Exit code: 0. No warnings.
+
+=== Sanity check: atomics-enabled build still works (both before and after the patch) ===
+Command (run directly against the main project's own worktree, not through repro/):
+  RUSTUP_TOOLCHAIN=nightly RUSTFLAGS='-C target-feature=+atomics -C link-arg=--shared-memory \
+  -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__heap_base \
+  -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align \
+  -C link-arg=--export=__tls_base' cargo build --target wasm32-unknown-unknown --features wasm \
+  --lib -Z build-std=panic_abort,std
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.48s
+(only pre-existing, unrelated warnings: an unstable -Ctarget-feature=atomics notice, and an
+unused-import warning for wasm_web::init_wasm_thread_pool that predates this candidate.)
+
+=== Native (x86_64) test suite, main project worktree, cargo test --lib ===
+Before patch: test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out.
+After patch:  test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out.
+(wasm_web.rs is not compiled at all on the native target - cfg(target_arch = "wasm32") - so this
+suite exercises no code touched by the patch; included for completeness per the candidate loop's
+mandatory before/after test-suite check.)

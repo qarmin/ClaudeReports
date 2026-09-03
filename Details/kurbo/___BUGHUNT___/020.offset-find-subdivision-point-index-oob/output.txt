@@ -1,0 +1,36 @@
+$ ITERS=2000000 cargo run --release   (repro/, against a fresh clone of
+  https://github.com/linebender/kurbo.git at ca273499e3e48bd2de6f02aa8e99a148984e45f3)
+
+    Finished `release` profile [optimized] target(s) in 0.00s
+     Running `target/release/repro020`
+=== Approach 1+2: exhaustive/adversarial-grid check of the isolated arc_angles-consumption arithmetic ===
+isolated grid total=22736 oob=0
+
+=== Approach 3: real end-to-end fuzz of the public kurbo::offset::offset_cubic API ===
+fuzz total=2000000 panics=0
+
+RESULT: did not reproduce (isolated_oob=0, fuzz_panics=0)
+
+---
+
+Approach 1+2 exhaustively enumerates arc_angles-consumption inputs (mirroring the exact
+arithmetic of the `while arc_angles[i].abs() < target { target -= arc_angles[i].abs(); i += 1; }`
+loop in kurbo/src/offset.rs's CubicOffset::find_subdivision_point) over an adversarial grid of 33
+f64 values (0, the smallest denormal, values near 0/pi/4/pi/2/0.75*pi/pi, and each value's nearest
+representable float via next_up/next_down) for both n=2 and n=3 (the only sizes ArrayVec<f64, 3>
+can hold), for a total of 33^2 + 33^3 = 22,736 combinations. Zero out-of-bounds indexes found -
+consistent with the RESULT.md "Root cause" analysis, which shows this is a structural property of
+the loop, not a coincidence of the tested inputs.
+
+Approach 3 fuzzes the real public kurbo::offset::offset_cubic entry point directly (2,000,000
+iterations, release build) with randomized CubicBez control points biased toward S-shaped
+(inflection-bearing) curves across 7 coordinate-magnitude scales and 4 very small tolerances
+(chosen to push recursion toward MAX_DEPTH = 8, the condition under which
+find_subdivision_point's inflection-point branch is reached), each call wrapped in
+catch_unwind. Zero panics of any kind observed (not just the specific index-out-of-bounds panic
+under investigation).
+
+A supplementary earlier debug-assertions/overflow-checks build (outside this repro/, run
+directly against the main project's worktree during investigation) also found zero panics in the
+~100-300k iterations it completed within a 100s budget before timing out; not preserved as a
+separate artifact since it is strictly less thorough than the release-build run captured above.

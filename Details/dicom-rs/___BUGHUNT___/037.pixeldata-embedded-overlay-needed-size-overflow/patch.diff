@@ -1,0 +1,25 @@
+diff --git a/pixeldata/src/overlay.rs b/pixeldata/src/overlay.rs
+index 94c09871..b1335beb 100644
+--- a/pixeldata/src/overlay.rs
++++ b/pixeldata/src/overlay.rs
+@@ -410,8 +410,18 @@ where
+     // the overlay frames are embedded in the image frames
+     // starting at the image frame origin
+     let bytes_per_sample = (bits_allocated / 8) as usize;
+-    let offset = (image_frame_origin as usize - 1) * frame_pixels * bytes_per_sample;
+-    let needed = offset + num_pixels * bytes_per_sample;
++    // checked/saturating: `image_frame_origin`, `frame_pixels`, and `num_pixels` are all
++    // derived from untrusted attribute values, and their product can exceed `usize::MAX` -
++    // saturate to `usize::MAX` on overflow so the length check below always rejects it,
++    // instead of panicking (debug) or wrapping to a smaller value (release).
++    let offset = (image_frame_origin as usize - 1)
++        .checked_mul(frame_pixels)
++        .and_then(|v| v.checked_mul(bytes_per_sample))
++        .unwrap_or(usize::MAX);
++    let needed = num_pixels
++        .checked_mul(bytes_per_sample)
++        .and_then(|v| offset.checked_add(v))
++        .unwrap_or(usize::MAX);
+     if samples.len() < needed {
+         return DataLengthSnafu {
+             group,

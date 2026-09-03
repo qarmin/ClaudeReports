@@ -1,0 +1,74 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# repo_url/base_commit read via `git remote get-url origin` / `git rev-parse HEAD` in the main
+# project at the moment patch.diff was captured (same commit as candidates 021/022/023 - no
+# upstream changes to hayro-interpret/src/interpret/mod.rs since).
+#
+# This candidate's own investigation (source diff + disassembly/branch-sim comparison of std's
+# vendored hashbrown-0.17.1 vs. the crates.io hashbrown-0.17.1 pulled in here) requires the
+# `rust-src` rustup component (`rustup component add rust-src`) to locate std's copy on this
+# machine, and `objdump` (binutils) for the disassembly step - see the `disasm`/`branchsim`
+# recipes below. `just test` itself only needs a normal Rust toolchain + valgrind.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone at the pinned commit, profile baseline (no resolved_font_cache at all,
+# identical to candidates 021/022/023's baseline), apply this candidate's patch (external
+# hashbrown::HashMap via .entry(), matching 022's API shape exactly), profile again.
+test: clone profile-baseline apply profile-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build:
+    cd bench && cargo build --release
+
+# valgrind needs a sane open-file-descriptor limit in this sandbox - the default
+# (2147483584, unlimited-ish) makes valgrind's private-file-creation check fail outright.
+profile-baseline: build
+    cd bench && bash -c 'ulimit -n 4096; valgrind --tool=callgrind --callgrind-out-file=callgrind.baseline.out ./target/release/callgrind_probe 5'
+    cd bench && callgrind_annotate --auto=no callgrind.baseline.out | head -5
+
+profile-patched: build
+    cd bench && bash -c 'ulimit -n 4096; valgrind --tool=callgrind --callgrind-out-file=callgrind.patched.out ./target/release/callgrind_probe 5'
+    cd bench && callgrind_annotate --auto=no callgrind.patched.out | head -5
+
+# Re-run the patched build with branch simulation enabled, for the Bc/Bcm comparison in RESULT.md
+# (must apply the patch first: `just apply` then `just build`).
+branchsim: build
+    cd bench && bash -c 'ulimit -n 4096; valgrind --tool=callgrind --branch-sim=yes --callgrind-out-file=callgrind.branchsim.out ./target/release/callgrind_probe 5'
+    cd bench && callgrind_annotate --auto=no --show=Bc,Bcm,Ir callgrind.branchsim.out | grep -i hashbrown
+
+# Disassemble the patched binary and pull out the two RawTable::reserve_rehash monomorphizations
+# compared in RESULT.md (std-backed font_dict_cache vs. external-crate-backed resolved_font_cache).
+disasm: build
+    objdump -d --demangle bench/target/release/callgrind_probe > bench/full_disasm.txt
+    grep -A 60 "RawTable<(hayro_syntax::object::name::Name, hayro_syntax::object::dict::Dict)>>::reserve_rehash" bench/full_disasm.txt | head -60
+    grep -A 60 "RawTable<(hayro_syntax::object::name::Name, core::option::Option<hayro_interpret::interpret::state::TextStateFont>)>>::reserve_rehash" bench/full_disasm.txt | head -60
+
+# Diff std's internal vendored hashbrown-0.17.1 source against the crates.io copy this
+# candidate's Cargo.lock resolves to - requires `rustup component add rust-src`.
+source-diff: build
+    diff -rq "$(rustc --print sysroot)/lib/rustlib/src/rust/library/vendor/hashbrown-0.17.1/src" \
+        "$(find ~/.cargo/registry/src -maxdepth 1 -iname 'index.crates.io-*' | head -1)/hashbrown-0.17.1/src" \
+        || true
+
+# Full annotated per-line breakdown of hayro-interpret's interpret() against a given .out file,
+# e.g. `just annotate bench/callgrind.patched.out`
+annotate out_file:
+    callgrind_annotate --auto=yes {{out_file}} clone/hayro-interpret/src/interpret/mod.rs | less
+
+# Regenerate testdata/worst_case_cache.pdf (already committed; only needed if N_TF changes).
+gen-testdata:
+    python3 testdata/gen_worst_case_pdf.py testdata/worst_case_cache.pdf 326
+
+clean:
+    rm -rf clone bench/target bench/*.out bench/full_disasm.txt

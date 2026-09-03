@@ -1,0 +1,26 @@
+diff --git a/sparse_strips/vello_cpu/src/text.rs b/sparse_strips/vello_cpu/src/text.rs
+index 50394ff7..b97b806a 100644
+--- a/sparse_strips/vello_cpu/src/text.rs
++++ b/sparse_strips/vello_cpu/src/text.rs
+@@ -132,6 +132,21 @@ impl Resources {
+ 
+     /// Upload all pending bitmaps, rasterize pending outline/COLR glyphs, etc.
+     fn sync_glyph_cache(&mut self, render_mode: RenderMode) {
++        // Normally, `maintain_glyph_cache` (called from `after_render` at the end of the
++        // previous `render_with`) already removed every atlas page from the image registry,
++        // restoring unique ownership of `glyph_resources.pixmaps` before we get here. But if
++        // the previous `render_with` call panicked (e.g. an unrelated `ImageSource::OpaqueId`
++        // failed to resolve) partway through rasterization, `after_render` never ran, and the
++        // registry can still be holding a clone of one or more atlas pages from that frame.
++        // Proactively undo that registration here so a failure in a *previous* frame can't
++        // turn the `Arc::get_mut` calls below - which assume this frame started from unique
++        // ownership - into a panic in a frame that is otherwise perfectly fine.
++        if let Some(glyph_resources) = self.glyph_resources.as_ref() {
++            for page_index in 0..glyph_resources.pixmaps.len() {
++                self.image_registry.destroy_atlas_page(page_index as u32);
++            }
++        }
++
+         let glyph_resources = self
+             .glyph_resources
+             .as_mut()

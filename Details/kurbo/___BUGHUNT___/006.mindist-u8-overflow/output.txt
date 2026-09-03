@@ -1,0 +1,106 @@
+Captured output of repro/ (`cargo run` / `cargo run --release`), run from
+___BUGHUNT___/006.mindist-u8-overflow/repro against ./clone at base_commit
+ca273499e3e48bd2de6f02aa8e99a148984e45f3, before and after applying patch.diff.
+
+================================================================================
+BEFORE patch.diff (pristine base_commit)
+================================================================================
+
+=== BEFORE fix, debug build (cargo run) ===
+calling min_dist_param with a degree-128 Bezier curve (n = 128), per the function's own doc comment this should be supported up to degree 255
+
+thread 'main' (57240) panicked at src/../../clone/kurbo/src/mindist.rs:176:18:
+attempt to multiply with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - min_dist_param panicked: attempt to multiply with overflow
+exit code: 1
+
+=== BEFORE fix, release build (cargo run --release) ===
+    Finished `release` profile [optimized] target(s) in 0.01s
+     Running `target/release/mindist-u8-overflow-repro`
+calling min_dist_param with a degree-128 Bezier curve (n = 128), per the function's own doc comment this should be supported up to degree 255
+did not reproduce - min_dist_param completed normally: (1.0, 0.5, 0.5)
+exit code: 0
+
+Note: the release build does NOT panic - it silently wraps `2 * n` (u8 arithmetic, no
+overflow checks in release) and returns a bogus, meaningless result
+`(1.0, 0.5, 0.5)` instead of ever computing a real minimum distance. The debug build's
+panic ("attempt to multiply with overflow") happens inside `S()` at mindist.rs:176
+(`for r in 0..=2 * n`), matching the candidate description's cited lines 176-177 (the
+`min_dist_param` loop at lines 65-66 is reached first in a full `min_dist_param` call
+but `S()` is called even earlier, at line ~45-48, before the property-1 loop - so the
+very first panic observed is inside `S`, not the `min_dist_param` loop body itself;
+both loops share the identical `2 * n`/`2 * m` u8-arithmetic bug the candidate names).
+
+Repeatability: re-ran `cargo run` (debug) 3 times against the pristine clone - all 3
+runs panicked identically at src/../../clone/kurbo/src/mindist.rs:176:18 with
+"attempt to multiply with overflow", exit code 1 every time (this is a pure,
+deterministic computation - no randomness/threading/ASLR-sensitivity involved, so a
+3/3 repeat count fully characterizes it; see RESULT.md).
+
+================================================================================
+AFTER patch.diff applied to ./clone
+================================================================================
+
+=== AFTER fix, debug build (cargo run) ===
+calling min_dist_param with a degree-128 Bezier curve (n = 128), per the function's own doc comment this should be supported up to degree 255
+
+thread 'main' (57268) panicked at src/../../clone/kurbo/src/mindist.rs:39:5:
+At most 128 control points
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - min_dist_param panicked: At most 128 control points
+exit code: 1
+
+=== AFTER fix, release build (cargo run --release) ===
+calling min_dist_param with a degree-128 Bezier curve (n = 128), per the function's own doc comment this should be supported up to degree 255
+
+thread 'main' (57496) panicked at src/../../clone/kurbo/src/mindist.rs:39:5:
+At most 128 control points
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - min_dist_param panicked: At most 128 control points
+exit code: 1
+
+Note: after the fix, degree-128 input is rejected identically and deterministically
+in BOTH debug and release builds, via a plain, documented `assert!` at mindist.rs:39
+("At most 128 control points") - not the undefined, build-profile-dependent
+"attempt to multiply with overflow" panic/silent-wraparound pair seen before the fix.
+This is the intended fix shape: `min_dist_param`'s documented and enforced degree
+limit (127) now actually matches what its `u8`-based `2 * n`/`2 * m` arithmetic can
+represent without overflowing, in every build profile - not just the profile that
+happens to have overflow checks enabled.
+
+================================================================================
+kurbo test suite (cargo test -p kurbo), pristine vs patched
+================================================================================
+
+BEFORE (pristine ca273499e3e48bd2de6f02aa8e99a148984e45f3):
+  running 187 tests
+  test result: ok. 187 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+  running 55 tests (doctests)
+  test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+AFTER (patch.diff applied):
+  running 187 tests
+  test result: ok. 187 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+  running 55 tests (doctests)
+  test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+(Both runs performed directly in a git worktree of the main project at
+/tmp/kurbo_worktrees/candidate-006, base_commit ca273499e3e48bd2de6f02aa8e99a148984e45f3,
+reverted with `git checkout --` immediately after each run; not the ./clone used by
+repro/'s own justfile, which is a separate, disposable checkout.)
+
+================================================================================
+Additional boundary-value probes (ad hoc, run directly in the worktree via a
+temporary #[test], not part of repro/ - see RESULT.md "New suspects noticed")
+================================================================================
+
+n = 127 (exactly at the new patched limit, bez1.len() == 128): does NOT hit the
+`2 * n` u8-overflow bug anymore (2 * 127 = 254, fits in u8) - but debug build still
+panics, this time inside `choose()` at mindist.rs:257 ("attempt to multiply with
+overflow"), because `choose(254, 127)` (a central binomial coefficient) vastly
+exceeds u32::MAX - a distinct, pre-existing bug in `choose()`'s `u32` accumulator,
+unrelated to `n`/`m`'s `u8` representation, and NOT fixed by this candidate's patch.
+Release build does not panic (choose() silently wraps too) - same class of latent
+issue, different root cause, different location. Noted as a new suspect, not
+investigated further this session (see RESULT.md).

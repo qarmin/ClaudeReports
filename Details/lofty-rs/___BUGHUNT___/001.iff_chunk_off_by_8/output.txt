@@ -1,0 +1,34 @@
+Captured by running `just test` in ___BUGHUNT___/001.iff_chunk_off_by_8/ against a fresh clone of
+https://github.com/Serial-ATA/lofty-rs.git at commit 5c6565e36d35b9ea7de049daa67acc0be0fd3b01.
+(cargo build noise trimmed; git detached-HEAD advice trimmed)
+
+--- reproduce-before (pristine clone, bug expected) ---
+     Running `target/release/wav_chunk_off_by_8_repro`
+input file: 56 bytes total
+layout: RIFF header(12) + valid 'fmt ' chunk(24) + valid 'data' chunk(12) + truncated 'ID3 ' chunk header only(8, declares 8 content bytes, 0 physically present)
+RESULT: Err(FileParseError { ty: Some(Wav), .. }) -- BestAttempt failed to gracefully degrade, hard I/O error propagated instead
+
+cd clone && git apply ".../patch.diff"
+
+--- reproduce-after (patched clone, bug expected to be gone) ---
+     Running `target/release/wav_chunk_off_by_8_repro`
+input file: 56 bytes total
+layout: RIFF header(12) + valid 'fmt ' chunk(24) + valid 'data' chunk(12) + truncated 'ID3 ' chunk header only(8, declares 8 content bytes, 0 physically present)
+RESULT: Ok(WavFile { properties: WavProperties { format: PCM, duration: 0ns, overall_bitrate: 0, audio_bitrate: 706, sample_rate: 44100, bit_depth: 16, channels: 1, channel_mask: None } }) -- BestAttempt gracefully degraded past the malformed trailing chunk
+
+before: exit=1 (non-zero = reproduced), after: exit=0 (0 = fixed)
+
+---
+
+Repeat-run check (5/5, release build, deterministic - no seed/layout dependence):
+
+$ for i in 1 2 3 4 5; do cargo run --release; done   # against unpatched lofty/src/iff/chunk.rs
+RESULT: Err(FileParseError { ty: Some(Wav), .. }) -- BestAttempt failed to gracefully degrade, hard I/O error propagated instead
+RESULT: Err(FileParseError { ty: Some(Wav), .. }) -- BestAttempt failed to gracefully degrade, hard I/O error propagated instead
+RESULT: Err(FileParseError { ty: Some(Wav), .. }) -- BestAttempt failed to gracefully degrade, hard I/O error propagated instead
+RESULT: Err(FileParseError { ty: Some(Wav), .. }) -- BestAttempt failed to gracefully degrade, hard I/O error propagated instead
+RESULT: Err(FileParseError { ty: Some(Wav), .. }) -- BestAttempt failed to gracefully degrade, hard I/O error propagated instead
+
+Second boundary value in the same class (declared trailing-chunk size = 5 instead of 8, still
+within the 1..=IFF_CHUNK_HEADER_SIZE off-by window): also Err before the fix, Ok after - fix
+verified against more than the single exact triggering value.

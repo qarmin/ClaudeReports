@@ -1,0 +1,59 @@
+# Self-contained reproduction for this candidate.
+#
+# Uses the `rss_probe` harness from ../harness/rss_probe (untracked in the main calamine repo -
+# see ../README.md). Self-contained given the whole ___OPTIMIZATIONS___ folder kept together.
+#
+# `testdata/poc.xls` (5632 bytes - calamine's own tests/date.xls with one real Rk cell record's
+# row/col fields byte-patched to 0xFFFF/0xFFFF, Dimensions record and every other byte untouched)
+# is copied in directly. No large real-world file download needed for this candidate - the local
+# repo's own tests/adhocallbabynames1996to2016.xls (18MB, already in the main project's tests/)
+# is what RESULT.md's "legitimate large input" numbers were measured against; not re-copied here
+# since it's already present in `clone/tests/` once cloned.
+#
+# patch.diff here is identical to ___BUGHUNT___/004.xls_from_sparse_real_cell_oom/patch.diff -
+# a fresh, standalone `Range::from_sparse_bounded()` addition, independent of any other
+# candidate's own patch.
+
+repo_url := "https://github.com/tafia/calamine.git"
+base_commit := "5c02e86e99ec5c1fb1dcc15e64c2bbaf19bff60d"
+harness_dir := "../harness/rss_probe"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/rss_probe
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_baseline
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_patched
+
+bench:
+    @echo "=== baseline: poc.xls, range mode ==="
+    @echo "expected to ABORT the process (attempted ~137.4 GB allocation) - bounded address space"
+    @echo "so the failure is observed instead of stressing the host"
+    ( ulimit -v 4000000; ./rss_probe_baseline range testdata/poc.xls ) || echo "(aborted as expected, exit $?)"
+    @echo ""
+    @echo "=== baseline: real large xls file, range mode ==="
+    ./rss_probe_baseline range clone/tests/adhocallbabynames1996to2016.xls
+    @echo ""
+    @echo "=== patched: poc.xls, range mode ==="
+    @echo "expected to return a clean CellLimitExceeded error instead of aborting (no ulimit needed)"
+    ( ulimit -v 4000000; ./rss_probe_patched range testdata/poc.xls ) || echo "(exited non-zero due to the expected Err/panic message above, no abort, exit $?)"
+    @echo ""
+    @echo "=== patched: real large xls file, range mode ==="
+    @echo "expect peak_rss_kb/cells/sig to match the baseline run above"
+    ./rss_probe_patched range clone/tests/adhocallbabynames1996to2016.xls
+
+clean:
+    rm -rf clone rss_probe_baseline rss_probe_patched

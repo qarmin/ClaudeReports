@@ -1,0 +1,47 @@
+# Self-contained reproduction for candidate 032 (MP3_ANTIALIAS_CLAMPS_RZERO_MIXED_BLOCK).
+#
+# repro/ generates its own MPEG-1 Layer III bitstreams (see repro/src/main.rs - no encoder in
+# common use emits mixed_block_flag = 1, so the streams have to be written bit by bit) into
+# repro/out/, then decodes them through Symphonia's real public probe -> MpaReader -> MpaDecoder
+# path. Nothing outside this folder is referenced; ./clone is fetched by `just clone`.
+#
+# `reproduce-before` exits non-zero (that is the bug), `reproduce-after` exits zero.
+#
+# ffmpeg is optional: if it is on PATH, repro/ additionally cross-checks Symphonia against it
+# (ffmpeg is the reference decoder symphonia-check itself uses for MP3) and runs a sweep over
+# sample rate x block type x rzero position. Without ffmpeg the self-contained A-vs-B differential
+# still demonstrates the bug on its own.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - demonstrates that two mp3 files
+# differing only in whether coefficients 36..576 are coded decode to bit-identical PCM, and that
+# the full-spectrum one is off by ~0.52 from ffmpeg's decoding of the very same file.
+reproduce-before:
+    #!/usr/bin/env bash
+    ulimit -c 0
+    cd repro
+    if cargo run --release; then
+        echo ">>> UNEXPECTED: repro did NOT reproduce the bug against the pristine clone"
+        exit 1
+    fi
+    echo ">>> expected non-zero exit: the bug reproduced against the pristine clone"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - the two files must decode differently, and
+# Symphonia must agree with ffmpeg to within symphonia-check's own 0.00001 tolerance.
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target repro/out

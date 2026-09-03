@@ -1,0 +1,42 @@
+# Self-contained reproduction for candidate 054 (feOffset / drop-shadow's shared pixel-shift
+# helper leaves stale, non-transparent pixels behind when the offset's magnitude exceeds
+# u16::MAX, due to a wrapping i32->u16 cast in `process_offset_pixel`'s `should_clear`
+# computation). Status: Confirmed. patch.diff fixes it by comparing in `i32` throughout instead
+# of casting a possibly-negative `i32` down to `u16`.
+#
+# `repo_url`/`base_commit` were read via `git remote get-url origin` / `git rev-parse HEAD` in the
+# main project at investigation time.
+#
+# Note: this environment's git-lfs binary may be missing from PATH in some shells, which makes a
+# plain `git clone`/`git checkout` of this repo fail on its LFS-tracked PNG test snapshots. The
+# repro below never touches those files, so the clone step disables the LFS filter outright
+# (`-c filter.lfs.*`) to stay robust regardless of whether git-lfs is installed/on PATH on the
+# machine running this.
+
+# https (not the ssh form `git remote get-url origin` actually returns) so `just clone` works
+# without an ssh key/agent configured.
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false clone {{repo_url}} clone
+    cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug (pixel
+# still opaque at the source rectangle's original location after a dx = -70000 offset).
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - the source rectangle should now correctly be
+# fully transparent for both dx = -30 and dx = -70000.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

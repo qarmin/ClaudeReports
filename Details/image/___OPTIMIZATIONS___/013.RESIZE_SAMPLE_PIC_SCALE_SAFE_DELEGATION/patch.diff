@@ -1,0 +1,123 @@
+diff --git a/src/imageops/sample.rs b/src/imageops/sample.rs
+index 25864cac..fec44430 100644
+--- a/src/imageops/sample.rs
++++ b/src/imageops/sample.rs
+@@ -7,6 +7,7 @@
+ // for some of the theory behind image scaling and convolution
+ 
+ use num_traits::{NumCast, ToPrimitive, Zero};
++use std::any::TypeId;
+ use std::f32;
+ use std::ops::Mul;
+ 
+@@ -23,7 +24,7 @@ use crate::primitive_sealed::NearestFrom;
+ use crate::traits::{Enlargeable, Pixel, Primitive};
+ use crate::utils::{clamp, is_integer, vec_try_with_capacity};
+ use crate::{
+-    DynamicImage, GenericImage, GenericImageView, GrayAlphaImage, GrayImage, ImageBuffer,
++    DynamicImage, GenericImage, GenericImageView, GrayAlphaImage, GrayImage, ImageBuffer, Rgb,
+     Rgb32FImage, RgbImage, Rgba32FImage, RgbaImage,
+ };
+ 
+@@ -970,6 +971,75 @@ where
+     out
+ }
+ 
++/// Prototype fast path for `resize` (see perf-optimize candidate
++/// `RESIZE_SAMPLE_PIC_SCALE_SAFE_DELEGATION`): delegate to `pic_scale_safe::resize_rgb8` when the
++/// source is provably a fully packed, contiguous `Rgb<u8>` buffer, falling back to `None`
++/// (the original `Filter{kernel,support}` algorithm below) for every other pixel type or layout.
++///
++/// This intentionally covers only one representative concrete case rather than the whole
++/// `I: GenericImageView` generality `resize` otherwise supports - it exists to measure whether
++/// delegating is worthwhile at all, not as a complete replacement.
++fn try_pic_scale_safe_rgb8_resize<I: GenericImageView>(
++    image: &I,
++    nwidth: u32,
++    nheight: u32,
++    filter: FilterType,
++) -> Option<ImageBuffer<I::Pixel, Vec<<I::Pixel as Pixel>::Subpixel>>>
++where
++    I::Pixel: 'static,
++{
++    if TypeId::of::<I::Pixel>() != TypeId::of::<Rgb<u8>>() {
++        return None;
++    }
++
++    let view = image.to_pixel_view()?;
++    let (width, height) = image.dimensions();
++    let channels = <I::Pixel as Pixel>::CHANNEL_COUNT as usize;
++    let (px_stride, row_stride) = view.strides_wh();
++    // Require full contiguity (not just packed-per-pixel): pic-scale-safe's entry points take a
++    // flat row-major buffer with no row-to-row gap, unlike this file's other fast paths (e.g.
++    // candidate 005's `vertical_sample`) which only need per-pixel packing and can stride between
++    // rows, so e.g. a `SubImage` view (packed pixels, but padded rows) does not qualify here.
++    if px_stride != channels || row_stride != width as usize * channels {
++        return None;
++    }
++
++    let samples: &[<I::Pixel as Pixel>::Subpixel] = view.samples();
++    // SAFETY: the `TypeId` check above proves `I::Pixel == Rgb<u8>`, hence
++    // `<I::Pixel as Pixel>::Subpixel == u8` and this slice is really `&[u8]` with identical
++    // layout - the compiler just can't see that equality through the generic parameter `S`.
++    let samples_u8: &[u8] =
++        unsafe { std::slice::from_raw_parts(samples.as_ptr().cast::<u8>(), samples.len()) };
++
++    let src_size = pic_scale_safe::ImageSize::new(width as usize, height as usize);
++    let dst_size = pic_scale_safe::ImageSize::new(nwidth as usize, nheight as usize);
++    let alg = match filter {
++        FilterType::Nearest => pic_scale_safe::ResamplingFunction::Nearest,
++        FilterType::Triangle => pic_scale_safe::ResamplingFunction::Bilinear,
++        FilterType::CatmullRom => pic_scale_safe::ResamplingFunction::CatmullRom,
++        FilterType::Gaussian => pic_scale_safe::ResamplingFunction::Gaussian,
++        FilterType::Lanczos3 => pic_scale_safe::ResamplingFunction::Lanczos3,
++    };
++
++    let resized = pic_scale_safe::resize_rgb8(samples_u8, src_size, dst_size, alg).ok()?;
++
++    // SAFETY: reverses the cast above; `<I::Pixel as Pixel>::Subpixel == u8` was already
++    // established via the `TypeId` check, so re-interpreting this `Vec<u8>` as
++    // `Vec<<I::Pixel as Pixel>::Subpixel>` is sound (same size/alignment, same allocator).
++    let resized_typed: Vec<<I::Pixel as Pixel>::Subpixel> = unsafe {
++        let mut resized = std::mem::ManuallyDrop::new(resized);
++        Vec::from_raw_parts(
++            resized
++                .as_mut_ptr()
++                .cast::<<I::Pixel as Pixel>::Subpixel>(),
++            resized.len(),
++            resized.capacity(),
++        )
++    };
++
++    ImageBuffer::from_raw(nwidth, nheight, resized_typed)
++}
++
+ /// Resize the supplied image to the specified dimensions.
+ ///
+ /// # Arguments:
+@@ -987,7 +1057,10 @@ pub fn resize<I: GenericImageView>(
+     nwidth: u32,
+     nheight: u32,
+     filter: FilterType,
+-) -> ImageBuffer<I::Pixel, Vec<<I::Pixel as Pixel>::Subpixel>> {
++) -> ImageBuffer<I::Pixel, Vec<<I::Pixel as Pixel>::Subpixel>>
++where
++    I::Pixel: 'static,
++{
+     // Check if there is nothing to sample from.
+     let is_empty = {
+         let (width, height) = image.dimensions();
+@@ -1005,6 +1078,13 @@ pub fn resize<I: GenericImageView>(
+         return tmp;
+     }
+ 
++    // Prototype delegation fast path (perf-optimize candidate: RESIZE_SAMPLE_PIC_SCALE_SAFE_DELEGATION):
++    // hand off to pic-scale-safe's SIMD/optionally-rayon implementation for the common
++    // fully-packed 8-bit RGB case, instead of this file's own Filter{kernel,support} algorithm.
++    if let Some(fast) = try_pic_scale_safe_rgb8_resize(image, nwidth, nheight, filter) {
++        return fast;
++    }
++
+     let mut method = match filter {
+         FilterType::Nearest => Filter {
+             kernel: Box::new(box_kernel),

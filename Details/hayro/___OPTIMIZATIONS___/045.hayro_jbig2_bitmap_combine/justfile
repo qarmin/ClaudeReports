@@ -1,0 +1,73 @@
+# Self-contained reproduction for candidate 045 (hayro-jbig2 Bitmap::combine).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff is a diff against repo_url at base_commit - it may stop applying cleanly once
+# the main branch moves on from that commit.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone at the pinned commit, download JBIG2 test assets, build a BASELINE binary,
+# apply the patch, build a PATCHED binary, then run both and print both results.
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone/hayro-jbig2 && python3 sync.py
+    cp "{{justfile_directory()}}/decode_only.rs" clone/hayro-jbig2/examples/decode_only.rs
+
+build-baseline:
+    cd clone && cargo build --release -p hayro-jbig2 --example decode_only
+    cp clone/target/release/examples/decode_only ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone && cargo build --release -p hayro-jbig2 --example decode_only
+    cp clone/target/release/examples/decode_only ./bin_patched
+
+# 042_11.jb2 is the symbol/text-heavy file this patch measurably helps on (see RESULT.md);
+# 600-6-45.jb2 is the halftone/pattern-heavy file it does NOT regress (within noise).
+bench:
+    @echo "=== 042_11.jb2 (symbol/text-heavy) ==="
+    @echo "--- baseline ---"
+    ITERS=40 ./bin_baseline clone/hayro-jbig2/test-inputs/power_jbig2/042_11.jb2
+    @echo "--- patched ---"
+    ITERS=40 ./bin_patched clone/hayro-jbig2/test-inputs/power_jbig2/042_11.jb2
+    @echo "=== 600-6-45.jb2 (halftone/pattern-heavy) ==="
+    @echo "--- baseline ---"
+    ITERS=15 ./bin_baseline clone/hayro-jbig2/test-inputs/power_jbig2/600-6-45.jb2
+    @echo "--- patched ---"
+    ITERS=15 ./bin_patched clone/hayro-jbig2/test-inputs/power_jbig2/600-6-45.jb2
+
+# Re-runs the 20,000-case randomized differential correctness check (Bitmap::combine vs. a naive
+# per-pixel reference) described in RESULT.md against the PATCHED tree. The test itself is not
+# part of patch.diff (see RESULT.md's "Does it change behavior/output?" section) - this recipe
+# drops it into the patched clone, runs it, then removes it again.
+correctness-check: clone apply
+    cd clone && git apply "{{justfile_directory()}}/combine_diff_test.patch"
+    cd clone && cargo test --release -p hayro-jbig2 --lib combine_matches_naive_reference -- --nocapture
+
+# Bit-exact snapshot check against the project's own asset corpus. Run `just clone` once first,
+# then this (creates snapshots.png from the current/baseline tree on the first cargo-test
+# invocation, which itself reports as "failed" per the harness's own convention - that first
+# invocation is expected to fail and is not the real result; the second invocation is the real
+# baseline pass/fail count, checked against those just-created references). Does NOT depend on
+# `clone` itself, since re-running `clone` would `rm -rf` the snapshots this recipe just made.
+asset-suite-baseline:
+    cd clone/hayro-jbig2 && (cargo test --release --test asset_suite || true)
+    cd clone/hayro-jbig2 && cargo test --release --test asset_suite
+
+# Run after `asset-suite-baseline` (so snapshots already exist from the unpatched tree) and
+# `just apply`. Reports pass/fail for the PATCHED tree against those same baseline snapshots -
+# a real regression (not just a "new reference" first-run message) shows up as [FAIL] here.
+asset-suite-patched:
+    cd clone/hayro-jbig2 && cargo test --release --test asset_suite
+
+clean:
+    rm -rf clone bin_baseline bin_patched

@@ -1,0 +1,45 @@
+=== reproduce-before (pristine clone, commit ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee) ===
+$ cd repro && cargo run --release
+   Compiling symphonia-core v0.6.1
+   Compiling symphonia-metadata v0.6.1
+   Compiling symphonia-format-riff v0.6.1
+   Compiling repro v0.1.0
+    Finished `release` profile [optimized + debuginfo] target(s)
+     Running `target/release/repro`
+BUG CONFIRMED: metadata().current() returned None entirely, even though the WAV file's own LIST/INFO chunk contained an INAM ("Hello Symphonia") tag.
+$ echo $?
+1
+
+Re-run 3 more times (release build, deterministic, no fixed seed needed - pure logic bug):
+BUG CONFIRMED: metadata().current() returned None entirely, even though the WAV file's own LIST/INFO chunk contained an INAM ("Hello Symphonia") tag.
+BUG CONFIRMED: metadata().current() returned None entirely, even though the WAV file's own LIST/INFO chunk contained an INAM ("Hello Symphonia") tag.
+BUG CONFIRMED: metadata().current() returned None entirely, even though the WAV file's own LIST/INFO chunk contained an INAM ("Hello Symphonia") tag.
+(4/4 runs reproduce identically)
+
+=== apply patch.diff ===
+$ cd clone && git apply patch.diff
+(applied cleanly, no rejects)
+
+=== reproduce-after (patched clone) ===
+$ cd repro && cargo run --release
+   Compiling symphonia-format-riff v0.6.1 (patched)
+   Compiling repro v0.1.0
+    Finished `release` profile [optimized + debuginfo] target(s)
+     Running `target/release/repro`
+OK: metadata() returned 1 tag(s), e.g. Tag { raw: RawTag { key: "INAM", value: String("Hello Symphonia"), sub_fields: None }, std: Some(TrackTitle("Hello Symphonia")) }
+$ echo $?
+0
+
+=== Second input in the same bug class (IART/Artist tag instead of INAM/Title) ===
+Before fix:
+BUG CONFIRMED: metadata().current() returned None entirely, even though the WAV file's own LIST/INFO chunk contained an IART ("Jane Artist") tag.
+After fix:
+OK: metadata() returned 1 tag(s), e.g. Tag { raw: RawTag { key: "IART", value: String("Jane Artist"), sub_fields: None }, std: Some(Artist("Jane Artist")) }
+
+=== symphonia-format-riff unit tests ===
+Before fix: running 2 tests ... test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+After fix:  running 2 tests ... test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+=== full workspace test suite (cargo test --workspace) ===
+Before fix: 106 passed; 0 failed (summed across all crates' test result lines)
+After fix:  106 passed; 0 failed (summed across all crates' test result lines)

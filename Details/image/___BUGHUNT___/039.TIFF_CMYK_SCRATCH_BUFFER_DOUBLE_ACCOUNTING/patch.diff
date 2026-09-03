@@ -1,0 +1,34 @@
+diff --git a/src/codecs/tiff.rs b/src/codecs/tiff.rs
+index 49987934..c4f99b50 100644
+--- a/src/codecs/tiff.rs
++++ b/src/codecs/tiff.rs
+@@ -176,6 +176,15 @@ where
+         let max_alloc = (self.limits.decoding_buffer_size as u64)
+             .saturating_add(self.limits.intermediate_buffer_size as u64);
+ 
++        // The caller's own output buffer (sized for the final, converted `ColorType`, e.g. RGB
++        // for a CMYK source) is reserved separately - by `ImageReader::decode_to_dynimage`'s own
++        // `Limits::reserve(layout.total_bytes())` call, or simply by already existing when a
++        // caller drives this decoder directly - against the very same declared `max_alloc`
++        // ceiling. Subtract it here so this decoder's own internal scratch buffer (which can be
++        // *larger* than the output, e.g. CMYK source data before CMYK->RGB conversion) can't push
++        // the combined live allocation past what the caller declared.
++        let max_alloc = max_alloc.saturating_sub(info.total_bytes_output());
++
+         let max_intermediate_alloc = max_alloc.saturating_sub(info.total_bytes_buffer());
+         let mut tiff_limits: tiff::decoder::Limits = Default::default();
+         tiff_limits.decoding_buffer_size =
+@@ -263,6 +272,13 @@ impl ImageInfo {
+ 
+         total_pixels.saturating_mul(bytes_per_pixel)
+     }
++
++    // The size of the final, converted output buffer (`read_image`'s `buf` parameter).
++    fn total_bytes_output(&self) -> u64 {
++        let (width, height) = self.dimensions;
++        let total_pixels = u64::from(width) * u64::from(height);
++        total_pixels.saturating_mul(u64::from(self.color_type.bytes_per_pixel()))
++    }
+ }
+ 
+ fn check_ycbcr_subsampling<R: BufRead + Seek>(decoder: &mut Decoder<R>) -> ImageResult<()> {

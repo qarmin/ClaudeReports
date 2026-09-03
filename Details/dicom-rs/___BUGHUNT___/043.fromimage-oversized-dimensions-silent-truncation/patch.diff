@@ -1,0 +1,55 @@
+diff --git a/fromimage/src/main.rs b/fromimage/src/main.rs
+index 453a4df5..a6a7d4b4 100644
+--- a/fromimage/src/main.rs
++++ b/fromimage/src/main.rs
+@@ -154,7 +154,7 @@ fn inject_image(obj: &mut DefaultDicomObject, img_file: PathBuf, verbose: bool)
+         }
+     };
+ 
+-    update_from_img(obj, &img, verbose);
++    update_from_img(obj, &img, verbose)?;
+ 
+     for tag in [
+         tags::NUMBER_OF_FRAMES,
+@@ -207,7 +207,7 @@ fn inject_encapsulated(
+     if let Ok(img) = image_reader.decode() {
+         // insert attributes but not pixel data
+ 
+-        update_from_img(&mut *dcm, &img, verbose);
++        update_from_img(&mut *dcm, &img, verbose)?;
+     }
+ 
+     // insert pixel data in a sequence
+@@ -220,11 +220,22 @@ fn inject_encapsulated(
+     Ok(())
+ }
+ 
+-fn update_from_img(obj: &mut DefaultDicomObject, img: &DynamicImage, verbose: bool) {
++fn update_from_img(obj: &mut DefaultDicomObject, img: &DynamicImage, verbose: bool) -> Result<()> {
+     let width = img.width();
+     let height = img.height();
+     let color = img.color();
+ 
++    // DICOM's Rows/Columns attributes (VR US) cannot represent a dimension
++    // larger than u16::MAX - silently truncating (`width as u16`) would
++    // store a value that no longer matches the actual pixel data being
++    // written right after this function returns, producing a
++    // self-inconsistent file.
++    snafu::ensure_whatever!(
++        width <= u32::from(u16::MAX) && height <= u32::from(u16::MAX),
++        "Image dimensions {width}x{height} exceed the maximum DICOM Rows/Columns can represent ({})",
++        u16::MAX
++    );
++
+     let (pi, spp, bits_stored): (&str, u16, u16) = match color {
+         image::ColorType::L8 => ("MONOCHROME2", 1, 8),
+         image::ColorType::L16 => ("MONOCHROME2", 1, 16),
+@@ -300,6 +311,8 @@ fn update_from_img(obj: &mut DefaultDicomObject, img: &DynamicImage, verbose: bo
+         VR::US,
+         PrimitiveValue::from(0_u16),
+     ));
++
++    Ok(())
+ }
+ 
+ #[cfg(test)]

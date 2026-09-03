@@ -1,0 +1,143 @@
+=== Re-verification run of `just test` (justfile in this folder), from a fresh clone ===
+(captured this session; /tmp/verify_091 is a scratch checkout, not part of the deliverable)
+
+$ just clone
+Cloning into 'clone'...
+[...git-lfs filter, 546 objects...]
+HEAD is now at 75168314 Remove some Vello-Classic-specific info from the root README (#1698)
+real    0m14.701s
+
+$ just build-harness
+   Compiling vello_common v0.2.0 (.../clone/sparse_strips/vello_common)
+   Compiling skrifa v0.44.0
+   Compiling glifo v0.3.0 (.../clone/glifo)
+   Compiling vello_cpu v0.2.0 (.../clone/sparse_strips/vello_cpu)
+   Compiling colr_diff_harness v0.1.0 (.../repro/vello_harness)
+    Finished `release` profile [optimized] target(s) in 25.99s
+
+$ just run-sample
+glyph 84 (scale_0.5_1.5_center_500.0_500.0): vello|resvg -> /tmp/colr_diff_out/g84_combo.png
+glyph 90 (linear_gradient_extend_mode_pad): vello|resvg -> /tmp/colr_diff_out/g90_combo.png
+glyph 93 (radial_contained_gradient_extend_mode_pad): vello|resvg -> /tmp/colr_diff_out/g93_combo.png
+glyph 99 (rotate_10_center_0_0): vello|resvg -> /tmp/colr_diff_out/g99_combo.png
+glyph 103 (skew_25_0_center_0_0): vello|resvg -> /tmp/colr_diff_out/g103_combo.png
+glyph 109 (transform_matrix_1_0_0_1_125_125): vello|resvg -> /tmp/colr_diff_out/g109_combo.png
+glyph 113 (translate_0_0): vello|resvg -> /tmp/colr_diff_out/g113_combo.png
+glyph 156 (clip_box_top_left): vello|resvg -> /tmp/colr_diff_out/g156_combo.png
+glyph 160 (clip_box_center): vello|resvg -> /tmp/colr_diff_out/g160_combo.png
+glyph 148 (foreground_color_linear_alpha_1): vello|resvg -> /tmp/colr_diff_out/g148_combo.png
+glyph 167 (gradient_p2_skewed): vello|resvg -> /tmp/colr_diff_out/g167_combo.png
+glyph 205 (paint_glyph_nested_identity_identity): vello|resvg -> /tmp/colr_diff_out/g205_combo.png
+glyph 220 (paint_glyph_nested_rotate_center_rotate_center): vello|resvg -> /tmp/colr_diff_out/g220_combo.png
+Combined images written to /tmp/colr_diff_out/g*_combo.png - vello on the left, resvg on the right.
+
+All 13 sample glyphs' *_combo.png images were visually inspected: identical (allowing for normal
+antialiasing/rasterizer differences between two independent CPU rasterizers) except glyph 167,
+which is the documented gradient_p2_skewed divergence (see RESULT.md) - reproduced identically to
+the original investigation.
+
+=== Full sweep performed during the original investigation (not all glyphs are in the justfile's
+smaller `run-sample` set, to keep `just test` fast - the full glyph-id list checked was): ===
+
+Transforms (scale/rotate/skew/matrix/translate), glyph ids 84-119: all 36 glyphs match
+(evidence/g99_rotate_matching_combo.png is representative).
+
+Gradient extend modes (linear + radial), glyph ids 90-98: all 9 glyphs match.
+
+Clip boxes, glyph ids 156-160: all 5 glyphs match.
+
+Foreground-color substitution (linear/radial/solid, alpha 1.0 and 0.3), glyph ids 148-151,154-155:
+all 6 glyphs match (sweep variants 152-153 excluded - resvg does not support sweep gradients at
+all, see repro/README.md).
+
+Nested paint-glyph composition (identity/translate/rotate x identity/translate/rotate, 4x4 = 16
+combinations), glyph ids 205-220: all 16 glyphs match.
+
+Cyclic PaintColrGlyph detection, glyph ids 178-179 (paintcolrglyph_cycle_first/second): both
+engines render nothing for both glyphs (cycle correctly detected and aborted by both independent
+implementations).
+
+Misc: circle_r50..r350 (170-176), colored_circles_v0/v1 (168-169), solid_colorline_alpha (177):
+all match.
+
+gradient_p2_skewed (167): DIVERGES. vello shows a diagonal red/blue/yellow gradient; resvg shows a
+plain horizontal red/blue gradient (evidence/g167_gradient_p2_skewed_combo.png). Root-caused below
+as a resvg limitation, not a vello bug.
+
+sweep_coincident_angles_* and sweep_coincident_stops_* (181-204, 24 glyphs): the "_pad" variant of
+each renders in vello; the "_reflect" and "_repeat" variants all render as fully blank/transparent
+in vello. resvg cannot be used as a reference here (no sweep-gradient support at all), so this was
+investigated separately via source-level tracing (see below), not via the resvg differential.
+
+composite_* (Porter-Duff/blend modes, 120-147): resvg approximates COLRv1 composite modes as CSS
+mix-blend-mode strings and admits (in its own source, usvg-0.46.0/src/text/colr.rs) that it cannot
+represent Clear/Src/Dest/SrcIn/DestIn/SrcOut/DestOut/SrcAtop/DestAtop/Xor/Plus this way, silently
+falling back to "normal" for all of them - so these 11 of 16 composite glyphs are not meaningfully
+comparable against resvg (evidence/g120_composite_CLEAR_combo.png shows the expected divergence:
+vello correctly renders the Clear-composited region as fully erased, resvg's fallback leaves the
+layered squares fully opaque). This composite-mode gap is exactly what candidates 048 and 079
+already investigated and confirmed as real vello bugs (Mix modes collapsing to SrcOver; PlusLighter
+reusing the Plus formula) via other means, not via this differential harness.
+
+=== Manual verification that vello's gradient_p2_skewed (167) rendering is spec-correct ===
+
+$ python3 -c "
+from fontTools.ttLib import TTFont
+f = TTFont('examples/assets/colr_test_glyphs/test_glyphs-glyf_colr_1.ttf')
+colr = f['COLR']; table = colr.table
+name = 'gradient_p2_skewed'
+for bg in table.BaseGlyphList.BaseGlyphPaintRecord:
+    if bg.BaseGlyph == name:
+        print(bg.Paint.Format, bg.Paint.Paint.Format, bg.Paint.Paint.x0, bg.Paint.Paint.y0,
+              bg.Paint.Paint.x1, bg.Paint.Paint.y1, bg.Paint.Paint.x2, bg.Paint.Paint.y2)
+"
+10 4 100 950 2300 950 -1000 250
+# i.e. raw COLR PaintLinearGradient: p0=(100,950) p1=(2300,950) p2=(-1000,250)
+
+Applying the OpenType COLR "rotating and skewing gradients" normalization by hand
+(the same one skrifa/fontations implements, see skrifa-0.44.0/src/color/mod.rs's
+`Brush::LinearGradient` doc comment: "normalized from the P0, P1 and P2 representation ... to a
+linear gradient between two points p0 and p1"):
+
+  p0p1 = p1 - p0 = (2200, 0)
+  p0p2 = p2 - p0 = (-1100, -700)
+  s = dot(p0p2, p0p1) / dot(p0p1, p0p1) = -2,420,000 / 4,840,000 = -0.5
+  perpendicular = p0p2 - s * p0p1 = (-1100, -700) - (-0.5)*(2200, 0) = (0, -700)
+  new_p1 = p1 + perpendicular = (2300, 950) + (0, -700) = (2300, 250)
+
+So the spec-correct gradient runs from (100, 950) to (2300, 250) - a DIAGONAL line, not the
+horizontal (100,950)->(2300,950) line resvg's own (documented-incomplete) implementation draws.
+vello's diagonal red -> blue -> yellow rendering matches this hand-derived spec-correct result;
+resvg's plain horizontal red -> blue rendering does not. Confirms vello is correct here and resvg's
+own acknowledged "TODO: we ignore x2, y2" gap (usvg-0.46.0/src/text/colr.rs line 125-126) is the
+actual explanation for the divergence.
+
+=== Source-level trace of the sweep_coincident_*_reflect/_repeat blank-rendering pattern ===
+
+(temporary `std::eprintln!` instrumentation added to glifo/src/colr.rs's ColrPainter::paint() and
+the Brush::SweepGradient arm of `fill()`, in the investigation worktree only - reverted before
+this candidate folder was written; not part of any patch)
+
+$ colr_diff_harness 181 g181.png   # sweep_coincident_angles_forward_blue_red_pad
+DEBUG sweep: c0=(500.0, 600.0) start=270 end=270 extend=Pad n_stops=4 stops=[...] fill_rect=...
+DEBUG paint_result = Ok(())
+# start_angle == end_angle (270 == 270) hits glifo's own `if start_angle == end_angle` branch,
+# Extend::Pad arm adds a 0.01 degree epsilon and paints normally.
+
+$ colr_diff_harness 182 g182.png   # sweep_coincident_angles_forward_blue_red_reflect
+DEBUG paint_result = Ok(())
+# The Brush::SweepGradient arm of fill() is NEVER reached at all (no "DEBUG sweep:" line) - yet
+# skrifa's own glyph.paint(...) call returns Ok(()), not an error. I.e. skrifa's own COLRv1
+# traversal decides, internally, not to call back into fill() at all for this paint operation
+# when start_angle == end_angle and extend != Pad - it is not glifo/vello choosing to skip
+# anything, and no panic occurs (glifo's `_ => unreachable!()` fallback in that branch, added
+# with a comment citing https://github.com/googlefonts/fontations/issues/1017, is consistent
+# with this: that branch is provably unreachable in practice, exactly as the comment claims).
+# Same pattern reproduced for glyph 194 (sweep_coincident_stops_forward_blue_red_reflect, start
+# and end both 292.5) and every other _reflect/_repeat glyph in both the coincident_angles and
+# coincident_stops families (183, 185, 186, 188, 189, 191, 192, 194, 195, 197, 198, 200, 201, 203,
+# 204 - the systematic pattern noted above).
+#
+# This is already-known, already-tracked behavior (the exact upstream issue is cited directly in
+# vello's own source) rather than a new finding - see RESULT.md for why this was not written up
+# as a fresh Confirmed bug this session.

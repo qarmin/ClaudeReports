@@ -1,0 +1,33 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate is a documentation-consistency check, not a hayro source change - there is no
+# patch.diff against hayro (see RESULT.md). What's actually being verified is the sandbox
+# gotcha itself: valgrind's default file-descriptor limit here makes callgrind fail outright, and
+# `ulimit -n 4096` fixes it. This justfile reproduces exactly that, with a trivial throwaway C
+# program (no dependency on hayro/its clone at all - nothing here needs repo_url/base_commit,
+# they're only recorded below for provenance, matching this workspace's convention).
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+test: build fail-without-fix succeed-with-fix
+
+build:
+    mkdir -p scratch
+    printf 'int main(){ volatile int x=0; for(int i=0;i<1000;i++) x+=i; return 0; }\n' > scratch/t.c
+    gcc -O0 -g scratch/t.c -o scratch/t
+
+# Expected: FAILS with "Private file creation failed" under this sandbox's default ulimit -n.
+fail-without-fix:
+    @echo "=== without ulimit -n fix (expect: Private file creation failed) ==="
+    @ulimit -n
+    -valgrind --tool=callgrind --callgrind-out-file=scratch/cg_nofix.out -- ./scratch/t
+
+# Expected: SUCCEEDS once ulimit -n is lowered in the same shell before invoking valgrind.
+succeed-with-fix:
+    @echo "=== with 'ulimit -n 4096' fix (expect: succeeds, writes scratch/cg_fix.out) ==="
+    bash -c 'ulimit -n 4096; valgrind --tool=callgrind --callgrind-out-file=scratch/cg_fix.out -- ./scratch/t'
+    @ls -la scratch/cg_fix.out
+
+clean:
+    rm -rf scratch

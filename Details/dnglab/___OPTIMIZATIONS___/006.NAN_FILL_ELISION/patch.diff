@@ -1,0 +1,71 @@
+diff --git a/rawler/src/imgop/sensor/xtrans/bilinear.rs b/rawler/src/imgop/sensor/xtrans/bilinear.rs
+index d47f5bd0..41a12b22 100644
+--- a/rawler/src/imgop/sensor/xtrans/bilinear.rs
++++ b/rawler/src/imgop/sensor/xtrans/bilinear.rs
+@@ -3,12 +3,13 @@
+ 
+ use multiversion::multiversion;
+ use rayon::prelude::*;
++use std::mem::MaybeUninit;
+ use std::time::Instant;
+ 
+ use crate::{
+   cfa::{CFA, PlaneColor},
+   imgop::{Rect, sensor::Demosaic},
+-  pixarray::{Color2D, PixF32, RgbF32},
++  pixarray::{Color2D, PixF32},
+ };
+ 
+ /// Bilinear demosaicing implementation for Fujifilm X-Trans sensor data.
+@@ -71,11 +72,21 @@ impl Demosaic<f32, 3> for XTransBilinearDemosaic {
+ #[multiversion(targets("x86_64+avx+avx2+fma", "x86+sse", "aarch64+neon"))]
+ fn interpolate_bilinear(input: &PixF32, cfa: &CFA, roi: Rect) -> Color2D<f32, 3> {
+   let cfa_roi = cfa.shift(roi.p.x, roi.p.y);
+-  let mut output = RgbF32::new_with_default(roi.width(), roi.height(), f32::NAN);
+-  let width = output.width;
+-  let height = output.height;
++  let width = roi.width();
++  let height = roi.height();
++  let len = width * height;
+ 
+-  output.pixels_mut().par_chunks_exact_mut(width).enumerate().for_each(|(y, line)| {
++  // Every element of `data` is unconditionally written exactly once by the loop below (the
++  // `for c in 0..3` write covers all 3 channels of every pixel, including the `count[c] == 0`
++  // case which still writes 0.0), so the NaN pre-fill this replaces was pure write traffic with
++  // no corresponding read. `MaybeUninit` makes the "written before read" invariant explicit and
++  // checked by the type system instead of relying on every code path actually overwriting it.
++  let mut data: Vec<MaybeUninit<[f32; 3]>> = Vec::with_capacity(len);
++  // SAFETY: MaybeUninit<T> has no validity invariant, so extending the length without
++  // initializing the new elements is sound.
++  unsafe { data.set_len(len) };
++
++  data.par_chunks_exact_mut(width).enumerate().for_each(|(y, line)| {
+     line.iter_mut().enumerate().for_each(|(x, pixel)| {
+       let mut rgb = [0.0f32; 3];
+       let mut count = [0u32; 3];
+@@ -93,10 +104,23 @@ fn interpolate_bilinear(input: &PixF32, cfa: &CFA, roi: Rect) -> Color2D<f32, 3>
+         }
+       }
+ 
++      let mut out = [0.0f32; 3];
+       for c in 0..3 {
+-        pixel[c] = if count[c] > 0 { rgb[c] / count[c] as f32 } else { 0.0 };
++        out[c] = if count[c] > 0 { rgb[c] / count[c] as f32 } else { 0.0 };
+       }
++      pixel.write(out);
+     });
+   });
+-  output
++
++  // SAFETY: the parallel loop above wrote every one of the `len` elements exactly once via
++  // `pixel.write(out)` (par_chunks_exact_mut/enumerate covers every index in 0..height and
++  // 0..width with no skipped indices), so all elements are now initialized. Vec<MaybeUninit<T>>
++  // and Vec<T> share layout (MaybeUninit<T> is #[repr(transparent)] over T), so reusing the
++  // buffer via from_raw_parts avoids a second full-buffer copy.
++  let mut data = std::mem::ManuallyDrop::new(data);
++  let ptr = data.as_mut_ptr() as *mut [f32; 3];
++  let cap = data.capacity();
++  let data: Vec<[f32; 3]> = unsafe { Vec::from_raw_parts(ptr, len, cap) };
++
++  Color2D::new_with(data, width, height)
+ }

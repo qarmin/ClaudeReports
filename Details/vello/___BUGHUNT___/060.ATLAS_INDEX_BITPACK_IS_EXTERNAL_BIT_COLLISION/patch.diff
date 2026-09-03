@@ -1,0 +1,57 @@
+diff --git a/sparse_strips/vello_hybrid/src/render/common.rs b/sparse_strips/vello_hybrid/src/render/common.rs
+index 03308506..f2944f10 100644
+--- a/sparse_strips/vello_hybrid/src/render/common.rs
++++ b/sparse_strips/vello_hybrid/src/render/common.rs
+@@ -119,7 +119,8 @@ impl MemorySettings {
+             .clamp(1, device_limits.max_texture_dimension_2d)
+             .into();
+ 
+-        let supported_max_atlases = usize::from(device_limits.max_texture_array_layers);
++        let supported_max_atlases =
++            usize::from(device_limits.max_texture_array_layers).min(MAX_PACKED_ATLAS_COUNT);
+         image_atlas_config.max_atlases = image_atlas_config.max_atlases.min(supported_max_atlases);
+         image_atlas_config.initial_atlas_count = image_atlas_config
+             .initial_atlas_count
+@@ -273,6 +274,26 @@ mod tests {
+         assert_eq!(settings.image_atlas_config.max_atlases, 1);
+     }
+ 
++    #[test]
++    fn normalize_memory_settings_clamps_atlas_count_to_packed_format_limit() {
++        // Regression test for candidate 060 (___BUGHUNT___): even a device that genuinely
++        // supports far more than 256 texture array layers must not let `max_atlases` exceed the
++        // packed `image_params` format's 8-bit `atlas_index` domain (0..=255) - an `atlas_id` of
++        // exactly 256 collides with the `is_external` bit (bit 14) in `pack_image_params`.
++        let mut settings = MemorySettings {
++            image_atlas_config: AtlasConfig {
++                initial_atlas_count: 0,
++                max_atlases: 300,
++                ..Default::default()
++            },
++            ..Default::default()
++        };
++
++        settings.normalize(&device_limits(4096, 2048));
++
++        assert_eq!(settings.image_atlas_config.max_atlases, 256);
++    }
++
+     #[test]
+     fn normalize_memory_settings_clamps_minimum_to_maximum() {
+         let mut settings = MemorySettings {
+@@ -643,6 +664,15 @@ pub(crate) fn pack_image_offset(x: u16, y: u16) -> u32 {
+     ((x as u32) << 16) | (y as u32)
+ }
+ 
++/// Maximum number of atlases representable by [`pack_image_params`]'s 8-bit `atlas_index` field
++/// (bits 6-13). An `atlas_index` of exactly this value would carry into bit 14 (`is_external`),
++/// silently misinterpreting an atlas-backed image as an external texture - see
++/// [`MemorySettings::normalize`], which clamps [`AtlasConfig::max_atlases`] to this value so that
++/// no real atlas allocation can ever produce an out-of-range `atlas_index`.
++///
++/// [`AtlasConfig::max_atlases`]: vello_common::multi_atlas::AtlasConfig::max_atlases
++pub(crate) const MAX_PACKED_ATLAS_COUNT: usize = 256;
++
+ /// Pack image `quality`, extend modes, `atlas_index`, and source type into a single u32.
+ /// `is_external`: stored in bit 14
+ /// `atlas_index`: stored in bits 6-13 (8 bits, supports up to 256 atlases)

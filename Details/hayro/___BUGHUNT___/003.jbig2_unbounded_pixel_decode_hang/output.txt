@@ -1,0 +1,69 @@
+Repro: ___BUGHUNT___/003.jbig2_unbounded_pixel_decode_hang/repro/
+Build: `cargo run --release` (release profile; hayro's workspace `[profile.fuzz]` overflow-checks
+were not needed to observe this - it's a wall-clock hang, not a panic).
+
+=== BEFORE (pristine hayro-jbig2, commit 5a5f0e247c970df948505ee0bb36e2df2504bf86) ===
+Ran twice, `timeout 30`/`timeout 10`, both times killed without the process ever exiting on its
+own (exit code 124/143 = SIGTERM from `timeout`):
+
+$ timeout 15 cargo run --release
+   Compiling hayro-jbig2 v0.3.0 (.../hayro-jbig2)
+   Compiling repro v0.1.0 (.../003.jbig2_unbounded_pixel_decode_hang/repro)
+    Finished `release` profile [optimized] target(s) in 1.26s
+     Running `target/release/repro`
+hang_input.jb2 (generic region): decode finished in 4.510145088s
+[... process killed by `timeout` after 15s total wall time - it never got to print a line for
+hang_input_symbol_dict.jb2, i.e. it was still stuck inside that second decode call when killed ...]
+
+real    0m15.028s
+user    0m17.751s
+sys     0m0.484s
+
+A second, separate `timeout 30 cargo run --release` run (no source/build changes) also never
+completed within 30s. A third, separate `timeout 10 cargo run --release` run also never completed
+within 10s. Every pristine-tree run hung; none ever printed a "did not reproduce"/"REPRODUCED" line
+or exited on its own.
+
+Also verified directly against the real, unmodified `hayro-jbig2` public API outside this repro
+crate (an ad hoc `cargo build --release --example probe_timing` inside hayro-jbig2/ itself,
+`hayro_jbig2::Image::new(data)` + `.decode(&mut NullDecoder)`) on the *original* stale fuzz corpus
+files this repro's two inputs were copied from
+(`hayro-fuzz/artifacts/fuzz_jbig2/timeout-14906338e9e1dfc8a5906d95a47c3bfc9f702f2a` for the generic
+-region case, `timeout-25519e0f0e84bad4ff20208f23ec291823bc0eb1` and
+`timeout-5763e1fddf4ebda28280c8869d63a033291ce407` for the symbol-dictionary case) - all three
+hung the same way, every run, before the fix.
+
+Root-cause instrumentation (temporary `eprintln!`s in `hayro-jbig2/src/lib.rs`/`decode/symbol.rs`,
+reverted before this candidate folder was written) captured the actual mechanism directly:
+
+  GENERIC REGION width=34304 height=49920 x=2241268250 y=168449792
+  (page itself is only 1x1 - this region has ~1.7 billion pixels and starts far outside the page)
+
+  SYMDICT num_new_symbols=59881 ... use_huffman=false use_refagg=false
+  SYMDONE decoded=0   w=5    h=82  elapsed=5.681us
+  SYMDONE decoded=200 w=2282 h=383 elapsed=6.604259ms
+  SYMDONE decoded=400 w=4882 h=383 elapsed=12.336836ms
+  SYMDONE decoded=600 w=7482 h=383 elapsed=17.581238ms
+  (symbol_width keeps growing across the whole height class - per-symbol cost, and therefore
+  total cost, grows without any cap tied to the actual page size or a total-pixel budget)
+
+=== AFTER (patch.diff applied) ===
+
+$ cargo run --release
+    Finished `release` profile [optimized] target(s) in 0.01s
+     Running `target/release/repro`
+hang_input.jb2 (generic region): decode finished in 6.693us
+hang_input_symbol_dict.jb2 (symbol dictionary): decode finished in 557.050989ms
+did not reproduce - both decodes completed under 3s (generic_region=6.693us, symbol_dict=557.050989ms)
+
+Repeated twice more for CONFIRMATION.md's repeat-run bar, both `exit 0`, both under 3s total:
+
+Run 1: generic_region=4.929us  symbol_dict=476.690366ms  -> did not reproduce (exit 0)
+Run 2: generic_region=5.911us  symbol_dict=471.583879ms  -> did not reproduce (exit 0)
+
+=== Fuzz corpus sweep (all 35 stale `hayro-fuzz/artifacts/fuzz_jbig2/timeout-*` files) ===
+Before the fix: pre-session triage already established these hang >15s each (per IDEAS.md).
+After the fix: all 35 files complete within a 5s-per-file `timeout` wrapper (35/35 pass, 0 fail),
+using the same `hayro_jbig2::Image::new`/`.decode` public entry point via the ad hoc
+`probe_timing` example. The full `hayro-fuzz/artifacts/fuzz_jbig2/crash-*` corpus (22 files) was
+also re-run after the fix and still exits cleanly (no new panics introduced).

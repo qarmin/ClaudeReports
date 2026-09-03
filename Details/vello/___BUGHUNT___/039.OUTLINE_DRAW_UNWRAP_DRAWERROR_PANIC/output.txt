@@ -1,0 +1,92 @@
+=== BEFORE (unpatched glifo/src/glyph.rs) ===
+
+$ cargo run --release
+   Compiling repro v0.1.0
+    Finished `release` profile [optimized] target(s)
+     Running `target/release/repro`
+
+thread 'main' (484449) panicked at /tmp/vello-wt-039/glifo/src/glyph.rs:1985:69:
+called `Result::unwrap()` on an `Err` value: TooManyPoints(GlyphId(2))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- re-run with RUST_BACKTRACE=1, 3 times to confirm determinism ---
+
+run 1:
+
+thread 'main' (486442) panicked at /tmp/vello-wt-039/glifo/src/glyph.rs:1985:69:
+called `Result::unwrap()` on an `Err` value: TooManyPoints(GlyphId(2))
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::result::unwrap_failed
+   3: <glifo::glyph::OutlineCacheSession>::get_or_insert
+   4: glifo::glyph::create_outline_glyph
+   5: <glifo::glyph::GlyphRunRenderer<core::iter::sources::once::Once<glifo::glyph::Glyph>>>::draw_glyphs::<vello_cpu::render::RenderContext>
+   6: <vello_cpu::text::CpuGlyphRunBackend>::render_glyphs::<core::iter::sources::once::Once<glifo::glyph::Glyph>, <vello_cpu::text::CpuGlyphRunBackend as glifo::glyph::GlyphRunBackend>::fill_glyphs<core::iter::sources::once::Once<glifo::glyph::Glyph>>::{closure#0}>
+   7: repro::main
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+exit code: 101
+
+run 2:
+
+thread 'main' (486443) panicked at /tmp/vello-wt-039/glifo/src/glyph.rs:1985:69:
+called `Result::unwrap()` on an `Err` value: TooManyPoints(GlyphId(2))
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::result::unwrap_failed
+   3: <glifo::glyph::OutlineCacheSession>::get_or_insert
+   4: glifo::glyph::create_outline_glyph
+   5: <glifo::glyph::GlyphRunRenderer<core::iter::sources::once::Once<glifo::glyph::Glyph>>>::draw_glyphs::<vello_cpu::render::RenderContext>
+   6: <vello_cpu::text::CpuGlyphRunBackend>::render_glyphs::<core::iter::sources::once::Once<glifo::glyph::Glyph>, <vello_cpu::text::CpuGlyphRunBackend as glifo::glyph::GlyphRunBackend>::fill_glyphs<core::iter::sources::once::Once<glifo::glyph::Glyph>>::{closure#0}>
+   7: repro::main
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+exit code: 101
+
+run 3:
+
+thread 'main' (486444) panicked at /tmp/vello-wt-039/glifo/src/glyph.rs:1985:69:
+called `Result::unwrap()` on an `Err` value: TooManyPoints(GlyphId(2))
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::result::unwrap_failed
+   3: <glifo::glyph::OutlineCacheSession>::get_or_insert
+   4: glifo::glyph::create_outline_glyph
+   5: <glifo::glyph::GlyphRunRenderer<core::iter::sources::once::Once<glifo::glyph::Glyph>>>::draw_glyphs::<vello_cpu::render::RenderContext>
+   6: <vello_cpu::text::CpuGlyphRunBackend>::render_glyphs::<core::iter::sources::once::Once<glifo::glyph::Glyph>, <vello_cpu::text::CpuGlyphRunBackend as glifo::glyph::GlyphRunBackend>::fill_glyphs<core::iter::sources::once::Once<glifo::glyph::Glyph>>::{closure#0}>
+   7: repro::main
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+exit code: 101
+
+=== AFTER (patched glifo/src/glyph.rs, patch.diff applied) ===
+
+$ cargo build --release
+   Compiling glifo v0.3.0
+   Compiling vello_cpu v0.2.0
+   Compiling repro v0.1.0
+    Finished `release` profile [optimized] target(s) in 13.33s
+
+$ ./target/release/repro
+did not reproduce: rendering completed without panicking
+exit 0
+
+$ ./target/release/repro
+did not reproduce: rendering completed without panicking
+exit 0
+
+$ ./target/release/repro
+did not reproduce: rendering completed without panicking
+exit 0
+
+=== Direct skrifa-level probe (used to identify which DrawError variant is reachable) ===
+
+Self-referencing composite glyph (glyph id 1 references itself):
+get(2).is_some() = false   [note: this was gid 1 in this probe]
+-> OutlineGlyphCollection::get() itself already returns None for a self-referencing composite;
+   RecursionLimitExceeded never reaches glifo's `.draw()` call for this exact code path.
+
+Too-many-points composite glyph (glyph id 2, two references to a 40,000-point glyph id 1):
+get(2).is_some() = true
+draw result: Err(TooManyPoints(GlyphId(2)))
+-> get() succeeds; draw() fails. This is the variant that reaches glifo's `.unwrap()`.

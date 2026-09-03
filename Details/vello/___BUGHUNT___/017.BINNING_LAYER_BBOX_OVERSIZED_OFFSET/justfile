@@ -1,0 +1,41 @@
+# Self-contained reproduction for candidate 017.BINNING_LAYER_BBOX_OVERSIZED_OFFSET
+# (https://github.com/linebender/vello/issues/1061 - "Layer shapes are wrong").
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# No patch.diff exists for this candidate (Confirmed, but no bounded fix was found this
+# session - see RESULT.md), so there is no apply/reproduce-after step, only reproduce-before.
+#
+# Needs a working wgpu backend (Vulkan/Metal/DX12/GL) to create a GPU device - this repro uses
+# vello's real GPU compute pipeline (Scene + Renderer::render_to_texture), not a CPU fallback.
+# On a machine with a real GPU this works out of the box. In a headless/CI-like environment
+# without one, a software backend (Mesa llvmpipe for GL, or a software Vulkan ICD such as
+# swiftshader/lavapipe) is picked up automatically by wgpu if installed.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, prove the bug exists.
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    # -c filter.lfs.*: this repo LFS-tracks its snapshot PNGs (vello_tests/snapshots), which this
+    # repro never touches (it only needs the `vello` crate's source) - skip the LFS smudge/clean
+    # filters so `git clone`/`checkout` still succeed on a machine without `git-lfs` installed.
+    git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false \
+        clone {{repo_url}} clone
+    cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false \
+        checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone. Prints the actual affected-pixel
+# bounding box vs. the true rect, and exits 1 ("REPRODUCED") when they differ.
+reproduce-before:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target

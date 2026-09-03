@@ -1,0 +1,44 @@
+# Standalone SIMD probe: run the same binary under LLVM and under cg_clif and compare.
+#
+# cg_clif reports only fxsr/sse/sse2/x87 from `target_config`, and ignores `-C target-feature`
+# for `cfg(target_feature)` - irrelevant here (nothing in src/ is cfg-gated on a feature), but
+# it is why the hodow suite needs `--cfg target_feature="..."`; see ../../README.md.
+
+clif := justfile_directory() + "/../../../dist"
+feats := ""
+
+default: probe
+
+# Build + run with plain rustc (the reference answer).
+llvm:
+    cargo build {{ if feats == "" { "" } else { "--features " + feats } }} --target-dir target-llvm
+    @ulimit -c 0 && ./target-llvm/debug/simd_probe
+
+# Build + run with cg_clif.
+clif:
+    RUSTFLAGS="-Ctarget-cpu=native" {{clif}}/cargo-clif build {{ if feats == "" { "" } else { "--features " + feats } }} --target-dir target-clif
+    @ulimit -c 0 && ./target-clif/debug/simd_probe
+
+# Same, but on Cranelift's default x86-64 preset instead of native - different lowerings.
+clif-baseline:
+    {{clif}}/cargo-clif build {{ if feats == "" { "" } else { "--features " + feats } }} --target-dir target-clif-base
+    @ulimit -c 0 && ./target-clif-base/debug/simd_probe
+
+# The actual comparison. Exits non-zero if cg_clif disagrees with LLVM.
+probe:
+    @echo "=== LLVM ==="
+    -@just feats={{feats}} llvm
+    @echo ""
+    @echo "=== cg_clif (target-cpu=native) ==="
+    -@just feats={{feats}} clif
+
+# The three probes that don't even compile / ICE under cg_clif today. Each is expected to fail
+# the cg_clif build; run them one at a time to see which diagnostic you get.
+blockers:
+    -just feats=permilvar clif
+    -just feats=funnel clif
+    -just feats=stream clif
+    -just feats=kreg clif
+
+clean:
+    rm -rf target-llvm target-clif target-clif-base

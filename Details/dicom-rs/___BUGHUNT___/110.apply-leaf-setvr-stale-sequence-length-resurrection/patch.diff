@@ -1,0 +1,26 @@
+diff --git a/object/src/mem.rs b/object/src/mem.rs
+index f403b109..93a2243c 100644
+--- a/object/src/mem.rs
++++ b/object/src/mem.rs
+@@ -1602,7 +1602,20 @@ where
+             AttributeAction::SetVr(new_vr) => {
+                 if let Some(e) = self.entries.remove(&tag) {
+                     let (header, value) = e.into_parts();
+-                    let e = DataElement::new(header.tag, new_vr, value);
++                    // `DataElement::new` would recompute the length from
++                    // `value.length()`, but for a `Value::Sequence` that reads
++                    // `DataSetSequence`'s own private `length` field, which
++                    // `items_mut()`/`update_value` never keep in sync with
++                    // `header.len` after the items are mutated in place - only
++                    // `header.len` itself is kept correct by those. Reusing
++                    // `value.length()` here could resurrect a stale explicit
++                    // length. An undefined length is always valid for a sequence,
++                    // so use that instead of trusting the vestigial field.
++                    let len = match &value {
++                        Value::Sequence(_) => Length::UNDEFINED,
++                        Value::Primitive(_) | Value::PixelSequence(_) => value.length(),
++                    };
++                    let e = DataElement::new_with_len(header.tag, new_vr, len, value);
+                     self.put(e);
+                 } else {
+                     self.put(DataElement::empty(tag, new_vr));

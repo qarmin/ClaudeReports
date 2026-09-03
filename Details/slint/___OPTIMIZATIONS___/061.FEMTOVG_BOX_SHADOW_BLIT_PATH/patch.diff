@@ -1,0 +1,65 @@
+diff --git a/internal/renderers/femtovg/itemrenderer.rs b/internal/renderers/femtovg/itemrenderer.rs
+index 6eb271c99..128ee4352 100644
+--- a/internal/renderers/femtovg/itemrenderer.rs
++++ b/internal/renderers/femtovg/itemrenderer.rs
+@@ -101,6 +101,51 @@ pub struct GLItemRenderer<'a, R: femtovg::Renderer + TextureImporter> {
+     metrics: RenderingMetrics,
+ }
+ 
++std::thread_local! {
++    /// Scratch paths handed out by [`ScratchPath`], reused across frames instead of allocating a
++    /// fresh `femtovg::Path` (which allocates its verb and coordinate vectors) every time.
++    static PATH_POOL: RefCell<Vec<femtovg::Path>> = const { RefCell::new(Vec::new()) };
++}
++
++/// A `femtovg::Path` borrowed from a thread-local pool and returned, cleared, on drop.
++/// Deref-coerces to `&femtovg::Path`, so call sites pass `&path` as before.
++struct ScratchPath(Option<femtovg::Path>);
++
++impl ScratchPath {
++    fn new() -> Self {
++        Self(Some(PATH_POOL.with(|pool| pool.borrow_mut().pop()).unwrap_or_else(femtovg::Path::new)))
++    }
++}
++
++impl core::ops::Deref for ScratchPath {
++    type Target = femtovg::Path;
++    fn deref(&self) -> &femtovg::Path {
++        self.0.as_ref().expect("the path is only taken in Drop")
++    }
++}
++
++impl core::ops::DerefMut for ScratchPath {
++    fn deref_mut(&mut self) -> &mut femtovg::Path {
++        self.0.as_mut().expect("the path is only taken in Drop")
++    }
++}
++
++impl Drop for ScratchPath {
++    /// Bounded so that deeply nested shadows/clips cannot make the pool grow without limit.
++    fn drop(&mut self) {
++        const POOL_LIMIT: usize = 8;
++        if let Some(mut path) = self.0.take() {
++            path.clear();
++            PATH_POOL.with(|pool| {
++                let mut pool = pool.borrow_mut();
++                if pool.len() < POOL_LIMIT {
++                    pool.push(path);
++                }
++            });
++        }
++    }
++}
++
+ fn rect_with_radius_to_path(
+     rect: PhysicalRect,
+     border_radius: PhysicalBorderRadius,
+@@ -517,7 +562,7 @@ fn draw_box_shadow(
+         // since we are just blitting a texture. This saves a triangle strip for the stroke.
+         let shadow_image_paint = shadow_image.as_paint().with_anti_alias(false);
+ 
+-        let mut shadow_image_rect = femtovg::Path::new();
++        let mut shadow_image_rect = ScratchPath::new();
+         shadow_image_rect.rect(
+             0.,
+             0.,

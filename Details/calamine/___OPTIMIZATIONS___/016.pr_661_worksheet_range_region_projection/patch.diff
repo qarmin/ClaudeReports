@@ -1,0 +1,1095 @@
+diff --git a/src/auto.rs b/src/auto.rs
+index a380b26..cc627fd 100644
+--- a/src/auto.rs
++++ b/src/auto.rs
+@@ -9,8 +9,8 @@ use crate::vba::VbaProject;
+ #[cfg(feature = "picture")]
+ use crate::Picture;
+ use crate::{
+-    open_workbook, open_workbook_from_rs, Data, DataRef, HeaderRow, Metadata, Ods, Range, Reader,
+-    ReaderRef, Xls, Xlsb, Xlsx,
++    open_workbook, open_workbook_from_rs, Data, DataRef, HeaderRow, IndexSet, Metadata, Ods, Range,
++    Reader, ReaderRef, Xls, Xlsb, Xlsx,
+ };
+ 
+ use std::fs::File;
+@@ -188,8 +188,32 @@ where
+         match self {
+             Sheets::Xlsx(e) => e.worksheet_range_ref(name).map_err(Error::Xlsx),
+             Sheets::Xlsb(e) => e.worksheet_range_ref(name).map_err(Error::Xlsb),
+-            Sheets::Xls(_) => unimplemented!(),
+-            Sheets::Ods(_) => unimplemented!(),
++            _ => Err(Error::Msg(
++                // Xls and Ods are eager, owned-data readers and don't produce
++                // borrowed `DataRef` ranges (they don't implement `ReaderRef`)
++                "`worksheet_range_ref` is only supported for Xlsx and Xlsb",
++            )),
++        }
++    }
++
++    fn worksheet_range_region_ref<'a>(
++        &'a mut self,
++        name: &str,
++        cols: impl Into<IndexSet>,
++        rows: impl Into<IndexSet>,
++    ) -> Result<Range<DataRef<'a>>, Self::Error> {
++        let cols = cols.into();
++        let rows = rows.into();
++        match self {
++            Sheets::Xlsx(e) => e
++                .worksheet_range_region_ref(name, cols, rows)
++                .map_err(Error::Xlsx),
++            Sheets::Xlsb(e) => e
++                .worksheet_range_region_ref(name, cols, rows)
++                .map_err(Error::Xlsb),
++            _ => Err(Error::Msg(
++                "`worksheet_range_region_ref` is only supported for Xlsx and Xlsb",
++            )),
+         }
+     }
+ }
+diff --git a/src/index_set.rs b/src/index_set.rs
+new file mode 100644
+index 0000000..38467b1
+--- /dev/null
++++ b/src/index_set.rs
+@@ -0,0 +1,246 @@
++use std::ops::{Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive};
++
++/// A normalized set of 0-based indices for projecting columns or rows.
++///
++/// Constructed via `From`/`Into` from a range, single index, list, or list of
++/// ranges. An empty set (eg: `..` or `IndexSet::default()`) selects *everything*.
++///
++/// ```
++/// use calamine::IndexSet;
++///
++/// let _: IndexSet = (0..5).into();        // contiguous range
++/// let _: IndexSet = (5..).into();         // open-ended range
++/// let _: IndexSet = [1, 3, 5].into();     // list of indexes
++/// let _: IndexSet = [0..3, 8..10].into(); // disjoint ranges
++/// let _: IndexSet = (..).into();          // everything
++/// ```
++///
++/// Note: overlapping or duplicate inputs are merged.
++#[derive(Debug, Clone, Default, PartialEq, Eq)]
++pub struct IndexSet {
++    /// Sorted, merged, non-overlapping half-open `[start, end)` intervals.
++    /// Empty == "everything", [`IndexSet::UNBOUNDED`] is the upper-bound sentinel.
++    spans: Vec<(u32, u32)>,
++}
++
++impl IndexSet {
++    /// Upper-bound sentinel; real worksheet ranges end far below
++    /// this, so it can never collide with an addressable index.
++    pub(crate) const UNBOUNDED: u32 = u32::MAX;
++
++    /// Build normalized `IndexSet` from raw half-open `[start, end)` spans. Spans
++    /// with `start >= end` contribute nothing, overlapping/adjacent spans merge.
++    fn from_spans(mut raw: Vec<(u32, u32)>) -> Self {
++        raw.retain(|&(s, e)| s < e);
++        raw.sort_unstable_by_key(|&(s, _)| s);
++        let mut spans: Vec<(u32, u32)> = Vec::with_capacity(raw.len());
++        for (s, e) in raw {
++            match spans.last_mut() {
++                // Overlapping or adjacent with the previous span: extend it.
++                Some(last) if s <= last.1 => last.1 = last.1.max(e),
++                _ => spans.push((s, e)),
++            }
++        }
++        IndexSet { spans }
++    }
++
++    /// True if this set selects everything (no projection).
++    pub fn is_all(&self) -> bool {
++        self.spans.is_empty()
++    }
++
++    /// True if index `i` is selected. An empty set selects everything.
++    pub(crate) fn keep(&self, i: u32) -> bool {
++        if self.spans.is_empty() {
++            return true;
++        }
++        // Find the last span whose start is <= i, then bounds-check its end.
++        match self.spans.binary_search_by(|&(s, _)| s.cmp(&i)) {
++            Ok(_) => true,   // i is exactly a span start
++            Err(0) => false, // before the first span
++            Err(idx) => i < self.spans[idx - 1].1,
++        }
++    }
++
++    /// The maximum index this set can select, or [`IndexSet::UNBOUNDED`] if
++    /// unbounded above (either "all", or an open-ended span such as `5..`).
++    pub(crate) fn max_index(&self) -> u32 {
++        match self.spans.last() {
++            Some(&(_, end)) if end == Self::UNBOUNDED => Self::UNBOUNDED, // open-ended
++            Some(&(_, end)) => end - 1, // half-open -> inclusive last
++            None => Self::UNBOUNDED,    // "all"
++        }
++    }
++
++    /// Number of selected indices that fall within `0..bound`.
++    pub(crate) fn selected_count(&self, bound: u32) -> u64 {
++        if self.spans.is_empty() {
++            return bound as u64;
++        }
++        // Relies on `spans` being normalized (non-overlapping), so summing
++        // clamped span widths counts each selected index exactly once.
++        self.spans
++            .iter()
++            .map(|&(s, e)| {
++                let s = s.min(bound);
++                let e = e.min(bound);
++                (e - s) as u64
++            })
++            .sum()
++    }
++}
++
++impl From<&[Range<u32>]> for IndexSet {
++    fn from(ranges: &[Range<u32>]) -> Self {
++        IndexSet::from_spans(ranges.iter().map(|r| (r.start, r.end)).collect())
++    }
++}
++
++impl From<&[u32]> for IndexSet {
++    fn from(list: &[u32]) -> Self {
++        IndexSet::from_spans(list.iter().map(|&i| (i, i.saturating_add(1))).collect())
++    }
++}
++
++impl<const N: usize> From<[Range<u32>; N]> for IndexSet {
++    fn from(ranges: [Range<u32>; N]) -> Self {
++        IndexSet::from(&ranges[..])
++    }
++}
++
++impl<const N: usize> From<[u32; N]> for IndexSet {
++    fn from(list: [u32; N]) -> Self {
++        IndexSet::from(&list[..])
++    }
++}
++
++impl From<Range<u32>> for IndexSet {
++    fn from(r: Range<u32>) -> Self {
++        IndexSet::from_spans(vec![(r.start, r.end)])
++    }
++}
++
++impl From<RangeFrom<u32>> for IndexSet {
++    fn from(r: RangeFrom<u32>) -> Self {
++        IndexSet::from_spans(vec![(r.start, IndexSet::UNBOUNDED)])
++    }
++}
++
++impl From<RangeFull> for IndexSet {
++    fn from(_: RangeFull) -> Self {
++        IndexSet::default()
++    }
++}
++
++impl From<RangeInclusive<u32>> for IndexSet {
++    fn from(r: RangeInclusive<u32>) -> Self {
++        let (start, end) = (*r.start(), *r.end());
++        IndexSet::from_spans(vec![(start, end.saturating_add(1))])
++    }
++}
++
++impl From<RangeTo<u32>> for IndexSet {
++    fn from(r: RangeTo<u32>) -> Self {
++        IndexSet::from_spans(vec![(0, r.end)])
++    }
++}
++
++impl From<RangeToInclusive<u32>> for IndexSet {
++    fn from(r: RangeToInclusive<u32>) -> Self {
++        IndexSet::from_spans(vec![(0, r.end.saturating_add(1))])
++    }
++}
++
++impl From<u32> for IndexSet {
++    fn from(i: u32) -> Self {
++        IndexSet::from_spans(vec![(i, i.saturating_add(1))])
++    }
++}
++
++impl From<Vec<Range<u32>>> for IndexSet {
++    fn from(ranges: Vec<Range<u32>>) -> Self {
++        IndexSet::from(&ranges[..])
++    }
++}
++
++impl From<Vec<u32>> for IndexSet {
++    fn from(list: Vec<u32>) -> Self {
++        IndexSet::from(&list[..])
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use rstest::rstest;
++
++    /// Each input set reduces to the expected normalized spans.
++    #[rstest]
++    #[case::all((..).into(), &[])]
++    #[case::degenerate((5..5).into(), &[])] // start >= end -> nothing -> "all"
++    #[case::half_open((0..5).into(), &[(0, 5)])]
++    #[case::inclusive((0..=4).into(), &[(0, 5)])]
++    #[case::open_ended((5..).into(), &[(5, IndexSet::UNBOUNDED)])]
++    #[case::unsorted_dup([3u32, 1, 2, 1].into(), &[(1, 4)])] // adjacent merge
++    #[case::disjoint([0..3, 8..10].into(), &[(0, 3), (8, 10)])]
++    #[case::overlapping([0..5, 3..10].into(), &[(0, 10)])]
++    #[case::contained([0..10, 2..5].into(), &[(0, 10)])]
++    fn normalization(#[case] set: IndexSet, #[case] expected: &[(u32, u32)]) {
++        assert_eq!(set.spans, expected.to_vec(), "spans for {set:?}");
++        assert_eq!(set.is_all(), expected.is_empty(), "is_all for {set:?}");
++    }
++
++    /// The empty set is the canonical "all", so `..` and `default()` should agree.
++    #[test]
++    fn full_range_equals_default() {
++        assert_eq!(IndexSet::from(..), IndexSet::default());
++    }
++
++    /// `keep(i)` for representative in/out indices, including half-open boundaries, gaps
++    /// between disjoint ranges, and open-ended ranges probed past any real sheet bound.
++    #[rstest]
++    #[case::all(IndexSet::default(), &[(0, true), (999, true)])]
++    #[case::disjoint(
++        [0..3, 8..10].into(),
++        &[(2, true), (3, false), (7, false), (8, true), (9, true), (10, false)]
++    )]
++    #[case::half_open((0..5).into(), &[(0, true), (4, true), (5, false)])]
++    #[case::inclusive((0..=4).into(), &[(4, true), (5, false)])]
++    #[case::list([3u32, 1, 2, 1].into(), &[(0, false), (1, true), (3, true), (4, false)])]
++    #[case::open_ended((5..).into(), &[(4, false), (5, true), (1_000_000, true)])]
++    fn membership(#[case] set: IndexSet, #[case] probes: &[(u32, bool)]) {
++        for &(i, kept) in probes {
++            assert_eq!(set.keep(i), kept, "keep({i}) for {set:?}");
++        }
++    }
++
++    /// `max_index()` returns the inclusive upper bound, or `UNBOUNDED` when unbounded.
++    #[rstest]
++    #[case::all(IndexSet::default(), IndexSet::UNBOUNDED)]
++    #[case::disjoint([0..3, 8..10].into(), 9)] // last span's end - 1
++    #[case::half_open((0..5).into(), 4)] // half-open -> inclusive last
++    #[case::inclusive((0..=4).into(), 4)]
++    #[case::open_ended((5..).into(), IndexSet::UNBOUNDED)]
++    #[case::single(3u32.into(), 3)]
++    fn max_index_is_inclusive_ceiling(#[case] set: IndexSet, #[case] expected: u32) {
++        assert_eq!(set.max_index(), expected, "max_index for {set:?}");
++    }
++
++    /// `selected_count(bound)` capacity estimate, clamped to the bound.
++    #[rstest]
++    #[case::all(IndexSet::default(), 7, 7)] // "all" -> bound
++    #[case::beyond_bound((8..10).into(), 5, 0)] // span starts beyond bound
++    #[case::clamped([0..3, 8..10].into(), 9, 4)] // 3 + (9 - 8)
++    #[case::within_bound([0..3, 8..10].into(), 100, 5)] // 3 + 2
++    fn selected_count_clamps_to_bound(
++        #[case] set: IndexSet,
++        #[case] bound: u32,
++        #[case] expected: u64,
++    ) {
++        assert_eq!(
++            set.selected_count(bound),
++            expected,
++            "selected_count({bound}) for {set:?}"
++        );
++    }
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index e869c49..f396b60 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -92,6 +92,7 @@ mod xlsx;
+ 
+ mod de;
+ mod errors;
++mod index_set;
+ 
+ pub mod changelog;
+ pub mod vba;
+@@ -110,6 +111,7 @@ pub use crate::de::{
+     DeError, RangeDeserializer, RangeDeserializerBuilder, RowDeserializer, ToCellDeserializer,
+ };
+ pub use crate::errors::Error;
++pub use crate::index_set::IndexSet;
+ pub use crate::ods::{Ods, OdsError};
+ pub use crate::xls::{Xls, XlsError, XlsOptions};
+ pub use crate::xlsb::{Xlsb, XlsbError};
+@@ -472,8 +474,12 @@ where
+     ///
+     /// This is implemented only for [`calamine::Xlsx`](crate::Xlsx) and [`calamine::Xlsb`](crate::Xlsb), as Xls and Ods formats
+     /// do not support lazy iteration.
+-    fn worksheet_range_ref<'a>(&'a mut self, name: &str)
+-        -> Result<Range<DataRef<'a>>, Self::Error>;
++    fn worksheet_range_ref<'a>(
++        &'a mut self,
++        name: &str,
++    ) -> Result<Range<DataRef<'a>>, Self::Error> {
++        self.worksheet_range_region_ref(name, .., ..)
++    }
+ 
+     /// Get the nth worksheet range where shared string values are only borrowed. Shortcut for getting the nth
+     /// worksheet name, then the corresponding worksheet.
+@@ -487,6 +493,36 @@ where
+         let name = self.sheet_names().get(n)?.to_string();
+         Some(self.worksheet_range_ref(&name))
+     }
++
++    /// Get the worksheet range where shared string values are only borrowed,
++    /// projected onto a subset of columns and rows.
++    ///
++    /// `cols` and `rows` accept anything convertible to an [`IndexSet`]; a
++    /// range, list of ranges, an index, or a list of indices. Overlapping
++    /// selections are merged. Pass `..` to select everything.
++    fn worksheet_range_region_ref<'a>(
++        &'a mut self,
++        name: &str,
++        cols: impl Into<IndexSet>,
++        rows: impl Into<IndexSet>,
++    ) -> Result<Range<DataRef<'a>>, Self::Error>;
++
++    /// Owned-data equivalent of [`worksheet_range_region_ref`](ReaderRef::worksheet_range_region_ref);
++    /// see that method for the column/row-selection semantics.
++    fn worksheet_range_region(
++        &mut self,
++        name: &str,
++        cols: impl Into<IndexSet>,
++        rows: impl Into<IndexSet>,
++    ) -> Result<Range<Data>, Self::Error> {
++        let rge = self.worksheet_range_region_ref(name, cols, rows)?;
++        let inner = rge.inner.into_iter().map(Into::into).collect();
++        Ok(Range {
++            start: rge.start,
++            end: rge.end,
++            inner,
++        })
++    }
+ }
+ 
+ /// Convenient function to open a file with a `BufReader<File>`.
+diff --git a/src/utils.rs b/src/utils.rs
+index ecb0cd1..74f6d33 100644
+--- a/src/utils.rs
++++ b/src/utils.rs
+@@ -11,6 +11,9 @@ use std::io::{Read, Seek};
+ use quick_xml::{escape::resolve_xml_entity, events::BytesRef};
+ use zip::read::ZipArchive;
+ 
++use crate::datatype::DataRef;
++use crate::{Cell, Dimensions, HeaderRow, IndexSet, Range};
++
+ const UNICODE_ESCAPE_LENGTH: usize = 7; // Length of _x00HH_.
+ 
+ macro_rules! from_err {
+@@ -67,6 +70,78 @@ pub fn read_f64(s: &[u8]) -> f64 {
+     f64::from_le_bytes(s[..8].try_into().unwrap())
+ }
+ 
++/// Collect worksheet cells into a [`Range`], honouring the header row and column/row
++/// projection. `cols` and `rows` are normalized index sets, with an empty set
++/// selecting every column/row. Overlapping or duplicate indices are merged.
++pub fn collect_cells_into_range<'a, E>(
++    header_row: HeaderRow,
++    cols: &IndexSet,
++    rows: &IndexSet,
++    dimensions: Dimensions,
++    mut next_cell: impl FnMut() -> Result<Option<Cell<DataRef<'a>>>, E>,
++) -> Result<Range<DataRef<'a>>, E> {
++    // `Row(idx)` floors the kept rows at the header row; `FirstNonEmptyRow` keeps all.
++    let min_row = match header_row {
++        HeaderRow::FirstNonEmptyRow => 0,
++        HeaderRow::Row(idx) => idx,
++    };
++
++    // Keep non-empty cells within both projections; the header row is always retained.
++    let header_idx = match header_row {
++        HeaderRow::Row(idx) => Some(idx),
++        HeaderRow::FirstNonEmptyRow => None,
++    };
++    let keep = |row: u32, col: u32| {
++        row >= min_row && cols.keep(col) && (rows.keep(row) || Some(row) == header_idx)
++    };
++
++    // When rows are bounded above, no cell past the last kept row can survive, so
++    // we can stop reading once we move beyond it. The header row is always retained,
++    // so the cutoff must clear it too. An unbounded `max_index` (IndexSet::UNBOUNDED)
++    // lets every cell through, so we scan the whole sheet.
++    let last_row = match header_idx {
++        Some(h) => rows.max_index().max(h),
++        None => rows.max_index(),
++    };
++
++    // Reserve for the *projected* cell count, not the full sheet.
++    let full_cols = dimensions.end.1 - dimensions.start.1 + 1;
++    let full_rows = dimensions.end.0 - dimensions.start.0 + 1;
++    let projected_len = dimensions
++        .len()
++        .saturating_mul(cols.selected_count(full_cols))
++        .saturating_mul(rows.selected_count(full_rows))
++        / (full_cols as u64).max(1)
++        / (full_rows as u64).max(1);
++    let mut cells = Vec::new();
++    if projected_len < 100_000 {
++        cells.reserve(projected_len as usize);
++    }
++    while let Some(cell) = next_cell()? {
++        // Cells stream in ascending row order, so once we pass the last kept row
++        // nothing further can survive the projection: stop early.
++        if cell.pos.0 > last_row {
++            break;
++        }
++        if !matches!(cell.val, DataRef::Empty) && keep(cell.pos.0, cell.pos.1) {
++            cells.push(cell);
++        }
++    }
++
++    // If no cell survived on the header row, anchor it with an empty cell in a
++    // kept column so it stays in the range. Skipped when no cells survived at all.
++    if let HeaderRow::Row(header_row_idx) = header_row {
++        if let Some(first) = cells.first() {
++            if first.pos.0 != header_row_idx {
++                let col = first.pos.1;
++                cells.push(Cell::new((header_row_idx, col), DataRef::Empty));
++            }
++        }
++    }
++
++    Ok(Range::from_sparse(cells))
++}
++
+ /// Convert a 0-based column index to an Excel column name (0 -> "A", 26 -> "AA").
+ pub fn push_column(col: u32, buf: &mut String) {
+     let mut digits = [0u8; 6];
+@@ -1174,6 +1249,68 @@ pub const FTAB_ARGC: [u8; FTAB_LEN] = [
+ mod tests {
+     use super::*;
+ 
++    /// A row-bounded projection stops pulling cells once it passes the last kept
++    /// row, instead of draining the whole sheet. Unbounded rows read everything.
++    #[test]
++    fn collect_breaks_past_last_kept_row() {
++        // Stream one non-empty cell per row across 1000 rows, counting pulls.
++        let make_reader = || {
++            let mut row = 0u32;
++            move || -> Result<Option<Cell<DataRef<'static>>>, std::convert::Infallible> {
++                if row >= 1000 {
++                    return Ok(None);
++                }
++                let cell = Cell::new((row, 0), DataRef::Int(row as i64));
++                row += 1;
++                Ok(Some(cell))
++            }
++        };
++        let dims = Dimensions {
++            start: (0, 0),
++            end: (999, 0),
++        };
++
++        // Bounded to rows 0..3: should stop after pulling row 3 (the first row
++        // beyond the kept window), not scan all 1000 rows.
++        let mut pulls = 0;
++        let mut reader = make_reader();
++        let range = collect_cells_into_range(
++            HeaderRow::FirstNonEmptyRow,
++            &(..).into(),
++            &(0u32..3).into(),
++            dims,
++            || {
++                let c = reader();
++                if matches!(c, Ok(Some(_))) {
++                    pulls += 1;
++                }
++                c
++            },
++        )
++        .unwrap();
++        assert_eq!(range.get_size(), (3, 1));
++        assert_eq!(pulls, 4, "should break after the first out-of-range row");
++
++        // Unbounded rows: must consume every cell.
++        let mut pulls = 0;
++        let mut reader = make_reader();
++        collect_cells_into_range(
++            HeaderRow::FirstNonEmptyRow,
++            &(..).into(),
++            &(..).into(),
++            dims,
++            || {
++                let c = reader();
++                if matches!(c, Ok(Some(_))) {
++                    pulls += 1;
++                }
++                c
++            },
++        )
++        .unwrap();
++        assert_eq!(pulls, 1000, "unbounded rows scan the whole sheet");
++    }
++
+     #[test]
+     fn test_push_column() {
+         let check = |col: u32, expected: &str| {
+diff --git a/src/xlsb/mod.rs b/src/xlsb/mod.rs
+index cab7ab5..f232acf 100644
+--- a/src/xlsb/mod.rs
++++ b/src/xlsb/mod.rs
+@@ -23,12 +23,12 @@ use crate::attrs::{decode_attr, RawAttributes};
+ use crate::datatype::DataRef;
+ use crate::formats::{builtin_format_by_code, detect_custom_number_format, CellFormat};
+ use crate::utils::{
+-    build_zip_path_cache, cached_zip_path, push_column, read_f64, read_i32, read_u16, read_u32,
+-    read_usize,
++    build_zip_path_cache, cached_zip_path, collect_cells_into_range, push_column, read_f64,
++    read_i32, read_u16, read_u32, read_usize,
+ };
+ use crate::vba::VbaProject;
+ use crate::{
+-    Cell, Data, HeaderRow, Metadata, Range, Reader, ReaderRef, Sheet, SheetType, SheetVisible,
++    Data, HeaderRow, IndexSet, Metadata, Range, Reader, ReaderRef, Sheet, SheetType, SheetVisible,
+ };
+ 
+ /// A Xlsb specific error
+@@ -518,13 +518,7 @@ impl<RS: Read + Seek> Reader<RS> for Xlsb<RS> {
+ 
+     /// MS-XLSB 2.1.7.62
+     fn worksheet_range(&mut self, name: &str) -> Result<Range<Data>, XlsbError> {
+-        let rge = self.worksheet_range_ref(name)?;
+-        let inner = rge.inner.into_iter().map(|v| v.into()).collect();
+-        Ok(Range {
+-            start: rge.start,
+-            end: rge.end,
+-            inner,
+-        })
++        self.worksheet_range_region(name, .., ..)
+     }
+ 
+     /// MS-XLSB 2.1.7.62
+@@ -562,66 +556,18 @@ impl<RS: Read + Seek> Reader<RS> for Xlsb<RS> {
+ }
+ 
+ impl<RS: Read + Seek> ReaderRef<RS> for Xlsb<RS> {
+-    fn worksheet_range_ref<'a>(&'a mut self, name: &str) -> Result<Range<DataRef<'a>>, XlsbError> {
++    fn worksheet_range_region_ref<'a>(
++        &'a mut self,
++        name: &str,
++        cols: impl Into<IndexSet>,
++        rows: impl Into<IndexSet>,
++    ) -> Result<Range<DataRef<'a>>, XlsbError> {
++        let cols = cols.into();
++        let rows = rows.into();
+         let header_row = self.options.header_row;
+         let mut cell_reader = self.worksheet_cells_reader(name)?;
+-        let len = cell_reader.dimensions().len();
+-        let mut cells = Vec::new();
+-        if len < 100_000 {
+-            cells.reserve(len as usize);
+-        }
+-
+-        match header_row {
+-            HeaderRow::FirstNonEmptyRow => {
+-                // the header row is the row of the first non-empty cell
+-                loop {
+-                    match cell_reader.next_cell() {
+-                        Ok(Some(Cell {
+-                            val: DataRef::Empty,
+-                            ..
+-                        })) => (),
+-                        Ok(Some(cell)) => cells.push(cell),
+-                        Ok(None) => break,
+-                        Err(e) => return Err(e),
+-                    }
+-                }
+-            }
+-            HeaderRow::Row(header_row_idx) => {
+-                // If `header_row` is a row index, we only add non-empty cells after this index.
+-                loop {
+-                    match cell_reader.next_cell() {
+-                        Ok(Some(Cell {
+-                            val: DataRef::Empty,
+-                            ..
+-                        })) => (),
+-                        Ok(Some(cell)) => {
+-                            if cell.pos.0 >= header_row_idx {
+-                                cells.push(cell);
+-                            }
+-                        }
+-                        Ok(None) => break,
+-                        Err(e) => return Err(e),
+-                    }
+-                }
+-
+-                // If `header_row` is set and the first non-empty cell is not at the `header_row`, we add
+-                // an empty cell at the beginning with row `header_row` and same column as the first non-empty cell.
+-                if cells.first().is_some_and(|c| c.pos.0 != header_row_idx) {
+-                    cells.insert(
+-                        0,
+-                        Cell {
+-                            pos: (
+-                                header_row_idx,
+-                                cells.first().expect("cells should not be empty").pos.1,
+-                            ),
+-                            val: DataRef::Empty,
+-                        },
+-                    );
+-                }
+-            }
+-        }
+-
+-        Ok(Range::from_sparse(cells))
++        let dims = cell_reader.dimensions();
++        collect_cells_into_range(header_row, &cols, &rows, dims, || cell_reader.next_cell())
+     }
+ }
+ 
+diff --git a/src/xlsx/mod.rs b/src/xlsx/mod.rs
+index 9d12ede..dcd33dc 100644
+--- a/src/xlsx/mod.rs
++++ b/src/xlsx/mod.rs
+@@ -25,14 +25,15 @@ use crate::attrs::{decode_attr, local_name_matches, RawAttributes};
+ use crate::datatype::DataRef;
+ use crate::formats::{builtin_format_by_id, detect_custom_number_format, CellFormat};
+ use crate::utils::{
+-    build_zip_path_cache, cached_zip_path, unescape_entity_to_buffer, unescape_xml,
++    build_zip_path_cache, cached_zip_path, collect_cells_into_range, unescape_entity_to_buffer,
++    unescape_xml,
+ };
+ use crate::vba::VbaProject;
+ #[cfg(feature = "picture")]
+ use crate::Picture;
+ use crate::{
+-    Cell, CellErrorType, Data, Dimensions, HeaderRow, Metadata, Range, Reader, ReaderRef, Sheet,
+-    SheetType, SheetVisible, Table,
++    CellErrorType, Data, Dimensions, HeaderRow, IndexSet, Metadata, Range, Reader, ReaderRef,
++    Sheet, SheetType, SheetVisible, Table,
+ };
+ pub use cells_reader::{
+     XlsxCellFormula, XlsxCellFormulaMetadataRecord, XlsxCellReader, XlsxFormulaMetadata,
+@@ -2591,13 +2592,7 @@ impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
+     }
+ 
+     fn worksheet_range(&mut self, name: &str) -> Result<Range<Data>, XlsxError> {
+-        let rge = self.worksheet_range_ref(name)?;
+-        let inner = rge.inner.into_iter().map(|v| v.into()).collect();
+-        Ok(Range {
+-            start: rge.start,
+-            end: rge.end,
+-            inner,
+-        })
++        self.worksheet_range_region(name, .., ..)
+     }
+ 
+     fn worksheet_formula(&mut self, name: &str) -> Result<Range<String>, XlsxError> {
+@@ -2653,7 +2648,14 @@ impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
+ }
+ 
+ impl<RS: Read + Seek> ReaderRef<RS> for Xlsx<RS> {
+-    fn worksheet_range_ref<'a>(&'a mut self, name: &str) -> Result<Range<DataRef<'a>>, XlsxError> {
++    fn worksheet_range_region_ref<'a>(
++        &'a mut self,
++        name: &str,
++        cols: impl Into<IndexSet>,
++        rows: impl Into<IndexSet>,
++    ) -> Result<Range<DataRef<'a>>, XlsxError> {
++        let cols = cols.into();
++        let rows = rows.into();
+         let header_row = self.options.header_row;
+         let mut cell_reader = match self.worksheet_cells_reader(name) {
+             Ok(reader) => reader,
+@@ -2663,63 +2665,8 @@ impl<RS: Read + Seek> ReaderRef<RS> for Xlsx<RS> {
+             }
+             Err(e) => return Err(e),
+         };
+-        let len = cell_reader.dimensions().len();
+-        let mut cells = Vec::new();
+-        if len < 100_000 {
+-            cells.reserve(len as usize);
+-        }
+-
+-        match header_row {
+-            HeaderRow::FirstNonEmptyRow => {
+-                // the header row is the row of the first non-empty cell
+-                loop {
+-                    match cell_reader.next_cell() {
+-                        Ok(Some(Cell {
+-                            val: DataRef::Empty,
+-                            ..
+-                        })) => (),
+-                        Ok(Some(cell)) => cells.push(cell),
+-                        Ok(None) => break,
+-                        Err(e) => return Err(e),
+-                    }
+-                }
+-            }
+-            HeaderRow::Row(header_row_idx) => {
+-                // If `header_row` is a row index, we only add non-empty cells after this index.
+-                loop {
+-                    match cell_reader.next_cell() {
+-                        Ok(Some(Cell {
+-                            val: DataRef::Empty,
+-                            ..
+-                        })) => (),
+-                        Ok(Some(cell)) => {
+-                            if cell.pos.0 >= header_row_idx {
+-                                cells.push(cell);
+-                            }
+-                        }
+-                        Ok(None) => break,
+-                        Err(e) => return Err(e),
+-                    }
+-                }
+-
+-                // If `header_row` is set and the first non-empty cell is not at the `header_row`, we add
+-                // an empty cell at the beginning with row `header_row` and same column as the first non-empty cell.
+-                if cells.first().is_some_and(|c| c.pos.0 != header_row_idx) {
+-                    cells.insert(
+-                        0,
+-                        Cell {
+-                            pos: (
+-                                header_row_idx,
+-                                cells.first().expect("cells should not be empty").pos.1,
+-                            ),
+-                            val: DataRef::Empty,
+-                        },
+-                    );
+-                }
+-            }
+-        }
+-
+-        Ok(Range::from_sparse(cells))
++        let dims = cell_reader.dimensions();
++        collect_cells_into_range(header_row, &cols, &rows, dims, || cell_reader.next_cell())
+     }
+ }
+ 
+diff --git a/tests/col-projection.xlsx b/tests/col-projection.xlsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..ec0053904c31c9b235dff8fb075d511b78eb9c09
+GIT binary patch
+literal 5191
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/tests/test.rs b/tests/test.rs
+index e222e03..1c03b01 100644
+--- a/tests/test.rs
++++ b/tests/test.rs
+@@ -6,8 +6,8 @@ use calamine::vba::Reference;
+ use calamine::Data::{Bool, DateTime, DateTimeIso, DurationIso, Empty, Error, Float, Int, String};
+ use calamine::{
+     open_workbook, open_workbook_auto, DataRef, DataType, Dimensions, ExcelDateTime,
+-    ExcelDateTimeType, HeaderRow, Ods, Range, Reader, ReaderRef, Sheet, SheetType, SheetVisible,
+-    Xls, Xlsb, Xlsx, XlsxFormulaMetadata,
++    ExcelDateTimeType, HeaderRow, IndexSet, Ods, Range, Reader, ReaderRef, Sheet, SheetType,
++    SheetVisible, Xls, Xlsb, Xlsx, XlsxFormulaMetadata,
+ };
+ use calamine::{CellErrorType::*, Data};
+ use rstest::rstest;
+@@ -3671,3 +3671,212 @@ fn xls_embedded_cross_sheet_chart_does_not_leak_cells() {
+         Some(&Data::String("VALUE C6".to_string()))
+     );
+ }
++
++/// Assert projected `cols` reproduce the full sheet's values
++/// at the kept cols, with dropped columns reading `Empty`.
++#[rstest]
++#[case::disjoint("col-projection.xlsx", "Sheet1", IndexSet::from([0u32, 2]), &[0, 2])]
++#[case::list("col-projection.xlsx", "Sheet1", IndexSet::from([0u32, 1, 2]), &[0, 1, 2])]
++#[case::range("col-projection.xlsx", "Sheet1", IndexSet::from(0u32..3), &[0, 1, 2])]
++#[case::single("col-projection.xlsx", "Sheet1", IndexSet::from(2u32), &[2])]
++#[case::unsorted_dup("col-projection.xlsx", "Sheet1", IndexSet::from([2u32, 0, 0]), &[0, 2])]
++#[case::xlsb("issues.xlsb", "issue2", IndexSet::from([1u32]), &[1])]
++fn test_region_columns(
++    #[case] fixture: &str,
++    #[case] sheet: &str,
++    #[case] cols: IndexSet,
++    #[case] kept: &[u32],
++) {
++    let path = test_path(fixture);
++    let mut full_wb = open_workbook_auto(&path).expect(&path);
++    let full = full_wb.worksheet_range_region_ref(sheet, .., ..).unwrap();
++    let mut proj_wb = open_workbook_auto(&path).expect(&path);
++    let proj = proj_wb.worksheet_range_region_ref(sheet, cols, ..).unwrap();
++
++    // Bounding box spans the lowest..=highest kept column. Dropped interior
++    // columns are Empty, and every kept column matches the full sheet.
++    let (lo, hi) = (kept[0], *kept.last().unwrap());
++    assert_eq!(proj.width() as u32, hi - lo + 1);
++    assert_eq!(proj.height(), full.height());
++    for row in 0..proj.height() {
++        for c in lo..=hi {
++            let expected = if kept.contains(&c) {
++                full.get((row, c as usize))
++            } else {
++                Some(&DataRef::Empty)
++            };
++            assert_eq!(
++                proj.get((row, (c - lo) as usize)),
++                expected,
++                "row {row} col {c}"
++            );
++        }
++    }
++}
++
++/// Row projection reproduces the full sheet's selected row window.
++#[rstest]
++#[case::head("col-projection.xlsx", "Sheet1", IndexSet::from(0u32..2), 0, Some(1))]
++#[case::tail("col-projection.xlsx", "Sheet1", IndexSet::from(1u32..), 1, None)]
++#[case::xlsb("issues.xlsb", "issue2", IndexSet::from(0u32..2), 0, Some(1))]
++fn test_region_rows(
++    #[case] fixture: &str,
++    #[case] sheet: &str,
++    #[case] rows: IndexSet,
++    #[case] start: u32,
++    #[case] end: Option<u32>,
++) {
++    let path = test_path(fixture);
++    let mut x = open_workbook_auto(&path).expect(&path);
++    let full = x.worksheet_range_region(sheet, .., ..).unwrap();
++    let proj = x.worksheet_range_region(sheet, .., rows).unwrap();
++
++    // `None` -> open-ended range
++    let last = end.unwrap_or_else(|| full.end().unwrap().0);
++    assert_eq!(proj.start().map(|(r, _)| r), Some(start));
++    assert_eq!(proj.end().map(|(r, _)| r), Some(last));
++
++    // `get` is relative to each range's start; both fixtures start at column 0
++    let full_start = full.start().unwrap().0;
++    for i in 0..proj.height() {
++        let full_row = (start as usize + i) - full_start as usize;
++        for c in 0..proj.width() {
++            assert_eq!(
++                proj.get((i, c)),
++                full.get((full_row, c)),
++                "rel row {i} col {c}"
++            );
++        }
++    }
++}
++
++#[test]
++fn test_region_full_equals_plain() {
++    // The unprojected region (`.., ..`) matches `worksheet_range_ref`.
++    let mut x: Xlsx<_> = wb("col-projection.xlsx");
++    let full = x.worksheet_range_region_ref("Sheet1", .., ..).unwrap();
++    let mut plain_wb: Xlsx<_> = wb("col-projection.xlsx");
++    let plain = plain_wb.worksheet_range_ref("Sheet1").unwrap();
++    assert_eq!(full, plain);
++    assert!(
++        full.width() > 3,
++        "fixture must be wider than projection subsets"
++    );
++}
++
++#[test]
++fn test_region_both_axes() {
++    let mut x: Xlsx<_> = wb("col-projection.xlsx");
++    let full = x.worksheet_range_region("Sheet1", .., ..).unwrap();
++    let both = x.worksheet_range_region("Sheet1", 0..2, 0..2).unwrap();
++    assert_eq!(both.start(), Some((0, 0)));
++    assert_eq!(both.end().map(|(r, _)| r), Some(1));
++    assert_eq!(both.width(), 2);
++    for row in 0..2 {
++        for col in 0..2 {
++            assert_eq!(both.get((row, col)), full.get((row, col)));
++        }
++    }
++}
++
++#[test]
++fn test_region_overlaps_merge() {
++    // Overlapping/duplicate selections are valid and merge silently.
++    let mut x: Xlsx<_> = wb("col-projection.xlsx");
++    let merged = x
++        .worksheet_range_region("Sheet1", [0..2, 1..3], ..)
++        .unwrap();
++    let contiguous = x.worksheet_range_region("Sheet1", 0..3, ..).unwrap();
++    assert_eq!(merged, contiguous);
++}
++
++/// Column projection composes with header row; dropped cols read
++/// Empty and the header floor is preserved for both header modes.
++#[rstest]
++#[case(HeaderRow::Row(8))]
++#[case(HeaderRow::FirstNonEmptyRow)]
++fn test_region_header_columns(#[case] header: HeaderRow) {
++    let mut x: Xlsx<_> = wb("header-row.xlsx");
++    x.with_header_row(header);
++    let full = x.worksheet_range_region("Sheet1", .., ..).unwrap();
++    let proj = x.worksheet_range_region("Sheet1", [0, 2], ..).unwrap();
++    assert_eq!(proj.start(), full.start());
++    assert_eq!(proj.width(), 3);
++    for row in 0..proj.height() {
++        assert_eq!(proj.get((row, 0)), full.get((row, 0)));
++        assert_eq!(proj.get((row, 2)), full.get((row, 2)));
++        assert_eq!(proj.get((row, 1)), Some(&Empty));
++    }
++}
++
++#[test]
++fn test_region_header_row_always_retained() {
++    // HeaderRow::Row(8) with a row selection that EXCLUDES row 8; header
++    // row should still be present, and rows above 8 must still be dropped.
++    let mut x: Xlsx<_> = wb("header-row.xlsx");
++    let range = x
++        .with_header_row(HeaderRow::Row(8))
++        .worksheet_range_region_ref("Sheet1", .., 9..10)
++        .unwrap();
++    assert_eq!(range.start().map(|(r, _)| r), Some(8));
++    assert_eq!(range.end().map(|(r, _)| r), Some(9));
++}
++
++#[test]
++fn test_region_xlsb_with_header_row() {
++    let mut x: Xlsb<_> = wb("date.xlsb");
++    x.with_header_row(HeaderRow::Row(1));
++    let full = x.worksheet_range_region("Sheet1", .., ..).unwrap();
++    let proj = x.worksheet_range_region("Sheet1", [1], ..).unwrap();
++    assert_eq!(proj.start(), Some((1, 1)));
++    assert_eq!(proj.end(), Some((2, 1)));
++    assert_eq!(proj.width(), 1);
++    for row in 0..proj.height() {
++        assert_eq!(proj.get((row, 0)), full.get((row, 1)));
++    }
++}
++
++#[test]
++fn test_region_through_sheets_auto() {
++    let path = test_path("col-projection.xlsx");
++    let mut sheets = open_workbook_auto(&path).expect(&path);
++    let dispatched = sheets
++        .worksheet_range_region_ref("Sheet1", [0, 2], ..)
++        .unwrap();
++
++    let mut direct: Xlsx<_> = wb("col-projection.xlsx");
++    let expected = direct
++        .worksheet_range_region_ref("Sheet1", [0, 2], ..)
++        .unwrap();
++    assert_eq!(dispatched, expected);
++
++    // Owned variant also dispatches through `Sheets`.
++    let mut owned = open_workbook_auto(&path).expect(&path);
++    assert_eq!(
++        owned
++            .worksheet_range_region("Sheet1", [0, 1, 2], ..)
++            .unwrap()
++            .width(),
++        3
++    );
++}
++
++#[test]
++fn test_region_unsupported_for_xls_ods() {
++    for file in ["any_sheets.xls", "any_sheets.ods"] {
++        let path = test_path(file);
++        let mut sheets = open_workbook_auto(&path).expect(&path);
++        let name = sheets.sheet_names()[0].clone();
++        assert!(
++            matches!(
++                sheets.worksheet_range_region_ref(&name, [0], ..),
++                Err(calamine::Error::Msg(_))
++            ),
++            "{file}: expected Error::Msg, not a panic"
++        );
++        assert!(matches!(
++            sheets.worksheet_range_ref(&name),
++            Err(calamine::Error::Msg(_))
++        ));
++    }
++}

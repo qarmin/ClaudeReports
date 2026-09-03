@@ -1,0 +1,30 @@
+diff --git a/hayro-syntax/src/filter/lzw_flate.rs b/hayro-syntax/src/filter/lzw_flate.rs
+index 8e4bdbe2..99c94e14 100644
+--- a/hayro-syntax/src/filter/lzw_flate.rs
++++ b/hayro-syntax/src/filter/lzw_flate.rs
+@@ -15,15 +15,23 @@ pub(crate) mod flate {
+         use flate2::read::{DeflateDecoder, ZlibDecoder};
+         use std::io::Read;
+ 
++        // A conservative guess at the deflate output/input ratio for typical PDF stream content
++        // (text-heavy content streams, xref/object streams). Pre-sizing avoids `read_to_end`'s
++        // usual grow-from-empty doubling, which forces flate2 to decompress into a series of
++        // small buffers (limiting the decoder's fast path) and repeatedly reallocate+copy
++        // already-decoded bytes as the `Vec` grows. Wrong guesses still work correctly -
++        // `read_to_end` just falls back to its normal growth from whatever capacity remains.
++        const OUTPUT_SIZE_GUESS_FACTOR: usize = 3;
++
+         fn zlib_stream(data: &[u8]) -> Option<Vec<u8>> {
+             let mut decoder = ZlibDecoder::new(data);
+-            let mut result = Vec::new();
++            let mut result = Vec::with_capacity(data.len() * OUTPUT_SIZE_GUESS_FACTOR);
+             decoder.read_to_end(&mut result).ok().map(|_| result)
+         }
+ 
+         fn deflate_stream(data: &[u8]) -> Option<Vec<u8>> {
+             let mut decoder = DeflateDecoder::new(data);
+-            let mut result = Vec::new();
++            let mut result = Vec::with_capacity(data.len() * OUTPUT_SIZE_GUESS_FACTOR);
+             decoder.read_to_end(&mut result).ok().map(|_| result)
+         }
+ 

@@ -1,0 +1,69 @@
+=== BEFORE (pristine tree, commit 5a5f0e24) - repro/ run against unpatched hayro-jbig2 ===
+$ cargo run   (in ___BUGHUNT___/001.jbig2_huffman_range_offset_overflow/repro)
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running `target/debug/repro`
+
+thread 'main' (15323) panicked at /home/rafal/Projekty/Obce/hayro/hayro-jbig2/src/huffman_table.rs:455:25:
+attempt to add with overflow
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:80:14
+   2: core::panicking::panic_const::panic_const_add_overflow
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:175:17
+   3: <hayro_jbig2::huffman_table::HuffmanNode>::decode_from
+             at /home/rafal/Projekty/Obce/hayro/hayro-jbig2/src/huffman_table.rs:455:25
+   4: <hayro_jbig2::huffman_table::HuffmanTable>::decode
+             at /home/rafal/Projekty/Obce/hayro/hayro-jbig2/src/huffman_table.rs:42:9
+   5: hayro_jbig2::decode::symbol::decode::{closure#1}
+             at /home/rafal/Projekty/Obce/hayro/hayro-jbig2/src/decode/symbol.rs:67:18
+   6: hayro_jbig2::decode::symbol::decode
+             at /home/rafal/Projekty/Obce/hayro/hayro-jbig2/src/decode/symbol.rs:91:39
+   7: hayro_jbig2::decode_segments
+             at /home/rafal/Projekty/Obce/hayro/hayro-jbig2/src/lib.rs:351:34
+   8: <hayro_jbig2::Image>::decode_with::<repro::NullDecoder>
+             at /home/rafal/Projekty/Obce/hayro/hayro-jbig2/src/lib.rs:196:9
+   9: <hayro_jbig2::Image>::decode::<repro::NullDecoder>
+             at /home/rafal/Projekty/Obce/hayro/hayro-jbig2/src/lib.rs:188:14
+  10: repro::main::{closure#0}
+             at ./src/main.rs:27:27
+  11: std::panicking::catch_unwind::do_call::<repro::main::{closure#0}, ()>
+             at /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:576:43
+  12: __rust_try
+  13: std::panicking::catch_unwind::<(), repro::main::{closure#0}>
+             at /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:544:19
+  14: std::panic::catch_unwind::<repro::main::{closure#0}, ()>
+             at /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panic.rs:359:14
+  15: repro::main
+             at ./src/main.rs:24:18
+  16: <fn() as core::ops::function::FnOnce<()>>::call_once
+             at /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+REPRODUCED - panicked: Any { .. }
+
+=== AFTER (patched tree, patch.diff applied) - same repro/ run again ===
+$ cargo run
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running `target/debug/repro`
+did not reproduce - decode completed without panicking
+
+=== Repeatability: repro run 3x against pristine tree, before capturing the run above ===
+run 1: thread 'main' panicked at hayro-jbig2/src/huffman_table.rs:455:25: attempt to add with overflow -> REPRODUCED
+run 2: thread 'main' panicked at hayro-jbig2/src/huffman_table.rs:455:25: attempt to add with overflow -> REPRODUCED
+run 3: thread 'main' panicked at hayro-jbig2/src/huffman_table.rs:455:25: attempt to add with overflow -> REPRODUCED
+
+=== Sweep of all 17 stale hayro-fuzz/artifacts/fuzz_jbig2/crash-* files (same corpus referenced in IDEAS.md) ===
+Pristine tree:  ok=0 panicked=17 (all 17 panic at the same huffman_table.rs:455 location)
+Patched tree:   ok=17 panicked=0
+
+=== cargo test -p hayro-jbig2 --lib (unit tests) ===
+Before (pristine): 2 passed; 0 failed (test_segment_header_example_1, test_segment_header_example_2)
+After (patched):   5 passed; 0 failed (the same 2 pre-existing tests + 3 new overflow_boundary_tests)
+
+cargo test -p hayro-jbig2 --test asset_suite fails identically before and after with
+"No test inputs were found. Run `python sync.py` to download them." - a pre-existing
+environment condition (no network access to download test assets in this sandbox), unrelated
+to this change.

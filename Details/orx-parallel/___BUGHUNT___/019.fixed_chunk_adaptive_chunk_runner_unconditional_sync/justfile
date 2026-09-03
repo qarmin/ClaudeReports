@@ -1,0 +1,42 @@
+# Self-contained reproduction attempt for this candidate.
+#
+# Status: Not reproducible (see RESULT.md) - there is no patch.diff. `reproduce-before` runs the
+# main probe binary against a pristine clone of base_commit: it confirms FixedChunkRunner<P>/
+# AdaptiveChunkRunner<P> are unconditionally Sync even for a !Sync/!Send witness pool, then shares
+# a reference to the runner across a real second OS thread (only possible because of that Sync
+# impl) and shows no public API call from that thread can reach the inner pool. `probe-privacy`
+# additionally captures the two compile-time checks (private field, private trait) that establish
+# *why* nothing is reachable.
+
+repo_url := "https://github.com/orxfun/orx-parallel.git"
+base_commit := "b9214fbeb714e4bb8f8858676a818cef2f21b097"
+
+# Full cycle: clone pristine, run the probe (expected to print the three "confirms .. but no
+# public API reaches it" lines documented in output.txt, not to crash/corrupt anything).
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    mkdir -p clone
+    git clone {{repo_url}} clone/orx-parallel
+    cd clone/orx-parallel && git checkout {{base_commit}}
+
+reproduce-before:
+    cd repro && cargo test --release
+    cd repro && cargo run --release
+
+# Control experiment: prove the two "nothing reachable" claims aren't just this repro failing to
+# try hard enough - actually attempt field access and trait naming against the pristine clone and
+# capture the real compiler errors (matches output.txt's "Probe A"/"Probe B" sections).
+probe-privacy:
+    cp repro/src/main.rs repro/src/main.rs.orig
+    sed -i '/let runner = Runner::fixed_with_pool(pool);/a\    let _ = runner.pool;' repro/src/main.rs
+    cd repro && (cargo build --release 2>&1 | grep -A3 "^error\[" || true)
+    cp repro/src/main.rs.orig repro/src/main.rs
+    printf '\n#[allow(dead_code)]\nfn probe_trait() { let _: &dyn orx_parallel::ParRunner; }\n' >> repro/src/main.rs
+    cd repro && (cargo build --release 2>&1 | grep -A3 "^error\[" || true)
+    cp repro/src/main.rs.orig repro/src/main.rs
+    rm repro/src/main.rs.orig
+
+clean:
+    rm -rf clone

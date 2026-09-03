@@ -1,0 +1,99 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# This candidate is a measurement-only re-confirmation (via `perf stat -e L1-dcache-load-misses`)
+# of candidates 060/064's already-known `#[inline]` fix - `patch.diff` here is byte-identical to
+# candidate 064's (same convention candidate 037 used for its own measurement-only
+# re-confirmation of an already-known fix, with a different measurement tool). Needs `perf` on
+# PATH with usable perf_event access (`perf_event_paranoid <= 1`, or `-1`) - falls back to a loud
+# message and skips the perf step if unavailable, rather than failing silently.
+#
+# The temporary example driver this needs (_perf_check_065.rs) is NOT part of patch.diff (see
+# RESULT.md's "Does it change behavior/output?" - it's measurement tooling, not the fix) - this
+# justfile writes it into the clone directly instead of assuming a reader already has it.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+test: clone add-driver build-baseline build-patched perf-compare
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Adds the temporary example driver + its [[example]] Cargo.toml entry to the clone. Kept out of
+# patch.diff on purpose (measurement tooling, not the fix) - see justfile header.
+add-driver:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cat > clone/examples/_perf_check_065.rs <<'RUST'
+    use std::env;
+    use std::hint::black_box;
+
+    use image::{imageops, DynamicImage, ImageBuffer, Rgba};
+
+    fn main() {
+        let args: Vec<String> = env::args().collect();
+        let which = args.get(1).map(String::as_str).unwrap_or("vertical");
+        let iters: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(200);
+
+        let mut img = DynamicImage::from(ImageBuffer::from_fn(1920, 1080, |x, y| {
+            Rgba([x as u8, y as u8, ((x * 3 + y) % 256) as u8, 255])
+        }));
+        let start = Rgba([0u8, 128, 0, 0]);
+        let stop = Rgba([255u8, 255, 255, 255]);
+
+        for _ in 0..iters {
+            match which {
+                "vertical" => imageops::vertical_gradient(black_box(&mut img), &start, &stop),
+                "horizontal" => imageops::horizontal_gradient(black_box(&mut img), &start, &stop),
+                other => panic!("unknown mode: {other}"),
+            }
+        }
+
+        black_box(&img);
+    }
+    RUST
+    python3 - <<'PY'
+    content = open("clone/Cargo.toml").read()
+    marker = '[[example]]\nname = "bmp_1bit_encoding"\nrequired-features = ["bmp"]\n'
+    addition = marker + '\n[[example]]\nname = "_perf_check_065"\nrequired-features = ["bmp"]\n'
+    assert marker in content, "bmp_1bit_encoding [[example]] block not found - Cargo.toml layout changed since base_commit"
+    open("clone/Cargo.toml", "w").write(content.replace(marker, addition))
+    PY
+
+build-baseline:
+    cd clone && cargo build --release --example _perf_check_065
+    mkdir -p bin
+    cp clone/target/release/examples/_perf_check_065 bin/baseline
+
+build-patched: apply
+    cd clone && cargo build --release --example _perf_check_065
+    mkdir -p bin
+    cp clone/target/release/examples/_perf_check_065 bin/patched
+
+# Compares L1-dcache-load-misses (and instructions/loads for context) between baseline and
+# patched, for both vertical_gradient and horizontal_gradient, single-core pinned.
+perf-compare:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v perf >/dev/null; then
+        echo "perf not installed/usable - skipping perf-compare step (see RESULT.md for this session's already-captured numbers)"
+        exit 0
+    fi
+    for variant in baseline patched; do
+        for mode in vertical horizontal; do
+            echo "=== ${variant} ${mode} ==="
+            taskset -c 0 perf stat -e L1-dcache-loads,L1-dcache-load-misses,instructions,cycles,task-clock \
+                -- "bin/${variant}" "${mode}" 200 2>&1 | grep -E "L1-dcache-load-misses|L1-dcache-loads|instructions|cycles|task-clock"
+        done
+    done
+
+clean:
+    rm -rf clone bin

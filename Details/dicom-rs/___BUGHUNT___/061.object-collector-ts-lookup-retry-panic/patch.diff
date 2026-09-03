@@ -1,0 +1,47 @@
+diff --git a/object/src/collector.rs b/object/src/collector.rs
+index 9be81739..4fdd4091 100644
+--- a/object/src/collector.rs
++++ b/object/src/collector.rs
+@@ -448,15 +448,16 @@ where
+                 odd_length,
+                 charset_override,
+             } => {
+-                let src = src.take().unwrap();
+-
+-                // look up transfer syntax
++                // look up transfer syntax BEFORE taking the reader, so that a
++                // failed lookup leaves self intact and a retry doesn't unwrap None
+                 let ts = ts_index
+                     .get(ts_uid)
+                     .context(UnrecognizedTransferSyntaxSnafu {
+                         ts_uid: ts_uid.to_string(),
+                     })?;
+ 
++                let src = src.take().unwrap();
++
+                 let mut options = LazyDataSetReaderOptions::default();
+                 options.odd_length = *odd_length;
+                 options.charset_override = *charset_override;
+@@ -1365,6 +1366,22 @@ mod tests {
+         assert_eq!(dset, dataset1);
+     }
+ 
++    #[test]
++    fn ts_lookup_panic_repro() {
++        let encoded: Vec<u8> = vec![0u8; 16];
++        let reader = BufReader::new(std::io::Cursor::new(&encoded));
++        let mut collector = DicomCollector::new_with_ts(reader, "1.2.3.4.not.a.real.ts");
++
++        let mut dset = InMemDicomObject::new_empty();
++        let first = collector.read_dataset_to_end(&mut dset);
++        assert!(first.is_err());
++
++        // retrying after the failed lookup should return the same error again,
++        // not panic
++        let second = collector.read_dataset_to_end(&mut dset);
++        assert!(second.is_err());
++    }
++
+     /// read a DICOM data set to the end,
+     /// inferring the transfer syntax from the file meta group
+     #[test]

@@ -1,0 +1,54 @@
+--- environment ---
+RLIMIT_NOFILE (soft): 2147483584
+RLIMIT_NOFILE (hard): 2147483584
+
+--- building mp4file_read_from with --sanitizer address (untimed) ---
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+
+=== [1/3] baseline: run mp4file_read_from under ASAN with the sandbox's real (huge) ulimit, empty corpus ===
+    (expected: hangs - stuck at the first NEW_FUNC coverage-symbolization event)
+exit code: 124 (124 = killed by the 30s wall-clock timeout, i.e. hung)
+INFO:        0 files found in /tmp/tmp.psBV0Hvun6
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: A corpus is not provided, starting from an empty corpus
+#2	INITED cov: 50 ft: 51 corp: 1/1b exec/s: 0 rss: 40Mb
+	NEW_FUNC[1/4]: ==159666== libFuzzer: run interrupted; exiting
+==159668== libFuzzer: run interrupted; exiting
+
+--- capturing a real gdb backtrace of the hang (best-effort, requires ptrace on a direct child - works in most sandboxes since gdb spawns the target itself) ---
+--- gdb backtrace of the hung symbolizer-fork child (inferior 2) ---
+Thread 1.2 "mp4file_read_fr" received signal SIGINT, Interrupt.
+[Switching to Thread 0x79b0e5eb96c0 (LWP 159685)]
+__syscall_cancel_arch () at ../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:56
+warning: 56	../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S: No such file or directory
+[Switching to inferior 2 [process 159686] (/home/rafal/Projekty/Obce/lofty-rs/target/x86_64-unknown-linux-gnu/release/mp4file_read_from)]
+[Switching to thread 2.1 (Thread 0x7db0ea86b880 (LWP 159686))]
+#0  0x00005b72537116aa in __sanitizer::internal_close(int) ()
+#0  0x00005b72537116aa in __sanitizer::internal_close(int) ()
+#1  0x00005b725371efdc in __sanitizer::StartSubprocess(char const*, char const* const*, char const* const*, int, int, int) ()
+#2  0x00005b7253729ca7 in __sanitizer::SymbolizerProcess::StartSymbolizerSubprocess() ()
+#3  0x00005b7253728a18 in __sanitizer::SymbolizerProcess::SendCommand(char const*) ()
+#4  0x00005b725372877f in __sanitizer::LLVMSymbolizer::SymbolizePC(unsigned long, __sanitizer::SymbolizedStack*) ()
+#5  0x00005b7253726f67 in __sanitizer::Symbolizer::SymbolizePC(unsigned long) ()
+#6  0x00005b72537253c7 in __sanitizer::(anonymous namespace)::StackTraceTextPrinter::ProcessAddressFrames(unsigned long) ()
+#7  0x00005b72537258ec in __sanitizer_symbolize_pc ()
+#8  0x00005b7253e886dd in fuzzer::DescribePC[abi:cxx11](char const*, unsigned long) (SymbolizedFMT=SymbolizedFMT@entry=0x5b7253fc7b1d "%p %F %L", PC=100546585635553) at libfuzzer/FuzzerUtil.cpp:194
+#9  0x00005b7253e888e9 in fuzzer::PrintPC (SymbolizedFMT=SymbolizedFMT@entry=0x5b7253fc7b1d "%p %F %L", FallbackFMT=FallbackFMT@entry=0x5b7253fc7b11 "%p", PC=<optimized out>) at libfuzzer/FuzzerUtil.cpp:202
+#10 0x00005b7253e80834 in fuzzer::TracePC::UpdateObservedPCs (this=0x5b7254d52600 <fuzzer::TPC>) at libfuzzer/FuzzerTracePC.cpp:200
+#11 0x00005b7253e5e55c in fuzzer::Fuzzer::RunOne (this=this@entry=0x7b40e9be0580, Data=0x7bc0e9be0100 "G\n", '\276' <repeats 198 times>..., Size=<optimized out>, Size@entry=2, MayDeleteFile=MayDeleteFile@entry=true, II=<optimized out>, II@entry=0x7ab0e9be0040, ForceAddToCorpus=ForceAddToCorpus@entry=false, FoundUniqFeatures=0x7ffd85dafb8f) at libfuzzer/FuzzerLoop.cpp:537
+#12 0x00005b7253e60723 in fuzzer::Fuzzer::MutateAndTestOne (this=this@entry=0x7b40e9be0580) at libfuzzer/FuzzerLoop.cpp:765
+#13 0x00005b7253e61fb8 in fuzzer::Fuzzer::Loop (this=this@entry=0x7b40e9be0580, CorporaFiles=std::vector of length 0, capacity 0) at libfuzzer/FuzzerLoop.cpp:910
+
+=== [2/3] fix under test: same target, same empty corpus, ASAN, but with ulimit -Sn lowered first ===
+exit code: 0 (0 = completed cleanly, no hang)
+#1897405	REDUCE cov: 127 ft: 249 corp: 29/1222b lim: 4096 exec/s: 126493 rss: 507Mb L: 23/267 MS: 2 CopyPart-EraseBytes-
+#1903375	DONE   cov: 127 ft: 249 corp: 29/1222b lim: 4096 exec/s: 118960 rss: 507Mb
+###### Recommended dictionary. ######
+"\377\377\377\377\377\377\377\377" # Uses: 54466
+"\001\000\000\000" # Uses: 57605
+"\001\000" # Uses: 59911
+###### End of recommended dictionary. ######
+Done 1903375 runs in 16 second(s)
+
+=== [3/3] RESULT ===
+CONFIRMED: mp4file_read_from hangs under --sanitizer address with this sandbox's real RLIMIT_NOFILE (baseline exit 124 = killed while hung), and lowering RLIMIT_NOFILE with 'ulimit -Sn 65536' before the same command makes it run to completion cleanly (exit 0) with full ASAN instrumentation still active.

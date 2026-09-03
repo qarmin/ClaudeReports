@@ -1,0 +1,49 @@
+# Self-contained reproduction for this candidate.
+#
+# Extends candidate 017's confirmed pic-scale-safe compute_weights.rs window-misalignment bug
+# (originally shown only for horizontal Luma8) to the vertical resampling pass and to
+# Rgb8/Rgba8/Luma16. The bug itself lives in the `pic-scale-safe` dependency
+# (github.com/awxkee/pic-scale-safe), not in the `image` repo - same as candidate 017 - but the
+# trigger path is `image`'s own public API (`DynamicImage::resize_exact`), which is what a real
+# caller would use, so this clones both repos: `image` (the real end-to-end entry point) and
+# `pic-scale-safe` (where candidate 017's already-verified patch.diff applies, reused unmodified
+# here since the root cause and fix are identical).
+#
+# repo_url/base_commit: `image-rs/image`, read via `git remote get-url origin` / `git rev-parse
+# HEAD` in the main project at the moment patch.diff was captured.
+# dep_repo_url/dep_base_commit: `awxkee/pic-scale-safe`, the exact version `image`'s Cargo.lock
+# resolved to at that same moment (0.1.11, tag `0.1.11` == this commit) - identical to candidate
+# 017's, since this is the same shared dependency code.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+dep_repo_url := "https://github.com/awxkee/pic-scale-safe.git"
+dep_base_commit := "83c4801428c436678d7c6b6bea74af800924a469"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone dep_clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{dep_repo_url}} dep_clone
+    cd dep_clone && git checkout {{dep_base_commit}}
+
+# Build+run the standalone repro against the pristine, unpatched pic-scale-safe. Should show real
+# disagreements (many gray levels, not +-1 rounding noise) against the independent legacy
+# imageops::resize oracle, on every orientation/pixel-type case, not just horizontal Luma8.
+reproduce-before:
+    cd repro && cargo run --release || true
+
+# Patch the pic-scale-safe clone in place with candidate 017's already-verified fix (reused
+# unmodified - same root cause, same fix, same shared `generate_weights` function).
+apply:
+    cd dep_clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched pic-scale-safe - should agree with the oracle to
+# within ordinary +-1 rounding noise on every case.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone dep_clone

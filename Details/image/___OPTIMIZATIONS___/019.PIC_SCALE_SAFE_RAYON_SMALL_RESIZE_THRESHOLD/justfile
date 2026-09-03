@@ -1,0 +1,45 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# This candidate re-applies candidate 002's Cargo.toml change (forward the `rayon` feature into
+# `pic-scale-safe`) plus an extended `benches/imageops.rs` with small-output and small-source
+# cases, to check whether pic-scale-safe's unconditional rayon dispatch (no minimum-size gate)
+# regresses at genuinely small total resize work.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+# patch.diff bundles a harness-only hunk (the extended benches/imageops.rs with small-output/
+# small-source dynamic_resize cases) with the actual fix (Cargo.toml's `rayon` feature-forward,
+# same change as candidate 002). apply-harness applies just the former so the same benchmarks
+# exist in both the baseline (rayon not forwarded) and patched build; apply-fix applies the
+# latter on top, for the patched build only.
+test: clone apply-harness bench-baseline apply-fix bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-harness:
+    cd clone && git apply --exclude='Cargo.toml' "{{justfile_directory()}}/patch.diff"
+
+apply-fix:
+    cd clone && git apply --include='Cargo.toml' "{{justfile_directory()}}/patch.diff"
+
+bench-baseline:
+    @echo "=== baseline (before patch, pic-scale-safe rayon NOT forwarded) ==="
+    cd clone && cargo build --release --bench imageops
+    cd clone && ./target/release/deps/imageops-* --bench --list 2>/dev/null | grep dynamic_resize
+    cd clone && ./target/release/deps/imageops-* --bench "dynamic_resize/DynamicImage::resize_exact 400x300->32x24 Triangle" --exact --noplot
+
+bench-patched:
+    @echo "=== patched (after patch, pic-scale-safe rayon forwarded) ==="
+    cd clone && cargo build --release --bench imageops
+    cd clone && ./target/release/deps/imageops-* --bench --list 2>/dev/null | grep dynamic_resize
+    cd clone && ./target/release/deps/imageops-* --bench "dynamic_resize/DynamicImage::resize_exact 400x300->32x24 Triangle" --exact --noplot
+
+clean:
+    rm -rf clone

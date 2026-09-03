@@ -1,0 +1,61 @@
+Command: `LIBGL_ALWAYS_SOFTWARE=1 cargo run --release` (from repro/, against clone/ at base_commit
+7516831426fb70f36d62c521c5477f6a7265b36a)
+
+=== BEFORE applying patch.diff (bug present) ===
+vello_cpu:               fraction of pixels != solid red = 0.0000
+vello_hybrid (Backends::GL, adapter=llvmpipe (LLVM 21.1.8, 256 bits)): fraction of pixels != solid red = 1.0000
+
+BUG REPRODUCED: vello_hybrid's Backends::GL render target is mostly NOT the uploaded solid-red image (mismatch fraction 1.0000), even though vello_cpu (mismatch fraction 0.0000) renders the identical scene correctly.
+exit status: 1
+
+Repeated 3/3 times (fresh process each run): identical result every run (mismatch fraction exactly
+1.0000, i.e. every single pixel of the 64x64 render target differs from the uploaded solid-red
+image by more than the 2-per-channel tolerance).
+
+=== AFTER applying patch.diff (fixed) ===
+vello_cpu:               fraction of pixels != solid red = 0.0000
+vello_hybrid (Backends::GL, adapter=llvmpipe (LLVM 21.1.8, 256 bits)): fraction of pixels != solid red = 0.0000
+
+OK: vello_hybrid's Backends::GL output matches the uploaded image (mismatch fraction 0.0000), consistent with vello_cpu's reference render.
+exit status: 0
+
+Repeated 3/3 times (fresh process each run): identical result every run (mismatch fraction exactly
+0.0000).
+
+=== Cross-check: the same unpatched checkout, forcing wgpu::Backends::VULKAN instead of
+    wgpu::Backends::GL (via VK_ICD_FILENAMES pointed at a SwiftShader software Vulkan ICD) ===
+vello_cpu:               fraction of pixels != solid red = 0.0000
+vello_hybrid (Backends::GL, adapter=SwiftShader Device (Subzero)): fraction of pixels != solid red = 0.0000
+
+OK: vello_hybrid's Backends::GL output matches the uploaded image (mismatch fraction 0.0000), consistent with vello_cpu's reference render.
+exit status: 0
+
+(Adapter label in this cross-check run still prints "Backends::GL" because that's the print
+string baked into the repro's message, not the value of `backends` actually passed for this
+one-off check - the adapter name "SwiftShader Device (Subzero)" and the fully-matching output
+confirm Backends::VULKAN was what actually ran. This shows the bug is specific to wgpu's GL/GLES
+backend - the same scene renders correctly through vello_hybrid on Vulkan even on the unpatched
+tree.)
+
+=== Broader signal: differential sweep across 22 real `vello_example_scenes` scenes ===
+(vello_tests' own `compare_gpu_cpu` harness bug from candidate 065 was re-applied locally, for this
+session only, to make a real CPU-vs-GPU comparison possible; see RESULT.md.)
+
+Run: VK_ICD_FILENAMES=/tmp/swiftshader_icd/vk_swiftshader_icd.json WGPU_BACKEND=vulkan (SwiftShader):
+scene=9  diff_bytes=31706/1920000  max_byte_diff=150  mean_byte_diff=0.068847   (image scene)
+scene=10 diff_bytes=600363/1920000 max_byte_diff=2   mean_byte_diff=0.315629   (multi_image scene)
+(all 22 scenes stayed in the same small numeric-divergence range; images render correctly, matching CPU)
+
+Run: WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1 (Mesa llvmpipe), same 22 scenes, BEFORE patch.diff:
+scene=9  diff_bytes=514501/1920000  max_byte_diff=255 mean_byte_diff=31.971738  (image scene - BLANK)
+scene=10 diff_bytes=1555199/1920000 max_byte_diff=255 mean_byte_diff=101.013712 (multi_image scene - BLANK)
+(every other, non-image-bearing scene stayed in the same small-divergence range as the Vulkan run)
+
+Run: WGPU_BACKEND=gl LIBGL_ALWAYS_SOFTWARE=1, same 22 scenes, AFTER patch.diff:
+scene=9  diff_bytes=30530/1920000  max_byte_diff=203 mean_byte_diff=0.061828   (back to normal range)
+scene=10 diff_bytes=600356/1920000 max_byte_diff=2   mean_byte_diff=0.315629   (back to normal range, matches Vulkan run almost exactly)
+
+=== Project test suite, before vs. after patch.diff ===
+`cargo test -p vello_common -p vello_cpu -p vello_hybrid -p vello_encoding --release --lib`
+BEFORE: 160 + 81 + 31 + 122 = 394 passed; 0 failed; 1 ignored (across the four packages)
+AFTER:  160 + 81 + 31 + 122 = 394 passed; 0 failed; 1 ignored (identical - no regressions, no newly-passing test)

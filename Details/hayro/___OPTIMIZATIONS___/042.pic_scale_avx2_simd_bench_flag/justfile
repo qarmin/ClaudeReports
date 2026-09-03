@@ -1,0 +1,51 @@
+# Self-contained reproduction for this candidate.
+#
+# The fix is a one-line change to hayro-bench/Cargo.toml (add hayro's "simd" feature, which
+# hayro-jpeg2000's own dependency line and hayro-tests already request but hayro-bench never
+# did). No hayro library source is touched. `just test` builds hayro-bench twice (before/after
+# the patch) and runs render_bench against img.pdf, printing both timings and a pixel diff -
+# see RESULT.md for why the pixel diff is a real (AVX2-only) correctness bug in pic-scale, not
+# a benign rounding difference.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+test: clone build-baseline bench-baseline apply build-patched bench-patched diff
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp "{{justfile_directory()}}/img.pdf" clone/bench_input.pdf
+    mkdir -p clone/bench_input
+    cp "{{justfile_directory()}}/img.pdf" clone/bench_input/img.pdf
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone && cargo build --release -p hayro-bench
+
+bench-baseline:
+    @echo "=== baseline (hayro-bench, no simd - scalar pic-scale fallback) ==="
+    cd clone && taskset -c 0 ./target/release/render_bench bench_input --backend hayro --iter 200
+    cd clone && ./target/release/render_bench bench_input --backend hayro --iter 1 --save-bitmaps
+    cp clone/bench_input-hayro/img/page_0001_595x841.png baseline_out.png
+    rm -rf clone/bench_input-hayro
+
+build-patched:
+    cd clone && cargo build --release -p hayro-bench
+
+bench-patched:
+    @echo "=== patched (hayro-bench, simd added - AVX2/SSE pic-scale handlers) ==="
+    cd clone && taskset -c 0 ./target/release/render_bench bench_input --backend hayro --iter 200
+    cd clone && ./target/release/render_bench bench_input --backend hayro --iter 1 --save-bitmaps
+    cp clone/bench_input-hayro/img/page_0001_595x841.png patched_out.png
+    rm -rf clone/bench_input-hayro
+
+diff:
+    @echo "=== pixel diff between baseline_out.png and patched_out.png (expect a small, nonzero AE on an AVX2 machine - see RESULT.md) ==="
+    compare -metric AE -fuzz 0% baseline_out.png patched_out.png diff_out.png || true
+
+clean:
+    rm -rf clone baseline_out.png patched_out.png diff_out.png

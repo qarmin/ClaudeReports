@@ -1,0 +1,33 @@
+# Self-contained reproduction for candidate 027: u16 multiply overflow computing the expected
+# WAVE fmt-chunk block align.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing here reaches outside the folder it lives in.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Writes 7 WAV files (varying nChannels/wBitsPerSample) and opens each through the real
+# `symphonia::default::get_probe().probe()` entry point. Should panic with "attempt to multiply
+# with overflow" on 3 of them and exit non-zero (leading `-` keeps `just test` going so it can
+# reach apply/reproduce-after).
+reproduce-before:
+    -ulimit -c 0 && cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro against the patched clone - every file must now be rejected with
+# "riff: invalid channel count", no panic, exit 0.
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target

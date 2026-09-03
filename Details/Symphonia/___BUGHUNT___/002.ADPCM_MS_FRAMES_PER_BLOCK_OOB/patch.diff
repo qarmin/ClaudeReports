@@ -1,0 +1,73 @@
+diff --git a/symphonia-codec-adpcm/src/codec_ima_qt.rs b/symphonia-codec-adpcm/src/codec_ima_qt.rs
+index 55bcd96..edcc2c1 100644
+--- a/symphonia-codec-adpcm/src/codec_ima_qt.rs
++++ b/symphonia-codec-adpcm/src/codec_ima_qt.rs
+@@ -5,12 +5,17 @@
+ // License, v. 2.0. If a copy of the MPL was not distributed with this
+ // file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
+-use symphonia_core::errors::Result;
++use symphonia_core::errors::{Result, decode_error};
+ use symphonia_core::io::ReadBytes;
+ 
+ use crate::common::{Nibble, u16_to_i32};
+ use crate::common_ima::AdpcmImaBlockStatus;
+ 
++/// IMA4 blocks are a fixed 34 bytes (a 2-byte preamble followed by 32 bytes of nibbles), which
++/// always expands to exactly 64 frames, regardless of what `frames_per_block` a (possibly
++/// malformed) container claims.
++const IMA4_FRAMES_PER_BLOCK: usize = 64;
++
+ fn read_preamble<B: ReadBytes>(stream: &mut B) -> Result<AdpcmImaBlockStatus> {
+     let header = stream.read_be_u16()?;
+     let predictor = u16_to_i32!(header & 0xFF80);
+@@ -27,6 +32,10 @@ pub(crate) fn decode_mono<B: ReadBytes>(
+ ) -> Result<()> {
+     // IMA4 apparently always uses 34 bytes packets
+     // https://wiki.multimedia.cx/index.php/Apple_QuickTime_IMA_ADPCM
++    if buffer.len() < IMA4_FRAMES_PER_BLOCK {
++        return decode_error("adpcm (ima qt): frames_per_block must be at least 64");
++    }
++
+     let mut status = read_preamble(stream)?;
+     for byte in 0..32 {
+         let nibbles = stream.read_u8()?;
+diff --git a/symphonia-codec-adpcm/src/codec_ms.rs b/symphonia-codec-adpcm/src/codec_ms.rs
+index e05fbb7..bd35205 100644
+--- a/symphonia-codec-adpcm/src/codec_ms.rs
++++ b/symphonia-codec-adpcm/src/codec_ms.rs
+@@ -5,7 +5,7 @@
+ // License, v. 2.0. If a copy of the MPL was not distributed with this
+ // file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ 
+-use symphonia_core::errors::{Result, unsupported_error};
++use symphonia_core::errors::{Result, decode_error, unsupported_error};
+ use symphonia_core::io::ReadBytes;
+ use symphonia_core::util::clamp::clamp_i16;
+ 
+@@ -104,6 +104,12 @@ pub(crate) fn decode_mono<B: ReadBytes>(
+     buffer: &mut [i32],
+     frames_per_block: usize,
+ ) -> Result<()> {
++    // Every MS ADPCM block stores 2 uncompressed preamble samples before any compressed nibbles,
++    // so a block of fewer than 2 frames cannot be decoded.
++    if frames_per_block < 2 {
++        return decode_error("adpcm (ms): frames_per_block must be at least 2");
++    }
++
+     let mut status = AdpcmMsBlockStatus::read_mono_preamble(stream)?;
+     buffer[0] = from_i16_shift!(status.sample2);
+     buffer[1] = from_i16_shift!(status.sample1);
+@@ -121,6 +127,12 @@ pub(crate) fn decode_stereo<B: ReadBytes>(
+     buffers: [&mut [i32]; 2],
+     frames_per_block: usize,
+ ) -> Result<()> {
++    // Every MS ADPCM block stores 2 uncompressed preamble samples per channel before any
++    // compressed nibbles, so a block of fewer than 2 frames cannot be decoded.
++    if frames_per_block < 2 {
++        return decode_error("adpcm (ms): frames_per_block must be at least 2");
++    }
++
+     let (mut left_status, mut right_status) = AdpcmMsBlockStatus::read_stereo_preamble(stream)?;
+     buffers[0][0] = from_i16_shift!(left_status.sample2);
+     buffers[0][1] = from_i16_shift!(left_status.sample1);

@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# repo_url/base_commit read at the moment patch.diff was captured (git remote get-url origin /
+# git rev-parse HEAD in the main project) - patch.diff is a diff against that exact commit and
+# may stop applying cleanly once the main branch moves on.
+
+repo_url := "https://github.com/linebender/kurbo.git"
+base_commit := "ca273499e3e48bd2de6f02aa8e99a148984e45f3"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug
+# (the original assertion condition, copied verbatim from kurbo/src/rect.rs, accepts a rect
+# whose height is 5x its outer's height).
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone. Note: this repro reproduces the flawed
+# CONDITION itself (copied verbatim into repro/src/main.rs), not the live `rect.rs` test - so
+# `reproduce-after`'s printed output is identical to `reproduce-before`'s (the repro always shows
+# both the original and corrected condition side by side). What "after" actually proves is that
+# `just apply`'s patch.diff applies cleanly to rect.rs's real test helper and the full test suite
+# still passes against the patched clone - run below.
+reproduce-after:
+    cd repro && cargo run --release
+    cd clone/kurbo && cargo test --lib rect::tests
+
+clean:
+    rm -rf clone

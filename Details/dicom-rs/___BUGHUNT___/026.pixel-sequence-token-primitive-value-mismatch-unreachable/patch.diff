@@ -1,0 +1,36 @@
+diff --git a/parser/src/dataset/mod.rs b/parser/src/dataset/mod.rs
+index 18469cae..8f7f6e90 100644
+--- a/parser/src/dataset/mod.rs
++++ b/parser/src/dataset/mod.rs
+@@ -641,7 +641,30 @@ where
+                                     ),
+                                 )
+                             }
+-                            Value::Primitive(_) | Value::Sequence { .. } => unreachable!(),
++                            v @ Value::Primitive(_) => {
++                                // this can only happen in malformed data (the tag/VR/undefined
++                                // length combination that identifies encapsulated pixel data,
++                                // but with an ordinary primitive value instead), but we try to
++                                // handle it gracefully anyway, mirroring the analogous mismatch
++                                // handling in the `SequenceStart` case above
++                                tracing::warn!(
++                                    "Unexpected primitive value for pixel data {} with undefined length",
++                                    header.tag
++                                );
++                                let adapted_elem = DataElement::new(header.tag, header.vr(), v);
++                                (
++                                    Some(DataToken::ElementHeader(*adapted_elem.header())),
++                                    DataElementTokens::Header(Some(adapted_elem)),
++                                )
++                            }
++                            Value::Sequence { .. } => {
++                                // this is also invalid, for the same reason as above
++                                tracing::warn!(
++                                    "Unexpected data set sequence for pixel data {} with undefined length, ignored",
++                                    header.tag
++                                );
++                                (None, DataElementTokens::End)
++                            }
+                         }
+                     }
+                     _ => (

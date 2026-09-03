@@ -1,0 +1,52 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff is candidate 073's full patch, UNMODIFIED (CHUNK_SIZE = 256) - chunked_arena does
+# not exist on master, so this is the prerequisite this candidate's CHUNK_SIZE = 1024 profiling
+# run is a one-line edit on top of, same as 078/080/083. See RESULT.md for the scheduling-counter
+# addition to `perf_test` this candidate made (not part of patch.diff - see its "harness" note).
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench at CHUNK_SIZE=256.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# perf_test (the project's own headless bench harness) reaches the patched code path directly -
+# no standalone bench crate was needed. This candidate needs `perf_test/` copied into `clone/`
+# manually first (it is untracked in the main checkout, see ___OPTIMIZATIONS___/README.md), with
+# RESULT.md's "scheduling counter" snippet applied to `perf_test/src/alloc_stats.rs`/`bench.rs` to
+# reproduce the `scheduling` output line (that addition is permanent in the live checkout's
+# `perf_test/`, so it is not a diff here - see README.md's "Instrumentation added" table).
+#
+# This builds and runs only the CHUNK_SIZE=256 reference point on the `flat` scrolling scene.
+# To reproduce the CHUNK_SIZE=1024 side (and the chunk-count/size debug counter this candidate
+# also used, since removed): after `just clone apply`, edit
+# clone/internal/core/partial_renderer.rs's CHUNK_SIZE constant to 1024, rebuild, and compare
+# with tools/paired.sh / tools/pixelcheck.sh against a saved copy of the 256 binary - see
+# RESULT.md for the exact invocations and results.
+bench:
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug
+    ./clone/target/rdebug/perf_test --bench --mode scroll --count 100000 --row-style flat --frames 20
+
+clean:
+    rm -rf clone

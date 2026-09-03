@@ -1,0 +1,62 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+
+repo_url := "https://github.com/orxfun/orx-parallel.git"
+base_commit := "b9214fbeb714e4bb8f8858676a818cef2f21b097"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+#
+# Note: for this specific bug, "reproduced" means the exploit program compiles and runs
+# (a soundness hole letting a Sync-but-!Send type flow across real thread boundaries
+# unchecked); "fixed" means the *same* program now fails to compile with a clear
+# `Self::Use: Send` bound error at the `.fold()` call site - that is the correct outcome
+# for a Send-soundness fix, not a runtime difference. `reproduce-after` therefore expects
+# (and reports) a compile failure, it is not a bug in this justfile.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should compile and run to
+# completion (the bug is present: PairPtr's unconditional `unsafe impl Send` lets a
+# Sync-but-!Send Use::Item flow through .fold() across real OS worker threads).
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should FAIL TO COMPILE (the fix makes
+# `.fold()` require `Self::Use: Send`, so PairPtr's blanket impl can no longer smuggle a
+# !Send per-thread state type through). A compile error here is the successful/expected
+# outcome, so this recipe prints the real compiler output and then explicitly asserts
+# that outcome (exit 0 only if the build failed with a `Send` bound error; exit 1 if it
+# still compiles, meaning the fix did not actually take effect).
+reproduce-after:
+    #!/usr/bin/env bash
+    set -o pipefail
+    cd repro
+    if cargo build --release 2>build_output.txt; then
+        echo "FIX NOT VERIFIED: repro still compiles after applying patch.diff" >&2
+        cat build_output.txt
+        exit 1
+    else
+        cat build_output.txt
+        if grep -q "Self::Use: Send" build_output.txt; then
+            echo
+            echo "FIX VERIFIED: repro now correctly fails to compile (Self::Use: Send bound enforced)."
+        else
+            echo "FIX NOT VERIFIED: build failed, but not for the expected reason (no 'Self::Use: Send' in output)" >&2
+            exit 1
+        fi
+    fi
+
+clean:
+    rm -rf clone

@@ -1,0 +1,127 @@
+diff --git a/hayro-jbig2/src/bitmap.rs b/hayro-jbig2/src/bitmap.rs
+index a9ae838..ee8bead 100644
+--- a/hayro-jbig2/src/bitmap.rs
++++ b/hayro-jbig2/src/bitmap.rs
+@@ -291,6 +291,52 @@ impl Bitmap {
+         }
+     }
+ 
++    #[cfg(test)]
++    pub(crate) fn combine_naive(
++        &mut self,
++        other: &Self,
++        x: i32,
++        y: i32,
++        operator: CombinationOperator,
++    ) {
++        for src_y in 0..other.height {
++            let dest_y = y + src_y as i32;
++            if dest_y < 0 || dest_y >= self.height as i32 {
++                continue;
++            }
++            for src_x in 0..other.width {
++                let dest_x = x + src_x as i32;
++                if dest_x < 0 || dest_x >= self.width as i32 {
++                    continue;
++                }
++                let src_pixel = other.get_pixel(src_x, src_y);
++                let dest_pixel = self.get_pixel(dest_x as u32, dest_y as u32);
++                let result = match operator {
++                    CombinationOperator::Or => dest_pixel | src_pixel,
++                    CombinationOperator::And => dest_pixel & src_pixel,
++                    CombinationOperator::Xor => dest_pixel ^ src_pixel,
++                    CombinationOperator::Xnor => 1 - (dest_pixel ^ src_pixel),
++                    CombinationOperator::Replace => src_pixel,
++                };
++                self.set_pixel_overwrite(dest_x as u32, dest_y as u32, result);
++            }
++        }
++    }
++
++    #[cfg(test)]
++    fn set_pixel_overwrite(&mut self, x: u32, y: u32, value: u8) {
++        if x >= self.width || y >= self.height {
++            return;
++        }
++        let word_idx = (y * self.stride + x / WORD_BITS) as usize;
++        let bit_pos = WORD_SHIFT - (x % WORD_BITS);
++        if value != 0 {
++            self.data[word_idx] |= 1 << bit_pos;
++        } else {
++            self.data[word_idx] &= !(1 << bit_pos);
++        }
++    }
++
+     #[inline]
+     pub(crate) fn get_word(&self, row: u32, word_idx: u32) -> Word {
+         if row >= self.height || word_idx >= self.stride {
+@@ -300,3 +346,69 @@ impl Bitmap {
+         self.data[(row * self.stride + word_idx) as usize]
+     }
+ }
++
++#[cfg(test)]
++mod combine_diff_tests {
++    use super::*;
++
++    // xorshift32, deterministic, no extra dev-dependency needed.
++    struct Rng(u32);
++    impl Rng {
++        fn next(&mut self) -> u32 {
++            let mut x = self.0;
++            x ^= x << 13;
++            x ^= x >> 17;
++            x ^= x << 5;
++            self.0 = x;
++            x
++        }
++        fn range(&mut self, lo: i32, hi: i32) -> i32 {
++            lo + (self.next() % ((hi - lo) as u32)) as i32
++        }
++    }
++
++    fn random_bitmap(rng: &mut Rng, w: u32, h: u32) -> Bitmap {
++        let mut bmp = Bitmap::new(w, h).unwrap();
++        for y in 0..h {
++            for x in 0..w {
++                bmp.set_pixel(x, y, (rng.next() & 1) as u8);
++            }
++        }
++        bmp
++    }
++
++    #[test]
++    fn combine_matches_naive_reference() {
++        let mut rng = Rng(0xC0FFEE ^ 1);
++        let ops = [
++            CombinationOperator::Or,
++            CombinationOperator::And,
++            CombinationOperator::Xor,
++            CombinationOperator::Xnor,
++            CombinationOperator::Replace,
++        ];
++
++        for iter in 0..20_000_u32 {
++            let dest_w = 1 + (rng.next() % 130);
++            let dest_h = 1 + (rng.next() % 20);
++            let src_w = 1 + (rng.next() % 130);
++            let src_h = 1 + (rng.next() % 20);
++
++            let src = random_bitmap(&mut rng, src_w, src_h);
++            let x = rng.range(-140, 140);
++            let y = rng.range(-25, 25);
++            let op = ops[(rng.next() as usize) % ops.len()];
++
++            let mut dest_a = random_bitmap(&mut rng, dest_w, dest_h);
++            let mut dest_b = dest_a.clone();
++
++            dest_a.combine(&src, x, y, op);
++            dest_b.combine_naive(&src, x, y, op);
++
++            assert_eq!(
++                dest_a.data, dest_b.data,
++                "mismatch at iter {iter}: dest {dest_w}x{dest_h}, src {src_w}x{src_h}, x={x}, y={y}, op={op:?}"
++            );
++        }
++    }
++}

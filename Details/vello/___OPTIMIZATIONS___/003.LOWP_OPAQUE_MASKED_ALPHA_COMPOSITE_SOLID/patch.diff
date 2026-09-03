@@ -1,0 +1,156 @@
+diff --git a/sparse_strips/vello_bench/src/fine/fill.rs b/sparse_strips/vello_bench/src/fine/fill.rs
+index 050bc784..f560f120 100644
+--- a/sparse_strips/vello_bench/src/fine/fill.rs
++++ b/sparse_strips/vello_bench/src/fine/fill.rs
+@@ -8,6 +8,7 @@ use vello_common::encode::EncodedPaint;
+ use vello_common::fearless_simd::Simd;
+ use vello_common::paint::{NoOpImageResolver, Paint, PremulColor};
+ use vello_common::peniko::BlendMode;
++use vello_common::tile::Tile;
+ use vello_cpu::fine::{Fine, FineKernel, FineResources, PaintFillAttrs, Span};
+ use vello_dev_macros::vello_bench;
+ 
+@@ -16,6 +17,16 @@ pub fn fill(c: &mut Criterion) {
+     opaque_long(c);
+     transparent_short(c);
+     transparent_long(c);
++    opaque_long_masked(c);
++    transparent_long_masked(c);
++}
++
++/// Builds a per-pixel AA-coverage mask (`Tile::HEIGHT` bytes per pixel column) with a mix of
++/// full and partial coverage values, representative of an anti-aliased fill's edge pixels.
++fn mask_alphas(width: u16) -> Vec<u8> {
++    (0..usize::from(width) * Tile::HEIGHT as usize)
++        .map(|i| (i * 37 % 256) as u8)
++        .collect()
+ }
+ 
+ #[vello_bench]
+@@ -50,6 +61,32 @@ pub fn transparent_long<S: Simd, N: FineKernel<S>>(b: &mut Bencher<'_>, fine: &m
+     fill_single(&paint, &[], width, b, default_blend(), fine);
+ }
+ 
++/// Same as `opaque_long`, but with a per-pixel AA-coverage mask supplied - exercises the
++/// `alphas.is_some()` branch of `fill_solid`/`alpha_composite_solid` instead of the
++/// no-mask `copy_solid` fast path.
++#[vello_bench]
++pub fn opaque_long_masked<S: Simd, N: FineKernel<S>>(b: &mut Bencher<'_>, fine: &mut Fine<S, N>) {
++    let paint = Paint::Solid(PremulColor::from_alpha_color(ROYAL_BLUE));
++    let width = 256;
++    let alphas = mask_alphas(width);
++
++    fill_single_with_alphas(&paint, &[], width, b, default_blend(), fine, Some(&alphas));
++}
++
++/// Same as `opaque_long_masked`, but with a non-opaque solid color, so the fast path added for
++/// fully-opaque colors under a mask should not apply here.
++#[vello_bench]
++pub fn transparent_long_masked<S: Simd, N: FineKernel<S>>(
++    b: &mut Bencher<'_>,
++    fine: &mut Fine<S, N>,
++) {
++    let paint = Paint::Solid(PremulColor::from_alpha_color(ROYAL_BLUE.with_alpha(0.3)));
++    let width = 256;
++    let alphas = mask_alphas(width);
++
++    fill_single_with_alphas(&paint, &[], width, b, default_blend(), fine, Some(&alphas));
++}
++
+ pub(crate) fn fill_single<S: Simd, N: FineKernel<S>>(
+     paint: &Paint,
+     encoded_paints: &[EncodedPaint],
+@@ -57,6 +94,18 @@ pub(crate) fn fill_single<S: Simd, N: FineKernel<S>>(
+     b: &mut Bencher<'_>,
+     blend_mode: BlendMode,
+     fine: &mut Fine<S, N>,
++) {
++    fill_single_with_alphas(paint, encoded_paints, width, b, blend_mode, fine, None);
++}
++
++pub(crate) fn fill_single_with_alphas<S: Simd, N: FineKernel<S>>(
++    paint: &Paint,
++    encoded_paints: &[EncodedPaint],
++    width: u16,
++    b: &mut Bencher<'_>,
++    blend_mode: BlendMode,
++    fine: &mut Fine<S, N>,
++    alphas: Option<&[u8]>,
+ ) {
+     let attrs = PaintFillAttrs {
+         paint: paint.clone(),
+@@ -77,7 +126,7 @@ pub(crate) fn fill_single<S: Simd, N: FineKernel<S>>(
+                 filter_paints: &[],
+                 image_resolver: &NoOpImageResolver,
+             },
+-            None,
++            alphas,
+         );
+ 
+         std::hint::black_box(&fine);
+diff --git a/sparse_strips/vello_cpu/src/fine/lowp/mod.rs b/sparse_strips/vello_cpu/src/fine/lowp/mod.rs
+index f8a7f5e0..5e7b174a 100644
+--- a/sparse_strips/vello_cpu/src/fine/lowp/mod.rs
++++ b/sparse_strips/vello_cpu/src/fine/lowp/mod.rs
+@@ -617,12 +617,23 @@ mod alpha_fill {
+         s.vectorize(
+             #[inline(always)]
+             || {
+-                let src_a = u8x32::splat(s, src[3]);
+                 let src_c = u32x8::splat(s, u32::from_ne_bytes(src)).to_bytes();
+                 let one = u8x32::splat(s, 255);
+ 
+-                for (next_bg, next_mask) in dest.chunks_exact_mut(32).zip(alphas) {
+-                    alpha_composite_inner(s, next_bg, &next_mask, src_c, src_a, one);
++                // `src_a` is constant for the whole call, so hoist the opaque check out of the
++                // per-chunk loop: when the source is fully opaque, `src_alpha * mask / 255 ==
++                // mask` exactly (for every mask value, given this crate's div-by-255
++                // approximation), so `effective_alpha` collapses to `mask` and the
++                // widen/multiply/div_255 needed to compute it can be skipped entirely.
++                if src[3] == 255 {
++                    for (next_bg, next_mask) in dest.chunks_exact_mut(32).zip(alphas) {
++                        alpha_composite_inner_opaque(s, next_bg, &next_mask, src_c, one);
++                    }
++                } else {
++                    let src_a = u8x32::splat(s, src[3]);
++                    for (next_bg, next_mask) in dest.chunks_exact_mut(32).zip(alphas) {
++                        alpha_composite_inner(s, next_bg, &next_mask, src_c, src_a, one);
++                    }
+                 }
+             },
+         );
+@@ -682,6 +693,34 @@ mod alpha_fill {
+             },
+         );
+     }
++
++    /// Same as `alpha_composite_inner`, specialized for a fully-opaque `src` (`src_alpha ==
++    /// 255`), where `effective_alpha` is just `mask` - skips the multiply/div_255 needed to
++    /// scale `src_alpha` by `mask` in the general case.
++    #[inline(always)]
++    fn alpha_composite_inner_opaque<S: Simd>(
++        s: S,
++        dest: &mut [u8],
++        masks: &[u8; 8],
++        src_c: u8x32<S>,
++        one: u8x32<S>,
++    ) {
++        s.vectorize(
++            #[inline(always)]
++            || {
++                let bg_v = u8x32::from_slice(s, dest);
++
++                let mask_v = extract_masks(s, masks);
++                let inv_mask = one - mask_v;
++
++                let p1 = s.widen_u8x32(bg_v) * s.widen_u8x32(inv_mask);
++                let p2 = s.widen_u8x32(src_c) * s.widen_u8x32(mask_v);
++                let res = s.narrow_u16x32((p1 + p2).div_255());
++
++                res.store_slice(dest);
++            },
++        );
++    }
+ }
+ 
+ /// Expands 8 mask bytes into a 32-byte SIMD vector where each pixel's 4 components

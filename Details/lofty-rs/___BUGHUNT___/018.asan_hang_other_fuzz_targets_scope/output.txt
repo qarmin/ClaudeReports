@@ -1,0 +1,91 @@
+Real captured output from `repro/run.sh` (candidate 018), run against the actual project checkout
+at commit 5c6565e36d35b9ea7de049daa67acc0be0fd3b01, via:
+
+    ./repro/run.sh /home/rafal/Projekty/Obce/lofty-rs mp4file_read_from
+    ./repro/run.sh /home/rafal/Projekty/Obce/lofty-rs flacfile_read_from
+
+Both runs start from an empty `fuzz/corpus/<target>/` (the corpus dir was removed before the
+`mp4file_read_from` run below to force the same "starting from an empty corpus" condition
+candidate 009 hit; `flacfile_read_from` had never been fuzzed before this candidate so it was
+already empty).
+
+=== Run 1: mp4file_read_from, empty corpus ===
+
+=== [1/2] cargo +nightly fuzz run mp4file_read_from --sanitizer address (expect: hang, no libFuzzer progress) ===
+--> still running after 30s wall-clock (max_total_time was only 20s) - HUNG
+----- captured ASAN-build log -----
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.03s
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+     Running `/home/rafal/Projekty/Obce/lofty-rs/target/x86_64-unknown-linux-gnu/release/mp4file_read_from -artifact_prefix=/home/rafal/Projekty/Obce/lofty-rs/fuzz/artifacts/mp4file_read_from/ -max_total_time=20 /home/rafal/Projekty/Obce/lofty-rs/fuzz/corpus/mp4file_read_from`
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 1074939319
+INFO: Loaded 1 modules   (156834 inline 8-bit counters): 156834 [0x60795f1e2240, 0x60795f2086e2),
+INFO: Loaded 1 PC tables (156834 PCs): 156834 [0x60795f2086e8,0x60795f46d108),
+INFO:        0 files found in /home/rafal/Projekty/Obce/lofty-rs/fuzz/corpus/mp4file_read_from
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: A corpus is not provided, starting from an empty corpus
+#2	INITED cov: 50 ft: 51 corp: 1/1b exec/s: 0 rss: 40Mb
+	NEW_FUNC[1/4]: ------------------------------------
+(process killed by repro/run.sh's own pkill after the 30s wait window; nothing further was ever
+printed - confirmed separately by leaving an equivalent run alive under manual `ps aux`
+observation for 3+ minutes: the child process sat at 99.9% CPU with zero additional libFuzzer
+output the entire time)
+
+=== [2/2] cargo +nightly fuzz run mp4file_read_from --sanitizer none (expect: runs cleanly, no hang) ===
+----- captured non-sanitizer log (tail) -----
+"\263\247\327V\263!\000\000" # Uses: 116351
+"KKK#" # Uses: 121147
+"\377\377\377\377" # Uses: 120830
+###### End of recommended dictionary. ######
+Done 5212865 runs in 16 second(s)
+------------------------------------
+
+=== RESULT ===
+CONFIRMED: mp4file_read_from hangs under default --sanitizer address but runs cleanly under --sanitizer none - same tooling gap as candidate 009, now shown on a *file_read_from target.
+
+=== Run 2: flacfile_read_from, empty corpus ===
+
+=== [1/2] cargo +nightly fuzz run flacfile_read_from --sanitizer address (expect: hang, no libFuzzer progress) ===
+--> still running after 30s wall-clock (max_total_time was only 20s) - HUNG
+----- captured ASAN-build log -----
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+     Running `/home/rafal/Projekty/Obce/lofty-rs/target/x86_64-unknown-linux-gnu/release/flacfile_read_from -artifact_prefix=/home/rafal/Projekty/Obce/lofty-rs/fuzz/artifacts/flacfile_read_from/ -max_total_time=20 /home/rafal/Projekty/Obce/lofty-rs/fuzz/corpus/flacfile_read_from`
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 882773667
+INFO: Loaded 1 modules   (155500 inline 8-bit counters): 155500 [0x5aad066c5c00, 0x5aad066ebb6c),
+INFO: Loaded 1 PC tables (155500 PCs): 155500 [0x5aad066ebb70,0x5aad0694b230),
+INFO:        0 files found in /home/rafal/Projekty/Obce/lofty-rs/fuzz/corpus/flacfile_read_from
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: A corpus is not provided, starting from an empty corpus
+#2	INITED cov: 83 ft: 84 corp: 1/1b exec/s: 0 rss: 41Mb
+	NEW_FUNC[1/1]: ────────────────────────────────────────────────────────────────────────────────
+
+Error: Fuzz target exited with signal: 9 (SIGKILL)
+------------------------------------
+(this run was killed manually after ~3m41s of continuous 99.9% CPU with no further output, on an
+earlier manual verification pass before repro/run.sh's own pkill pattern was fixed; the fixed
+script's own pkill in run.sh - verified in Run 1 above - now performs the same kill unattended)
+
+=== [2/2] cargo +nightly fuzz run flacfile_read_from --sanitizer none (expect: runs cleanly, no hang) ===
+----- captured non-sanitizer log (tail) -----
+"\377\377\377\377" # Uses: 109674
+"\001\000\000\000" # Uses: 108954
+"\377\377\377\377\377\377\377\007" # Uses: 104923
+###### End of recommended dictionary. ######
+Done 4734318 runs in 16 second(s)
+------------------------------------
+
+=== RESULT ===
+CONFIRMED: flacfile_read_from hangs under default --sanitizer address but runs cleanly under --sanitizer none - same tooling gap as candidate 009, now shown on a *file_read_from target.
+
+=== Control observation: mp4file_read_from with a NON-empty corpus does NOT hang ===
+
+Before Run 1 above, an earlier pass over the same mp4file_read_from target (after
+`fuzz/corpus/mp4file_read_from/` had already been populated with 23-29 files by a prior
+--sanitizer none run) completed the --sanitizer address leg cleanly in 21 seconds with no hang
+at all ("INFO: 23 files found ... Done 2072441 runs in 21 second(s)"). This isolates the hang
+specifically to the first NEW_FUNC coverage-symbolization event libFuzzer performs when a run
+starts from a genuinely empty corpus (candidate 009's targets, and this candidate's two targets,
+were all first exercised from an empty corpus) - not to target size/complexity, and not to ASAN
+generally failing on this machine.

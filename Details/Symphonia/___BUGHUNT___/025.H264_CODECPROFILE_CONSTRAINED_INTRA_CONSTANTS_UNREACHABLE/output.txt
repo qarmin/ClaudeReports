@@ -1,0 +1,50 @@
+=== repro/ run against pristine base_commit (ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee), 3 repeat runs ===
+
+$ cargo run --release  (run 1)
+Parsed profile: CodecProfile(66) (raw = 66)
+CODEC_PROFILE_H264_CONSTRAINED_BASELINE: CodecProfile(578) (raw = 578)
+record.profile == CODEC_PROFILE_H264_CONSTRAINED_BASELINE: false
+
+BUG: real Constrained Baseline avcC bytes parse to CodecProfile(66), which can never equal CODEC_PROFILE_H264_CONSTRAINED_BASELINE (CodecProfile(578)), because the real parser never folds the constraint_set bits into bits 8+ the way the constant expects.
+
+$ cargo run --release  (run 2)
+Parsed profile: CodecProfile(66) (raw = 66)
+CODEC_PROFILE_H264_CONSTRAINED_BASELINE: CodecProfile(578) (raw = 578)
+record.profile == CODEC_PROFILE_H264_CONSTRAINED_BASELINE: false
+
+BUG: real Constrained Baseline avcC bytes parse to CodecProfile(66), which can never equal CODEC_PROFILE_H264_CONSTRAINED_BASELINE (CodecProfile(578)), because the real parser never folds the constraint_set bits into bits 8+ the way the constant expects.
+
+$ cargo run --release  (run 3)
+Parsed profile: CodecProfile(66) (raw = 66)
+CODEC_PROFILE_H264_CONSTRAINED_BASELINE: CodecProfile(578) (raw = 578)
+record.profile == CODEC_PROFILE_H264_CONSTRAINED_BASELINE: false
+
+BUG: real Constrained Baseline avcC bytes parse to CodecProfile(66), which can never equal CODEC_PROFILE_H264_CONSTRAINED_BASELINE (CodecProfile(578)), because the real parser never folds the constraint_set bits into bits 8+ the way the constant expects.
+
+Result: deterministic, 3/3 identical runs. Same input bytes ([0x01, 0x42, 0x40, 0x1E], a real
+ISO/IEC 14496-15 AVCDecoderConfigurationRecord for a Constrained Baseline Profile H.264 stream)
+fed through the crate's own public `symphonia_common::mpeg::video::AVCDecoderConfigurationRecord::read`
+entry point (the exact function symphonia-format-isomp4's `avcc.rs` calls when demuxing a real
+mp4 file's avcC box) always yields CodecProfile(66), which structurally can never equal
+CODEC_PROFILE_H264_CONSTRAINED_BASELINE (CodecProfile(578)).
+
+=== repro/ run against patched tree (patch.diff applied to symphonia-common/src/mpeg/video/mod.rs) ===
+
+$ cargo run --release
+Parsed profile: CodecProfile(578) (raw = 578)
+CODEC_PROFILE_H264_CONSTRAINED_BASELINE: CodecProfile(578) (raw = 578)
+record.profile == CODEC_PROFILE_H264_CONSTRAINED_BASELINE: true
+
+OK: real Constrained Baseline avcC bytes parse to a CodecProfile that equals CODEC_PROFILE_H264_CONSTRAINED_BASELINE.
+
+=== workspace test suite, before fix (pristine ee35874) ===
+
+$ cargo test --workspace
+(all `test result:` lines)
+0 passed, 2 passed, 5 passed, 0, 1, 1, 0, 0, 0, 0, 6, 0, 7, 65, 2, 0, 3, 0, 2, 12, then 17x "0 passed"
+Total: 106 passed; 0 failed; 0 ignored (across all workspace crates + doctests)
+
+=== workspace test suite, after fix ===
+
+$ cargo test --workspace
+Identical per-crate results to before: 106 passed; 0 failed; 0 ignored (across all workspace crates + doctests)

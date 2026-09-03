@@ -1,0 +1,149 @@
+diff --git a/src/intrinsic/simd.rs b/src/intrinsic/simd.rs
+index 1416f4e..f2818c0 100644
+--- a/src/intrinsic/simd.rs
++++ b/src/intrinsic/simd.rs
+@@ -915,6 +915,11 @@ pub fn generic_simd_intrinsic<'a, 'gcc, 'tcx>(
+         cx.type_vector(elem_ty, vec_len)
+     }
+ 
++    // Loads `pointers[i]` and stores it into lane `i` of the result, but only for lanes whose
++    // `mask[i]` is non-zero - disabled lanes keep `default[i]` and their pointer is never
++    // dereferenced. This must be real control flow (not "load every lane unconditionally, then
++    // select"): a disabled lane's pointer is documented (`simd_gather`'s intrinsic contract) to
++    // potentially be invalid/dangling/pointing at memory the caller never promised is readable.
+     #[cfg(feature = "master")]
+     fn gather<'a, 'gcc, 'tcx>(
+         default: RValue<'gcc>,
+@@ -922,45 +927,44 @@ pub fn generic_simd_intrinsic<'a, 'gcc, 'tcx>(
+         mask: RValue<'gcc>,
+         bx: &mut Builder<'a, 'gcc, 'tcx>,
+         in_len: u64,
+-        invert: bool,
+     ) -> RValue<'gcc> {
+         let vector_type = default.get_type();
+         let elem_type =
+             vector_type.unqualified().dyncast_vector().expect("vector type").get_element_type();
+ 
++        let mask_elem_type =
++            mask.get_type().unqualified().dyncast_vector().expect("vector type").get_element_type();
++        let zero_mask = bx.context.new_rvalue_zero(mask_elem_type);
++
+         let mut values = Vec::with_capacity(in_len as usize);
+         for i in 0..in_len {
+             let index = bx.context.new_rvalue_from_long(bx.i32_type, i as i64);
+-            let int = bx.context.new_vector_access(None, pointers, index).to_rvalue();
+ 
++            let lane = bx.current_func().new_local(None, elem_type, "gather_lane");
++            let default_value = bx.context.new_vector_access(None, default, index).to_rvalue();
++            bx.llbb().add_assignment(None, lane, default_value);
++
++            let mask_value = bx.context.new_vector_access(None, mask, index).to_rvalue();
++            let enabled =
++                bx.context.new_comparison(None, ComparisonOp::NotEquals, mask_value, zero_mask);
++
++            let after_block = bx.current_func().new_block("gather_after");
++            let then_block = bx.current_func().new_block("gather_then");
++            bx.llbb().end_with_conditional(None, enabled, then_block, after_block);
++
++            bx.switch_to_block(then_block);
++            let int = bx.context.new_vector_access(None, pointers, index).to_rvalue();
+             let ptr_type = elem_type.make_pointer();
+             let ptr = bx.context.new_bitcast(None, int, ptr_type);
+             let value = ptr.dereference(None).to_rvalue();
+-            values.push(value);
+-        }
+-
+-        let vector = bx.context.new_rvalue_from_vector(None, vector_type, &values);
++            bx.llbb().add_assignment(None, lane, value);
++            bx.llbb().end_with_jump(None, after_block);
+ 
+-        let mut mask_types = Vec::with_capacity(in_len as usize);
+-        let mut mask_values = Vec::with_capacity(in_len as usize);
+-        for i in 0..in_len {
+-            let index = bx.context.new_rvalue_from_long(bx.i32_type, i as i64);
+-            mask_types.push(bx.context.new_field(None, bx.i32_type, "m"));
+-            let mask_value = bx.context.new_vector_access(None, mask, index).to_rvalue();
+-            let mask_value_cast = bx.context.new_cast(None, mask_value, bx.i32_type);
+-            let masked =
+-                bx.context.new_rvalue_from_int(bx.i32_type, in_len as i32) & mask_value_cast;
+-            let value = index + masked;
+-            mask_values.push(value);
++            bx.switch_to_block(after_block);
++            values.push(lane.to_rvalue());
+         }
+-        let mask_type = bx.context.new_struct_type(None, "mask_type", &mask_types);
+-        let mask = bx.context.new_struct_constructor(None, mask_type.as_type(), None, &mask_values);
+ 
+-        if invert {
+-            bx.shuffle_vector(vector, default, mask)
+-        } else {
+-            bx.shuffle_vector(default, vector, mask)
+-        }
++        bx.context.new_rvalue_from_vector(None, vector_type, &values)
+     }
+ 
+     #[cfg(feature = "master")]
+@@ -1072,14 +1076,7 @@ pub fn generic_simd_intrinsic<'a, 'gcc, 'tcx>(
+             }
+         }
+ 
+-        return Ok(gather(
+-            args[0].immediate(),
+-            args[1].immediate(),
+-            args[2].immediate(),
+-            bx,
+-            in_len,
+-            false,
+-        ));
++        return Ok(gather(args[0].immediate(), args[1].immediate(), args[2].immediate(), bx, in_len));
+     }
+ 
+     #[cfg(feature = "master")]
+@@ -1186,10 +1183,9 @@ pub fn generic_simd_intrinsic<'a, 'gcc, 'tcx>(
+             }
+         }
+ 
+-        let result =
+-            gather(args[0].immediate(), args[1].immediate(), args[2].immediate(), bx, in_len, true);
+-
++        let values = args[0].immediate();
+         let pointers = args[1].immediate();
++        let mask = args[2].immediate();
+ 
+         let vector_type = if pointer_count > 1 {
+             bx.context.new_vector_type(bx.usize_type, in_len)
+@@ -1198,14 +1194,33 @@ pub fn generic_simd_intrinsic<'a, 'gcc, 'tcx>(
+         };
+         let elem_type = vector_type.dyncast_vector().expect("vector type").get_element_type();
+ 
++        let mask_elem_type =
++            mask.get_type().unqualified().dyncast_vector().expect("vector type").get_element_type();
++        let zero_mask = bx.context.new_rvalue_zero(mask_elem_type);
++
++        // Disabled lanes must not be written to (and their pointer must not even be
++        // dereferenced) - see `gather`'s doc comment above for why this needs real control flow
++        // rather than an unconditional write to every lane.
+         for i in 0..in_len {
+             let index = bx.context.new_rvalue_from_int(bx.int_type, i as i32);
+-            let value = bx.context.new_vector_access(None, result, index);
+ 
++            let mask_value = bx.context.new_vector_access(None, mask, index).to_rvalue();
++            let enabled =
++                bx.context.new_comparison(None, ComparisonOp::NotEquals, mask_value, zero_mask);
++
++            let after_block = bx.current_func().new_block("scatter_after");
++            let then_block = bx.current_func().new_block("scatter_then");
++            bx.llbb().end_with_conditional(None, enabled, then_block, after_block);
++
++            bx.switch_to_block(then_block);
++            let value = bx.context.new_vector_access(None, values, index);
+             let int = bx.context.new_vector_access(None, pointers, index).to_rvalue();
+             let ptr_type = elem_type.make_pointer();
+             let ptr = bx.context.new_bitcast(None, int, ptr_type);
+             bx.llbb().add_assignment(None, ptr.dereference(None), value);
++            bx.llbb().end_with_jump(None, after_block);
++
++            bx.switch_to_block(after_block);
+         }
+ 
+         return Ok(bx.context.new_rvalue_zero(bx.i32_type));

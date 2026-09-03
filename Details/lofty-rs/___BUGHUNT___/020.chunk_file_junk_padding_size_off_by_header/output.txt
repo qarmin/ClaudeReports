@@ -1,0 +1,54 @@
+Captured by running `just test` (via its `clone` / `reproduce-before` / `apply` / `reproduce-after`
+recipes) against a fresh clone of the repo at base_commit 5c6565e36d35b9ea7de049daa67acc0be0fd3b01.
+
+=== BEFORE (pristine, unpatched tree) ===
+$ just clone reproduce-before
+...
+     Running `target/release/repro020`
+REPRODUCED - TEST chunk NOT FOUND after write (consumed by an oversized JUNK chunk)
+  JUNK chunk at pos=98, declared size=1996, footprint end=2102 (real TEST chunk started at 2094)
+error: Recipe `reproduce-before` failed on line 19 with exit code 1
+
+=== AFTER (patch.diff applied) ===
+$ just apply reproduce-after
+...
+     Running `target/release/repro020`
+did not reproduce - TEST chunk intact at pos=2094, size=251
+
+=== Repeat-run check (3 consecutive runs against the unpatched tree, deterministic/no randomness
+involved anywhere in the repro - same result every time) ===
+run 1: REPRODUCED - TEST chunk NOT FOUND after write (consumed by an oversized JUNK chunk)
+        JUNK chunk at pos=14782, declared size=1996, footprint end=16786 (TEST chunk started at 16778)
+run 2: REPRODUCED - TEST chunk NOT FOUND after write (consumed by an oversized JUNK chunk)
+        JUNK chunk at pos=14782, declared size=1996, footprint end=16786 (TEST chunk started at 16778)
+run 3: REPRODUCED - TEST chunk NOT FOUND after write (consumed by an oversized JUNK chunk)
+        JUNK chunk at pos=14782, declared size=1996, footprint end=16786 (TEST chunk started at 16778)
+(these 3 repeat runs used the larger `___BUGHUNT___/_reference/scratch_020` harness variant, which
+reads a real 14744-byte fixture WAV rather than the repro's inline-built minimal WAV, hence the
+different byte offsets - the underlying corruption and its cause are identical: the JUNK chunk's
+declared size is `IFF_CHUNK_HEADER_SIZE` (8) bytes larger than it should be, in both cases exactly
+`footprint_end - true_next_chunk_start == 8`.)
+
+=== Project test suite (lofty crate), run both before and after applying patch.diff, in the main
+project working tree, `cargo test --release -p lofty --tests` and `--doc` ===
+Before (unpatched):
+  unittests src/lib.rs:      256 passed; 0 failed; 0 ignored
+  tests/files/main.rs:       122 passed; 0 failed; 0 ignored
+  tests/fuzz/main.rs:         56 passed; 0 failed; 0 ignored
+  tests/hound.rs:               2 passed; 0 failed; 0 ignored
+  tests/picture/main.rs:       15 passed; 0 failed; 0 ignored
+  tests/taglib/main.rs:       191 passed; 0 failed; 73 ignored
+  tests/tags/main.rs:           4 passed; 0 failed; 0 ignored
+  doctests:                   176 passed; 0 failed; 23 ignored
+After (patched):
+  unittests src/lib.rs:      256 passed; 0 failed; 0 ignored
+  tests/files/main.rs:       122 passed; 0 failed; 0 ignored
+  tests/fuzz/main.rs:         56 passed; 0 failed; 0 ignored
+  tests/hound.rs:               2 passed; 0 failed; 0 ignored
+  tests/picture/main.rs:       15 passed; 0 failed; 0 ignored
+  tests/taglib/main.rs:       191 passed; 0 failed; 73 ignored
+  tests/tags/main.rs:           4 passed; 0 failed; 0 ignored
+  doctests:                   176 passed; 0 failed; 23 ignored
+Identical pass/fail counts before and after - the existing test suite does not exercise this path
+(no test shrinks an existing WAV ID3v2 tag with a real trailing chunk after it via the JUNK-padding
+write path), so it neither caught the bug nor regressed from the fix.

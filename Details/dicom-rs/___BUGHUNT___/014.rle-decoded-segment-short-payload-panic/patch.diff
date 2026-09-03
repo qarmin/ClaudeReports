@@ -1,0 +1,135 @@
+diff --git a/transfer-syntax-registry/src/adapters/rle_lossless.rs b/transfer-syntax-registry/src/adapters/rle_lossless.rs
+index 7c16c5f7..d0a05a47 100644
+--- a/transfer-syntax-registry/src/adapters/rle_lossless.rs
++++ b/transfer-syntax-registry/src/adapters/rle_lossless.rs
+@@ -72,7 +72,7 @@ impl PixelDataReader for RleLosslessAdapter {
+             let fragment = &src
+                 .fragment(i)
+                 .whatever_context("No pixel data found for frame")?;
+-            let mut offsets = read_rle_header(fragment);
++            let mut offsets = read_rle_header(fragment)?;
+             offsets.push(fragment.len() as u32);
+ 
+             for sample_number in 0..samples_per_pixel {
+@@ -80,7 +80,22 @@ impl PixelDataReader for RleLosslessAdapter {
+                     // ii is 1, 0, 3, 2, 5, 4 for the example above
+                     // This is where the segment order correction occurs
+                     let ii = sample_number * bytes_per_sample + byte_offset;
+-                    let segment = &fragment[offsets[ii] as usize..offsets[ii + 1] as usize];
++                    if ii + 1 >= offsets.len() {
++                        whatever!(
++                            "RLE fragment declares too few segments ({}) for BitsAllocated/SamplesPerPixel",
++                            offsets.len().saturating_sub(1),
++                        );
++                    }
++                    let (seg_start, seg_end) = (offsets[ii], offsets[ii + 1]);
++                    if seg_start > seg_end || seg_end as usize > fragment.len() {
++                        whatever!(
++                            "Invalid RLE segment offsets ({}, {}) for a fragment of {} bytes",
++                            seg_start,
++                            seg_end,
++                            fragment.len(),
++                        );
++                    }
++                    let segment = &fragment[seg_start as usize..seg_end as usize];
+                     let buff = io::Cursor::new(segment);
+                     let (_, decoder) = PackBitsReader::new(buff, segment.len())
+                         .whatever_context("Failed to read RLE segments")?;
+@@ -111,7 +126,14 @@ impl PixelDataReader for RleLosslessAdapter {
+                         .step_by(bytes_per_sample * samples_per_pixel)
+                         .enumerate()
+                     {
+-                        dst[base_offset + dst_index] = decoded_segment[decoded_index];
++                        let Some(value) = decoded_segment.get(decoded_index) else {
++                            whatever!(
++                                "RLE segment decoded to only {} byte(s), expected at least {}",
++                                decoded_segment.len(),
++                                decoded_index + 1,
++                            );
++                        };
++                        dst[base_offset + dst_index] = *value;
+                     }
+                 }
+             }
+@@ -182,7 +204,7 @@ impl PixelDataReader for RleLosslessAdapter {
+         let fragment = &src
+             .fragment(frame as usize)
+             .whatever_context("No pixel data found for frame")?;
+-        let mut offsets = read_rle_header(fragment);
++        let mut offsets = read_rle_header(fragment)?;
+         offsets.push(fragment.len() as u32);
+ 
+         for sample_number in 0..samples_per_pixel {
+@@ -190,7 +212,22 @@ impl PixelDataReader for RleLosslessAdapter {
+                 // ii is 1, 0, 3, 2, 5, 4 for the example above
+                 // This is where the segment order correction occurs
+                 let ii = sample_number * bytes_per_sample + byte_offset;
+-                let segment = &fragment[offsets[ii] as usize..offsets[ii + 1] as usize];
++                if ii + 1 >= offsets.len() {
++                    whatever!(
++                        "RLE fragment declares too few segments ({}) for BitsAllocated/SamplesPerPixel",
++                        offsets.len().saturating_sub(1),
++                    );
++                }
++                let (seg_start, seg_end) = (offsets[ii], offsets[ii + 1]);
++                if seg_start > seg_end || seg_end as usize > fragment.len() {
++                    whatever!(
++                        "Invalid RLE segment offsets ({}, {}) for a fragment of {} bytes",
++                        seg_start,
++                        seg_end,
++                        fragment.len(),
++                    );
++                }
++                let segment = &fragment[seg_start as usize..seg_end as usize];
+                 let buff = io::Cursor::new(segment);
+                 let (_, decoder) = PackBitsReader::new(buff, segment.len())
+                     .map_err(|e| Box::new(e) as Box<_>)
+@@ -213,7 +250,14 @@ impl PixelDataReader for RleLosslessAdapter {
+                     .step_by(bytes_per_sample * samples_per_pixel)
+                     .enumerate()
+                 {
+-                    dst[base_offset + dst_index] = decoded_segment[decoded_index];
++                    let Some(value) = decoded_segment.get(decoded_index) else {
++                        whatever!(
++                            "RLE segment decoded to only {} byte(s), expected at least {}",
++                            decoded_segment.len(),
++                            decoded_index + 1,
++                        );
++                    };
++                    dst[base_offset + dst_index] = *value;
+                 }
+             }
+         }
+@@ -224,11 +268,29 @@ impl PixelDataReader for RleLosslessAdapter {
+ // TODO(#125) implement `encode`
+ 
+ // Read the RLE header and return the offsets
+-fn read_rle_header(fragment: &[u8]) -> Vec<u32> {
++fn read_rle_header(fragment: &[u8]) -> DecodeResult<Vec<u32>> {
++    if fragment.len() < 4 {
++        whatever!("RLE fragment too short to contain a header");
++    }
+     let nr_segments = LittleEndian::read_u32(&fragment[0..4]);
++    // PS3.5 Annex G.5: a maximum of 15 segments are permitted, and there must be at least 1.
++    // Also protects against the untrusted `nr_segments` value (up to ~4 billion, attacker
++    // controlled) driving an unbounded allocation or an out-of-bounds header read.
++    if nr_segments == 0 || nr_segments > 15 {
++        whatever!("Invalid number of RLE segments: {nr_segments}");
++    }
++    let header_len = 4 * (nr_segments as usize + 1);
++    if fragment.len() < header_len {
++        whatever!(
++            "RLE fragment too short for its declared header ({} segments, {} bytes needed, {} available)",
++            nr_segments,
++            header_len,
++            fragment.len(),
++        );
++    }
+     let mut offsets = vec![0; nr_segments as usize];
+-    LittleEndian::read_u32_into(&fragment[4..4 * (nr_segments + 1) as usize], &mut offsets);
+-    offsets
++    LittleEndian::read_u32_into(&fragment[4..header_len], &mut offsets);
++    Ok(offsets)
+ }
+ 
+ /// PackBits Reader from the image-tiff crate

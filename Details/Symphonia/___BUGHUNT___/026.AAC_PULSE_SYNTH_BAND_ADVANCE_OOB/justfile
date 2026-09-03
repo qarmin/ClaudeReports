@@ -1,0 +1,33 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# This candidate's Status is "Not reproducible" - there is no patch.diff and no "after" state.
+# `just test` clones the pristine repo, appends pulse_synth_boundary_tests.rs to the real
+# symphonia-codec-aac/src/aac/ics/pulse.rs source (Pulse's fields and the SWB_OFFSET_*_LONG
+# tables are private to the crate, so this is the only way to drive the REAL Pulse::synth
+# function and REAL band tables with adversarial values - see the comment at the top of that
+# file for why), then runs `cargo test` and shows none of the boundary/exhaustive/random-fuzz
+# cases panic.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone reproduce
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cat repro/pulse_synth_boundary_tests.rs >> clone/symphonia-codec-aac/src/aac/ics/pulse.rs
+
+# Run the boundary-value/exhaustive/random-fuzz test module against the real, unmodified
+# Pulse::synth and SWB_OFFSET_*_LONG tables, in a debug-assertions + overflow-checks build
+# (cargo's default dev profile already has both on; RUSTFLAGS below is just explicit belt-and-
+# braces). None of these should panic.
+reproduce:
+    cd clone && RUSTFLAGS="-C debug-assertions=on -C overflow-checks=on" cargo test -p symphonia-codec-aac pulse_oob --lib -- --nocapture
+
+clean:
+    rm -rf clone

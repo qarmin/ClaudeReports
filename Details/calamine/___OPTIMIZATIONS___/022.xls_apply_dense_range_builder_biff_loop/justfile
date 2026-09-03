@@ -1,0 +1,54 @@
+# Self-contained reproduction for candidate 022 (xls_apply_dense_range_builder_biff_loop).
+#
+# Same patch and mechanism as candidate 011 (stream cells directly into a pre-sized dense buffer
+# via a push-based DenseRangeBuilder, skip the intermediate sparse Vec<Cell> in XLS's per-sheet
+# BIFF record loop, src/xls.rs) - this candidate is a fresh, independent re-measurement of that
+# same patch.diff against the current base_commit, run in its own isolated worktree. Everything
+# needed is either in this folder or fetched by `just clone`/`just harness` - nothing reaches
+# outside this folder except the ONE shared harness copy at
+# `___OPTIMIZATIONS___/harness/rss_probe/` (see SKILL.md's "Bench harnesses" / justfile template
+# shape 3) - this folder is self-contained given the whole `___OPTIMIZATIONS___/` tree kept
+# together, not in complete isolation.
+#
+# patch.diff is a diff against base_commit below, captured at the moment this candidate was
+# measured - it may stop applying cleanly once the main branch moves on.
+
+repo_url := "https://github.com/tafia/calamine.git"
+base_commit := "5c02e86e99ec5c1fb1dcc15e64c2bbaf19bff60d"
+harness_dir := "../harness/rss_probe"
+
+# Full cycle: clone at the pinned commit, build a BASELINE binary before touching anything,
+# apply the patch, build a PATCHED binary, then run both and print both results.
+test: clone build-baseline bench-baseline apply build-patched bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    rm -rf harness
+    mkdir harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" harness/rss_probe
+    rm -rf harness/rss_probe/target
+    sed -i 's#calamine = { path = "../../..".*#calamine = { path = "../../clone", features = ["dates"] }#' harness/rss_probe/Cargo.toml
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd harness/rss_probe && cargo build --release
+    cp harness/rss_probe/target/release/rss_probe ./bin_baseline
+
+build-patched:
+    cd harness/rss_probe && cargo build --release
+    cp harness/rss_probe/target/release/rss_probe ./bin_patched
+
+bench-baseline:
+    @echo "=== baseline (before patch), XLS fixture (18MB, 1.47M cells) ==="
+    ./bin_baseline range clone/tests/adhocallbabynames1996to2016.xls
+
+bench-patched:
+    @echo "=== patched (after patch) ==="
+    ./bin_patched range clone/tests/adhocallbabynames1996to2016.xls
+
+clean:
+    rm -rf clone harness bin_baseline bin_patched

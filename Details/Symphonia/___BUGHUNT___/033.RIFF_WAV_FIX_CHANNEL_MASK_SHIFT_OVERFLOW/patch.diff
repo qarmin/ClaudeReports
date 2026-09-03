@@ -1,0 +1,33 @@
+diff --git a/symphonia-format-riff/src/wave/chunks.rs b/symphonia-format-riff/src/wave/chunks.rs
+index 5e40b60..14742f8 100644
+--- a/symphonia-format-riff/src/wave/chunks.rs
++++ b/symphonia-format-riff/src/wave/chunks.rs
+@@ -687,7 +687,12 @@ fn fix_wave_channel_mask(mut channel_mask: u32, num_channels: u16) -> u32 {
+     if channel_diff > 0 {
+         // Too few ones in mask so add extra ones above the most significant one
+         let shift = 32 - (!channel_mask).leading_ones();
+-        channel_mask |= ((1 << channel_diff) - 1) << shift;
++        // Both shift amounts come straight from the fmt chunk and may be >= 32 (bit 31 already
++        // set makes shift == 32; a channel count >= 32 above the mask's population count makes
++        // channel_diff >= 32), so the run of ones is built in u64 and truncated. Ones that don't
++        // fit in the mask are dropped, leaving a mask that still doesn't match the channel count,
++        // which the caller rejects.
++        channel_mask |= (((1u64 << channel_diff.min(32)) - 1) << shift) as u32;
+     }
+     else {
+         // Too many ones in mask so remove the most significant extra ones
+@@ -706,6 +711,14 @@ fn test_fix_channel_mask() {
+     assert_eq!(fix_wave_channel_mask(0, 9), 0b111111111);
+     assert_eq!(fix_wave_channel_mask(0b101000, 5), 0b111101000);
+ 
++    // Too few, but the extra ones don't fit in the mask.
++    assert_eq!(fix_wave_channel_mask(0, 31), 0x7fff_ffff);
++    assert_eq!(fix_wave_channel_mask(0, 32), 0xffff_ffff);
++    assert_eq!(fix_wave_channel_mask(0, 40), 0xffff_ffff);
++    assert_eq!(fix_wave_channel_mask(0x8000_0000, 2), 0x8000_0000);
++    assert_eq!(fix_wave_channel_mask(0x8000_0000, 33), 0x8000_0000);
++    assert_eq!(fix_wave_channel_mask(0xc000_0000, 3), 0xc000_0000);
++
+     // Too many
+     assert_eq!(fix_wave_channel_mask(0b1111111, 0), 0);
+     assert_eq!(fix_wave_channel_mask(0b101110111010, 5), 0b10111010);

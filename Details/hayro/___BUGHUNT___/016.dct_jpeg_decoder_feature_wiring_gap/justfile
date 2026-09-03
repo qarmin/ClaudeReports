@@ -1,0 +1,38 @@
+# Self-contained reproduction for this candidate.
+#
+# Found while working ___OPTIMIZATIONS___/046 (perf-optimize candidate testing open PR #1353,
+# "honor ImageDecodeParams::target_dimension for DCTDecode and other filters"). The bug only
+# exists once that PR's own diff (pr_1353.diff, the PR's diff verbatim, same file this repo's
+# ___OPTIMIZATIONS___/046.dct_target_dimension_scaled_decode/patch.diff already has) is applied -
+# it isn't present in plain HEAD, since the `jpeg-decoder` feature this candidate is about doesn't
+# exist until that PR adds it. `just test` applies the PR, shows the feature never reaches the
+# real `hayro-bench` build graph (`cargo tree` has no `jpeg-decoder` node), applies this
+# candidate's own one-line patch.diff on top, and shows it now does.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && git apply "{{justfile_directory()}}/pr_1353.diff"
+
+# Expect: no output (no `jpeg-decoder` node in hayro-bench's own dependency tree) - the PR's own
+# scaled-decode fast path is dead code in the real build despite being applied.
+reproduce-before:
+    @echo "=== cargo tree -p hayro-bench | grep jpeg-decoder (expect: nothing) ==="
+    cd clone && cargo tree -p hayro-bench 2>/dev/null | grep -i jpeg-decoder || echo "(no jpeg-decoder node - REPRODUCED)"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Expect: a `jpeg-decoder vX.Y.Z` line now present.
+reproduce-after:
+    @echo "=== cargo tree -p hayro-bench | grep jpeg-decoder (expect: a jpeg-decoder node) ==="
+    cd clone && cargo tree -p hayro-bench 2>/dev/null | grep -i jpeg-decoder
+
+clean:
+    rm -rf clone

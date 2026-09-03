@@ -1,0 +1,18 @@
+#![feature(portable_simd)]
+use std::simd::prelude::*;
+use std::hint::black_box;
+
+fn main() {
+    let v = Simd::<u32, 8>::from_array(black_box([0u32, 1u32, 4294967295u32, 4294967294u32, 2147483648u32, 2147483647u32, 2147483649u32, 2147483649u32]));
+    println!("shl(0)/u32x8: {:?}", v << 0);
+    println!("shr(0)/u32x8: {:?}", v >> 0);
+    println!("shl(1)/u32x8: {:?}", v << 1);
+    println!("shr(1)/u32x8: {:?}", v >> 1);
+    println!("shl(16)/u32x8: {:?}", v << 16);
+    println!("shr(16)/u32x8: {:?}", v >> 16);
+    println!("shl(31)/u32x8: {:?}", v << 31);
+    println!("shr(31)/u32x8: {:?}", v >> 31);
+    let shifts = Simd::<u32, 8>::from_array(black_box([0, 3, 6, 9, 12, 15, 18, 21]));
+    println!("shl(perlane)/u32x8: {:?}", v << shifts);
+    println!("shr(perlane)/u32x8: {:?}", v >> shifts);
+}

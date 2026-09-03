@@ -1,0 +1,79 @@
+diff --git a/pixeldata/src/gdcm.rs b/pixeldata/src/gdcm.rs
+index d82f56f6..baf48b78 100644
+--- a/pixeldata/src/gdcm.rs
++++ b/pixeldata/src/gdcm.rs
+@@ -256,11 +256,31 @@ where
+                     GDCMTransferSyntax::ImplicitVRLittleEndian
+                     | GDCMTransferSyntax::ExplicitVRLittleEndian => {
+                         // This is just in case of encapsulated uncompressed data
+-                        let frame_size = cols * rows * samples_per_pixel * (bits_allocated / 8);
+-                        data.chunks_exact(frame_size as usize)
+-                            .nth(frame)
+-                            .map(|frame| frame.to_vec())
+-                            .unwrap_or_default()
++                        let frame_pixels =
++                            cols as usize * rows as usize * samples_per_pixel as usize;
++                        if bits_allocated == 1 {
++                            // Samples are packed 8 per byte: unpack to one byte (0/255) per pixel
++                            let frame_size = frame_pixels.div_ceil(8);
++                            data.chunks_exact(frame_size)
++                                .nth(frame)
++                                .map(|chunk| {
++                                    chunk
++                                        .iter()
++                                        .flat_map(|&byte| {
++                                            (0..8).map(move |bit| ((byte >> bit) & 1) * 255)
++                                        })
++                                        .take(frame_pixels)
++                                        .collect()
++                                })
++                                .unwrap_or_default()
++                        } else {
++                            let frame_size =
++                                frame_pixels * (bits_allocated as usize).div_ceil(8);
++                            data.chunks_exact(frame_size)
++                                .nth(frame)
++                                .map(|frame| frame.to_vec())
++                                .unwrap_or_default()
++                        }
+                     }
+                     _ => {
+                         let buffer = [data.as_slice()];
+@@ -285,15 +305,28 @@ where
+             }
+             DicomValue::Primitive(p) => {
+                 // Uncompressed data
+-                let frame_size = cols as usize
+-                    * rows as usize
+-                    * samples_per_pixel as usize
+-                    * (bits_allocated as usize / 8);
+-                p.to_bytes()
+-                    .chunks_exact(frame_size)
+-                    .nth(frame as usize)
+-                    .map(|frame| frame.to_vec())
+-                    .unwrap_or_default()
++                let frame_pixels = cols as usize * rows as usize * samples_per_pixel as usize;
++                let data = p.to_bytes();
++                if bits_allocated == 1 {
++                    // Samples are packed 8 per byte: unpack to one byte (0/255) per pixel
++                    let frame_size = frame_pixels.div_ceil(8);
++                    data.chunks_exact(frame_size)
++                        .nth(frame as usize)
++                        .map(|chunk| {
++                            chunk
++                                .iter()
++                                .flat_map(|&byte| (0..8).map(move |bit| ((byte >> bit) & 1) * 255))
++                                .take(frame_pixels)
++                                .collect()
++                        })
++                        .unwrap_or_default()
++                } else {
++                    let frame_size = frame_pixels * (bits_allocated as usize).div_ceil(8);
++                    data.chunks_exact(frame_size)
++                        .nth(frame as usize)
++                        .map(|frame| frame.to_vec())
++                        .unwrap_or_default()
++                }
+             }
+             DicomValue::Sequence(_) => InvalidPixelDataSnafu.fail()?,
+         };

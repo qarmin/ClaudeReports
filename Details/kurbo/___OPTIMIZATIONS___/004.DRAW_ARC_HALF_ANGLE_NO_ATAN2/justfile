@@ -1,0 +1,65 @@
+# Self-contained reproduction for candidate 004.
+#
+# NOTE (shape 3, see templates/candidate_justfile): kurbo's own benchmarks don't reach this code
+# path, so this uses the `kurbo_bench` harness built for this workspace. That harness is UNTRACKED
+# in the kurbo repo - a fresh `git clone` of repo_url will never contain it - so `clone:` copies it
+# in from `../harness/kurbo_bench` and rewrites its kurbo dependency path. That makes this folder
+# self-contained *given the whole ___OPTIMIZATIONS___ folder kept together*, not as a single
+# isolated subfolder.
+#
+# `just test` clones at the pinned commit, builds a baseline binary, applies patch.diff, builds a
+# patched binary, and prints a real before/after for both affected scenes plus the paired
+# comparison that carries the conclusion.
+
+repo_url := "https://github.com/linebender/kurbo.git"
+base_commit := "ca273499e3e48bd2de6f02aa8e99a148984e45f3"
+harness_dir := "../harness/kurbo_bench"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout --quiet {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/kurbo_bench
+    rm -rf clone/kurbo_bench/target
+    # The harness lives at ___OPTIMIZATIONS___/harness/kurbo_bench in the workspace, but at
+    # clone/kurbo_bench here, so its relative path to the kurbo crate changes.
+    sed -i 's|path = "../../../kurbo"|path = "../kurbo"|' clone/kurbo_bench/Cargo.toml
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/kurbo_bench && cargo build --release
+    cp clone/kurbo_bench/target/release/kurbo_bench ./bin_baseline
+
+build-patched:
+    find clone/kurbo/src -name '*.rs' -exec touch {} +
+    cd clone/kurbo_bench && cargo build --release
+    cp clone/kurbo_bench/target/release/kurbo_bench ./bin_patched
+
+bench:
+    @echo "=== the two binaries must differ, or the patch didn't apply ==="
+    md5sum ./bin_baseline ./bin_patched
+    @echo ""
+    @echo "=== offset: baseline then patched ==="
+    ulimit -c 0 && ./bin_baseline offset 20
+    ulimit -c 0 && ./bin_patched  offset 20
+    @echo ""
+    @echo "=== stroke: baseline then patched ==="
+    ulimit -c 0 && ./bin_baseline stroke 20
+    ulimit -c 0 && ./bin_patched  stroke 20
+    @echo ""
+    @echo "=== paired comparison (alternating runs; the win count carries the conclusion) ==="
+    ulimit -c 0 && TASKSET=2 RUNS=9 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- offset 20
+    ulimit -c 0 && TASKSET=2 RUNS=9 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- stroke 20
+    ulimit -c 0 && TASKSET=2 RUNS=9 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- dash 20
+    @echo ""
+    @echo "NOTE: the CHECK lines above differ by design - this candidate is not bit-exact."
+    @echo "      offset: identical path structure, max coordinate difference 3.13e-12."
+    @echo "      stroke: ~15 fewer curve elements of ~18860 (a subdivision-count change, not"
+    @echo "              just a rounding change) - see RESULT.md before trusting a byte diff."
+
+clean:
+    rm -rf clone bin_baseline bin_patched

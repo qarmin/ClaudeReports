@@ -1,0 +1,59 @@
+Environment: rustc_codegen_gcc worktree at 4cd7da5f9a5d9509b34ac0a766424ccdae706d33, sysroot built
+via `./y.sh prepare && ./y.sh build --sysroot --release` (config.example.toml's
+`download-gccjit = true`). repro/ubsan_hook.patch applied to src/gcc_util.rs to forward
+`-fsanitize=undefined` into libgccjit when CG_GCCJIT_UBSAN=1 is set (instrumentation only, not the
+fix). Build/run command:
+
+  CG_GCCJIT_UBSAN=1 CG_RUSTFLAGS="-Clinker=gcc -Clink-arg=-fsanitize=undefined -Clink-arg=-lubsan" \
+    CHANNEL=release ./y.sh cargo build --manifest-path repro/Cargo.toml
+  ./repro/target/debug/shuffle_oob_repro
+
+=====================================================================
+BEFORE patch.diff (pristine src/builder.rs, base_commit 4cd7da5) - run 1 of 3
+=====================================================================
+=== case A done (no OOB expected) ===
+core/src/../../portable-simd/crates/core_simd/src/swizzle.rs:88:13: runtime error: load of address 0x7ffeb34b0f70 with insufficient space for an object of type 'unsigned char'
+0x7ffeb34b0f70: note: pointer points here
+ fe 7f 2a 2a  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  bf 0f 4b b3 fe 7f 00 00  0b 0b 00 00
+              ^
+core/src/../../portable-simd/crates/core_simd/src/swizzle.rs:88:13: runtime error: load of address 0x7ffeb34b0f71 with insufficient space for an object of type 'unsigned char'
+0x7ffeb34b0f71: note: pointer points here
+ 7f 2a 2a  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  bf 0f 4b b3 fe 7f 00 00  0b 0b 00 00 00
+              ^
+[... repeats with the same "load of address ... insufficient space for an object of type
+'unsigned char'" / 'unsigned int' diagnostic pattern, 40 occurrences total across case B (u8, 1
+lane -> 4 lanes) and case C (u32, 2 lanes -> 8 lanes); case A alone produces zero occurrences ...]
+=== case B done (OOB expected) ===
+=== case C done (OOB expected) ===
+ok
+
+Repeat-run summary (3/3 runs, same build, no fixed seed - addresses vary with ASLR, message text
+and occurrence count are identical every run):
+  run 1: 40 "runtime error" diagnostics, exit 0, stdout unaffected ("ok" printed, all asserts pass)
+  run 2: 40 "runtime error" diagnostics, exit 0, stdout unaffected
+  run 3: 40 "runtime error" diagnostics, exit 0, stdout unaffected
+Isolating case A alone (no case B/C in the program): 0 diagnostics, confirming the padding branch
+only reads out of bounds when mask_num_units - vec_num_units > vec_num_units (case A's 1-lane ->
+2-lane broadcast stays within vec_num_units, case B's 1-lane -> 4-lane and case C's 2-lane -> 8-lane
+do not).
+
+=====================================================================
+AFTER patch.diff applied to src/builder.rs, backend rebuilt (./y.sh build --release) - run 1 of 3
+=====================================================================
+=== case A done (no OOB expected) ===
+=== case B done (OOB expected) ===
+=== case C done (OOB expected) ===
+ok
+
+Repeat-run summary (3/3 runs, same build):
+  run 1: 0 "runtime error" diagnostics, exit 0, stdout identical to the pre-patch run
+  run 2: 0 "runtime error" diagnostics, exit 0, stdout identical
+  run 3: 0 "runtime error" diagnostics, exit 0, stdout identical
+
+=====================================================================
+Project test suite (coretests, `./y.sh test --test-libcore`), same worktree
+=====================================================================
+Before patch.diff: test result: ok. 578 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+After patch.diff:  test result: ok. 578 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+(`./y.sh test --mini-tests` also passed identically before and after: mini_core_hello_world builds
+and runs with the expected output.)

@@ -1,0 +1,72 @@
+=== Unpatched tree: repro/target/release/repro (3 separate runs) ===
+
+$ ./target/release/repro; echo "exit: $?"
+built PoC PDF: 1261 bytes (embedded JPEG: 286 bytes)
+page render dimensions (from MediaBox, ordinary-sized): 200 x 200
+rendering page (the embedded DCTDecode image declares 65535 x 65535 px, RGB - if there is no total-pixel cap, this is where an oversized allocation is attempted)...
+memory allocation of 85896724500 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit: 134
+
+$ ./target/release/repro; echo "exit: $?"
+built PoC PDF: 1261 bytes (embedded JPEG: 286 bytes)
+page render dimensions (from MediaBox, ordinary-sized): 200 x 200
+rendering page (the embedded DCTDecode image declares 65535 x 65535 px, RGB - if there is no total-pixel cap, this is where an oversized allocation is attempted)...
+memory allocation of 85896724500 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit: 134
+
+$ ./target/release/repro; echo "exit: $?"
+built PoC PDF: 1261 bytes (embedded JPEG: 286 bytes)
+page render dimensions (from MediaBox, ordinary-sized): 200 x 200
+rendering page (the embedded DCTDecode image declares 65535 x 65535 px, RGB - if there is no total-pixel cap, this is where an oversized allocation is attempted)...
+memory allocation of 85896724500 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit: 134
+
+All 3 runs aborted (SIGABRT, exit code 134) trying to allocate ~85.9 GB (65535 * 65535 * 20
+components, the 20 coming from the PoC's /DeviceN colorant-name array) from a 1261-byte PDF whose
+page itself is an ordinary 200x200pt MediaBox. Note: with a plain 3-component (/DeviceRGB) image
+instead of the /DeviceN trick, the same missing cap still requests a very real ~12.88 GB
+allocation (65535 * 65535 * 3) that this particular 29GB-RAM/8GB-swap test host's allocator
+happens to satisfy (confirmed separately: RSS peaked at ~12.6 GB, ~15s wall-clock, for a 3-run-only
+side observation, not part of this candidate's official repeat-run evidence) - the /DeviceN variant
+above is used for the official repro because it reliably aborts on any real machine regardless of
+its total RAM+swap, without relying on an artificial `ulimit`.
+
+=== Patched tree (patch.diff applied to hayro-syntax/src/filter/dct.rs): same repro, 3 runs ===
+
+$ ./target/release/repro; echo "exit: $?"
+built PoC PDF: 1261 bytes (embedded JPEG: 286 bytes)
+page render dimensions (from MediaBox, ordinary-sized): 200 x 200
+rendering page (the embedded DCTDecode image declares 65535 x 65535 px, RGB - if there is no total-pixel cap, this is where an oversized allocation is attempted)...
+did not reproduce - rendered successfully, 200x200 px pixmap
+exit: 0
+
+$ ./target/release/repro; echo "exit: $?"
+built PoC PDF: 1261 bytes (embedded JPEG: 286 bytes)
+page render dimensions (from MediaBox, ordinary-sized): 200 x 200
+rendering page (the embedded DCTDecode image declares 65535 x 65535 px, RGB - if there is no total-pixel cap, this is where an oversized allocation is attempted)...
+did not reproduce - rendered successfully, 200x200 px pixmap
+exit: 0
+
+$ ./target/release/repro; echo "exit: $?"
+built PoC PDF: 1261 bytes (embedded JPEG: 286 bytes)
+page render dimensions (from MediaBox, ordinary-sized): 200 x 200
+rendering page (the embedded DCTDecode image declares 65535 x 65535 px, RGB - if there is no total-pixel cap, this is where an oversized allocation is attempted)...
+did not reproduce - rendered successfully, 200x200 px pixmap
+exit: 0
+
+All 3 runs render successfully (the /DeviceN image is skipped once it exceeds MAX_OUTPUT_BYTES;
+the page itself still renders fine at 200x200, same as candidate 004's fix behavior).
+
+=== Project test suite (cargo test -p hayro-syntax --release) ===
+
+Before (unpatched, HEAD 5a5f0e24): 199 passed; 2 failed; 0 ignored
+After (patched):                   199 passed; 2 failed; 0 ignored
+
+Identical pass/fail counts and identical failing tests before and after
+(pdf::tests::pdf_version_header, pdf::tests::pdf_version_catalog - both pre-existing failures
+unrelated to this change, panicking on a missing on-disk test asset:
+`Os { code: 2, kind: NotFound }` reading `../hayro-tests/downloads/...`, not downloaded in this
+checkout).

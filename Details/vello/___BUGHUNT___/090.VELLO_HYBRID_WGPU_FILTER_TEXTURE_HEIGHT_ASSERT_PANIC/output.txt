@@ -1,0 +1,118 @@
+All runs below use `repro/` (real `vello_hybrid::Scene`/`Renderer` public API, real wgpu
+`Device`/`Queue` from a real Vulkan adapter) with `VK_ICD_FILENAMES=/tmp/swiftshader_icd/vk_swiftshader_icd.json`
+(Google SwiftShader software Vulkan implementation, `max_texture_dimension_2d = 8192`).
+
+=== BEFORE FIX (pristine checkout at base_commit 75168314) ===
+
+--- run 1/3, NUM_FILTERS=5700000 (release build) ---
+adapter: "SwiftShader Device (Subzero)", max_texture_dimension_2d = 8192
+Pushing 5700000 distinct filter layers in a single frame...
+Calling Renderer::render...
+
+thread 'main' (582058) panicked at /tmp/vello_worktrees/090_filter_texture_limit/sparse_strips/vello_hybrid/src/filter.rs:670:9:
+Filter texture height exceeds resource texture dimensions
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+real	0m6.007s
+user	0m4.252s
+sys	0m1.729s
+
+--- run 2/3, NUM_FILTERS=5700000 (release build) ---
+thread 'main' (586664) panicked at /tmp/vello_worktrees/090_filter_texture_limit/sparse_strips/vello_hybrid/src/filter.rs:670:9:
+Filter texture height exceeds resource texture dimensions
+
+--- run 3/3, NUM_FILTERS=5700000 (release build) ---
+thread 'main' (587254) panicked at /tmp/vello_worktrees/090_filter_texture_limit/sparse_strips/vello_hybrid/src/filter.rs:670:9:
+Filter texture height exceeds resource texture dimensions
+
+=> Reproduces 3/3 runs, deterministic (no seed/layout dependency: the panic condition is a pure
+   arithmetic comparison against a fixed constant, not memory-layout sensitive).
+
+--- boundary checks below the panic threshold (all completed successfully, no panic) ---
+NUM_FILTERS=1000    -> "Rendered 1000 distinct filter layers without panicking." (real 0m1.x s incl. build)
+NUM_FILTERS=100000  -> "Rendered 100000 distinct filter layers without panicking." (real 0m7.612s)
+NUM_FILTERS=500000  -> "Rendered 500000 distinct filter layers without panicking." (real 0m37.848s)
+
+--- re-run of the exact `repro/`+`justfile` combination, from a fresh `just clone` (not the
+    persistent worktree used above) ---
+$ just clone && VK_ICD_FILENAMES=... just reproduce-before
+adapter: "SwiftShader Device (Subzero)", max_texture_dimension_2d = 8192
+Pushing 5600000 distinct filter layers in a single frame...
+Calling Renderer::render...
+
+thread 'main' (682439) panicked at /tmp/verify090/clone/sparse_strips/vello_hybrid/src/filter.rs:670:9:
+Filter texture height exceeds resource texture dimensions
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+=== AFTER FIX (patch.diff applied) ===
+
+--- NUM_FILTERS=5700000 (the exact original triggering input) ---
+adapter: "SwiftShader Device (Subzero)", max_texture_dimension_2d = 8192
+Pushing 5700000 distinct filter layers in a single frame...
+Calling Renderer::render...
+Rendered 5700000 distinct filter layers without panicking.
+
+(completed in ~7 minutes wall-clock under software/CPU Vulkan rendering - see RESULT.md for why
+this specific input is expensive to fully execute even though the panic itself, pre-fix, fires
+almost immediately)
+
+--- NUM_FILTERS=12000000 (deliberately beyond the real device's actual 4096(width)*8192(height)
+    capacity, to prove the fix restores real device capacity rather than deleting the safety
+    check) ---
+adapter: "SwiftShader Device (Subzero)", max_texture_dimension_2d = 8192
+Pushing 12000000 distinct filter layers in a single frame...
+Calling Renderer::render...
+
+thread 'main' (594242) panicked at /tmp/vello_worktrees/090_filter_texture_limit/sparse_strips/vello_hybrid/src/filter.rs:678:9:
+Filter texture height exceeds device texture dimensions
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+=== `just apply` against a fresh clone (fresh-clone verification of patch.diff applying cleanly) ===
+$ just apply
+cd clone && git apply "/tmp/verify090/patch.diff"
+(no output => applied cleanly)
+
+=== Project test suite (cargo test --release -p vello_hybrid --lib), same worktree, before vs
+    after applying patch.diff ===
+BEFORE: test result: ok. 122 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+AFTER:  test result: ok. 122 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+(no regressions; no test in the existing suite exercised this scale, so no test flips either way -
+the one directly-relevant unit test, `filter::tests::filter_data_height_must_fit_resource_texture_limit`,
+was updated as part of the patch to match the new two-argument signature and new panic message,
+and still passes both before its own update - against the old 1-arg signature - and after, since
+it's a `#[should_panic]` test asserting the same "the assert still fires when given deliberately
+tiny bounds" behavior, unchanged by the fix itself.)
+
+=== `cargo check --workspace --all-features` and `cargo build -p vello_hybrid --all-features
+    --target wasm32-unknown-unknown` (webgl backend compiles too) ===
+Both: `Finished` with 0 errors, after the patch (the pre-patch tree is the unmodified upstream
+source, already known to build clean).
+
+=== Full `just test` (clone -> reproduce-before -> apply -> reproduce-after) re-run from a
+    completely fresh scratch copy of this candidate folder (not the persistent worktree used
+    above), to verify the justfile itself actually works standalone ===
+$ just clone
+Cloning into 'clone'...
+HEAD is now at 75168314 Remove some Vello-Classic-specific info from the root README (#1698)
+
+$ VK_ICD_FILENAMES=... just reproduce-before
+adapter: "SwiftShader Device (Subzero)", max_texture_dimension_2d = 8192
+Pushing 5600000 distinct filter layers in a single frame...
+Calling Renderer::render...
+
+thread 'main' (682439) panicked at /tmp/verify090/clone/sparse_strips/vello_hybrid/src/filter.rs:670:9:
+Filter texture height exceeds resource texture dimensions
+
+$ just apply
+cd clone && git apply "/tmp/verify090/patch.diff"
+(applied cleanly, no output)
+
+$ VK_ICD_FILENAMES=... just reproduce-after
+adapter: "SwiftShader Device (Subzero)", max_texture_dimension_2d = 8192
+Pushing 5600000 distinct filter layers in a single frame...
+Calling Renderer::render...
+Rendered 5600000 distinct filter layers without panicking.
+
+(this run took ~17 minutes wall-clock, longer than the ~7 minutes measured earlier in the
+persistent worktree - consistent with the sandbox being under more concurrent load at the time,
+not a difference in the fix's correctness; both runs used the same default NUM_FILTERS=5,600,000)

@@ -1,0 +1,90 @@
+diff --git a/src/avx2/alpha_u8.rs b/src/avx2/alpha_u8.rs
+index 85ff6b3..a901566 100644
+--- a/src/avx2/alpha_u8.rs
++++ b/src/avx2/alpha_u8.rs
+@@ -160,10 +160,9 @@ impl Avx2DisassociateAlpha {
+         );
+         let rgba = unsafe { _mm256_loadu_si256(in_place.as_ptr().cast()) };
+         let alpha_u32 = _mm256_shuffle_epi8(rgba, alpha_mask);
+-        let alpha_f32 = _mm256_mul_ps(
+-            _mm256_rcp_ps(_mm256_cvtepi32_ps(alpha_u32)),
+-            _mm256_set1_ps(255.),
+-        );
++        // Exact alpha (no reciprocal approximation here - see disassociate_chunk's own division
++        // below, which needs the unscaled value as its divisor).
++        let alpha_f32 = _mm256_cvtepi32_ps(alpha_u32);
+         let is_zero_mask = _mm256_cmpeq_epi32(alpha_u32, _mm256_setzero_si256());
+ 
+         let a_lo = _mm256_unpacklo_epi8(rgba, _mm256_setzero_si256());
+@@ -184,15 +183,22 @@ impl Avx2DisassociateAlpha {
+         let a2 = _mm256_permutevar8x32_ps(alpha_f32, _mm256_setr_epi32(2, 2, 2, 2, 6, 6, 6, 6));
+         let a3 = _mm256_permutevar8x32_ps(alpha_f32, _mm256_setr_epi32(3, 3, 3, 3, 7, 7, 7, 7));
+ 
+-        v0 = _mm256_mul_ps(v0, a0);
+-        v1 = _mm256_mul_ps(v1, a1);
+-        v2 = _mm256_mul_ps(v2, a2);
+-        v3 = _mm256_mul_ps(v3, a3);
+-
+-        let s0 = _mm256_cvtps_epi32(v0);
+-        let s1 = _mm256_cvtps_epi32(v1);
+-        let s2 = _mm256_cvtps_epi32(v2);
+-        let s3 = _mm256_cvtps_epi32(v3);
++        // Exact division (not an `_mm256_rcp_ps`-approximated reciprocal multiply - the crate's
++        // own 12-bit-precision hardware reciprocal used to diverge from the scalar reference's
++        // exact `(pixel*255+alpha/2)/alpha` by +/-1 on a large fraction of inputs, not just exact
++        // .5 ties) plus a +0.5 bias truncated towards zero, matching the scalar reference's own
++        // round-half-up tie-breaking rule bit-for-bit (verified exhaustively, see RESULT.md).
++        let scale = _mm256_set1_ps(255.);
++        let half = _mm256_set1_ps(0.5);
++        v0 = _mm256_add_ps(_mm256_div_ps(_mm256_mul_ps(v0, scale), a0), half);
++        v1 = _mm256_add_ps(_mm256_div_ps(_mm256_mul_ps(v1, scale), a1), half);
++        v2 = _mm256_add_ps(_mm256_div_ps(_mm256_mul_ps(v2, scale), a2), half);
++        v3 = _mm256_add_ps(_mm256_div_ps(_mm256_mul_ps(v3, scale), a3), half);
++
++        let s0 = _mm256_cvttps_epi32(v0);
++        let s1 = _mm256_cvttps_epi32(v1);
++        let s2 = _mm256_cvttps_epi32(v2);
++        let s3 = _mm256_cvttps_epi32(v3);
+ 
+         let packed16_0 = _mm256_packus_epi32(s0, s1);
+         let packed16_1 = _mm256_packus_epi32(s2, s3);
+diff --git a/src/sse/alpha_u8.rs b/src/sse/alpha_u8.rs
+index 6d0494f..5663c90 100644
+--- a/src/sse/alpha_u8.rs
++++ b/src/sse/alpha_u8.rs
+@@ -87,20 +87,21 @@ pub(crate) fn sse_unpremultiply_row(x: __m128i, a: __m128i) -> __m128i {
+         let ahlf = _mm_cvtepi32_ps(ahlw);
+         let ahhf = _mm_cvtepi32_ps(ahhw);
+ 
+-        let a_lo_lo = _mm_rcp_ps(allf);
+-        let a_lo_hi = _mm_rcp_ps(alhf);
+-        let a_hi_lo = _mm_rcp_ps(ahlf);
+-        let a_hi_hi = _mm_rcp_ps(ahhf);
+-
+-        let fllw = _mm_mul_ps(lo_lo, a_lo_lo);
+-        let flhw = _mm_mul_ps(lo_hi, a_lo_hi);
+-        let fhlw = _mm_mul_ps(hi_lo, a_hi_lo);
+-        let fhhw = _mm_mul_ps(hi_hi, a_hi_hi);
+-
+-        let lo_lo = _mm_cvtps_epi32(fllw);
+-        let lo_hi = _mm_cvtps_epi32(flhw);
+-        let hi_lo = _mm_cvtps_epi32(fhlw);
+-        let hi_hi = _mm_cvtps_epi32(fhhw);
++        // Exact division (not an `_mm_rcp_ps`-approximated reciprocal multiply - the crate's own
++        // 12-bit-precision hardware reciprocal used to diverge from the scalar reference's exact
++        // `(pixel*255+alpha/2)/alpha` by +/-1 on a large fraction of inputs, not just exact .5
++        // ties) plus a +0.5 bias truncated towards zero, matching the scalar reference's own
++        // round-half-up tie-breaking rule bit-for-bit (verified exhaustively, see RESULT.md).
++        let half = _mm_set1_ps(0.5);
++        let fllw = _mm_add_ps(_mm_div_ps(lo_lo, allf), half);
++        let flhw = _mm_add_ps(_mm_div_ps(lo_hi, alhf), half);
++        let fhlw = _mm_add_ps(_mm_div_ps(hi_lo, ahlf), half);
++        let fhhw = _mm_add_ps(_mm_div_ps(hi_hi, ahhf), half);
++
++        let lo_lo = _mm_cvttps_epi32(fllw);
++        let lo_hi = _mm_cvttps_epi32(flhw);
++        let hi_lo = _mm_cvttps_epi32(fhlw);
++        let hi_hi = _mm_cvttps_epi32(fhhw);
+ 
+         let lo = _mm_packs_epi32(lo_lo, lo_hi);
+         let hi = _mm_packs_epi32(hi_lo, hi_hi);

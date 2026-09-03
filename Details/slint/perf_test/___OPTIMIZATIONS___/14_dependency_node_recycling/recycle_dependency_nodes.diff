@@ -1,0 +1,330 @@
+--- a/internal/core/properties.rs
++++ b/internal/core/properties.rs
+@@ -27,6 +27,54 @@
+         value: T,
+     }
+ 
++    /// A pool of unlinked nodes kept for reuse, owned by the caller rather than by any one list.
++    ///
++    /// A binding re-reads the same properties every time it is evaluated, so freeing its whole
++    /// dependency list and allocating an identical one on the next evaluation is pure churn -- and
++    /// that is where essentially all of a frame's allocations come from (92-100% of every scene
++    /// measured). [`SingleLinkedListPinHead::recycle_into`] unlinks the nodes without giving the
++    /// memory back, and [`SingleLinkedListPinHead::push_front`] takes from the pool first.
++    ///
++    /// The pool is deliberately *not* a second chain inside the list head: `PropertyTracker`'s
++    /// layout is mirrored by `PropertyTrackerOpaque` for the C++ API, so the head has to stay one
++    /// pointer wide. Sharing one pool across all bindings is also better than one each - a binding
++    /// that shrinks hands its nodes to the others instead of sitting on them.
++    pub struct NodePool<T>(NodePtr<T>);
++
++    impl<T> NodePool<T> {
++        pub const fn new() -> Self {
++            Self(None)
++        }
++    }
++
++    impl<T> Default for NodePool<T> {
++        fn default() -> Self {
++            Self::new()
++        }
++    }
++
++    impl<T> Drop for NodePool<T> {
++        fn drop(&mut self) {
++            free_chain(self.0.take());
++        }
++    }
++
++    /// Frees a chain of nodes, dropping each value in place first.
++    fn free_chain<T>(mut cur: NodePtr<T>) {
++        // Iterative to avoid stack overflow on long chains.
++        while let Some(node) = cur {
++            // Safety: we own this node; drop_in_place keeps the value at its pinned address.
++            unsafe {
++                cur = (*node.as_ptr()).next;
++                core::ptr::drop_in_place(&raw mut (*node.as_ptr()).value);
++                alloc::alloc::dealloc(
++                    node.as_ptr().cast(),
++                    core::alloc::Layout::new::<SingleLinkedListPinNode<T>>(),
++                );
++            }
++        }
++    }
++
+     pub struct SingleLinkedListPinHead<T>(NodePtr<T>);
+     impl<T> Default for SingleLinkedListPinHead<T> {
+         fn default() -> Self {
+@@ -36,39 +84,59 @@
+ 
+     impl<T> Drop for SingleLinkedListPinHead<T> {
+         fn drop(&mut self) {
+-            // Iterative drop to avoid stack overflow on long lists.
+-            let mut cur = self.0.take();
+-            while let Some(node) = cur {
+-                // Safety: we own this node.
+-                // drop_in_place keeps the value at its pinned address.
+-                unsafe {
+-                    cur = (*node.as_ptr()).next;
+-                    core::ptr::drop_in_place(&raw mut (*node.as_ptr()).value);
+-                    alloc::alloc::dealloc(
+-                        node.as_ptr().cast(),
+-                        core::alloc::Layout::new::<SingleLinkedListPinNode<T>>(),
+-                    );
+-                }
+-            }
++            free_chain(self.0.take());
+         }
+     }
+ 
+     impl<T> SingleLinkedListPinHead<T> {
+-        pub fn push_front(&mut self, value: T) -> Pin<&T> {
+-            let node = SingleLinkedListPinNode { next: self.0.take(), value };
+-            // Safety: raw allocation, written once and never moved
+-            let ptr = unsafe {
+-                let layout = core::alloc::Layout::new::<SingleLinkedListPinNode<T>>();
+-                let mem = alloc::alloc::alloc(layout) as *mut SingleLinkedListPinNode<T>;
+-                assert!(!mem.is_null(), "allocation failed");
+-                core::ptr::write(mem, node);
+-                NonNull::new_unchecked(mem)
++        pub fn push_front(&mut self, value: T, pool: &mut NodePool<T>) -> Pin<&T> {
++            let ptr = match pool.0 {
++                // Reuse an allocation from a previous round. The address is unchanged, which is
++                // what keeps the node pinned, and nothing points at it any more: `recycle_into`
++                // unlinked it from whatever list it was registered in.
++                Some(node) => unsafe {
++                    pool.0 = (*node.as_ptr()).next;
++                    core::ptr::drop_in_place(&raw mut (*node.as_ptr()).value);
++                    core::ptr::write(&raw mut (*node.as_ptr()).value, value);
++                    (*node.as_ptr()).next = self.0;
++                    node
++                },
++                None => {
++                    let node = SingleLinkedListPinNode { next: self.0, value };
++                    // Safety: raw allocation, written once and never moved
++                    unsafe {
++                        let layout = core::alloc::Layout::new::<SingleLinkedListPinNode<T>>();
++                        let mem = alloc::alloc::alloc(layout) as *mut SingleLinkedListPinNode<T>;
++                        assert!(!mem.is_null(), "allocation failed");
++                        core::ptr::write(mem, node);
++                        NonNull::new_unchecked(mem)
++                    }
++                }
+             };
+             self.0 = Some(ptr);
+             // Safety: the value is pinned because we never move it out of the allocation
+             unsafe { Pin::new_unchecked(&(*ptr.as_ptr()).value) }
+         }
+ 
++        /// Empties the list into `pool`, keeping the allocations for the next round.
++        ///
++        /// `unlink` must detach the value from anything still pointing at it -- for a
++        /// `DependencyNode` that is `remove()`. It is called instead of dropping the value, and the
++        /// value stays initialized: `push_front` drops it when it reuses the node, so a pooled node
++        /// that is never reused is still dropped exactly once, by `Drop for NodePool`.
++        pub fn recycle_into(&mut self, pool: &mut NodePool<T>, unlink: impl Fn(Pin<&T>)) {
++            let mut cur = self.0.take();
++            while let Some(node) = cur {
++                // Safety: we own this node and it stays at its pinned address.
++                unsafe {
++                    cur = (*node.as_ptr()).next;
++                    unlink(Pin::new_unchecked(&(*node.as_ptr()).value));
++                    (*node.as_ptr()).next = pool.0;
++                    pool.0 = Some(node);
++                }
++            }
++        }
++
+         #[allow(unused)]
+         pub fn iter(&self) -> impl Iterator<Item = Pin<&T>> {
+             struct I<'a, T>(&'a NodePtr<T>);
+@@ -97,10 +165,11 @@
+ 
+     #[test]
+     fn test_list() {
++        let mut pool = NodePool::default();
+         let mut head = SingleLinkedListPinHead::default();
+-        head.push_front(1);
+-        head.push_front(2);
+-        head.push_front(3);
++        head.push_front(1, &mut pool);
++        head.push_front(2, &mut pool);
++        head.push_front(3, &mut pool);
+         assert_eq!(
+             head.iter().map(|x: Pin<&i32>| *x.get_ref()).collect::<std::vec::Vec<i32>>(),
+             std::vec![3, 2, 1]
+@@ -109,10 +178,66 @@
+     #[test]
+     fn big_list() {
+         // should not stack overflow
++        let mut pool = NodePool::default();
+         let mut head = SingleLinkedListPinHead::default();
+         for x in 0..100000 {
+-            head.push_front(x);
++            head.push_front(x, &mut pool);
++        }
++    }
++
++    #[test]
++    fn recycled_nodes_are_reused_and_values_replaced() {
++        let mut pool = NodePool::default();
++        let mut head = SingleLinkedListPinHead::default();
++        let addresses = |head: &SingleLinkedListPinHead<i32>| {
++            head.iter().map(|x| x.get_ref() as *const i32).collect::<std::vec::Vec<_>>()
++        };
++
++        for x in 1..=3 {
++            head.push_front(x, &mut pool);
++        }
++        let mut first_round = addresses(&head);
++        first_round.sort_unstable();
++
++        head.recycle_into(&mut pool, |_| {});
++        assert!(head.is_empty());
++
++        for x in 4..=6 {
++            head.push_front(x, &mut pool);
++        }
++        // Same three allocations, new values: nothing was returned to the allocator.
++        let mut second_round = addresses(&head);
++        second_round.sort_unstable();
++        assert_eq!(first_round, second_round);
++        assert_eq!(
++            head.iter().map(|x: Pin<&i32>| *x.get_ref()).collect::<std::vec::Vec<i32>>(),
++            std::vec![6, 5, 4]
++        );
++    }
++
++    #[test]
++    fn recycled_values_are_dropped_exactly_once() {
++        use core::cell::Cell;
++        std::thread_local!(static DROPS: Cell<usize> = const { Cell::new(0) });
++        struct CountDrops;
++        impl Drop for CountDrops {
++            fn drop(&mut self) {
++                DROPS.with(|d| d.set(d.get() + 1));
++            }
++        }
++
++        {
++            let mut pool = NodePool::default();
++            let mut head = SingleLinkedListPinHead::default();
++            head.push_front(CountDrops, &mut pool);
++            head.push_front(CountDrops, &mut pool);
++            head.recycle_into(&mut pool, |_| {});
++            // Reusing a pooled node drops the value it held.
++            head.push_front(CountDrops, &mut pool);
++            assert_eq!(DROPS.with(Cell::get), 1);
+         }
++        // One live node in the head, one left in the pool: both dropped when they go out of scope.
++        assert_eq!(DROPS.with(Cell::get), 3);
+     }
+ }
+ 
+@@ -309,6 +434,51 @@
+ 
+ type DependencyListHead = dependency_tracker::DependencyListHead<*const BindingHolder>;
+ type DependencyNode = dependency_tracker::DependencyNode<*const BindingHolder>;
++type NodePool = single_linked_list_pin::NodePool<DependencyNode>;
++
++/// Unlinked dependency nodes kept for reuse, shared by every binding on this thread.
++///
++/// See [`single_linked_list_pin::NodePool`] for why it lives here rather than inside each list.
++/// Follows the same `std` / `unsafe-single-threaded` split as [`current_binding_storage`].
++pub(crate) mod node_pool {
++    use super::NodePool;
++    use core::cell::RefCell;
++
++    #[cfg(feature = "std")]
++    std::thread_local! {
++        static POOL: RefCell<NodePool> = RefCell::new(NodePool::default());
++    }
++
++    #[cfg(feature = "std")]
++    pub(super) fn with<R>(f: impl FnOnce(&mut NodePool) -> R) -> R {
++        // A thread-local destructor can run while a binding is still being torn down; falling back
++        // to a fresh pool then just means those nodes are allocated and freed normally.
++        match POOL.try_with(|pool| pool.as_ptr()) {
++            // Safety: the pool is thread-local and `f` cannot re-enter `with` - `push_front` and
++            // `recycle_into` only touch the nodes.
++            Ok(pool) => f(unsafe { &mut *pool }),
++            // A thread-local destructor can run while a binding is still being torn down; falling
++            // back to a fresh pool then just means those nodes are allocated and freed normally.
++            Err(_) => f(&mut NodePool::default()),
++        }
++    }
++
++    #[cfg(not(feature = "std"))]
++    struct PoolCell(RefCell<NodePool>);
++    // Safety: the unsafe-single-threaded feature means only one thread accesses this
++    #[cfg(not(feature = "std"))]
++    unsafe impl Send for PoolCell {}
++    #[cfg(not(feature = "std"))]
++    unsafe impl Sync for PoolCell {}
++
++    #[cfg(not(feature = "std"))]
++    static POOL: PoolCell = PoolCell(RefCell::new(NodePool::new()));
++
++    #[cfg(not(feature = "std"))]
++    pub(super) fn with<R>(f: impl FnOnce(&mut NodePool) -> R) -> R {
++        f(&mut POOL.0.borrow_mut())
++    }
++}
+ 
+ use alloc::boxed::Box;
+ use core::cell::{Cell, RefCell, UnsafeCell};
+@@ -492,7 +662,7 @@
+         // Safety: self_ptr is valid and pinned
+         unsafe {
+             let dep_nodes = &mut *(*self_ptr).dep_nodes.get();
+-            let node = dep_nodes.push_front(node);
++            let node = node_pool::with(|pool| dep_nodes.push_front(node, pool));
+             DependencyListHead::append(&*property_that_will_notify, node);
+         }
+     }
+@@ -766,8 +936,13 @@
+                 // Safety: binding is Some so binding_ptr is too
+                 let binding_ptr = unsafe { binding_ptr.unwrap_unchecked() };
+ 
+-                // clear all the nodes so that we can start from scratch
+-                unsafe { *(*binding_ptr).dep_nodes.get() = Default::default() };
++                // Unregister all the nodes so that we can start from scratch, keeping their
++                // allocations: this binding is about to register the same properties again.
++                unsafe {
++                    node_pool::with(|pool| {
++                        (*(*binding_ptr).dep_nodes.get()).recycle_into(pool, |node| node.remove())
++                    })
++                };
+                 let r = unsafe {
+                     current_binding_storage::set(Some(binding_ptr), || {
+                         ((*binding_ptr).vtable.evaluate)(binding_ptr, value as *mut c_void)
+@@ -1338,8 +1513,12 @@
+     /// If this is called during the evaluation of another property binding or property tracker, then
+     /// any changes to accessed properties will not propagate to the other tracker.
+     pub fn evaluate_as_dependency_root<R>(self: Pin<&Self>, f: impl FnOnce() -> R) -> R {
+-        // clear all the nodes so that we can start from scratch
+-        unsafe { *self.holder.dep_nodes.get() = Default::default() };
++        // Unregister all the nodes so that we can start from scratch, keeping their allocations.
++        unsafe {
++            node_pool::with(|pool| {
++                (*self.holder.dep_nodes.get()).recycle_into(pool, |node| node.remove())
++            })
++        };
+ 
+         let holder_ptr = &raw const self.holder as *const BindingHolder;
+         let r = current_binding_storage::set(Some(holder_ptr), f);
+diff --git a/internal/core/properties/change_tracker.rs b/internal/core/properties/change_tracker.rs
+index 8018485dd..9379281fc 100644
+--- a/internal/core/properties/change_tracker.rs
++++ b/internal/core/properties/change_tracker.rs
+@@ -190,7 +190,9 @@ impl<T: PartialEq, EF: Fn(&Data) -> T + 'static, NF: Fn(&Data, &T) + 'static, Da
+             // Safety: raw is valid and we own it
+             unsafe {
+                 let dep_nodes = &mut *(*core::ptr::addr_of!((*raw).dep_nodes)).get();
+-                let node = dep_nodes.push_front(DependencyNode::new(raw as *const BindingHolder));
++                let node = super::node_pool::with(|pool| {
++                    dep_nodes.push_front(DependencyNode::new(raw as *const BindingHolder), pool)
++                });
+                 CHANGED_NODES.with(|changed_nodes| {
+                     changed_nodes.append(node);
+                 });

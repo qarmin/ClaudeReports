@@ -1,0 +1,107 @@
+=== BEFORE (pristine clone at ca273499e3e48bd2de6f02aa8e99a148984e45f3) ===
+$ cd repro && cargo run --release
+bend=0.0001   join=Miter width=+-0.3: elements(+0.3)=9 elements(-0.3)=13 match=false
+bend=0.0001   join=Miter width=+-2.5: elements(+2.5)=9 elements(-2.5)=13 match=false
+bend=0.0001   join=Bevel width=+-0.3: elements(+0.3)=9 elements(-0.3)=11 match=false
+bend=0.0001   join=Bevel width=+-2.5: elements(+2.5)=9 elements(-2.5)=11 match=false
+bend=0.0001   join=Round width=+-0.3: elements(+0.3)=9 elements(-0.3)=11 match=false
+bend=0.0001   join=Round width=+-2.5: elements(+2.5)=9 elements(-2.5)=11 match=false
+bend=0.0005   join=Miter width=+-0.3: elements(+0.3)=9 elements(-0.3)=13 match=false
+bend=0.0005   join=Miter width=+-2.5: elements(+2.5)=9 elements(-2.5)=13 match=false
+bend=0.0005   join=Bevel width=+-0.3: elements(+0.3)=9 elements(-0.3)=11 match=false
+bend=0.0005   join=Bevel width=+-2.5: elements(+2.5)=9 elements(-2.5)=11 match=false
+bend=0.0005   join=Round width=+-0.3: elements(+0.3)=9 elements(-0.3)=11 match=false
+bend=0.0005   join=Round width=+-2.5: elements(+2.5)=9 elements(-2.5)=11 match=false
+bend=0.002    join=Miter width=+-0.3: elements(+0.3)=9 elements(-0.3)=13 match=false
+bend=0.002    join=Miter width=+-2.5: elements(+2.5)=9 elements(-2.5)=13 match=false
+bend=0.002    join=Bevel width=+-0.3: elements(+0.3)=9 elements(-0.3)=11 match=false
+bend=0.002    join=Bevel width=+-2.5: elements(+2.5)=9 elements(-2.5)=11 match=false
+bend=0.002    join=Round width=+-0.3: elements(+0.3)=9 elements(-0.3)=11 match=false
+bend=0.002    join=Round width=+-2.5: elements(+2.5)=9 elements(-2.5)=11 match=false
+bend=0.01     join=Miter width=+-0.3: elements(+0.3)=9 elements(-0.3)=13 match=false
+bend=0.01     join=Miter width=+-2.5: elements(+2.5)=9 elements(-2.5)=13 match=false
+bend=0.01     join=Bevel width=+-0.3: elements(+0.3)=9 elements(-0.3)=11 match=false
+bend=0.01     join=Bevel width=+-2.5: elements(+2.5)=9 elements(-2.5)=11 match=false
+bend=0.01     join=Round width=+-0.3: elements(+0.3)=9 elements(-0.3)=11 match=false
+bend=0.01     join=Round width=+-2.5: elements(+2.5)=9 elements(-2.5)=11 match=false
+
+BUG REPRODUCED: stroke() emits a different number of path elements for a negative-width stroke than for the equal-magnitude positive-width stroke on the same path, because `join_thresh` is computed from the signed `style.width` instead of its absolute value, forcing spurious extra joins onto negative-width strokes.
+$ echo $?
+1
+
+(Re-ran this exact binary 3 times in a row; all 3 runs produced byte-for-byte identical output,
+including the exit code and every per-row `match=false` result above - release build, no RNG/seed
+involved, deterministic float arithmetic.)
+
+Concrete example of the actual extra geometry this produces (separate ad hoc check, same pristine
+tree, `Stroke::new(-1.0).with_join(Join::Miter)` vs `Stroke::new(1.0).with_join(Join::Miter)` on a
+path bending by 0.001 units over a 100-unit run, tolerance 0.1):
+
+  positive width (correct, join omitted for this near-straight corner -- 9 elements):
+    MoveTo((0.0, -0.5))
+    LineTo((100.0, -0.5))
+    LineTo((200.000005, -0.49899999997499994))
+    CurveTo(...)
+    CurveTo(...)
+    LineTo((100.0, 0.5))
+    LineTo((0.0, 0.5))
+    CurveTo(...)
+    CurveTo(...)
+
+  negative width (buggy, spurious extra join segments inserted at the same near-straight corner
+  -- 13 elements instead of 9):
+    MoveTo((0.0, 0.5))
+    LineTo((100.0, 0.5))
+    LineTo((99.99999750000576, 0.5))          <- spurious extra point (join forced)
+    LineTo((99.999995, 0.49999999997499994))  <- spurious extra point (join forced)
+    LineTo((199.999995, 0.5009999999749999))
+    CurveTo(...)
+    CurveTo(...)
+    LineTo((100.000005, -0.49999999997499994))
+    LineTo((100.0, 0.0))                      <- spurious extra point (join forced)
+    LineTo((100.0, -0.5))                     <- spurious extra point (join forced)
+    LineTo((0.0, -0.5))
+    CurveTo(...)
+    CurveTo(...)
+
+=== Project test suite, pristine clone (before fix) ===
+$ cargo test -p kurbo
+test result: ok. 187 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+=== AFTER (patch.diff applied to the same clone) ===
+$ git apply patch.diff
+$ cd repro && cargo run --release
+bend=0.0001   join=Miter width=+-0.3: elements(+0.3)=9 elements(-0.3)=9 match=true
+bend=0.0001   join=Miter width=+-2.5: elements(+2.5)=9 elements(-2.5)=9 match=true
+bend=0.0001   join=Bevel width=+-0.3: elements(+0.3)=9 elements(-0.3)=9 match=true
+bend=0.0001   join=Bevel width=+-2.5: elements(+2.5)=9 elements(-2.5)=9 match=true
+bend=0.0001   join=Round width=+-0.3: elements(+0.3)=9 elements(-0.3)=9 match=true
+bend=0.0001   join=Round width=+-2.5: elements(+2.5)=9 elements(-2.5)=9 match=true
+bend=0.0005   join=Miter width=+-0.3: elements(+0.3)=9 elements(-0.3)=9 match=true
+bend=0.0005   join=Miter width=+-2.5: elements(+2.5)=9 elements(-2.5)=9 match=true
+bend=0.0005   join=Bevel width=+-0.3: elements(+0.3)=9 elements(-0.3)=9 match=true
+bend=0.0005   join=Bevel width=+-2.5: elements(+2.5)=9 elements(-2.5)=9 match=true
+bend=0.0005   join=Round width=+-0.3: elements(+0.3)=9 elements(-0.3)=9 match=true
+bend=0.0005   join=Round width=+-2.5: elements(+2.5)=9 elements(-2.5)=9 match=true
+bend=0.002    join=Miter width=+-0.3: elements(+0.3)=9 elements(-0.3)=9 match=true
+bend=0.002    join=Miter width=+-2.5: elements(+2.5)=9 elements(-2.5)=9 match=true
+bend=0.002    join=Bevel width=+-0.3: elements(+0.3)=9 elements(-0.3)=9 match=true
+bend=0.002    join=Bevel width=+-2.5: elements(+2.5)=9 elements(-2.5)=9 match=true
+bend=0.002    join=Round width=+-0.3: elements(+0.3)=9 elements(-0.3)=9 match=true
+bend=0.002    join=Round width=+-2.5: elements(+2.5)=9 elements(-2.5)=9 match=true
+bend=0.01     join=Miter width=+-0.3: elements(+0.3)=9 elements(-0.3)=9 match=true
+bend=0.01     join=Miter width=+-2.5: elements(+2.5)=9 elements(-2.5)=9 match=true
+bend=0.01     join=Bevel width=+-0.3: elements(+0.3)=9 elements(-0.3)=9 match=true
+bend=0.01     join=Bevel width=+-2.5: elements(+2.5)=9 elements(-2.5)=9 match=true
+bend=0.01     join=Round width=+-0.3: elements(+0.3)=9 elements(-0.3)=9 match=true
+bend=0.01     join=Round width=+-2.5: elements(+2.5)=9 elements(-2.5)=9 match=true
+
+No mismatch: element counts are symmetric under width sign flip (bug fixed).
+$ echo $?
+0
+
+=== Project test suite, same clone (after fix) ===
+$ cargo test -p kurbo
+test result: ok. 187 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s

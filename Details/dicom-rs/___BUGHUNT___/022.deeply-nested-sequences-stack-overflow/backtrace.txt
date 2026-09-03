@@ -1,0 +1,41 @@
+=== plain run (release build) ===
+
+built 20000 levels of nested sequences (400000 bytes), parsing...
+
+thread 'main' (162653) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+
+(process aborts with SIGABRT, exit code 134 - this is Rust's runtime-installed
+stack-overflow guard-page handler, not a catchable panic; RUST_BACKTRACE=1
+produces no additional output for this failure mode, since it isn't routed
+through the normal panic/backtrace machinery)
+
+=== gdb: `gdb -batch -ex run -ex "bt 20" --args ./target/release/repro 20000` ===
+
+Program received signal SIGSEGV, Segmentation fault.
+0x00006371847b1b71 in <dicom_parser::dataset::read::DataSetReader<...> as
+    core::iter::traits::iterator::Iterator>::next ()
+#0  <DataSetReader<...> as Iterator>::next ()
+#1  <dicom_object::mem::InMemDicomObject>::build_object::<DataSetReader<...>> ()
+#2  <dicom_object::mem::InMemDicomObject>::build_object::<DataSetReader<...>> ()
+#3  <dicom_object::mem::InMemDicomObject>::build_object::<DataSetReader<...>> ()
+#4  <dicom_object::mem::InMemDicomObject>::build_object::<DataSetReader<...>> ()
+#5  <dicom_object::mem::InMemDicomObject>::build_object::<DataSetReader<...>> ()
+#6  <dicom_object::mem::InMemDicomObject>::build_object::<DataSetReader<...>> ()
+    ... (repeats identically, one frame per level of sequence nesting in the
+    crafted input; with a 20000-level input the real stack would need well
+    over 20000 such frames before it could ever return - the guard page is
+    hit long before that, hence the SIGSEGV/abort) ...
+
+Every frame is the exact same recursive function (`build_object`, which in
+the pristine tree calls `build_sequence` for each `SequenceStart` token,
+which in turn calls `build_object` again for each `ItemStart` token) with no
+depth limit - the DICOM data set's own nesting depth is the only bound on
+the native call stack depth, and that nesting depth is entirely attacker
+controlled.
+
+=== after the fix (same input, same command) ===
+
+built 20000 levels of nested sequences (400000 bytes), parsing...
+did not reproduce - parsing returned a graceful error (no crash): Data set
+sequences are nested too deeply (limit is 1024)

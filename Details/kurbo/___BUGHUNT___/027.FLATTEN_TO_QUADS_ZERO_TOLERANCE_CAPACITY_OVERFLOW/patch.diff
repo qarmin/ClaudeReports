@@ -1,0 +1,67 @@
+diff --git a/kurbo/src/bezpath.rs b/kurbo/src/bezpath.rs
+index a290df1..c5259a2 100644
+--- a/kurbo/src/bezpath.rs
++++ b/kurbo/src/bezpath.rs
+@@ -554,6 +554,12 @@ impl Extend<PathEl> for BezPath {
+ /// Proportion of tolerance budget that goes to cubic to quadratic conversion.
+ const TO_QUAD_TOL: f64 = 0.1;
+ 
++// A generous but finite cap on the number of line segments a single `QuadTo`/`CurveTo` element
++// will ever be subdivided into, so a non-positive/non-finite `tolerance` (which would otherwise
++// divide-by-zero into `+inf` and saturate the `f64 as usize` cast to `usize::MAX`) can't make the
++// subdivision loop below spin effectively forever.
++const MAX_FLATTEN_SEGMENTS: usize = 1 << 20;
++
+ /// Flatten the path, invoking the callback repeatedly.
+ ///
+ /// Flattening is the action of approximating a curve with a succession of line segments.
+@@ -641,7 +647,9 @@ pub fn flatten(
+                 if let Some(p0) = last_pt {
+                     let q = QuadBez::new(p0, p1, p2);
+                     let params = q.estimate_subdiv(sqrt_tol);
+-                    let n = ((0.5 * params.val / sqrt_tol).ceil() as usize).max(1);
++                    let n = ((0.5 * params.val / sqrt_tol).ceil())
++                        .min(MAX_FLATTEN_SEGMENTS as f64) as usize;
++                    let n = n.max(1);
+                     let step = 1.0 / (n as f64);
+                     for i in 1..n {
+                         let u = (i as f64) * step;
+@@ -671,7 +679,9 @@ pub fn flatten(
+                         sum += params.val;
+                         quad_buf.push((q, params));
+                     }
+-                    let n = ((0.5 * sum / sqrt_remain_tol).ceil() as usize).max(1);
++                    let n = ((0.5 * sum / sqrt_remain_tol).ceil())
++                        .min(MAX_FLATTEN_SEGMENTS as f64) as usize;
++                    let n = n.max(1);
+ 
+                     // Iterate through the quadratics, outputting the points of
+                     // subdivisions that fall within that quadratic.
+diff --git a/kurbo/src/cubicbez.rs b/kurbo/src/cubicbez.rs
+index 899a351..e72c1b9 100644
+--- a/kurbo/src/cubicbez.rs
++++ b/kurbo/src/cubicbez.rs
+@@ -25,6 +25,12 @@ use crate::common::FloatFuncs;
+ 
+ const MAX_SPLINE_SPLIT: usize = 100;
+ 
++// A generous but finite cap on the number of quadratics `to_quads` will ever produce, so that a
++// non-positive/non-finite `accuracy` (which would otherwise divide-by-zero into `+inf` and
++// saturate the `f64 as usize` cast to `usize::MAX`) can't make a caller's `Vec::reserve` on the
++// iterator's `size_hint` panic with "capacity overflow".
++const MAX_TO_QUADS_SUBDIVISIONS: usize = 1 << 20;
++
+ /// A single cubic Bézier segment.
+ #[derive(Clone, Copy, Debug, PartialEq)]
+ #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+@@ -91,7 +97,9 @@ impl CubicBez {
+         let p1x2 = 3.0 * self.p1.to_vec2() - self.p0.to_vec2();
+         let p2x2 = 3.0 * self.p2.to_vec2() - self.p3.to_vec2();
+         let err = (p2x2 - p1x2).hypot2();
+-        let n = ((err / max_hypot2).powf(1. / 6.0).ceil() as usize).max(1);
++        let n = ((err / max_hypot2).powf(1. / 6.0).ceil())
++            .min(MAX_TO_QUADS_SUBDIVISIONS as f64) as usize;
++        let n = n.max(1);
+ 
+         ToQuads { c: *self, n, i: 0 }
+     }

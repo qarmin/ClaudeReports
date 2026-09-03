@@ -1,0 +1,112 @@
+diff --git a/src/decoder.rs b/src/decoder.rs
+index b8eb531..a47175c 100644
+--- a/src/decoder.rs
++++ b/src/decoder.rs
+@@ -1099,18 +1099,9 @@ fn decode_block<R: Read>(
+     if spectral_selection.start == 0 {
+         // Section F.2.2.1
+         // Figure F.12
+-        let value = huffman.decode(reader, dc_table.unwrap())?;
+-        let diff = match value {
+-            0 => 0,
+-            1..=11 => huffman.receive_extend(reader, value)?,
+-            _ => {
+-                // Section F.1.2.1.1
+-                // Table F.1
+-                return Err(Error::Format(
+-                    "invalid DC difference magnitude category".to_owned(),
+-                ));
+-            }
+-        };
++        // Section F.1.2.1.1
++        // Table F.1
++        let diff = huffman.decode_dc(reader, dc_table.unwrap())?;
+ 
+         // Malicious JPEG files can cause this add to overflow, therefore we use wrapping_add.
+         // One example of such a file is tests/crashtest/images/dc-predictor-overflow.jpg
+diff --git a/src/huffman.rs b/src/huffman.rs
+index fca57c1..434a7d1 100644
+--- a/src/huffman.rs
++++ b/src/huffman.rs
+@@ -95,6 +95,33 @@ impl HuffmanDecoder {
+         Ok(extend(value, count))
+     }
+ 
++    // Analogous to decode_fast_ac: for DC tables, table.dc_lut folds the magnitude-category
++    // decode and its receive_extend into one LUT probe when both fit within LUT_BITS.
++    pub fn decode_dc<R: Read>(&mut self, reader: &mut R, table: &HuffmanTable) -> Result<i16> {
++        if let Some(ref dc_lut) = table.dc_lut {
++            if self.num_bits < LUT_BITS {
++                self.read_bits(reader)?;
++            }
++
++            let (value, size) = dc_lut[self.peek_bits(LUT_BITS) as usize];
++
++            if size != 0 {
++                self.consume_bits(size);
++                return Ok(value);
++            }
++        }
++
++        let category = self.decode(reader, table)?;
++
++        match category {
++            0 => Ok(0),
++            1..=11 => self.receive_extend(reader, category),
++            _ => Err(Error::Format(
++                "invalid DC difference magnitude category".to_owned(),
++            )),
++        }
++    }
++
+     pub fn reset(&mut self) {
+         self.bits = 0;
+         self.num_bits = 0;
+@@ -185,6 +212,7 @@ pub struct HuffmanTable {
+ 
+     lut: [(u8, u8); 1 << LUT_BITS],
+     ac_lut: Option<[(i16, u8); 1 << LUT_BITS]>,
++    dc_lut: Option<[(i16, u8); 1 << LUT_BITS]>,
+ }
+ 
+ impl HuffmanTable {
+@@ -242,12 +270,39 @@ impl HuffmanTable {
+             },
+         };
+ 
++        // Build a lookup table for small DC coefficient differences which both decodes the
++        // magnitude category and does the equivalent of receive_extend, mirroring ac_lut above.
++        let dc_lut = match class {
++            HuffmanTableClass::AC => None,
++            HuffmanTableClass::DC => {
++                let mut table = [(0i16, 0u8); 1 << LUT_BITS];
++
++                for (i, &(magnitude_category, size)) in lut.iter().enumerate() {
++                    if size == 0 {
++                        continue;
++                    }
++
++                    if magnitude_category == 0 {
++                        table[i] = (0, size);
++                    } else if magnitude_category <= 11 && size + magnitude_category <= LUT_BITS {
++                        let unextended_value = (((i << size) & ((1 << LUT_BITS) - 1)) >> (LUT_BITS - magnitude_category)) as u16;
++                        let value = extend(unextended_value, magnitude_category);
++
++                        table[i] = (value, size + magnitude_category);
++                    }
++                }
++
++                Some(table)
++            },
++        };
++
+         Ok(HuffmanTable {
+             values: values.to_vec(),
+             delta,
+             maxcode,
+             lut,
+             ac_lut,
++            dc_lut,
+         })
+     }
+ }

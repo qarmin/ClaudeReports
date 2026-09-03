@@ -1,0 +1,39 @@
+# Self-contained reproduction for candidate 020 (VORBIS_CHAPTER_TIMESTAMP_POW_OVERFLOW).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - a real, otherwise-valid FLAC file
+# with a crafted 20-fractional-digit CHAPTER001 comment, opened via the real public
+# symphonia_bundle_flac::FlacReader::try_new entry point. Should panic with
+# "attempt to exponentiate with overflow" (exit code 101 - a *non-zero* exit here is the expected,
+# successful demonstration of the bug, so the `-` prefix stops `just` from treating it as a
+# failed recipe and aborting the rest of the `test` chain).
+reproduce-before:
+    -cd repro && cargo run --quiet -- 20
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer panic (returns a benign
+# Err("unexpected end of file") instead, same as every other non-overflowing digit count, since
+# the synthetic test file intentionally has no audio frame data).
+reproduce-after:
+    cd repro && cargo run --quiet -- 20
+
+clean:
+    rm -rf clone repro/target

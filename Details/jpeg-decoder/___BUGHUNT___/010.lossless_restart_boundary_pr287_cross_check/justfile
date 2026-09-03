@@ -1,0 +1,48 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate is a diff-review of an *open, unmerged* upstream PR (image-rs/jpeg-decoder#287),
+# not a bug already present in shipped code - so this justfile's shape deviates from the standard
+# candidate_justfile template: instead of one patch.diff applied straight to a pristine clone, it
+# applies PR #287's own diff (pr287_under_review.diff, bundled here for reproducibility - PRs can
+# be force-pushed/closed) first to reach the state actually under review, *then* demonstrates the
+# residual regression that state has, then applies patch.diff (this candidate's own small,
+# additional fix) on top and shows it's gone. Everything needed is in this folder or fetched by
+# `just clone` into ./clone (gitignored).
+
+repo_url := "https://github.com/image-rs/jpeg-decoder.git"
+base_commit := "eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c"
+
+# Full cycle: clone pristine, apply PR #287 (the state under review), prove its residual
+# regression exists, apply this candidate's own fix on top, prove it's gone.
+test: clone apply-pr287 reproduce-before apply-fix reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-pr287:
+    cd clone && git apply "{{justfile_directory()}}/pr287_under_review.diff"
+
+# Build+run the standalone repro against PR #287's own state (not yet this candidate's fix).
+# Adapt: repro/ depends on `{ path = "../clone" }`, so it always tracks whatever state ./clone is
+# currently in. Expect scenario E (Ra branch, precision/point_transform boundary) to mismatch here
+# - that is PR #287's own residual regression, the one this candidate's patch.diff fixes. Scenarios
+# A/B/C/D (the original #001/#002 restart-boundary bugs, including multi-component) should already
+# be fixed by PR #287 alone at this point. Scenarios G/H/I/J are a separate, NOT fixed by this
+# candidate's patch, anomaly - see RESULT.md's "New suspects noticed" - expect those to mismatch
+# both before and after this candidate's own patch is applied.
+reproduce-before:
+    cd repro && cargo run --release
+
+apply-fix:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now with this candidate's own fix applied on top of PR #287's state - scenario
+# E should now match too (F, candidate 003's own separate already-tracked bug, is intentionally
+# untouched by this candidate's patch either way; G/H/I/J remain mismatched either way, unrelated).
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

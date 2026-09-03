@@ -1,0 +1,46 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# NOTE: this is an unchecked `u32` addition, so it only panics when overflow checks are enabled
+# (`overflow-checks = true` in repro/Cargo.toml's [profile.dev]). In a release build it silently
+# wraps to a bogus in-range chunk index and `seek()` returns Ok with a garbage byte position, so
+# reproduce-before/reproduce-after intentionally run the debug profile (`cargo run`, not
+# `cargo run --release`).
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - 2 of the 5 cases must panic with
+# "attempt to add with overflow" at symphonia-format-isomp4/src/stream.rs:416, and the recipe
+# exits non-zero ("BUG REPRODUCED"). The leading `-` lets `just test` continue past it.
+reproduce-before:
+    -ulimit -c 0 && cd repro && cargo run
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - no case may panic; the two previously-panicking
+# cases must instead return Err(DecodeError("isomp4: chunk index overflow")), and the control case
+# must still seek successfully ("BUG NOT REPRODUCED").
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo run
+
+# Provenance only - the crafted assets are already committed under repro/assets.
+recraft-assets:
+    cd repro && python3 craft_assets.py
+
+clean:
+    rm -rf clone repro/target

@@ -1,0 +1,66 @@
+# Numbers for this candidate. `just run` builds the harness and prints the table.
+bin := justfile_directory() + "/../../../target/rdebug/perf_test"
+harness := justfile_directory() + "/../.."
+above_status_line := "3148815"   # 15-byte PPM header + 1280*820*3; see PIPELINE.md
+
+build:
+    cd {{ harness }} && cargo build --profile rdebug --bin perf_test
+
+# The headline: 11 MB of text, and how the resident cost scales with the document.
+run: build
+    @echo "--- 100 000 lines, no-wrap (was: 2.02 s, 543.3 MB, 3.67 ms/frame) ---"
+    {{ bin }} --bench --mode text --count 100000 --frames 8
+    @echo "--- scaling: 1k / 10k / 100k lines (was: 21.6 / 69.6 / 544.1 MB) ---"
+    for c in 1000 10000 100000; do printf "%-8s " $c; {{ bin }} --bench --mode text --count $c --frames 2 | grep resident; done
+
+# The four cases that behave differently, because only `no-wrap` shapes lazily and only a resize
+# reaches the width-dependent path. Was: 2.02 s / 543 MB / 3.67 ms / 76 ms per resize (no-wrap),
+# 1.98 s / 543 MB / 3.63 ms / 102 ms per resize (word-wrap).
+matrix: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for wrap in "" "--word-wrap"; do
+        for motion in "--frames 8" "--frames 5 --resize-step 40 --scroll-step 0"; do
+            echo "--- ${wrap:---no-wrap} ${motion} ---"
+            {{ bin }} --bench --mode text --count 100000 $wrap $motion \
+                | grep -E "show \+ layout|later frames|resident"
+        done
+    done
+
+# Where the allocations of the layout pass come from
+run-profile: build
+    {{ bin }} --bench --mode text --count 100000 --frames 1 --alloc-profile 5000 --profile-phase show
+
+# Pixel check against a binary built from the pristine `internal/core/textlayout`.
+# Build that one first:
+#   git stash push -- internal/core/textlayout
+#   (cd ../.. && cargo build --profile rdebug --bin perf_test) && cp ../../../target/rdebug/perf_test /tmp/pt_base
+#   git stash pop
+# Run the same-binary control before believing any difference.
+pixels base="/tmp/pt_base": build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for args in "--mode text --count 5000 --frames 5 --scroll-step 29" \
+                "--mode text --count 100000 --frames 12 --scroll-step 200" \
+                "--mode text --count 5000 --frames 5 --scroll-step 29 --word-wrap" \
+                "--mode text --count 100000 --frames 12 --scroll-step 200 --word-wrap" \
+                "--mode text --count 5000 --frames 5 --scroll-step 0 --resize-step 40" \
+                "--mode text --count 5000 --frames 5 --scroll-step 0 --resize-step 40 --word-wrap" \
+                "--mode text --count 100 --frames 3 --scroll-step 200" \
+                "--mode list --count 5000 --frames 5 --scroll-step 29" \
+                "--mode scroll --count 5000 --frames 5 --scroll-step 29" \
+                "--mode rects --count 2000 --frames 5 --scroll-step 29"; do
+        {{ base }} --bench $args --snapshot /tmp/pixels_base.ppm >/dev/null
+        {{ bin }}  --bench $args --snapshot /tmp/pixels_new.ppm  >/dev/null
+        if cmp -s -n {{ above_status_line }} /tmp/pixels_base.ppm /tmp/pixels_new.ppm; then
+            echo "identical   $args"
+        else
+            echo "DIFFERS     $args"
+        fi
+    done
+
+# Every suite this candidate can break.
+test:
+    cd {{ harness }}/.. && cargo test -p i-slint-core --all-features
+    cd {{ harness }}/.. && cargo test -p slint
+    cd {{ harness }}/../tests && cargo test -p test-driver-rust -p test-driver-interpreter --features build-time

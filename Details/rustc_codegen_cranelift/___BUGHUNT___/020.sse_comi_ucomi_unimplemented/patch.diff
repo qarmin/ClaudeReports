@@ -1,0 +1,63 @@
+diff --git a/src/intrinsics/llvm_x86.rs b/src/intrinsics/llvm_x86.rs
+index 136e9896..4acaf623 100644
+--- a/src/intrinsics/llvm_x86.rs
++++ b/src/intrinsics/llvm_x86.rs
+@@ -312,6 +312,58 @@ pub(super) fn codegen_x86_llvm_intrinsic_call<'tcx>(
+                 bool_to_zero_or_max_uint(fx, res_lane_ty, res_lane)
+             });
+         }
++        "llvm.x86.sse.comieq.ss"
++        | "llvm.x86.sse.comilt.ss"
++        | "llvm.x86.sse.comile.ss"
++        | "llvm.x86.sse.comigt.ss"
++        | "llvm.x86.sse.comige.ss"
++        | "llvm.x86.sse.comineq.ss"
++        | "llvm.x86.sse.ucomieq.ss"
++        | "llvm.x86.sse.ucomilt.ss"
++        | "llvm.x86.sse.ucomile.ss"
++        | "llvm.x86.sse.ucomigt.ss"
++        | "llvm.x86.sse.ucomige.ss"
++        | "llvm.x86.sse.ucomineq.ss"
++        | "llvm.x86.sse2.comieq.sd"
++        | "llvm.x86.sse2.comilt.sd"
++        | "llvm.x86.sse2.comile.sd"
++        | "llvm.x86.sse2.comigt.sd"
++        | "llvm.x86.sse2.comige.sd"
++        | "llvm.x86.sse2.comineq.sd"
++        | "llvm.x86.sse2.ucomieq.sd"
++        | "llvm.x86.sse2.ucomilt.sd"
++        | "llvm.x86.sse2.ucomile.sd"
++        | "llvm.x86.sse2.ucomigt.sd"
++        | "llvm.x86.sse2.ucomige.sd"
++        | "llvm.x86.sse2.ucomineq.sd" => {
++            // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_comieq_ss&ig_expand=1236
++            // COMISS/COMISD/UCOMISS/UCOMISD compare lane 0 of both operands and return the
++            // corresponding x86 flag test as a plain 0/1 `i32`; the upper lanes are ignored.
++            intrinsic_args!(fx, args => (a, b); intrinsic);
++
++            // `comi` and `ucomi` differ only in whether a *quiet* NaN raises the
++            // invalid-operation exception. Cranelift has no FP-exception model, so both spellings
++            // lower identically - matching what the returned value is defined to be either way.
++            let flt_cc = match intrinsic.rsplit('.').nth(1).unwrap() {
++                "comieq" | "ucomieq" => FloatCC::Equal,
++                "comilt" | "ucomilt" => FloatCC::LessThan,
++                "comile" | "ucomile" => FloatCC::LessThanOrEqual,
++                "comigt" | "ucomigt" => FloatCC::GreaterThan,
++                "comige" | "ucomige" => FloatCC::GreaterThanOrEqual,
++                // Unlike the other five this one is true for unordered operands, which is what
++                // `FloatCC::NotEqual` (UN | LT | GT) means.
++                "comineq" | "ucomineq" => FloatCC::NotEqual,
++                _ => unreachable!("{intrinsic}"),
++            };
++
++            assert_eq!(ret.layout().ty, fx.tcx.types.i32);
++
++            let a_lane0 = a.value_lane(fx, 0).load_scalar(fx);
++            let b_lane0 = b.value_lane(fx, 0).load_scalar(fx);
++            let res = fx.bcx.ins().fcmp(flt_cc, a_lane0, b_lane0);
++            let res = fx.bcx.ins().uextend(types::I32, res);
++            ret.write_cvalue(fx, CValue::by_val(res, fx.layout_of(fx.tcx.types.i32)));
++        }
+         "llvm.x86.ssse3.pshuf.b.128" | "llvm.x86.avx2.pshuf.b" => {
+             let (a, b) = match args {
+                 [a, b] => (a, b),

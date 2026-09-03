@@ -1,0 +1,98 @@
+diff --git a/src/intrinsics/mod.rs b/src/intrinsics/mod.rs
+index 4a779e22..b8ee3efc 100644
+--- a/src/intrinsics/mod.rs
++++ b/src/intrinsics/mod.rs
+@@ -54,6 +54,39 @@ fn report_atomic_type_validation_error<'tcx>(
+     fx.bcx.ins().trap(TrapCode::user(1 /* unreachable */).unwrap());
+ }
+ 
++/// Cranelift only has lowerings for 128bit atomics in its x64 backend, and every one of them is
++/// gated on the `cmpxchg16b` ISA flag. Everywhere else (aarch64, s390x, ...) there is no lowering
++/// at all and the operation has to be rejected.
++fn isa_supports_128bit_atomics(fx: &FunctionCx<'_, '_, '_>) -> bool {
++    let isa = fx.module.isa();
++    isa.triple().architecture == target_lexicon::Architecture::X86_64
++        && isa
++            .isa_flags()
++            .iter()
++            .any(|flag| flag.name == "has_cmpxchg16b" && flag.as_bool() == Some(true))
++}
++
++/// Emit a runtime abort for a 128bit atomic operation the target ISA can't lower.
++///
++/// This can't be a hard error: `core` itself instantiates the 128bit atomic intrinsics on every
++/// target where `target_has_atomic = "128"` holds (all of aarch64, s390x and x86_64 macOS), so
++/// erroring out makes those targets impossible to compile at all rather than just making the
++/// unsupported operation fail. Warn + trap is what the backend already does for unsupported
++/// `llvm.*` intrinsics.
++fn codegen_unsupported_128bit_atomic<'tcx>(
++    fx: &mut FunctionCx<'_, '_, 'tcx>,
++    intrinsic: Symbol,
++    span: Span,
++) {
++    if !fx.tcx.is_compiler_builtins(LOCAL_CRATE) {
++        fx.tcx.dcx().span_warn(
++            span,
++            format!("`{intrinsic}` on a 128bit integer is not yet supported; replacing with trap"),
++        );
++    }
++    crate::base::codegen_panic_nounwind(fx, "128bit atomics not yet supported", span);
++}
++
+ pub(crate) fn clif_vector_type<'tcx>(tcx: TyCtxt<'tcx>, layout: TyAndLayout<'tcx>) -> Type {
+     let (element, count) = match layout.backend_repr {
+         BackendRepr::SimdVector { element, count } => (element, count),
+@@ -870,21 +903,11 @@ fn codegen_regular_intrinsic_call<'tcx>(
+ 
+             let ty = generic_args.type_at(0);
+             match ty.kind() {
+-                ty::Uint(UintTy::U128) | ty::Int(IntTy::I128) => {
+-                    // FIXME implement 128bit atomics
+-                    if fx.tcx.is_compiler_builtins(LOCAL_CRATE) {
+-                        // special case for compiler-builtins to avoid having to patch it
+-                        crate::base::codegen_panic_nounwind(
+-                            fx,
+-                            "128bit atomics not yet supported",
+-                            source_info.span,
+-                        );
+-                        return Ok(());
+-                    } else {
+-                        fx.tcx
+-                            .dcx()
+-                            .span_fatal(source_info.span, "128bit atomics not yet supported");
+-                    }
++                ty::Uint(UintTy::U128) | ty::Int(IntTy::I128)
++                    if !isa_supports_128bit_atomics(fx) =>
++                {
++                    codegen_unsupported_128bit_atomic(fx, intrinsic, source_info.span);
++                    return Ok(());
+                 }
+                 ty::Uint(_) | ty::Int(_) | ty::RawPtr(..) => {}
+                 _ => {
+@@ -906,21 +929,11 @@ fn codegen_regular_intrinsic_call<'tcx>(
+ 
+             let ty = generic_args.type_at(0);
+             match ty.kind() {
+-                ty::Uint(UintTy::U128) | ty::Int(IntTy::I128) => {
+-                    // FIXME implement 128bit atomics
+-                    if fx.tcx.is_compiler_builtins(LOCAL_CRATE) {
+-                        // special case for compiler-builtins to avoid having to patch it
+-                        crate::base::codegen_panic_nounwind(
+-                            fx,
+-                            "128bit atomics not yet supported",
+-                            source_info.span,
+-                        );
+-                        return Ok(());
+-                    } else {
+-                        fx.tcx
+-                            .dcx()
+-                            .span_fatal(source_info.span, "128bit atomics not yet supported");
+-                    }
++                ty::Uint(UintTy::U128) | ty::Int(IntTy::I128)
++                    if !isa_supports_128bit_atomics(fx) =>
++                {
++                    codegen_unsupported_128bit_atomic(fx, intrinsic, source_info.span);
++                    return Ok(());
+                 }
+                 ty::Uint(_) | ty::Int(_) | ty::RawPtr(..) => {}
+                 _ => {

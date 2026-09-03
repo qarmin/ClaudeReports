@@ -1,0 +1,63 @@
+diff --git a/json/src/ser/mod.rs b/json/src/ser/mod.rs
+index 55a5638d..71d3229a 100644
+--- a/json/src/ser/mod.rs
++++ b/json/src/ser/mod.rs
+@@ -313,6 +313,24 @@ impl From<Tag> for DicomJson<Tag> {
+     }
+ }
+ 
++/// Encode a tag as the 8 uppercase hex digit bytes DICOM JSON uses for element keys and AT
++/// values (`"GGGGEEEE"`), without going through `core::fmt`'s `Formatter`/padding machinery -
++/// called once per element being (de)serialized, a real hot path for element-heavy documents.
++pub(crate) fn tag_hex_bytes(tag: Tag) -> [u8; 8] {
++    const HEX: &[u8; 16] = b"0123456789ABCDEF";
++    let Tag(g, e) = tag;
++    [
++        HEX[(g >> 12 & 0xF) as usize],
++        HEX[(g >> 8 & 0xF) as usize],
++        HEX[(g >> 4 & 0xF) as usize],
++        HEX[(g & 0xF) as usize],
++        HEX[(e >> 12 & 0xF) as usize],
++        HEX[(e >> 8 & 0xF) as usize],
++        HEX[(e >> 4 & 0xF) as usize],
++        HEX[(e & 0xF) as usize],
++    ]
++}
++
+ impl Serialize for DicomJson<Tag> {
+     /// Serializes the DICOM tag as a single string in uppercase hexadecimal,
+     /// with no separators or delimiters (`"GGGGEEEE"`).
+@@ -320,8 +338,11 @@ impl Serialize for DicomJson<Tag> {
+     where
+         S: Serializer,
+     {
+-        let Tag(g, e) = self.0;
+-        serializer.serialize_str(&format!("{g:04X}{e:04X}"))
++        let buf = tag_hex_bytes(self.0);
++        // SAFETY: every byte in `buf` is one of the ASCII hex digit bytes in `HEX` above,
++        // always valid UTF-8.
++        let s = unsafe { std::str::from_utf8_unchecked(&buf) };
++        serializer.serialize_str(s)
+     }
+ }
+ 
+diff --git a/json/src/ser/value.rs b/json/src/ser/value.rs
+index c8f9cd0b..c1a04de9 100644
+--- a/json/src/ser/value.rs
++++ b/json/src/ser/value.rs
+@@ -240,10 +240,11 @@ impl Serialize for AsAttributeTags<'_> {
+                 "AsAttributeTags created with a non-Tags value",
+             ));
+         };
+-        serializer.collect_seq(
+-            tags.iter()
+-                .map(|tag| format!("{:04X}{:04X}", tag.group(), tag.element())),
+-        )
++        serializer.collect_seq(tags.iter().map(|tag| {
++            let buf = crate::ser::tag_hex_bytes(*tag);
++            // SAFETY: see `tag_hex_bytes` - every byte is an ASCII hex digit.
++            unsafe { String::from_utf8_unchecked(buf.to_vec()) }
++        }))
+     }
+ }
+ 

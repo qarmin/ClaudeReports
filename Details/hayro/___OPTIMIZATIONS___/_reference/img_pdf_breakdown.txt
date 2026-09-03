@@ -1,0 +1,39 @@
+img.pdf, render() only (parse+interpret+decode+rasterize, NOT PNG/JPEG encode
+- excluded on purpose, since the user encodes JPEG downstream via a
+different crate, not through hayro/vello's PNG path).
+taskset -c 2, 100 iterations, 2 runs shown for consistency:
+
+Run 1 (total render() time = 359.042ms / 100 = 3.59ms/iteration):
+  draw_image (incl. decode/convert):   52.587 ms  ( 14.6%)
+  draw_path/draw_rect:                 13.252 ms  (  3.7%)
+  draw_glyph:                         139.223 ms  ( 38.8%)
+  clip/group ops:                       1.041 ms  (  0.3%)
+  interpret_page total:               293.569 ms  ( 81.8%)
+    of which dispatch/dedup overhead
+    not in any draw_* call:            87.465 ms  ( 24.4%)
+  final ctx.render() (rasterize):      57.867 ms  ( 16.1%)
+
+Run 2 (total render() time = 326.204ms / 100 = 3.26ms/iteration):
+  draw_image (incl. decode/convert):   47.859 ms  ( 14.7%)
+  draw_path/draw_rect:                 12.094 ms  (  3.7%)
+  draw_glyph:                         126.554 ms  ( 38.8%)
+  clip/group ops:                       0.946 ms  (  0.3%)
+  interpret_page total:               266.402 ms  ( 81.7%)
+    of which dispatch/dedup overhead
+    not in any draw_* call:            78.949 ms  ( 24.2%)
+  final ctx.render() (rasterize):      52.879 ms  ( 16.2%)
+
+Glyph outline sub-breakdown (draw_glyph -> fill_glyph -> cached_outline):
+  1232 glyph draw calls per render.
+  cache-hit lookup:            ~4.4-4.9 ms / 100 iter  (~3.2% of draw_glyph time)
+  cache-miss (extract outline): ~9.8-10.9 ms / 100 iter (~7.6% of draw_glyph time)
+  => ~89% of draw_glyph's cost is NOT outline management - it's the
+     vello_cpu `ctx.fill_path()` call itself (one real fill per glyph
+     instance; outlines are cached but each occurrence still needs its own
+     rasterization pass since screen position differs).
+
+Reproduce: apply profiling_instrumentation.diff to hayro/src/lib.rs and
+hayro/src/glyph.rs, copy bench_ops_reference.rs to hayro/examples/bench_ops.rs,
+`cargo build --release --example bench_ops -p hayro`, then
+`taskset -c 2 ./target/release/examples/bench_ops img.pdf 100`. Revert both
+after (not meant to ship - static AtomicU64 counters add per-call overhead).

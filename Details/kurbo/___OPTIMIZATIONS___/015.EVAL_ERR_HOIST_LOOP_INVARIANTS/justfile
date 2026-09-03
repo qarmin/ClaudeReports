@@ -1,0 +1,75 @@
+# Self-contained reproduction for candidate 015.
+#
+# NOTE (shape 3, see templates/candidate_justfile): kurbo's own benchmarks don't reach this code
+# path, so this uses the `kurbo_bench` harness built for this workspace. That harness is UNTRACKED
+# in the kurbo repo - a fresh `git clone` of repo_url will never contain it - so `clone:` copies it
+# in from `../harness/kurbo_bench` and rewrites its kurbo dependency path. That makes this folder
+# self-contained *given the whole ___OPTIMIZATIONS___ folder kept together*, not as a single
+# isolated subfolder.
+#
+# `just test` clones at the pinned commit, builds a baseline binary, applies patch.diff, builds a
+# patched binary, and prints a real before/after for the three affected scenes, the paired wall
+# clock comparison, the deterministic instruction counts, and the normalized-disassembly
+# comparison that carries this candidate's conclusion (the codegen is identical).
+
+repo_url := "https://github.com/linebender/kurbo.git"
+base_commit := "ca273499e3e48bd2de6f02aa8e99a148984e45f3"
+harness_dir := "../harness/kurbo_bench"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout --quiet {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/kurbo_bench
+    rm -rf clone/kurbo_bench/target
+    # The harness lives at ___OPTIMIZATIONS___/harness/kurbo_bench in the workspace, but at
+    # clone/kurbo_bench here, so its relative path to the kurbo crate changes.
+    sed -i 's|path = "../../../kurbo"|path = "../kurbo"|' clone/kurbo_bench/Cargo.toml
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/kurbo_bench && cargo build --release
+    cp clone/kurbo_bench/target/release/kurbo_bench ./bin_baseline
+
+build-patched:
+    find clone/kurbo/src -name '*.rs' -exec touch {} +
+    cd clone/kurbo_bench && cargo build --release
+    cp clone/kurbo_bench/target/release/kurbo_bench ./bin_patched
+
+bench:
+    @echo "=== the two binaries must differ, or the patch didn't apply ==="
+    sha256sum ./bin_baseline ./bin_patched
+    @echo ""
+    @echo "=== offset / stroke / dash: baseline then patched (CHECK must match) ==="
+    for s in offset stroke dash; do \
+        ulimit -c 0; ./bin_baseline $s 20; ./bin_patched $s 20; echo ""; \
+    done
+    @echo "=== paired wall clock, single-core then multi-core ==="
+    for s in offset stroke dash; do \
+        ulimit -c 0; \
+        TASKSET=2 RUNS=9 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- $s 20; \
+        RUNS=9 bash "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- $s 20; \
+    done
+    @echo ""
+    @echo "=== deterministic instruction counts (the primary signal) ==="
+    for s in offset stroke dash; do \
+        ulimit -n 4096; \
+        echo -n "base    $s "; valgrind --tool=callgrind --callgrind-out-file=/dev/null ./bin_baseline $s 3 2>&1 | grep 'I   refs'; \
+        echo -n "patched $s "; valgrind --tool=callgrind --callgrind-out-file=/dev/null ./bin_patched  $s 3 2>&1 | grep 'I   refs'; \
+    done
+    @echo ""
+    @echo "=== THE conclusion: machine code is identical modulo LLVM anon-symbol hashes ==="
+    for b in bin_baseline bin_patched; do \
+        objdump -d --no-show-raw-insn ./$b \
+          | sed 's/^ *[0-9a-f]*://; s/llvm\.[0-9]*/llvm.X/g; s|^\./[a-z_]*:|BIN:|' > ./$b.n.asm; \
+    done
+    @echo "differing instruction lines (expect 4: a 2-instruction reshuffle inside the same"
+    @echo "straight-line prologue of offset_rec, i.e. no loop-body change at all):"
+    diff ./bin_baseline.n.asm ./bin_patched.n.asm | grep -c '^[<>]' || true
+
+clean:
+    rm -rf clone bin_baseline bin_patched bin_baseline.n.asm bin_patched.n.asm

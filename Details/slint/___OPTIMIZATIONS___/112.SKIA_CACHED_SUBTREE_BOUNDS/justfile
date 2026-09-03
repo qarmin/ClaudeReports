@@ -1,0 +1,66 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff bundles candidates 049+050+051's whole subtree-bounds mechanism plus this
+# candidate's own one-method Skia delegation, since none of it exists on plain master and the
+# accessor being delegated has to exist for the delegation to compile (same convention 051 itself
+# used for 049+050). Applying it against base_commit gives the full patched product-source tree in
+# one step.
+#
+# Note: fully reproducing the bench additionally needs `perf_test/` copied in manually next to
+# `clone/` - it is untracked in the main slint repo's git history, so `just clone` alone will not
+# fetch it (see candidate 066's justfile for the same note). This candidate's only perf_test
+# change is `--skia-bench`'s new `--pointer-move` support; the full, already-patched file is in
+# `perf_test_fixes/skia_headless.rs` - overlay it onto your `perf_test/src/` before building if
+# your copy predates this candidate.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Reproduce the headline numbers from RESULT.md. Needs perf_test/'s source copied into
+# ./clone/perf_test (its Cargo.toml uses paths relative to its own directory, so it must sit
+# inside the checkout it is meant to build against) - see the note above for the one file this
+# candidate needs overlaid on top of it.
+bench:
+    # NOTE: the perf_test_fixes/ overlay below is now redundant - ../harness/perf_test
+    # (copied in by clone: above) is the current, cumulative perf_test source, which
+    # already includes this candidate's scene/flag additions plus everything added by
+    # later candidates. Overlaying an old snapshot on top would silently regress it, so
+    # the lines that used to do that were removed.
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug --features skia
+    @echo "Steady-state frame time including hit-test dispatch (see RESULT.md):"
+    taskset -c 2 ./clone/target/rdebug/perf_test --skia-bench --mode scroll --row-style layout \
+        --count 100000 --frames 20 --pointer-move
+    @echo "For the paired before/after comparison in RESULT.md: build once per patch.diff"
+    @echo "applied/unapplied into two separate clones (unapplied = 051.SUBTREE_BOUNDS_HIT_TEST_PRUNE's"
+    @echo "own patch.diff, not plain master - see RESULT.md's 'Reproduce' section), then (from the"
+    @echo "main project's ___OPTIMIZATIONS___/tools/, not this folder):"
+    @echo "  RUNS=9 TASKSET=2 paired_skia_headless.sh <baseline-bin> <patched-bin> \\"
+    @echo "      --skia-bench --mode scroll --row-style layout --count 100000 --frames 20 --pointer-move"
+    @echo "  RUNS=9 paired_skia_headless.sh <baseline-bin> <patched-bin> \\"
+    @echo "      --skia-bench --mode scroll --row-style layout --count 100000 --frames 20 --pointer-move   # unpinned, multi-core"
+
+clean:
+    rm -rf clone

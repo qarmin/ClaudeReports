@@ -1,0 +1,70 @@
+<!--
+Copy into ___BUGHUNT___/SUMMARY-SHORT.md. A filtered, condensed view of SUMMARY.md meant to be
+small enough to paste whole into a GitHub issue/comment (GitHub truncates very long bodies) - this
+file's whole point is staying well under that limit, so keep every cell terse.
+
+Rows: only candidates whose SUMMARY.md Status is exactly "Confirmed" AND whose SUMMARY.md "Fixed
+by" cell is blank (i.e. still reproduces against current HEAD). Everything else (Not reproducible,
+Inconclusive, or a Confirmed row that's since been fixed upstream per a CORRECTION.md) is omitted
+here - it still lives in SUMMARY.md, this file is a subset view, not a replacement. No "Fixed by"
+column exists in this file: by construction every row here is unfixed, so the column would always
+be empty - point readers at SUMMARY.md if they want the fixed-upstream history too. Re-check this
+filter whenever a CORRECTION.md is added for a row already in this file (see SUMMARY.md's own
+"Fixed by" column note) - remove that row immediately, don't wait for the next full regeneration.
+
+Condense, don't copy-paste SUMMARY.md's Root cause cell verbatim: one clause, the single headline
+mechanism, no methodology narration (which tools were tried, repeat-run counts, "same class as
+candidate N" cross-references) - that detail stays in SUMMARY.md and the linked RESULT.md.
+
+**Candidate column here is NOT the `NNN.CANDIDATE_NAME/` folder slug** (unlike SUMMARY.md's own
+Candidate column, which intentionally matches the folder name so its Link column resolves). This
+file has no Link column and no local folder to resolve against once pasted into a GitHub
+issue/comment in a different repo, so a bare slug like `mp4_ilst_atom_size_bounds_check_off_by_header`
+means nothing there. Write a short plain-language phrase instead - what/where the fix targets (file,
+function, the shape of the fix) - the same style `perf-optimize`'s own `SUMMARY-SHORT.md` uses for
+its Candidate column, e.g. `mp4 AtomInfo::read_inner atom-size-vs-budget off-by-header-length check`,
+not `mp4_ilst_atom_size_bounds_check_off_by_header`. **No Link column and no bare yes/no Fix-exists
+column** - point readers at the full `___BUGHUNT___/SUMMARY.md` (and its candidate folders) in the
+surrounding issue prose instead of trying to make either self-sufficient here. **This is different
+from the Fix lines column below** - a diffstat count is meaningful on its own without opening any
+local file, unlike a bare yes/no flag, so it doesn't have the same problem.
+
+**Fix lines column** (`+A/-D`, e.g. `+3/-1`) - only when a fix was actually found and a
+`patch.diff` exists for it (a `Confirmed` row can still have no fix, e.g. a repro with no bounded
+fix found this session; leave this cell as `n/a` then, not `+0/-0`): total added/deleted lines in
+that candidate's `patch.diff`, summed across every file it touches. Compute with `git apply
+--numstat patch.diff` (columns: added, deleted, path) against the same base commit the patch was
+captured from - or capture it via `git diff --numstat` at the same moment `patch.diff` itself is
+captured (during step 6's fix, before step 8's revert), so it never needs re-deriving later.
+
+**No Fully reproducible column** - unlike Fix lines, a `Yes`/justified-`No` flag adds little once a
+row already only exists here because SUMMARY.md marked it Confirmed; a reader who needs the
+nuance behind that column (see `CONFIRMATION.md` section 11) is already going to open the linked
+`___BUGHUNT___/SUMMARY.md`/`RESULT.md`, so don't spend a column on it here.
+
+**Introduced by column** - copy straight from SUMMARY.md's own "Introduced by" cell: a short commit
+hash on its own, written as **plain text, not inside backticks** (e.g. `abc1234`, not `` `abc1234` ``)
+so GitHub/GitLab auto-links it to the commit instead of rendering it as inert code - or
+`not determined` if this session didn't track it down (best-effort only - see `SKILL.md`'s candidate
+loop step 5). Unlike Fix lines, this is meaningful even without local access to the repo (a reader
+can look the hash up directly via the auto-link), which is why it survives the cut into this
+condensed table the same way Fix lines does.
+
+Same markdown table hygiene as SUMMARY_template.md applies: one row per physical line, no blank
+line between rows, escape any literal `|` inside cell text as `\|`. Same structural rule too: all
+prose lives above the table, nothing is ever appended below it.
+
+Regenerate wholesale (don't hand-patch line by line) whenever SUMMARY.md changes in a way that
+adds/removes/reclassifies a Confirmed row (including a CORRECTION.md that downgrades a Confirmed
+finding, which must also remove it from here) - it's a filtered derivative of SUMMARY.md, not an
+independently-maintained ledger, so SUMMARY.md is always the source of truth if the two ever
+disagree.
+-->
+
+# Confirmed bugs (Status: Confirmed only)
+
+Filtered from `SUMMARY.md` - see that file for every candidate investigated (including
+Not-reproducible and Inconclusive ones) and the full methodology behind each finding.
+
+| # | Class | Candidate | Fix lines | Root cause | Introduced by |
+|---|---|---|---|---|---|

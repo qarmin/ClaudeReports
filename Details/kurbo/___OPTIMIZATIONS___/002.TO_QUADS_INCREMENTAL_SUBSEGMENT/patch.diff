@@ -1,0 +1,59 @@
+diff --git a/kurbo/src/cubicbez.rs b/kurbo/src/cubicbez.rs
+index 899a351..e6d4c4b 100644
+--- a/kurbo/src/cubicbez.rs
++++ b/kurbo/src/cubicbez.rs
+@@ -40,8 +40,17 @@ pub struct CubicBez {
+ /// An iterator which produces quadratic Bézier segments.
+ struct ToQuads {
+     c: CubicBez,
++    /// Derivative of `c`. The same for every segment, so it is built once.
++    q: QuadBez,
+     i: usize,
+     n: usize,
++    /// Start point of the next segment, and the derivative there.
++    ///
++    /// Consecutive segments meet at a shared parameter value, so each segment's end point and end
++    /// derivative are the next one's start point and start derivative - evaluating them again
++    /// would repeat work already done.
++    p0: Point,
++    d0: Vec2,
+ }
+ 
+ /// Classification result for cusp detection.
+@@ -93,7 +102,15 @@ impl CubicBez {
+         let err = (p2x2 - p1x2).hypot2();
+         let n = ((err / max_hypot2).powf(1. / 6.0).ceil() as usize).max(1);
+ 
+-        ToQuads { c: *self, n, i: 0 }
++        let q = self.deriv();
++        ToQuads {
++            c: *self,
++            q,
++            n,
++            i: 0,
++            p0: self.eval(0.0),
++            d0: q.eval(0.0).to_vec2(),
++        }
+     }
+ 
+     /// Return a [`QuadSpline`] approximating this cubic Bézier.
+@@ -788,10 +805,18 @@ impl Iterator for ToQuads {
+         }
+         let t0 = self.i as f64 / self.n as f64;
+         let t1 = (self.i + 1) as f64 / self.n as f64;
+-        let seg = self.c.subsegment(t0..t1);
++        // Same arithmetic as `CubicBez::subsegment(t0..t1)`, but reusing the start point and
++        // start derivative carried over from the previous segment.
++        let (p0, d0) = (self.p0, self.d0);
++        let p3 = self.c.eval(t1);
++        let d1 = self.q.eval(t1).to_vec2();
++        let scale = (t1 - t0) * (1.0 / 3.0);
++        let seg = CubicBez::new(p0, p0 + scale * d0, p3 - scale * d1, p3);
+         let p1x2 = 3.0 * seg.p1.to_vec2() - seg.p0.to_vec2();
+         let p2x2 = 3.0 * seg.p2.to_vec2() - seg.p3.to_vec2();
+         let result = QuadBez::new(seg.p0, ((p1x2 + p2x2) / 4.0).to_point(), seg.p3);
++        self.p0 = p3;
++        self.d0 = d1;
+         self.i += 1;
+         Some((t0, t1, result))
+     }

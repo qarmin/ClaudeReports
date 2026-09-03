@@ -1,0 +1,270 @@
+diff --git a/benches/decode.rs b/benches/decode.rs
+index cfa788bc..0358d2c9 100644
+--- a/benches/decode.rs
++++ b/benches/decode.rs
+@@ -25,6 +25,7 @@ fn load_all(c: &mut Criterion) {
+                 "pal8rle.bmp",
+                 "rgb16-565.bmp",
+                 "rgb32bf.bmp",
++                "pal2_large.bmp",
+             ],
+             format: ImageFormat::Bmp,
+         },
+diff --git a/src/codecs/bmp/decoder.rs b/src/codecs/bmp/decoder.rs
+index cba61aed..6d2d58c7 100644
+--- a/src/codecs/bmp/decoder.rs
++++ b/src/codecs/bmp/decoder.rs
+@@ -867,27 +867,43 @@ fn set_4bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+     true
+ }
+ 
++// Unsafe direct-indexing variants used only by the plain (non-RLE) palettized row path
++// (`read_palettized_pixel_data`), which is the only caller of set_1bit/set_2bit; set_4bit/set_8bit
++// keep their original `ChunksExactMut`-based bodies above for the RLE4/RLE8 path (which relies on
++// the iterator's own cursor across several operations within one row - see candidate 051's
++// RESULT.md) and get their own `_unsafe` twins below instead. See candidate 057's RESULT.md.
++//
++// SAFETY (all four `_unsafe` functions below): `row` is always exactly `width * num_channels`
++// bytes (guaranteed by `with_rows_resumable`'s own `get_row_mut`, the sole source of `row` in the
++// caller), `num_channels` is always 3 or 4 on this path (RGB/RGBA output - the 1-channel
++// indexed-color case takes a different, `clone_from_slice`-based branch that never calls these
++// functions), and each loop below writes at most `n_pixels` (== `width`) times, incrementing
++// `offset` by `num_channels` after each write. So the last write starts at
++// `offset == (width - 1) * num_channels`, and `offset + 3 <= (width - 1) * num_channels + 3 <=
++// (width - 1) * num_channels + num_channels == width * num_channels == row.len()` whenever
++// `num_channels >= 3`, which always holds here - `get_unchecked_mut(offset..offset + 3)` is
++// therefore always in bounds.
+ #[rustfmt::skip]
+-fn set_2bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+-    pixel_iter: &mut ChunksExactMut<u8>,
++fn set_2bit_pixel_run_unsafe<'a, T: Iterator<Item = &'a u8>>(
++    row: &mut [u8],
++    num_channels: usize,
+     palette: &[[u8; 3]],
+     indices: T,
+     mut n_pixels: usize,
+-) -> bool {
++) {
++    let mut offset = 0usize;
+     for idx in indices {
+         macro_rules! set_pixel {
+             ($i:expr) => {
+                 if n_pixels == 0 {
+                     break;
+                 }
+-                if let Some(pixel) = pixel_iter.next() {
+-                    let rgb = palette[$i as usize];
+-                    pixel[0] = rgb[0];
+-                    pixel[1] = rgb[1];
+-                    pixel[2] = rgb[2];
+-                } else {
+-                    return false;
+-                }
++                let pixel = unsafe { row.get_unchecked_mut(offset..offset + 3) };
++                let rgb = palette[$i as usize];
++                pixel[0] = rgb[0];
++                pixel[1] = rgb[1];
++                pixel[2] = rgb[2];
++                offset += num_channels;
+                 n_pixels -= 1;
+             };
+         }
+@@ -896,25 +912,29 @@ fn set_2bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+         set_pixel!((idx >> 2) & 0x3u8);
+         set_pixel!( idx       & 0x3u8);
+     }
+-    true
+ }
+ 
+-fn set_1bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+-    pixel_iter: &mut ChunksExactMut<u8>,
++fn set_1bit_pixel_run_unsafe<'a, T: Iterator<Item = &'a u8>>(
++    row: &mut [u8],
++    num_channels: usize,
+     palette: &[[u8; 3]],
+     indices: T,
++    mut n_pixels: usize,
+ ) {
+-    for idx in indices {
++    let mut offset = 0usize;
++    'outer: for idx in indices {
+         let mut bit = 0x80;
+         loop {
+-            if let Some(pixel) = pixel_iter.next() {
+-                let rgb = palette[usize::from((idx & bit) != 0)];
+-                pixel[0] = rgb[0];
+-                pixel[1] = rgb[1];
+-                pixel[2] = rgb[2];
+-            } else {
+-                return;
++            if n_pixels == 0 {
++                break 'outer;
+             }
++            let pixel = unsafe { row.get_unchecked_mut(offset..offset + 3) };
++            let rgb = palette[usize::from((idx & bit) != 0)];
++            pixel[0] = rgb[0];
++            pixel[1] = rgb[1];
++            pixel[2] = rgb[2];
++            offset += num_channels;
++            n_pixels -= 1;
+ 
+             bit >>= 1;
+             if bit == 0 {
+@@ -924,6 +944,52 @@ fn set_1bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+     }
+ }
+ 
++fn set_8bit_pixel_run_unsafe<'a, T: Iterator<Item = &'a u8>>(
++    row: &mut [u8],
++    num_channels: usize,
++    palette: &[[u8; 3]],
++    indices: T,
++    n_pixels: usize,
++) {
++    let mut offset = 0usize;
++    for idx in indices.take(n_pixels) {
++        let pixel = unsafe { row.get_unchecked_mut(offset..offset + 3) };
++        let rgb = palette[*idx as usize];
++        pixel[0] = rgb[0];
++        pixel[1] = rgb[1];
++        pixel[2] = rgb[2];
++        offset += num_channels;
++    }
++}
++
++fn set_4bit_pixel_run_unsafe<'a, T: Iterator<Item = &'a u8>>(
++    row: &mut [u8],
++    num_channels: usize,
++    palette: &[[u8; 3]],
++    indices: T,
++    mut n_pixels: usize,
++) {
++    let mut offset = 0usize;
++    for idx in indices {
++        macro_rules! set_pixel {
++            ($i:expr) => {
++                if n_pixels == 0 {
++                    break;
++                }
++                let pixel = unsafe { row.get_unchecked_mut(offset..offset + 3) };
++                let rgb = palette[$i as usize];
++                pixel[0] = rgb[0];
++                pixel[1] = rgb[1];
++                pixel[2] = rgb[2];
++                offset += num_channels;
++                n_pixels -= 1;
++            };
++        }
++        set_pixel!(idx >> 4);
++        set_pixel!(idx & 0xf);
++    }
++}
++
+ #[derive(PartialEq, Eq)]
+ struct Bitfield {
+     shift: u32,
+@@ -1888,19 +1954,42 @@ impl<R: BufRead + Seek> BmpDecoder<R> {
+                 if skip_palette {
+                     row.clone_from_slice(&indices[0..width]);
+                 } else {
+-                    let mut pixel_iter = row.chunks_exact_mut(num_channels);
+                     match bit_count {
+                         1 => {
+-                            set_1bit_pixel_run(&mut pixel_iter, palette, indices.iter());
++                            set_1bit_pixel_run_unsafe(
++                                row,
++                                num_channels,
++                                palette,
++                                indices.iter(),
++                                width,
++                            );
+                         }
+                         2 => {
+-                            set_2bit_pixel_run(&mut pixel_iter, palette, indices.iter(), width);
++                            set_2bit_pixel_run_unsafe(
++                                row,
++                                num_channels,
++                                palette,
++                                indices.iter(),
++                                width,
++                            );
+                         }
+                         4 => {
+-                            set_4bit_pixel_run(&mut pixel_iter, palette, indices.iter(), width);
++                            set_4bit_pixel_run_unsafe(
++                                row,
++                                num_channels,
++                                palette,
++                                indices.iter(),
++                                width,
++                            );
+                         }
+                         8 => {
+-                            set_8bit_pixel_run(&mut pixel_iter, palette, indices.iter(), width);
++                            set_8bit_pixel_run_unsafe(
++                                row,
++                                num_channels,
++                                palette,
++                                indices.iter(),
++                                width,
++                            );
+                         }
+                         _ => panic!(),
+                     }
+diff --git a/tests/images/bmp/images/pal2_large.bmp b/tests/images/bmp/images/pal2_large.bmp
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f39b65571fe69eb8dca390c18f3041964514fdf
+GIT binary patch
+literal 123270
+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
+OOKpDVm)iWE&hH;@+-tP}
+
+literal 0
+HcmV?d00001
+
+diff --git a/tests/reference/bmp/images/pal2_large.bmp.png b/tests/reference/bmp/images/pal2_large.bmp.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..36ea2f6ba67d729664da022906a07e498150a350
+GIT binary patch
+literal 4286
+zcmeAS@N?(olHy`uVBq!ia0y~yVA=!1985rwrW?OS7#IXvJzX3_DsH{KW$4H3D8dq`
+z|ER0lGyal-qLVZ0;=X$>`tJ(rYHj5DfA5=r{`u>#Noi?mb<fZL{vLb%=$SKT{+yd1
+zmXMbA?9uDr+YfSq1lF&gAKmIYW9H1C`PouHD)RCHpz!lGnIL5;zRbqP#z^AHV74Vh
+z(JVHg;nz$IjEz6v0JHtToXyJ`XU?2y$_q5cW*eA28O#A2nFcnof9*&$zIYQNbZX9x
+zhT54kv`A9wNJ(}yDGx+Od{zuD3!uq;v;Y8>lr$(E?b5-;DI~d%mdf<4vVP71S8H=d
+ztIE-eezX+?Z#vSVK1Zs~M~w%z$Om!zd9;B`k3Q3A0~gfo9LS#LNN(W%<lda^wOm40
+S{w{D_g2B_(&t;ucLK6TfdgF%x
+
+literal 0
+HcmV?d00001
+

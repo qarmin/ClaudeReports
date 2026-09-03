@@ -1,0 +1,1341 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 9f5a8821..5f2ae98f 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -4467,12 +4467,15 @@ dependencies = [
+  "criterion",
+  "image",
+  "parley",
++ "pollster",
+  "rand",
+  "smallvec",
+  "usvg",
+  "vello_common",
+  "vello_cpu",
+  "vello_dev_macros",
++ "vello_hybrid",
++ "wgpu",
+ ]
+ 
+ [[package]]
+diff --git a/sparse_strips/vello_bench/Cargo.toml b/sparse_strips/vello_bench/Cargo.toml
+index eae23ba2..d6681e81 100644
+--- a/sparse_strips/vello_bench/Cargo.toml
++++ b/sparse_strips/vello_bench/Cargo.toml
+@@ -19,9 +19,14 @@ parley = { version = "0.11.0", default-features = true }
+ rand = { workspace = true, features = ["small_rng"] }
+ smallvec = { workspace = true }
+ usvg = { workspace = true }
++vello_hybrid = { workspace = true, optional = true }
++wgpu = { workspace = true, optional = true, features = ["default"] }
++pollster = { workspace = true, optional = true }
+ 
+ [features]
+ extended = []
++# Enables benches that need a real (or software-fallback) GPU/wgpu adapter, via vello_hybrid.
++hybrid = ["dep:vello_hybrid", "dep:wgpu", "dep:pollster"]
+ 
+ [[bench]]
+ name = "main"
+diff --git a/sparse_strips/vello_bench/benches/main.rs b/sparse_strips/vello_bench/benches/main.rs
+index 4e3a6662..0216f63a 100644
+--- a/sparse_strips/vello_bench/benches/main.rs
++++ b/sparse_strips/vello_bench/benches/main.rs
+@@ -5,6 +5,8 @@
+ #![allow(dead_code, reason = "Might be unused on platforms not supporting SIMD")]
+ 
+ use criterion::{criterion_group, criterion_main};
++#[cfg(feature = "hybrid")]
++use vello_bench::hybrid_color_matrix;
+ use vello_bench::{allocator, fine, flatten, glyph, integration, pixmap, sort, strip, tile};
+ 
+ criterion_group!(allocator_bench, allocator::allocator);
+@@ -25,6 +27,10 @@ criterion_group!(render_rect, strip::render_rect);
+ criterion_group!(glyph, glyph::glyph);
+ criterion_group!(sort_tiles, sort::sort);
+ criterion_group!(integration_bench, integration::images);
++#[cfg(feature = "hybrid")]
++criterion_group!(hybrid_color_matrix_bench, hybrid_color_matrix::color_matrix);
++
++#[cfg(not(feature = "hybrid"))]
+ criterion_main!(
+     pixmap_bench,
+     allocator_bench,
+@@ -45,3 +51,25 @@ criterion_main!(
+     sort_tiles,
+     integration_bench
+ );
++#[cfg(feature = "hybrid")]
++criterion_main!(
++    pixmap_bench,
++    allocator_bench,
++    tile,
++    render_strips,
++    render_strips_cull,
++    render_rect,
++    flatten,
++    strokes,
++    glyph,
++    fine_solid,
++    fine_strip,
++    fine_pack,
++    fine_gradient,
++    fine_rounded_blurred_rect,
++    fine_blend,
++    fine_image,
++    sort_tiles,
++    integration_bench,
++    hybrid_color_matrix_bench
++);
+diff --git a/sparse_strips/vello_bench/src/hybrid_color_matrix.rs b/sparse_strips/vello_bench/src/hybrid_color_matrix.rs
+new file mode 100644
+index 00000000..0f74aa87
+--- /dev/null
++++ b/sparse_strips/vello_bench/src/hybrid_color_matrix.rs
+@@ -0,0 +1,284 @@
++// Copyright 2026 the Vello Authors
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++//! Benchmarks for `vello_hybrid`'s GPU `ColorMatrix` filter shader path.
++//!
++//! Requires a real (or software-fallback, e.g. llvmpipe/EGL) `wgpu` adapter; gated behind the
++//! `hybrid` feature since it pulls in `vello_hybrid` + `wgpu` + `pollster`.
++
++use criterion::Criterion;
++use pollster::block_on;
++use vello_common::filter_effects::{Filter, FilterPrimitive, matrices};
++use vello_common::kurbo::Rect;
++use vello_common::peniko::color::{AlphaColor, Srgb};
++use vello_hybrid::{RenderSize, RenderTargetConfig, Renderer, Resources, Scene, TextureBindings};
++
++const WIDTH: u16 = 2048;
++const HEIGHT: u16 = 2048;
++
++struct GpuContext {
++    device: wgpu::Device,
++    queue: wgpu::Queue,
++    texture: wgpu::Texture,
++    texture_view: wgpu::TextureView,
++    depth_view: wgpu::TextureView,
++    renderer: Renderer,
++    resources: Resources,
++}
++
++fn init_gpu() -> Option<GpuContext> {
++    let instance = wgpu::Instance::default();
++    let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
++        power_preference: wgpu::PowerPreference::default(),
++        force_fallback_adapter: false,
++        compatible_surface: None,
++    }))
++    .ok()?;
++    let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
++        label: Some("vello_bench hybrid device"),
++        required_features: wgpu::Features::empty(),
++        ..Default::default()
++    }))
++    .ok()?;
++
++    let texture = device.create_texture(&wgpu::TextureDescriptor {
++        label: Some("vello_bench render target"),
++        size: wgpu::Extent3d {
++            width: WIDTH.into(),
++            height: HEIGHT.into(),
++            depth_or_array_layers: 1,
++        },
++        mip_level_count: 1,
++        sample_count: 1,
++        dimension: wgpu::TextureDimension::D2,
++        format: wgpu::TextureFormat::Rgba8Unorm,
++        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
++        view_formats: &[],
++    });
++    let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
++
++    let (renderer, resources) = Renderer::new(
++        &device,
++        &RenderTargetConfig {
++            format: texture.format(),
++            width: WIDTH.into(),
++            height: HEIGHT.into(),
++        },
++    );
++    let render_size = RenderSize {
++        width: WIDTH.into(),
++        height: HEIGHT.into(),
++    };
++    let depth_view = Renderer::create_depth_texture_view(&device, &render_size);
++
++    Some(GpuContext {
++        device,
++        queue,
++        texture,
++        texture_view,
++        depth_view,
++        renderer,
++        resources,
++    })
++}
++
++/// Build a scene containing a `ColorMatrix` filter layer applied to a varied-color fill,
++/// covering most of the viewport so the fragment shader's per-pixel matrix application
++/// dominates over fixed per-draw overhead.
++fn build_scene(matrix: [f32; 20]) -> Scene {
++    let mut scene = Scene::new(WIDTH, HEIGHT);
++
++    let filter = Filter::from_primitive(FilterPrimitive::ColorMatrix { matrix });
++    scene.push_filter_layer(filter);
++
++    // A handful of overlapping, differently colored rects so the filtered region has real
++    // RGB variance (grayscale/sepia are otherwise indistinguishable from a no-op on a solid fill).
++    let colors = [
++        AlphaColor::<Srgb>::new([0.8, 0.1, 0.1, 1.0]),
++        AlphaColor::<Srgb>::new([0.1, 0.8, 0.1, 1.0]),
++        AlphaColor::<Srgb>::new([0.1, 0.1, 0.8, 1.0]),
++        AlphaColor::<Srgb>::new([0.8, 0.8, 0.1, 1.0]),
++    ];
++    for (i, color) in colors.iter().enumerate() {
++        let offset = f64::from(u16::try_from(i).unwrap()) * 40.0;
++        scene.set_paint(*color);
++        scene.fill_rect(&Rect::new(
++            offset,
++            offset,
++            f64::from(WIDTH) - offset,
++            f64::from(HEIGHT) - offset,
++        ));
++    }
++
++    scene.pop_layer();
++    scene
++}
++
++fn render_once(ctx: &mut GpuContext, scene: &Scene) {
++    let render_size = RenderSize {
++        width: WIDTH.into(),
++        height: HEIGHT.into(),
++    };
++    let mut encoder = ctx
++        .device
++        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
++            label: Some("vello_bench hybrid encoder"),
++        });
++    ctx.renderer
++        .render(
++            scene,
++            &mut ctx.resources,
++            &ctx.device,
++            &ctx.queue,
++            &mut encoder,
++            &render_size,
++            &ctx.texture_view,
++            Some(&ctx.depth_view),
++            &TextureBindings::new(),
++        )
++        .unwrap();
++
++    let bytes_per_row = (u32::from(WIDTH) * 4).next_multiple_of(256);
++    let copy_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
++        label: Some("vello_bench hybrid readback"),
++        size: u64::from(bytes_per_row) * u64::from(HEIGHT),
++        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
++        mapped_at_creation: false,
++    });
++    encoder.copy_texture_to_buffer(
++        wgpu::TexelCopyTextureInfo {
++            texture: &ctx.texture,
++            mip_level: 0,
++            origin: wgpu::Origin3d::ZERO,
++            aspect: wgpu::TextureAspect::All,
++        },
++        wgpu::TexelCopyBufferInfo {
++            buffer: &copy_buffer,
++            layout: wgpu::TexelCopyBufferLayout {
++                offset: 0,
++                bytes_per_row: Some(bytes_per_row),
++                rows_per_image: None,
++            },
++        },
++        wgpu::Extent3d {
++            width: WIDTH.into(),
++            height: HEIGHT.into(),
++            depth_or_array_layers: 1,
++        },
++    );
++    ctx.queue.submit([encoder.finish()]);
++
++    copy_buffer
++        .slice(..)
++        .map_async(wgpu::MapMode::Read, |result| {
++            result.expect("failed to map readback buffer");
++        });
++    ctx.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
++    drop(copy_buffer.slice(..).get_mapped_range());
++    copy_buffer.unmap();
++}
++
++/// Read back the rendered texture as straight RGBA8, for a correctness/hash check outside the
++/// timed loop (not used by the criterion benches themselves).
++pub fn render_and_read_back(matrix: [f32; 20]) -> (u16, u16, Vec<u8>) {
++    let mut ctx = init_gpu().expect("no wgpu adapter available");
++    let scene = build_scene(matrix);
++    let render_size = RenderSize {
++        width: WIDTH.into(),
++        height: HEIGHT.into(),
++    };
++    let mut encoder = ctx
++        .device
++        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
++    ctx.renderer
++        .render(
++            &scene,
++            &mut ctx.resources,
++            &ctx.device,
++            &ctx.queue,
++            &mut encoder,
++            &render_size,
++            &ctx.texture_view,
++            Some(&ctx.depth_view),
++            &TextureBindings::new(),
++        )
++        .unwrap();
++
++    let bytes_per_row = (u32::from(WIDTH) * 4).next_multiple_of(256);
++    let copy_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
++        label: None,
++        size: u64::from(bytes_per_row) * u64::from(HEIGHT),
++        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
++        mapped_at_creation: false,
++    });
++    encoder.copy_texture_to_buffer(
++        wgpu::TexelCopyTextureInfo {
++            texture: &ctx.texture,
++            mip_level: 0,
++            origin: wgpu::Origin3d::ZERO,
++            aspect: wgpu::TextureAspect::All,
++        },
++        wgpu::TexelCopyBufferInfo {
++            buffer: &copy_buffer,
++            layout: wgpu::TexelCopyBufferLayout {
++                offset: 0,
++                bytes_per_row: Some(bytes_per_row),
++                rows_per_image: None,
++            },
++        },
++        wgpu::Extent3d {
++            width: WIDTH.into(),
++            height: HEIGHT.into(),
++            depth_or_array_layers: 1,
++        },
++    );
++    ctx.queue.submit([encoder.finish()]);
++    copy_buffer
++        .slice(..)
++        .map_async(wgpu::MapMode::Read, |result| {
++            result.expect("failed to map readback buffer");
++        });
++    ctx.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
++
++    let mut img_data = Vec::with_capacity(usize::from(WIDTH) * usize::from(HEIGHT) * 4);
++    for row in copy_buffer
++        .slice(..)
++        .get_mapped_range()
++        .chunks_exact(bytes_per_row as usize)
++    {
++        img_data.extend_from_slice(&row[0..usize::from(WIDTH) * 4]);
++    }
++    copy_buffer.unmap();
++
++    (WIDTH, HEIGHT, img_data)
++}
++
++/// `ColorMatrix` filter benchmark, comparing a premultiplied-compatible matrix (grayscale,
++/// eligible for the premul fast path) against a matrix that needs the general (unpremultiply
++/// -> apply -> premultiply) path (alpha-to-black, reads the alpha channel into RGB).
++pub fn color_matrix(c: &mut Criterion) {
++    if !crate::EXTENDED {
++        return;
++    }
++
++    let Some(mut ctx) = init_gpu() else {
++        return;
++    };
++
++    let mut g = c.benchmark_group("hybrid_color_matrix");
++
++    let grayscale_scene = build_scene(matrices::GRAYSCALE);
++    g.bench_function("premul_compatible_grayscale", |b| {
++        b.iter(|| render_once(&mut ctx, &grayscale_scene));
++    });
++
++    let sepia_scene = build_scene(matrices::SEPIA);
++    g.bench_function("premul_compatible_sepia", |b| {
++        b.iter(|| render_once(&mut ctx, &sepia_scene));
++    });
++
++    let general_scene = build_scene(matrices::ALPHA_TO_BLACK);
++    g.bench_function("general_alpha_to_black", |b| {
++        b.iter(|| render_once(&mut ctx, &general_scene));
++    });
++}
+diff --git a/sparse_strips/vello_bench/src/lib.rs b/sparse_strips/vello_bench/src/lib.rs
+index d540942a..ecd9af3c 100644
+--- a/sparse_strips/vello_bench/src/lib.rs
++++ b/sparse_strips/vello_bench/src/lib.rs
+@@ -12,6 +12,8 @@ pub mod data;
+ pub mod fine;
+ pub mod flatten;
+ pub mod glyph;
++#[cfg(feature = "hybrid")]
++pub mod hybrid_color_matrix;
+ pub mod integration;
+ pub mod pixmap;
+ pub mod sort;
+diff --git a/sparse_strips/vello_common/src/filter/color_matrix.rs b/sparse_strips/vello_common/src/filter/color_matrix.rs
+new file mode 100644
+index 00000000..1b801c2f
+--- /dev/null
++++ b/sparse_strips/vello_common/src/filter/color_matrix.rs
+@@ -0,0 +1,65 @@
++// Copyright 2026 the Vello Authors
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++//! The color matrix filter.
++
++/// Matrix-based color transformation filter.
++///
++/// The matrix is stored as four rows of five values. Each row computes one output
++/// channel (`R`, `G`, `B`, `A`) from the four input channels plus a constant offset.
++#[derive(Clone, Copy, Debug, PartialEq)]
++pub struct ColorMatrix {
++    /// The 4x5 color transformation matrix in row-major order.
++    pub matrix: [f32; 20],
++}
++
++impl ColorMatrix {
++    /// Create a new color matrix filter.
++    pub fn new(matrix: [f32; 20]) -> Self {
++        Self { matrix }
++    }
++
++    /// Return true if this matrix can be applied directly to premultiplied colors.
++    ///
++    /// A premultiplied-compatible matrix preserves alpha, does not read alpha
++    /// from the RGB rows, and has no RGB offsets. For this subset, renderers can
++    /// apply the RGB rows directly to premultiplied RGB and clamp the result to
++    /// the unchanged alpha channel.
++    pub fn is_premul_compatible(&self) -> bool {
++        self.matrix[3] == 0.0
++            && self.matrix[4] == 0.0
++            && self.matrix[8] == 0.0
++            && self.matrix[9] == 0.0
++            && self.matrix[13] == 0.0
++            && self.matrix[14] == 0.0
++            && self.matrix[15] == 0.0
++            && self.matrix[16] == 0.0
++            && self.matrix[17] == 0.0
++            && self.matrix[18] == 1.0
++            && self.matrix[19] == 0.0
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::filter_effects::matrices;
++
++    #[test]
++    fn premul_compatible_matrices_are_rgb_only_and_alpha_preserving() {
++        assert!(ColorMatrix::new(matrices::GRAYSCALE).is_premul_compatible());
++        assert!(ColorMatrix::new(matrices::SEPIA).is_premul_compatible());
++        assert!(!ColorMatrix::new(matrices::ALPHA_TO_BLACK).is_premul_compatible());
++    }
++
++    #[test]
++    fn premul_compatible_matrix_rejects_rgb_offsets_and_alpha_changes() {
++        let mut offset_matrix = matrices::IDENTITY;
++        offset_matrix[4] = 0.25;
++        assert!(!ColorMatrix::new(offset_matrix).is_premul_compatible());
++
++        let mut opacity_matrix = matrices::IDENTITY;
++        opacity_matrix[18] = 0.5;
++        assert!(!ColorMatrix::new(opacity_matrix).is_premul_compatible());
++    }
++}
+diff --git a/sparse_strips/vello_common/src/filter/mod.rs b/sparse_strips/vello_common/src/filter/mod.rs
+index 1898854c..33ad288e 100644
+--- a/sparse_strips/vello_common/src/filter/mod.rs
++++ b/sparse_strips/vello_common/src/filter/mod.rs
+@@ -7,6 +7,7 @@
+ //! represent a special representation of each filter to be used as the basis for rendering in
+ //! `vello_hybrid` and `vello_cpu`.
+ 
++use crate::filter::color_matrix::ColorMatrix;
+ use crate::filter::drop_shadow::{DropShadow, transform_shadow_params};
+ use crate::filter::flood::Flood;
+ use crate::filter::gaussian_blur::{GaussianBlur, transform_blur_params};
+@@ -18,6 +19,7 @@ use crate::math::snap_up;
+ use crate::tile::Tile;
+ use crate::util::RectExt;
+ 
++pub mod color_matrix;
+ pub mod drop_shadow;
+ pub mod flood;
+ pub mod gaussian_blur;
+@@ -34,6 +36,8 @@ pub enum PreparedFilter {
+     Offset(Offset),
+     /// A drop shadow filter.
+     DropShadow(DropShadow),
++    /// A color matrix filter.
++    ColorMatrix(ColorMatrix),
+ }
+ 
+ impl PreparedFilter {
+@@ -96,8 +100,9 @@ impl PreparedFilter {
+ 
+                 Self::Offset(offset)
+             }
++            FilterPrimitive::ColorMatrix { matrix } => Self::ColorMatrix(ColorMatrix::new(*matrix)),
+             _ => {
+-                // Other primitives like Blend, ColorMatrix, ComponentTransfer, etc.
++                // Other primitives like Blend, ComponentTransfer, etc.
+                 // are not yet implemented
+                 unimplemented!("Other filter primitives not yet implemented");
+             }
+@@ -255,3 +260,23 @@ fn transform_offset_params(dx: f32, dy: f32, transform: &Affine) -> (f32, f32) {
+     let transformed_offset = Vec2::new(a * offset.x + c * offset.y, b * offset.x + d * offset.y);
+     (transformed_offset.x as f32, transformed_offset.y as f32)
+ }
++
++#[cfg(test)]
++mod color_matrix_tests {
++    use super::*;
++    use crate::filter_effects::matrices;
++
++    #[test]
++    fn prepares_color_matrix_filter() {
++        let filter = Filter::from_primitive(FilterPrimitive::ColorMatrix {
++            matrix: matrices::SEPIA,
++        });
++        let prepared = PreparedFilter::new(&filter, &Affine::IDENTITY);
++
++        let PreparedFilter::ColorMatrix(color_matrix) = prepared else {
++            panic!("expected color matrix filter");
++        };
++
++        assert_eq!(color_matrix.matrix, matrices::SEPIA);
++    }
++}
+diff --git a/sparse_strips/vello_common/src/filter_effects.rs b/sparse_strips/vello_common/src/filter_effects.rs
+index c6064c90..3db06bd5 100644
+--- a/sparse_strips/vello_common/src/filter_effects.rs
++++ b/sparse_strips/vello_common/src/filter_effects.rs
+@@ -21,6 +21,7 @@
+ //! - `GaussianBlur` - Gaussian blur filter
+ //! - `DropShadow` - Drop shadow effect (compound primitive)
+ //! - `DropShadowOnly` - Drop shadow effect without the original input
++//! - `ColorMatrix` - Matrix-based color transformation
+ //! - `Offset` - Translation/shift (single primitive)
+ //!
+ //! **Note:** Currently only single primitive filters are supported. Filter graphs with
+@@ -37,7 +38,6 @@
+ //!   `Opacity`, `Saturate`, `Sepia`
+ //!
+ //! **Filter Primitives:**
+-//! - `ColorMatrix` - Matrix-based color transformation
+ //! - `Composite` - Porter-Duff compositing operations
+ //! - `Blend` - Blend mode operations
+ //! - `Morphology` - Dilate/erode operations
+@@ -426,11 +426,6 @@ pub enum FilterPrimitive {
+         /// Edge mode for handling boundaries during blur operation.
+         edge_mode: EdgeMode,
+     },
+-    //
+-    // ============================================================
+-    // TODO: The following filter primitives are not yet implemented
+-    // ============================================================
+-    //
+     /// Matrix-based color transformation.
+     ///
+     /// Applies a 4x5 matrix transformation to colors, allowing arbitrary
+@@ -451,6 +446,11 @@ pub enum FilterPrimitive {
+         dy: f32,
+     },
+ 
++    //
++    // ============================================================
++    // TODO: The following filter primitives are not yet implemented
++    // ============================================================
++    //
+     /// Composite two inputs using Porter-Duff compositing operations.
+     ///
+     /// Combines two input images using standard compositing operators
+diff --git a/sparse_strips/vello_cpu/src/filter/color_matrix.rs b/sparse_strips/vello_cpu/src/filter/color_matrix.rs
+new file mode 100644
+index 00000000..dfd8b912
+--- /dev/null
++++ b/sparse_strips/vello_cpu/src/filter/color_matrix.rs
+@@ -0,0 +1,226 @@
++// Copyright 2026 the Vello Authors
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++//! Color matrix filter implementation.
++
++use super::FilterEffect;
++use super::pixel::{clamp_unit, premul_rgba8_to_straight_f32, straight_f32_to_premul_rgba8};
++use crate::filter::context::ScratchBuffer;
++use vello_common::filter::color_matrix::ColorMatrix;
++use vello_common::filter_effects::matrices;
++use vello_common::peniko::color::PremulRgba8;
++use vello_common::pixmap::Pixmap;
++
++impl FilterEffect for ColorMatrix {
++    fn execute_lowp(&self, pixmap: &mut Pixmap, _filter_scratch: &mut ScratchBuffer) {
++        apply_color_matrix(pixmap, self);
++    }
++
++    fn execute_highp(&self, pixmap: &mut Pixmap, _filter_scratch: &mut ScratchBuffer) {
++        apply_color_matrix(pixmap, self);
++    }
++}
++
++fn apply_color_matrix(pixmap: &mut Pixmap, filter: &ColorMatrix) {
++    let matrix = &filter.matrix;
++    if matrix == &matrices::IDENTITY {
++        return;
++    }
++
++    if filter.is_premul_compatible() {
++        // For RGB-only, alpha-preserving matrices, applying the RGB matrix to
++        // premultiplied channels is equivalent to unpremultiply -> matrix ->
++        // premultiply. This avoids the per-pixel alpha division.
++        for pixel in pixmap.data_mut() {
++            *pixel = apply_premul_color_matrix_to_pixel(*pixel, matrix);
++        }
++    } else {
++        for pixel in pixmap.data_mut() {
++            *pixel = apply_color_matrix_to_pixel(*pixel, matrix);
++        }
++    }
++
++    pixmap.recompute_may_have_transparency();
++}
++
++/// Fast path for RGB-only, alpha-preserving matrices: apply the RGB rows directly
++/// to the premultiplied channels and clamp to the unchanged alpha.
++fn apply_premul_color_matrix_to_pixel(pixel: PremulRgba8, matrix: &[f32; 20]) -> PremulRgba8 {
++    let r = f32::from(pixel.r) / 255.0;
++    let g = f32::from(pixel.g) / 255.0;
++    let b = f32::from(pixel.b) / 255.0;
++    let a = f32::from(pixel.a) / 255.0;
++
++    let out_r = premul_row(matrix, 0, r, g, b);
++    let out_g = premul_row(matrix, 5, r, g, b);
++    let out_b = premul_row(matrix, 10, r, g, b);
++
++    PremulRgba8 {
++        r: (out_r.clamp(0.0, a) * 255.0).round() as u8,
++        g: (out_g.clamp(0.0, a) * 255.0).round() as u8,
++        b: (out_b.clamp(0.0, a) * 255.0).round() as u8,
++        a: pixel.a,
++    }
++}
++
++fn premul_row(matrix: &[f32; 20], offset: usize, r: f32, g: f32, b: f32) -> f32 {
++    matrix[offset] * r + matrix[offset + 1] * g + matrix[offset + 2] * b
++}
++
++fn apply_color_matrix_to_pixel(pixel: PremulRgba8, matrix: &[f32; 20]) -> PremulRgba8 {
++    let [r, g, b, a] = premul_rgba8_to_straight_f32(pixel);
++
++    let out_r = apply_row(matrix, 0, r, g, b, a);
++    let out_g = apply_row(matrix, 5, r, g, b, a);
++    let out_b = apply_row(matrix, 10, r, g, b, a);
++    let out_a = apply_row(matrix, 15, r, g, b, a);
++
++    straight_f32_to_premul_rgba8(out_r, out_g, out_b, out_a)
++}
++
++fn apply_row(matrix: &[f32; 20], offset: usize, r: f32, g: f32, b: f32, a: f32) -> f32 {
++    clamp_unit(
++        matrix[offset] * r
++            + matrix[offset + 1] * g
++            + matrix[offset + 2] * b
++            + matrix[offset + 3] * a
++            + matrix[offset + 4],
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::filter::context::ScratchBuffer;
++
++    #[test]
++    fn identity_preserves_premultiplied_pixel() {
++        let pixel = PremulRgba8 {
++            r: 128,
++            g: 64,
++            b: 32,
++            a: 128,
++        };
++
++        assert_eq!(
++            apply_color_matrix_to_pixel(pixel, &matrices::IDENTITY),
++            pixel
++        );
++    }
++
++    #[test]
++    fn grayscale_uses_unpremultiplied_color_channels() {
++        let pixel = PremulRgba8 {
++            r: 128,
++            g: 0,
++            b: 0,
++            a: 128,
++        };
++
++        assert_eq!(
++            apply_color_matrix_to_pixel(pixel, &matrices::GRAYSCALE),
++            PremulRgba8 {
++                r: 27,
++                g: 27,
++                b: 27,
++                a: 128,
++            }
++        );
++    }
++
++    #[test]
++    fn premul_fast_path_matches_general_path_for_grayscale() {
++        let pixel = PremulRgba8 {
++            r: 200,
++            g: 40,
++            b: 90,
++            a: 180,
++        };
++
++        let general = apply_color_matrix_to_pixel(pixel, &matrices::GRAYSCALE);
++        let fast = apply_premul_color_matrix_to_pixel(pixel, &matrices::GRAYSCALE);
++
++        // Both paths should agree within +/-1 due to independent rounding.
++        assert!((i16::from(general.r) - i16::from(fast.r)).abs() <= 1);
++        assert!((i16::from(general.g) - i16::from(fast.g)).abs() <= 1);
++        assert!((i16::from(general.b) - i16::from(fast.b)).abs() <= 1);
++        assert_eq!(general.a, fast.a);
++    }
++
++    #[test]
++    fn premul_fast_path_matches_general_path_for_sepia() {
++        let pixel = PremulRgba8 {
++            r: 60,
++            g: 120,
++            b: 200,
++            a: 90,
++        };
++
++        let general = apply_color_matrix_to_pixel(pixel, &matrices::SEPIA);
++        let fast = apply_premul_color_matrix_to_pixel(pixel, &matrices::SEPIA);
++
++        assert!((i16::from(general.r) - i16::from(fast.r)).abs() <= 1);
++        assert!((i16::from(general.g) - i16::from(fast.g)).abs() <= 1);
++        assert!((i16::from(general.b) - i16::from(fast.b)).abs() <= 1);
++        assert_eq!(general.a, fast.a);
++    }
++
++    #[test]
++    fn matrix_offsets_can_create_color_from_transparent_black() {
++        let matrix = [
++            0.0, 0.0, 0.0, 0.0, 0.5, //
++            0.0, 0.0, 0.0, 0.0, 0.25, //
++            0.0, 0.0, 0.0, 0.0, 0.0, //
++            0.0, 0.0, 0.0, 0.0, 0.5,
++        ];
++
++        assert_eq!(
++            apply_color_matrix_to_pixel(PremulRgba8::from_u32(0), &matrix),
++            PremulRgba8 {
++                r: 64,
++                g: 32,
++                b: 0,
++                a: 128,
++            }
++        );
++    }
++
++    #[test]
++    fn premul_compatible_matrices_skip_straight_alpha_conversion() {
++        assert!(ColorMatrix::new(matrices::GRAYSCALE).is_premul_compatible());
++        assert!(ColorMatrix::new(matrices::SEPIA).is_premul_compatible());
++        assert!(!ColorMatrix::new(matrices::ALPHA_TO_BLACK).is_premul_compatible());
++    }
++
++    #[test]
++    fn execution_updates_pixmap_transparency_flag() {
++        let mut pixmap = Pixmap::new(1, 1);
++        pixmap.data_mut()[0] = PremulRgba8 {
++            r: 255,
++            g: 0,
++            b: 0,
++            a: 255,
++        };
++        let mut filter_scratch = ScratchBuffer::default();
++        let matrix = [
++            1.0, 0.0, 0.0, 0.0, 0.0, //
++            0.0, 1.0, 0.0, 0.0, 0.0, //
++            0.0, 0.0, 1.0, 0.0, 0.0, //
++            0.0, 0.0, 0.0, 0.0, 0.5,
++        ];
++        let filter = ColorMatrix::new(matrix);
++
++        filter.execute_lowp(&mut pixmap, &mut filter_scratch);
++
++        assert!(pixmap.may_have_transparency());
++        assert_eq!(
++            pixmap.sample(0, 0),
++            PremulRgba8 {
++                r: 128,
++                g: 0,
++                b: 0,
++                a: 128,
++            }
++        );
++    }
++}
+diff --git a/sparse_strips/vello_cpu/src/filter/mod.rs b/sparse_strips/vello_cpu/src/filter/mod.rs
+index 06222a02..409e5246 100644
+--- a/sparse_strips/vello_cpu/src/filter/mod.rs
++++ b/sparse_strips/vello_cpu/src/filter/mod.rs
+@@ -8,11 +8,13 @@
+ //! Filters are applied to rendered layer pixmaps and may use scratch storage for
+ //! intermediate buffers.
+ 
++mod color_matrix;
+ pub(crate) mod context;
+ mod drop_shadow;
+ mod flood;
+ mod gaussian_blur;
+ mod offset;
++mod pixel;
+ mod shift;
+ 
+ use context::ScratchBuffer;
+@@ -79,6 +81,9 @@ pub(crate) fn filter_lowp(
+         PreparedFilter::DropShadow(drop_shadow) => {
+             drop_shadow.execute_lowp(pixmap, filter_scratch);
+         }
++        PreparedFilter::ColorMatrix(color_matrix) => {
++            color_matrix.execute_lowp(pixmap, filter_scratch);
++        }
+     }
+ }
+ 
+@@ -117,5 +122,8 @@ pub(crate) fn filter_highp(
+         PreparedFilter::DropShadow(drop_shadow) => {
+             drop_shadow.execute_highp(pixmap, filter_scratch);
+         }
++        PreparedFilter::ColorMatrix(color_matrix) => {
++            color_matrix.execute_highp(pixmap, filter_scratch);
++        }
+     }
+ }
+diff --git a/sparse_strips/vello_cpu/src/filter/pixel.rs b/sparse_strips/vello_cpu/src/filter/pixel.rs
+new file mode 100644
+index 00000000..822a8b8f
+--- /dev/null
++++ b/sparse_strips/vello_cpu/src/filter/pixel.rs
+@@ -0,0 +1,101 @@
++// Copyright 2026 the Vello Authors
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++//! Pixel helpers for CPU filter effects.
++
++use vello_common::peniko::color::PremulRgba8;
++#[cfg(not(feature = "std"))]
++use vello_common::peniko::kurbo::common::FloatFuncs as _;
++
++/// Convert a u8 color component to normalized f32.
++#[inline]
++pub(super) fn u8_to_norm(value: u8) -> f32 {
++    f32::from(value) / 255.0
++}
++
++/// Convert a normalized f32 color component to u8.
++#[inline]
++pub(super) fn norm_to_u8(value: f32) -> u8 {
++    (clamp_unit(value) * 255.0).round() as u8
++}
++
++/// Convert a premultiplied RGBA8 pixel to normalized straight-alpha components.
++#[inline]
++pub(super) fn premul_rgba8_to_straight_f32(pixel: PremulRgba8) -> [f32; 4] {
++    let a = u8_to_norm(pixel.a);
++
++    if pixel.a == 0 {
++        [0.0, 0.0, 0.0, 0.0]
++    } else {
++        let inv_alpha = 1.0 / a;
++        [
++            u8_to_norm(pixel.r) * inv_alpha,
++            u8_to_norm(pixel.g) * inv_alpha,
++            u8_to_norm(pixel.b) * inv_alpha,
++            a,
++        ]
++    }
++}
++
++/// Convert normalized straight-alpha components to a premultiplied RGBA8 pixel.
++#[inline]
++pub(super) fn straight_f32_to_premul_rgba8(r: f32, g: f32, b: f32, a: f32) -> PremulRgba8 {
++    let a = clamp_unit(a);
++
++    PremulRgba8 {
++        r: norm_to_u8(r * a),
++        g: norm_to_u8(g * a),
++        b: norm_to_u8(b * a),
++        a: norm_to_u8(a),
++    }
++}
++
++#[inline]
++pub(super) fn clamp_unit(value: f32) -> f32 {
++    value.clamp(0.0, 1.0)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn u8_to_norm_converts_endpoints() {
++        assert_eq!(u8_to_norm(0), 0.0);
++        assert!((u8_to_norm(255) - 1.0).abs() < 1e-6);
++    }
++
++    #[test]
++    fn norm_to_u8_rounds_to_nearest() {
++        assert_eq!(norm_to_u8(0.0), 0);
++        assert_eq!(norm_to_u8(1.0), 255);
++        assert_eq!(norm_to_u8(0.5), 128);
++    }
++
++    #[test]
++    fn norm_to_u8_clamps() {
++        assert_eq!(norm_to_u8(-1.0), 0);
++        assert_eq!(norm_to_u8(2.0), 255);
++    }
++
++    #[test]
++    fn premul_to_straight_handles_transparent_black() {
++        assert_eq!(
++            premul_rgba8_to_straight_f32(PremulRgba8::from_u32(0)),
++            [0.0, 0.0, 0.0, 0.0]
++        );
++    }
++
++    #[test]
++    fn straight_to_premul_premultiplies_rgb() {
++        assert_eq!(
++            straight_f32_to_premul_rgba8(1.0, 0.5, 0.0, 0.5),
++            PremulRgba8 {
++                r: 128,
++                g: 64,
++                b: 0,
++                a: 128,
++            }
++        );
++    }
++}
+diff --git a/sparse_strips/vello_hybrid/src/filter.rs b/sparse_strips/vello_hybrid/src/filter.rs
+index 9d5a1d47..b3f456c7 100644
+--- a/sparse_strips/vello_hybrid/src/filter.rs
++++ b/sparse_strips/vello_hybrid/src/filter.rs
+@@ -8,6 +8,7 @@ use crate::schedule::round::FilterOp;
+ use crate::util::pack_u16_pair;
+ use alloc::vec::Vec;
+ use bytemuck::{Pod, Zeroable};
++use vello_common::filter::color_matrix::ColorMatrix;
+ use vello_common::filter::drop_shadow::DropShadow;
+ use vello_common::filter::flood::Flood;
+ use vello_common::filter::gaussian_blur::{DecimationSizer, GaussianBlur, MAX_KERNEL_SIZE};
+@@ -31,11 +32,16 @@ pub(crate) const FILTER_ATLAS_PADDING: u16 = MAX_KERNEL_SIZE as u16 / 2;
+ 
+ // Since we store in RGBA32 texture.
+ const BYTES_PER_TEXEL: usize = 16;
+-const FILTER_SIZE_BYTES: usize = 48;
++const FILTER_SIZE_BYTES: usize = 96;
+ const FILTER_SIZE_U32: usize = FILTER_SIZE_BYTES / 4;
+ const COMPOSITE_ORIGINAL_SHIFT: u32 = 13;
+ const COMPOSITE_ORIGINAL_MASK: u32 = 1 << COMPOSITE_ORIGINAL_SHIFT;
+ 
++// Header bit used by color matrix filters to select the shader path that works
++// directly in premultiplied-alpha space. Shares the same bit position as
++// `COMPOSITE_ORIGINAL_MASK` above, but the two are never read for the same filter type.
++const COLOR_MATRIX_PREMUL_COMPATIBLE_FLAG: u32 = 1 << 13;
++
+ const _: () = assert!(
+     size_of::<GpuFilterData>() == FILTER_SIZE_BYTES,
+     "memory size of filters need to match"
+@@ -56,12 +62,17 @@ const _: () = assert!(
+     size_of::<GpuGaussianBlur>() == FILTER_SIZE_BYTES,
+     "memory size of filters need to match"
+ );
++const _: () = assert!(
++    size_of::<GpuColorMatrix>() == FILTER_SIZE_BYTES,
++    "memory size of filters need to match"
++);
+ 
+ pub(crate) mod filter_type {
+     pub(crate) const OFFSET: u32 = 0;
+     pub(crate) const FLOOD: u32 = 1;
+     pub(crate) const GAUSSIAN_BLUR: u32 = 2;
+     pub(crate) const DROP_SHADOW: u32 = 3;
++    pub(crate) const COLOR_MATRIX: u32 = 4;
+ }
+ 
+ pub(crate) mod edge_mode {
+@@ -81,6 +92,7 @@ pub(crate) mod pass_kind {
+     pub(crate) const UPSCALE: u32 = 6;
+     pub(crate) const COMPOSITE_DROP_SHADOW: u32 = 7;
+     pub(crate) const COLORIZE: u32 = 8;
++    pub(crate) const COLOR_MATRIX: u32 = 9;
+ }
+ 
+ pub(crate) fn edge_mode_to_gpu(mode: EdgeMode) -> u32 {
+@@ -98,6 +110,14 @@ fn pack_header(filter_type: u32) -> u32 {
+     filter_type
+ }
+ 
++fn pack_color_matrix_header(color_matrix: &ColorMatrix) -> u32 {
++    let mut header = pack_header(filter_type::COLOR_MATRIX);
++    if color_matrix.is_premul_compatible() {
++        header |= COLOR_MATRIX_PREMUL_COMPATIBLE_FLAG;
++    }
++    header
++}
++
+ const fn pack_header_with_gaussian_params(
+     filter_type: u32,
+     edge_mode: u32,
+@@ -197,7 +217,7 @@ pub(crate) struct GpuOffset {
+     pub header: u32,
+     pub dx: f32,
+     pub dy: f32,
+-    pub _padding: [u32; 9],
++    pub _padding: [u32; 21],
+ }
+ 
+ impl From<&Offset> for GpuOffset {
+@@ -206,7 +226,7 @@ impl From<&Offset> for GpuOffset {
+             header: pack_header(filter_type::OFFSET),
+             dx: offset.dx,
+             dy: offset.dy,
+-            _padding: [0; 9],
++            _padding: [0; 21],
+         }
+     }
+ }
+@@ -216,7 +236,7 @@ impl From<&Offset> for GpuOffset {
+ pub(crate) struct GpuFlood {
+     pub header: u32,
+     pub color: u32,
+-    pub _padding: [u32; 10],
++    pub _padding: [u32; 22],
+ }
+ 
+ impl From<&Flood> for GpuFlood {
+@@ -224,7 +244,7 @@ impl From<&Flood> for GpuFlood {
+         Self {
+             header: pack_header(filter_type::FLOOD),
+             color: flood.color.premultiply().to_rgba8().to_u32(),
+-            _padding: [0; 10],
++            _padding: [0; 22],
+         }
+     }
+ }
+@@ -237,7 +257,7 @@ pub(crate) struct GpuGaussianBlur {
+     pub linear_weights: [f32; MAX_TAPS_PER_SIDE],
+     pub linear_offsets: [f32; MAX_TAPS_PER_SIDE],
+     // Needed since drop shadow has a bigger footprint.
+-    pub _padding: [u32; 4],
++    pub _padding: [u32; 16],
+ }
+ 
+ impl From<&GaussianBlur> for GpuGaussianBlur {
+@@ -261,7 +281,7 @@ impl From<&GaussianBlur> for GpuGaussianBlur {
+             center_weight: lk.center_weight,
+             linear_weights: lk.weights,
+             linear_offsets: lk.offsets,
+-            _padding: [0; 4],
++            _padding: [0; 16],
+         }
+     }
+ }
+@@ -276,7 +296,7 @@ pub(crate) struct GpuDropShadow {
+     pub dx: f32,
+     pub dy: f32,
+     pub color: u32,
+-    pub _padding: [u32; 1],
++    pub _padding: [u32; 13],
+ }
+ 
+ impl From<&DropShadow> for GpuDropShadow {
+@@ -305,7 +325,42 @@ impl From<&DropShadow> for GpuDropShadow {
+             dx: shadow.dx,
+             dy: shadow.dy,
+             color: shadow.color.premultiply().to_rgba8().to_u32(),
+-            _padding: [0; 1],
++            _padding: [0; 13],
++        }
++    }
++}
++
++#[repr(C, align(16))]
++#[derive(Debug, Clone, Copy, PartialEq, Zeroable, Pod)]
++pub(crate) struct GpuColorMatrix {
++    pub header: u32,
++    // Padding here (rather than at the end) keeps `row_r` texel-aligned, so the shader can
++    // load each row (and the offsets) with a single `textureLoad` and static swizzles, with
++    // no need for dynamically-indexed array accesses (disallowed by this crate's shader lint).
++    pub _padding: [u32; 3],
++    /// R-output coefficients for the R, G, B, A input channels (`matrix[0..4]`).
++    pub row_r: [f32; 4],
++    /// G-output coefficients for the R, G, B, A input channels (`matrix[5..9]`).
++    pub row_g: [f32; 4],
++    /// B-output coefficients for the R, G, B, A input channels (`matrix[10..14]`).
++    pub row_b: [f32; 4],
++    /// A-output coefficients for the R, G, B, A input channels (`matrix[15..19]`).
++    pub row_a: [f32; 4],
++    /// Per-row constant offsets, in R, G, B, A output order (`matrix[4, 9, 14, 19]`).
++    pub offsets: [f32; 4],
++}
++
++impl From<&ColorMatrix> for GpuColorMatrix {
++    fn from(color_matrix: &ColorMatrix) -> Self {
++        let m = &color_matrix.matrix;
++        Self {
++            header: pack_color_matrix_header(color_matrix),
++            _padding: [0; 3],
++            row_r: [m[0], m[1], m[2], m[3]],
++            row_g: [m[5], m[6], m[7], m[8]],
++            row_b: [m[10], m[11], m[12], m[13]],
++            row_a: [m[15], m[16], m[17], m[18]],
++            offsets: [m[4], m[9], m[14], m[19]],
+         }
+     }
+ }
+@@ -349,6 +404,7 @@ impl CastToFilterData for GpuOffset {}
+ impl CastToFilterData for GpuFlood {}
+ impl CastToFilterData for GpuGaussianBlur {}
+ impl CastToFilterData for GpuDropShadow {}
++impl CastToFilterData for GpuColorMatrix {}
+ 
+ impl<T: CastToFilterData> From<T> for GpuFilterData {
+     fn from(filter: T) -> Self {
+@@ -363,6 +419,7 @@ impl From<&PreparedFilter> for GpuFilterData {
+             PreparedFilter::Flood(f) => GpuFlood::from(f).into(),
+             PreparedFilter::GaussianBlur(f) => GpuGaussianBlur::from(f).into(),
+             PreparedFilter::DropShadow(f) => GpuDropShadow::from(f).into(),
++            PreparedFilter::ColorMatrix(f) => GpuColorMatrix::from(f).into(),
+         }
+     }
+ }
+@@ -441,6 +498,9 @@ impl FilterPassPlan {
+                 filter_type::FLOOD => {
+                     builder.emit(pass_kind::FLOOD);
+                 }
++                filter_type::COLOR_MATRIX => {
++                    builder.emit(pass_kind::COLOR_MATRIX);
++                }
+                 filter_type::GAUSSIAN_BLUR => {
+                     builder.emit_blur_sequence(filter.gpu_filter.n_decimations());
+                 }
+@@ -683,6 +743,7 @@ mod tests {
+     use crate::target::{LayerTextureId, TextureParity, TextureRegion};
+     use vello_common::color::AlphaColor;
+     use vello_common::filter::gaussian_blur::{compute_gaussian_kernel, plan_decimated_blur};
++    use vello_common::filter_effects::matrices;
+ 
+     fn region(parity: TextureParity) -> TextureRegion {
+         TextureRegion {
+@@ -874,6 +935,52 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn test_color_matrix_round_trip() {
++        check_round_trip(
++            GpuColorMatrix::from(&ColorMatrix::new(matrices::SEPIA)),
++            filter_type::COLOR_MATRIX,
++        );
++    }
++
++    #[test]
++    fn color_matrix_header_marks_premul_compatible_matrices() {
++        assert!(
++            GpuColorMatrix::from(&ColorMatrix::new(matrices::GRAYSCALE)).header
++                & COLOR_MATRIX_PREMUL_COMPATIBLE_FLAG
++                != 0
++        );
++        assert!(
++            GpuColorMatrix::from(&ColorMatrix::new(matrices::SEPIA)).header
++                & COLOR_MATRIX_PREMUL_COMPATIBLE_FLAG
++                != 0
++        );
++        assert_eq!(
++            GpuColorMatrix::from(&ColorMatrix::new(matrices::ALPHA_TO_BLACK)).header
++                & COLOR_MATRIX_PREMUL_COMPATIBLE_FLAG,
++            0
++        );
++    }
++
++    #[test]
++    fn color_matrix_header_rejects_offsets_and_alpha_changes() {
++        let mut offset_matrix = matrices::IDENTITY;
++        offset_matrix[4] = 0.25;
++        assert_eq!(
++            GpuColorMatrix::from(&ColorMatrix::new(offset_matrix)).header
++                & COLOR_MATRIX_PREMUL_COMPATIBLE_FLAG,
++            0
++        );
++
++        let mut opacity_matrix = matrices::IDENTITY;
++        opacity_matrix[18] = 0.5;
++        assert_eq!(
++            GpuColorMatrix::from(&ColorMatrix::new(opacity_matrix)).header
++                & COLOR_MATRIX_PREMUL_COMPATIBLE_FLAG,
++            0
++        );
++    }
++
+     fn check_linear_kernel(kernel: &[f32; MAX_KERNEL_SIZE], size: u8, expected_taps: u8) {
+         let lk = LinearKernel::new(kernel, size);
+         assert_eq!(lk.n_taps, expected_taps);
+diff --git a/sparse_strips/vello_sparse_shaders/shaders/filter.wesl b/sparse_strips/vello_sparse_shaders/shaders/filter.wesl
+index 81b9d2e3..f52e54cf 100644
+--- a/sparse_strips/vello_sparse_shaders/shaders/filter.wesl
++++ b/sparse_strips/vello_sparse_shaders/shaders/filter.wesl
+@@ -24,7 +24,7 @@ import package::helpers::util::unpack_u16_pair;
+ 
+ // Keep these variables and layouts in sync with the ones in `filter.rs`!
+ 
+-const FILTER_SIZE_BYTES: u32 = 48;
++const FILTER_SIZE_BYTES: u32 = 96;
+ const FILTER_SIZE_U32: u32 = FILTER_SIZE_BYTES / 4;
+ const TEXELS_PER_FILTER: u32 = FILTER_SIZE_U32 / 4u;
+ 
+@@ -32,6 +32,7 @@ const FILTER_TYPE_OFFSET: u32 = 0u;
+ const FILTER_TYPE_FLOOD: u32 = 1u;
+ const FILTER_TYPE_GAUSSIAN_BLUR: u32 = 2u;
+ const FILTER_TYPE_DROP_SHADOW: u32 = 3u;
++const FILTER_TYPE_COLOR_MATRIX: u32 = 4u;
+ 
+ const PASS_COPY: u32 = 0u;
+ const PASS_FLOOD: u32 = 1u;
+@@ -42,6 +43,7 @@ const PASS_BLUR_V: u32 = 5u;
+ const PASS_UPSCALE: u32 = 6u;
+ const PASS_COMPOSITE_DROP_SHADOW: u32 = 7u;
+ const PASS_COLORIZE: u32 = 8u;
++const PASS_COLOR_MATRIX: u32 = 9u;
+ 
+ // Keep in sync with FILTER_ATLAS_PADDING in vello_hybrid/src/filter.rs.
+ const FILTER_ATLAS_PADDING: u32 = 6u;
+@@ -51,8 +53,11 @@ const FILTER_ATLAS_PADDING: u32 = 6u;
+ //   bits [5:6]   = edge_mode     (2 bits, only for blur filters), currently ignored.
+ //   bits [7:10]  = n_decimations (4 bits, only for blur filters), only read on the CPU side.
+ //   bits [11:12] = n_linear_taps (2 bits, only for blur filters)
+-//   bit  [13]    = composite_original (only for drop shadows), only read on the CPU side.
++//   bit  [13]    = composite_original (only for drop shadows) or premultiplied-compatible
++//                  matrix (only for color matrix filters), only read on the CPU side for
++//                  drop shadows, read on the GPU side for color matrix.
+ //   bits [14:32] = reserved for future use
++const COLOR_MATRIX_PREMUL_COMPATIBLE_FLAG: u32 = 1u << 13u;
+ 
+ fn load_filter_texel(texel_offset: u32, texel_index: u32) -> vec4<u32> {
+     let w = textureDimensions(filter_data).x;
+@@ -72,6 +77,11 @@ fn get_offset_dy(texel0: vec4<u32>) -> f32 { return bitcast<f32>(texel0.z); }
+ /// Flood color packed as RGBA8.
+ fn get_flood_color(texel0: vec4<u32>) -> u32 { return texel0.y; }
+ 
++/// Whether a color matrix header marks an RGB-only, alpha-preserving matrix.
++fn get_color_matrix_premul_compatible(texel0: vec4<u32>) -> bool {
++    return (texel0.x & COLOR_MATRIX_PREMUL_COMPATIBLE_FLAG) != 0u;
++}
++
+ struct FilterInstanceData {
+     @location(0)
+     source_origin: u32,
+@@ -166,6 +176,63 @@ fn sample_source_checked(
+     return sample_source(source_origin, rel_coord);
+ }
+ 
++// Row-major layout of a color matrix filter's data, spread across texels 1-5:
++// texel1 = row_r (R output coefficients for R,G,B,A), texel2 = row_g, texel3 = row_b,
++// texel4 = row_a, texel5 = per-row constant offsets (r,g,b,a). See `GpuColorMatrix` in
++// `vello_hybrid/src/filter.rs`.
++
++// For RGB-only, alpha-preserving matrices, applying the RGB rows directly to premultiplied
++// channels is equivalent to unpremultiply -> matrix -> premultiply, but without the per-pixel
++// division/multiplication by alpha. Straight-alpha clamping becomes clamping RGB to [0, alpha].
++fn apply_premul_compatible_color_matrix(filter_data_offset: u32, pixel: vec4<f32>) -> vec4<f32> {
++    let row_r = bitcast<vec4<f32>>(load_filter_texel(filter_data_offset, 1u));
++    let row_g = bitcast<vec4<f32>>(load_filter_texel(filter_data_offset, 2u));
++    let row_b = bitcast<vec4<f32>>(load_filter_texel(filter_data_offset, 3u));
++
++    let transformed_rgb = vec3<f32>(
++        dot(row_r.xyz, pixel.rgb),
++        dot(row_g.xyz, pixel.rgb),
++        dot(row_b.xyz, pixel.rgb),
++    );
++
++    return vec4<f32>(clamp(transformed_rgb, vec3<f32>(0.0), vec3<f32>(pixel.a)), pixel.a);
++}
++
++fn apply_general_color_matrix(filter_data_offset: u32, pixel: vec4<f32>) -> vec4<f32> {
++    var rgb = vec3<f32>(0.0);
++    if pixel.a > 0.0 {
++        rgb = pixel.rgb / pixel.a;
++    }
++    let straight = vec4<f32>(rgb, pixel.a);
++
++    let row_r = bitcast<vec4<f32>>(load_filter_texel(filter_data_offset, 1u));
++    let row_g = bitcast<vec4<f32>>(load_filter_texel(filter_data_offset, 2u));
++    let row_b = bitcast<vec4<f32>>(load_filter_texel(filter_data_offset, 3u));
++    let row_a = bitcast<vec4<f32>>(load_filter_texel(filter_data_offset, 4u));
++    let offsets = bitcast<vec4<f32>>(load_filter_texel(filter_data_offset, 5u));
++
++    let transformed = clamp(
++        vec4<f32>(
++            dot(row_r, straight),
++            dot(row_g, straight),
++            dot(row_b, straight),
++            dot(row_a, straight),
++        ) + offsets,
++        vec4<f32>(0.0),
++        vec4<f32>(1.0),
++    );
++
++    return vec4<f32>(transformed.rgb * transformed.a, transformed.a);
++}
++
++fn apply_color_matrix(filter_data_offset: u32, texel0: vec4<u32>, pixel: vec4<f32>) -> vec4<f32> {
++    if get_color_matrix_premul_compatible(texel0) {
++        return apply_premul_compatible_color_matrix(filter_data_offset, pixel);
++    }
++
++    return apply_general_color_matrix(filter_data_offset, pixel);
++}
++
+ @fragment
+ fn fs_main(
+     @location(0) @interpolate(flat)filter_data_offset: u32,
+@@ -270,6 +337,10 @@ fn fs_main(
+                 filter_texel2,
+             );
+         }
++        case PASS_COLOR_MATRIX: {
++            let filter_texel0 = load_filter_texel(filter_data_offset, 0u);
++            return apply_color_matrix(filter_data_offset, filter_texel0, sample_source(source_origin, rel_coord));
++        }
+         // Shouldn't be reached.
+         default: {
+             return vec4<f32>(0.0);

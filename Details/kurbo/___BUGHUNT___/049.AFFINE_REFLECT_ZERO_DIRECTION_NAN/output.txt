@@ -1,0 +1,40 @@
+=== BEFORE (pristine clone @ ca273499e3e48bd2de6f02aa8e99a148984e45f3) ===
+$ cargo run
+Affine::reflect((1.0,0.0),(0.0,0.0)).as_coeffs() = [NaN, NaN, NaN, NaN, NaN, NaN]
+aff * Point::new(2.0, 2.0) = (NaN, NaN)
+[behavior] confirmed: zero-length direction produces an all-NaN Affine (expected, documented behavior)
+[docs] `Affine::reflect`'s doc comment does NOT document the zero-length-direction NaN footgun - REPRODUCED (matches pristine tree)
+REPRODUCED - undocumented NaN footgun: zero-length direction silently produces NaN with no doc warning
+exit code: 1
+
+=== applying patch.diff ===
+$ git apply patch.diff
+(applied cleanly, kurbo/src/affine.rs +2 lines)
+
+=== AFTER (patched clone) ===
+$ cargo run
+Affine::reflect((1.0,0.0),(0.0,0.0)).as_coeffs() = [NaN, NaN, NaN, NaN, NaN, NaN]
+aff * Point::new(2.0, 2.0) = (NaN, NaN)
+[behavior] confirmed: zero-length direction produces an all-NaN Affine (expected, documented behavior)
+[docs] `Affine::reflect`'s doc comment documents the zero-length-direction NaN footgun - FIXED
+did not reproduce - behavior is the documented NaN footgun, and it IS documented
+exit code: 0
+
+Note: the runtime behavior (all-NaN Affine coefficients) is IDENTICAL before and after the patch -
+this is expected and correct. The finding is a documentation gap (the precondition was undocumented,
+unlike the analogous Affine::inverse/TranslateScale::inverse), not a behavioral defect with a
+well-defined "correct" alternative output. The fix adds the missing doc-comment warning; it does
+not change what the function computes.
+
+=== Repeatability check (5 runs against the pristine clone, same build) ===
+run 1: exit=1 REPRODUCED
+run 2: exit=1 REPRODUCED
+run 3: exit=1 REPRODUCED
+run 4: exit=1 REPRODUCED
+run 5: exit=1 REPRODUCED
+(deterministic pure floating-point computation, no RNG/seed involved - 5/5 as expected)
+
+=== Project test suite (run inside the main checkout's own isolated worktree, `cargo test --all-features` in kurbo/) ===
+Before fix: 187 unit tests passed, 0 failed; 55 doctests passed, 0 failed.
+After fix:  187 unit tests passed, 0 failed; 55 doctests passed, 0 failed.
+(identical - a doc-comment-only change, no behavioral test regressions)

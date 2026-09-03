@@ -1,0 +1,46 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+#
+# This patch is self-contained: it includes candidate 013's original Rgb<u8> fast path and
+# candidate 014's Rgba<u8> fast path (which this candidate modifies), since both of those
+# candidates' own patches were reverted from the main tree at the end of their sessions (per the
+# skill's "the one rule that matters most" - candidates never stay applied). This candidate's own
+# change is the one-line swap from `to_vec()` + `premultiply_rgba8` to
+# `pic_scale_safe::premultiplied_rgba8` inside `try_pic_scale_safe_rgba8_resize`.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+# patch.diff bundles a harness-only hunk (the `RgbaImage` source cases in benches/imageops.rs,
+# already introduced by candidate 014 and reapplied here from the pristine base_commit) with the
+# actual fix (src/imageops/sample.rs). apply-harness applies just the former so the same
+# benchmarks exist in both the baseline and patched build; apply-fix applies the latter on top,
+# for the patched build only.
+test: clone apply-harness bench-baseline apply-fix bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-harness:
+    cd clone && git apply --exclude='src/imageops/sample.rs' "{{justfile_directory()}}/patch.diff"
+
+apply-fix:
+    cd clone && git apply --include='src/imageops/sample.rs' "{{justfile_directory()}}/patch.diff"
+
+bench-baseline:
+    @echo "=== baseline (before patch, i.e. 013+014 only) ==="
+    cd clone && cargo bench --bench imageops -- 'resize rgba'
+
+bench-patched:
+    @echo "=== patched (after patch, 013+014+this candidate's fused-alloc swap) ==="
+    cd clone && cargo bench --bench imageops -- 'resize rgba'
+
+clean:
+    rm -rf clone

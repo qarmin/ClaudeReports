@@ -1,0 +1,36 @@
+# Self-contained reproduction for this candidate.
+#
+# Status is "Not reproducible" (see RESULT.md) - there is no patch.diff, and `repro/` demonstrates
+# the *absence* of the suspected OOB read (correct output, and zero UBSan diagnostics under
+# candidate 005's own instrumentation hook) rather than a crash. Kept as a real, runnable artifact
+# so a future session can re-verify the structural argument in RESULT.md still holds after the
+# code changes, without re-deriving the setup from scratch.
+#
+# Requires GCC's own libubsan on the host (`gcc -print-file-name=libubsan.a`; the `libubsan1`
+# package on Debian/Ubuntu) - see candidate 005's repro/README.md for the same requirement.
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && cp config.example.toml config.toml
+    cd clone && patch -p1 < "{{justfile_directory()}}/repro/ubsan_hook.patch"
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Build+run the standalone repro against the (UBSan-instrumented) clone - should print correct
+# gather/scatter results, exit 0, and produce zero UBSan diagnostics for any in_len/mask pattern.
+reproduce-before:
+    rm -rf repro/target
+    cd repro && CG_GCCJIT_UBSAN=1 \
+      CG_RUSTFLAGS="-Clinker=gcc -Clink-arg=-fsanitize=undefined -Clink-arg=-lubsan" \
+      CHANNEL=release "{{justfile_directory()}}/clone/y.sh" cargo build --manifest-path Cargo.toml
+    ulimit -c 0 && repro/target/debug/gather_repro
+
+clean:
+    rm -rf clone repro/target

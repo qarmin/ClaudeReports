@@ -1,0 +1,43 @@
+# Self-contained reproduction for candidate 028:
+# symphonia-format-riff AIFF FormatPcm::make_packet_info() frame-length u16 multiply overflow.
+#
+# Everything this needs is either already in this folder or fetched by `just clone` into ./clone.
+# Nothing here reaches outside this folder, so it can be copied/posted standalone.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Regenerate the .aiff assets from scratch (they are already committed in assets/; this recipe
+# only exists to show they are plain, mechanically generated AIFF files with nothing hidden).
+gen-assets:
+    python3 repro/gen_aiff.py repro/assets
+
+# Should panic with "attempt to multiply with overflow" at symphonia-format-riff/src/common.rs:215
+# on the first of the three high-channel-count files. A non-zero exit here is the demonstrated bug,
+# so it must not stop `just test` before reaching apply/reproduce-after.
+reproduce-before:
+    -ulimit -c 0 && cd repro && cargo run --release -- assets/aiff_chan16384_size32.aiff
+    -ulimit -c 0 && cd repro && cargo run --release -- assets/aiff_chan21846_size24.aiff
+    -ulimit -c 0 && cd repro && cargo run --release -- assets/aiff_chan65535_size32.aiff
+    # Controls: these two must already succeed before the patch.
+    ulimit -c 0 && cd repro && cargo run --release -- assets/aiff_chan2_size16.aiff assets/aiff_chan30000_size8.aiff
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone. All five files must be handled without a panic
+# (the three overflowing ones now open normally with a correctly-sized block, the two controls are
+# unaffected).
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo run --release
+    cd clone && cargo test -p symphonia-format-riff
+
+clean:
+    rm -rf clone repro/target

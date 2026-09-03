@@ -1,0 +1,38 @@
+Captured output of `cargo run --release` inside repro/, run against the pristine (unpatched)
+checkout at base_commit 83c4801428c436678d7c6b6bea74af800924a469. Reproduces bit-for-bit
+identically across 3 consecutive runs (deterministic, no seed, no floating-point nondeterminism
+observed).
+
+$ cargo run --release
+    Finished `release` profile [optimized] target(s) in 0.00s
+     Running `target/release/generate-weights-zero-sum-repro`
+HaasnSoft 1->100: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.7, 0.7, 0.7, 0.6999999, 0.7, 0.6999999, 0.6999999, 0.7, 0.6999999, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.6999999, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.6999999, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.6999999, 0.7, 0.7, 0.7, 0.7, 0.7, 0.6999999, 0.7, 0.7, 0.7, 0.7, 0.6999999, 0.7, 0.7, 0.7, 0.6999999, 0.7, 0.6999999, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.6999999, 0.6999999, 0.7, 0.7, 0.7, 0.7, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+HaasnSoft 3->10: [1.0, 1.0, 1.0, 0.0, 1.9999999, 2.0, 0.0, 3.0, 3.0, 3.0]
+REPRODUCED - 2 check(s) failed:
+  - HaasnSoft 1x1->100x1: 26 of 100 destination samples were silently zeroed despite a nonzero (0.7) source pixel
+  - HaasnSoft 3x1->10x1: 2 of 10 destination samples were silently zeroed despite an all-nonzero source row
+EXIT: 1
+
+Ran 3 times total, identical output and exit code (1) every time.
+
+--- Wider evidence: exhaustive internal scan (not part of repro/, run directly against
+    src/compute_weights.rs::generate_weights via a temporary #[cfg(test)] module during
+    investigation, removed before committing this candidate) ---
+
+Scanning all 39 ResamplingFunction variants x 23 (in_size, out_size) pairs (ranging from 1x1 up
+to 10000x1) for any destination row whose entire normalized-weights slice was exactly 0.0:
+
+    found 4365 zero-weight-sum rows
+
+Sample of the raw hits (function, in_size, out_size, destination_row_index):
+    ZERO-SUM HIT: function=HaasnSoft in_size=1 out_size=10000 row=9990 bound_start=0 bound_size=1 row_sum=0
+    ZERO-SUM HIT: function=HaasnSoft in_size=1 out_size=10000 row=9991 bound_start=0 bound_size=1 row_sum=0
+    ...
+    ZERO-SUM HIT: function=HaasnSoft in_size=5 out_size=3 row=1 bound_start=0 bound_size=5 row_sum=0
+    ZERO-SUM HIT: function=HaasnSoft in_size=3 out_size=5 row=1 bound_start=0 bound_size=3 row_sum=0
+    ZERO-SUM HIT: function=Lanczos6Jinc in_size=1 out_size=1 row=0 bound_start=0 bound_size=1 row_sum=0
+
+After applying patch.diff, re-running the identical scan (same code, same 39x23 matrix) found:
+
+    test compute_weights::bughunt_zero_sum_scan::scan_for_zero_weight_sum_rows ... ok
+    (0 zero-weight-sum rows, down from 4365)

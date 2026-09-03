@@ -1,0 +1,99 @@
+diff --git a/internal/core/graphics/image/cache.rs b/internal/core/graphics/image/cache.rs
+index 924d19042..fb5d52fa4 100644
+--- a/internal/core/graphics/image/cache.rs
++++ b/internal/core/graphics/image/cache.rs
+@@ -7,9 +7,47 @@
+ 
+ #[cfg(not(target_arch = "wasm32"))]
+ use super::CachedPath;
++#[cfg(feature = "svg")]
++use super::{OpaqueImageVTable, svg::ParsedSVG};
+ use super::{Image, ImageCacheKey, ImageInner, SharedImageBuffer};
+ use crate::{SharedString, slice::Slice};
+ 
++/// A weak counterpart to a cached `ImageInner`, kept in a side table alongside `IMAGE_CACHE` so
++/// an `Image` the application still holds can be handed back even after its strong entry was
++/// evicted (or never admitted, if it's heavier than the byte-weight bound above). Only variants
++/// backed by `vtable::VRc` can be represented here: unlike `SharedVector` (used by
++/// `EmbeddedImage`'s pixel buffer), which tracks a single strong refcount only, `VRc` already
++/// keeps a separate weak count (see `helper_crates/vtable/src/vrc.rs`), so downgrading one costs
++/// nothing once the last strong owner drops it. This does not cover `EmbeddedImage` (the common
++/// decoded-raster case): giving `SharedVector` the same strong/weak split would touch its FFI
++/// layout (`slint_shared_vector_allocate`/`_free`, mirrored in the generated C++ headers) and
++/// every unsafe pointer-arithmetic method in that type, which is a much larger and riskier change
++/// than this side table.
++#[derive(Clone)]
++enum WeakImageInner {
++    #[cfg(feature = "svg")]
++    Svg(vtable::VWeak<OpaqueImageVTable, ParsedSVG>),
++}
++
++impl WeakImageInner {
++    fn downgrade(inner: &ImageInner) -> Option<Self> {
++        match inner {
++            #[cfg(feature = "svg")]
++            ImageInner::Svg(svg) => Some(Self::Svg(vtable::VRc::downgrade(svg))),
++            _ => None,
++        }
++    }
++
++    fn upgrade(&self) -> Option<ImageInner> {
++        match self {
++            #[cfg(feature = "svg")]
++            Self::Svg(weak) => weak.upgrade().map(ImageInner::Svg),
++            #[cfg(not(feature = "svg"))]
++            _ => None,
++        }
++    }
++}
++
+ struct ImageWeightInBytes;
+ 
+ impl clru::WeightScale<ImageCacheKey, ImageInner> for ImageWeightInBytes {
+@@ -44,6 +82,7 @@ pub(crate) struct ImageCache(
+         std::collections::hash_map::RandomState,
+         ImageWeightInBytes,
+     >,
++    std::collections::HashMap<ImageCacheKey, WeakImageInner>,
+ );
+ 
+ crate::thread_local!(pub(crate) static IMAGE_CACHE: core::cell::RefCell<ImageCache>  =
+@@ -52,7 +91,8 @@ pub(crate) struct ImageCache(
+             clru::CLruCache::with_config(
+                 clru::CLruCacheConfig::new(core::num::NonZeroUsize::new(5 * 1024 * 1024).unwrap())
+                     .with_scale(ImageWeightInBytes)
+-            )
++            ),
++            std::collections::HashMap::new(),
+         )
+     )
+ );
+@@ -65,13 +105,21 @@ fn lookup_image_in_cache_or_create(
+         cache_key: ImageCacheKey,
+         image_create_fn: impl Fn(ImageCacheKey) -> Option<ImageInner>,
+     ) -> Option<Image> {
+-        Some(Image(if let Some(entry) = self.0.get(&cache_key) {
+-            entry.clone()
+-        } else {
+-            let new_image = image_create_fn(cache_key.clone())?;
+-            self.0.put_with_weight(cache_key, new_image.clone()).ok();
+-            new_image
+-        }))
++        if let Some(entry) = self.0.get(&cache_key) {
++            return Some(Image(entry.clone()));
++        }
++        if let Some(weak) = self.1.get(&cache_key) {
++            if let Some(strong) = weak.upgrade() {
++                return Some(Image(strong));
++            }
++            self.1.remove(&cache_key);
++        }
++        let new_image = image_create_fn(cache_key.clone())?;
++        if let Some(weak) = WeakImageInner::downgrade(&new_image) {
++            self.1.insert(cache_key.clone(), weak);
++        }
++        self.0.put_with_weight(cache_key, new_image.clone()).ok();
++        Some(Image(new_image))
+     }
+ 
+     #[cfg(target_arch = "wasm32")]

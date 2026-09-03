@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench, check bit-exactness.
+test: clone apply bench correctness
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    # The app crate's default pic-scale features don't include avx/sse - flip them on so the
+    # bench actually reaches the code path this patch touches (see ../README.md).
+    sed -i 's/"colorspaces", "rdm", "nightly_i8mm", "nightly_f16"/"colorspaces", "rdm", "nightly_i8mm", "nightly_f16", "avx", "sse"/' clone/app/Cargo.toml
+
+# Runs the existing "Pic scale Plane8(Quality): Lanczos 3" criterion case (harness = false,
+# PreferQuality workload strategy, the case profiled by callgrind to find this hotspot). It's
+# single-threaded by construction (ThreadingPolicy::Single) - pin with `taskset -c N` yourself
+# for a single-core-ranking run; unpinned is the realistic multi-core wall-clock run. Note:
+# the compiled criterion binary needs `--bench` as its first argument to actually measure
+# (without it, it just runs a quick smoke-test pass and prints "Success").
+bench:
+    cd clone && cargo bench -p app --bench resize_plane -- --bench "Pic scale Plane8\(Quality\): Lanczos 3"
+
+# Bit-exactness check: builds bit_exact_check/ against ./clone once as-is (patched, since
+# `apply` already ran) and prints a hash. Run `just clone && cd bit_exact_check && cargo build
+# --release && ./target/release/correctness_check` separately, without `apply`, to get the
+# pre-patch hash to diff against by eye - both must print the same `FINAL_HASH=...` line.
+correctness:
+    cd bit_exact_check && cargo build --release
+    ./bit_exact_check/target/release/correctness_check
+
+clean:
+    rm -rf clone

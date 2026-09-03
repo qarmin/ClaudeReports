@@ -1,0 +1,41 @@
+diff --git a/pixeldata/src/lib.rs b/pixeldata/src/lib.rs
+index 6ede5847..d5e56855 100644
+--- a/pixeldata/src/lib.rs
++++ b/pixeldata/src/lib.rs
+@@ -2113,18 +2113,32 @@ pub trait PixelDecoder {
+     fn decode_pixel_data_frame(&self, frame: u32) -> Result<DecodedPixelData<'_>> {
+         let mut px = self.decode_pixel_data()?;
+ 
+-        // calculate frame offset and size
++        // calculate frame offset and size - checked/saturating, since
++        // `bits_allocated`/`samples_per_pixel`/`rows`/`cols` are all derived from
++        // untrusted attribute values and `frame` is a caller-supplied index which
++        // may exceed the actual number of frames; saturate to `usize::MAX` on
++        // overflow so the bounds check below always rejects it.
+         let frame_size = px.bits_allocated.div_ceil(8) as usize
+             * px.samples_per_pixel as usize
+             * px.rows as usize
+             * px.cols as usize;
+-        let frame_offset = frame_size * frame as usize;
++        let frame_offset = frame_size.checked_mul(frame as usize).unwrap_or(usize::MAX);
++        let frame_end = frame_offset.checked_add(frame_size).unwrap_or(usize::MAX);
+ 
+         // crop to frame
+         match &mut px.data {
+-            Cow::Owned(data) => *data = data[frame_offset..frame_offset + frame_size].to_vec(),
++            Cow::Owned(data) => {
++                *data = data
++                    .get(frame_offset..frame_end)
++                    .context(FrameOutOfRangeSnafu {
++                        frame_number: frame,
++                    })?
++                    .to_vec()
++            }
+             Cow::Borrowed(data) => {
+-                *data = &data[frame_offset..frame_offset + frame_size];
++                *data = data.get(frame_offset..frame_end).context(FrameOutOfRangeSnafu {
++                    frame_number: frame,
++                })?;
+             }
+         }
+ 

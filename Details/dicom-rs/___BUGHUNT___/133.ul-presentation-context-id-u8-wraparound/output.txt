@@ -1,0 +1,63 @@
+Real captured output of `just test` in this folder: a fresh clone of Enet4/dicom-rs at
+df2b9e42, release build, rustc 1.98.0, Linux. First run = pristine clone (bug present),
+second run = same clone with patch.diff applied (bug gone). Git detached-HEAD advice trimmed.
+
+rm -rf clone
+git clone https://github.com/Enet4/dicom-rs.git clone
+cd clone && git checkout df2b9e42
+HEAD is now at df2b9e42 Merge pull request #821 from youdie006/fix/812-json-sq-primitive-panic
+cd repro && cargo run --release; echo "repro exit code: $? (non-zero = bug reproduced, which is what this step expects)"
+=== proposing 128 presentation contexts (protocol maximum is 128) ===
+  association established; SCP received 128 contexts using 128 distinct context IDs
+  0 of the 128 proposed abstract syntaxes are missing from the SCU's negotiated list
+  -> bug ABSENT for this input
+
+=== proposing 129 presentation contexts (protocol maximum is 128) ===
+  association established; SCP received 129 contexts using 128 distinct context IDs
+  context ID 1 was sent by the SCU for 2 different abstract syntaxes:
+      1.2.826.0.1.3680043.2.1143.1000   (as parsed by the real SCP)
+      1.2.826.0.1.3680043.2.1143.1128   (as parsed by the real SCP)
+  ...but the SCU's own negotiated list maps ID 1 to: 1.2.826.0.1.3680043.2.1143.1000, 1.2.826.0.1.3680043.2.1143.1000
+      abstract syntax 1.2.826.0.1.3680043.2.1143.1128 is NOT reported by the SCU at all
+  1 of the 129 proposed abstract syntaxes are missing from the SCU's negotiated list
+  -> REPRODUCED: 1 colliding context ID(s), 1 abstract syntax(es) mislabelled by the SCU
+
+=== proposing 200 presentation contexts (protocol maximum is 128) ===
+  association established; SCP received 200 contexts using 128 distinct context IDs
+  context ID 1 was sent by the SCU for 2 different abstract syntaxes:
+      1.2.826.0.1.3680043.2.1143.1000   (as parsed by the real SCP)
+      1.2.826.0.1.3680043.2.1143.1128   (as parsed by the real SCP)
+  ...but the SCU's own negotiated list maps ID 1 to: 1.2.826.0.1.3680043.2.1143.1000, 1.2.826.0.1.3680043.2.1143.1000
+      abstract syntax 1.2.826.0.1.3680043.2.1143.1128 is NOT reported by the SCU at all
+  context ID 3 was sent by the SCU for 2 different abstract syntaxes:
+      1.2.826.0.1.3680043.2.1143.1001   (as parsed by the real SCP)
+      1.2.826.0.1.3680043.2.1143.1129   (as parsed by the real SCP)
+  ...but the SCU's own negotiated list maps ID 3 to: 1.2.826.0.1.3680043.2.1143.1001, 1.2.826.0.1.3680043.2.1143.1001
+      abstract syntax 1.2.826.0.1.3680043.2.1143.1129 is NOT reported by the SCU at all
+  context ID 5 was sent by the SCU for 2 different abstract syntaxes:
+      1.2.826.0.1.3680043.2.1143.1002   (as parsed by the real SCP)
+      1.2.826.0.1.3680043.2.1143.1130   (as parsed by the real SCP)
+  ...but the SCU's own negotiated list maps ID 5 to: 1.2.826.0.1.3680043.2.1143.1002, 1.2.826.0.1.3680043.2.1143.1002
+      abstract syntax 1.2.826.0.1.3680043.2.1143.1130 is NOT reported by the SCU at all
+  ... and 69 further colliding context ID(s), omitted
+  72 of the 200 proposed abstract syntaxes are missing from the SCU's negotiated list
+  -> REPRODUCED: 72 colliding context ID(s), 72 abstract syntax(es) mislabelled by the SCU
+
+REPRODUCED: dicom-ul emitted an A-ASSOCIATE-RQ with colliding presentation context IDs
+repro exit code: 1 (non-zero = bug reproduced, which is what this step expects)
+cd clone && git apply "/home/rafal/Projekty/Obce/dicom-rs/.claude/worktrees/agent-aa1f7adf5916439b5/___BUGHUNT___/133.ul-presentation-context-id-u8-wraparound/patch.diff"
+cd repro && cargo run --release
+=== proposing 128 presentation contexts (protocol maximum is 128) ===
+  association established; SCP received 128 contexts using 128 distinct context IDs
+  0 of the 128 proposed abstract syntaxes are missing from the SCU's negotiated list
+  -> bug ABSENT for this input
+
+=== proposing 129 presentation contexts (protocol maximum is 128) ===
+  association was refused: SCU establish: too many presentation contexts to propose: 129 (the maximum is 128)
+  -> bug ABSENT for this input: no wire-corrupt A-ASSOCIATE-RQ was emitted
+
+=== proposing 200 presentation contexts (protocol maximum is 128) ===
+  association was refused: SCU establish: too many presentation contexts to propose: 200 (the maximum is 128)
+  -> bug ABSENT for this input: no wire-corrupt A-ASSOCIATE-RQ was emitted
+
+did not reproduce - over-limit proposals are rejected and the legal 128-context case still works

@@ -1,0 +1,27 @@
+=== just clone ===
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at df2b9e42 Merge pull request #821 from youdie006/fix/812-json-sq-primitive-panic
+
+=== just reproduce-before (pristine df2b9e42) ===
+cd repro && cargo run --release
+decoded.voi_lut_sequence() = Some, 1 entries:
+  [0] data=[0]
+decode_pixel_data().to_dynamic_image(2) pixel value = 0
+Frame 2's own real per-frame VOI LUT (present in the object) maps every input to 255; frame 0's real per-frame VOI LUT (a DIFFERENT frame's data) maps every input to 0.
+
+BUG CONFIRMED: decode_pixel_data().to_dynamic_image(2) = 0, matching frame 0's VOI LUT output instead of frame 2's own (255) - get_from_per_frame silently dropped frame 1's group-less item, misaligning the resulting 2-entry array against the declared 3-frame count, and the length-mismatch fallback in voi_lut_sequence() then silently returned frame 0's entry for every frame.
+error: Recipe `reproduce-before` failed on line 23 with exit code 1
+
+=== just apply ===
+cd clone && git apply "/home/rafal/Projekty/Obce/dicom-rs/___BUGHUNT___/114.pixeldata-get-from-per-frame-misaligned-gap-index/patch.diff"
+
+=== just reproduce-after (patched) ===
+cd repro && cargo run --release
+decoded.voi_lut_sequence() = None
+decode_pixel_data().to_dynamic_image(2) pixel value = 255
+Frame 2's own real per-frame VOI LUT (present in the object) maps every input to 255; frame 0's real per-frame VOI LUT (a DIFFERENT frame's data) maps every input to 0.
+
+No mismatch observed - decode_pixel_data() applied the correct per-frame VOI LUT for frame 2.

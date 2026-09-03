@@ -1,0 +1,53 @@
+Real output captured from `just clean && just test && just probe-privacy` in this candidate's own
+folder, against a genuinely fresh clone of base_commit b9214fbeb714e4bb8f8858676a818cef2f21b097
+(cargo/rustc build noise trimmed; nothing else edited).
+
+=== just test (clone + reproduce-before) ===
+
+$ git clone https://github.com/orxfun/orx-parallel.git clone/orx-parallel
+Cloning into 'clone/orx-parallel'...
+$ cd clone/orx-parallel && git checkout b9214fbeb714e4bb8f8858676a818cef2f21b097
+HEAD is now at b9214fbe iter of iter uses fixed chunk heuristic (#198)
+
+$ cd repro && cargo test --release
+   Compiling orx019-repro v0.1.0 (.../019.fixed_chunk_adaptive_chunk_runner_unconditional_sync/repro)
+    Finished `release` profile [optimized] target(s) in 1.31s
+     Running unittests src/main.rs (target/release/deps/orx019_repro-...)
+
+running 1 test
+test adaptive_chunk_runner_also_grants_unconditional_sync ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+$ cd repro && cargo run --release
+    Finished `release` profile [optimized] target(s) in 0.15s
+     Running `target/release/orx019-repro`
+FixedChunkRunner<RcPool> is Sync (confirms the suspected unconditional impl) even though RcPool is !Sync/!Send.
+second real OS thread holds &FixedChunkRunner<RcPool> (shared only because of the Sync impl), but no public API call can reach the RcPool/Rc inside it
+done - no public-API-reachable unsound operation was found
+
+=== just probe-privacy (Probe A: private field, Probe B: private trait) ===
+
+$ sed -i '/let runner = Runner::fixed_with_pool(pool);/a\    let _ = runner.pool;' repro/src/main.rs
+$ cd repro && cargo build --release
+error[E0616]: field `pool` of struct `orx_parallel::runner::runner_variants::fixed_chunk::fixed_chunk_runner::FixedChunkRunner` is private
+  --> src/main.rs:50:20
+   |
+50 |     let _ = runner.pool;
+   |                    ^^^^ private field
+
+$ printf '\n#[allow(dead_code)]\nfn probe_trait() { let _: &dyn orx_parallel::ParRunner; }\n' >> repro/src/main.rs
+$ cd repro && cargo build --release
+error[E0405]: cannot find trait `ParRunner` in crate `orx_parallel`
+   --> src/main.rs:109:46
+    |
+109 | fn probe_trait() { let _: &dyn orx_parallel::ParRunner; }
+    |                                              ^^^^^^^^^ not found in `orx_parallel`
+
+=== Repeatability ===
+
+`just test`'s `reproduce-before` step (the Sync assertion + cross-thread share) was additionally
+re-run 3 more times directly (not via a fresh clone each time, same build) with identical output
+each time - this is a deterministic, compile-time-gated observation (whether `FixedChunkRunner<P>:
+Sync` holds is a trait-resolution fact, not a runtime race), so repeat runs are expected to be
+100% consistent, and were.

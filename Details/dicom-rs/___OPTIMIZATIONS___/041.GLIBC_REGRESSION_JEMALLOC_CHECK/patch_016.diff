@@ -1,0 +1,27 @@
+diff --git a/object/src/tokens.rs b/object/src/tokens.rs
+index e32a4436..25963048 100644
+--- a/object/src/tokens.rs
++++ b/object/src/tokens.rs
+@@ -64,12 +64,18 @@ where
+ 
+         // otherwise, expand next element, recurse
+         if let Some(elem) = self.elem_iter.next() {
+-            self.tokens_pending = if self.token_options == Default::default() {
+-                elem.into_tokens()
++            // Reuse `tokens_pending`'s existing allocation (already empty here, since we only
++            // reach this branch after draining it via `pop_front` above) instead of dropping it
++            // and collecting into a brand new `VecDeque` on every single element - a real,
++            // measured allocation cost on a many-small-elements object, given this runs once per
++            // element in the whole dataset.
++            debug_assert!(self.tokens_pending.is_empty());
++            if self.token_options == Default::default() {
++                self.tokens_pending.extend(elem.into_tokens());
+             } else {
+-                elem.into_tokens_with_options(self.token_options)
++                self.tokens_pending
++                    .extend(elem.into_tokens_with_options(self.token_options));
+             }
+-            .collect();
+ 
+             self.next()
+         } else {

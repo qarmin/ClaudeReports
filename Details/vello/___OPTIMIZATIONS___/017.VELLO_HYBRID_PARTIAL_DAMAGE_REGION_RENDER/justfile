@@ -1,0 +1,73 @@
+# Self-contained reproduction for candidate 017 (vello_hybrid partial damage-region render +
+# rect-clip fast path).
+#
+# IMPORTANT DEVIATION from the usual shape: `patch.diff` does NOT apply to `base_commit` below
+# (the officially pinned commit for this whole ___OPTIMIZATIONS___ workspace) - see RESULT.md's
+# "Why the result looks the way it does" for the full explanation. In short: the four stacked
+# upstream PRs (#1783, #1737, #1784, #1786) that make up this feature were branched from an
+# older commit (`actual_base_commit` below, 34 commits behind `base_commit`, itself an ancestor
+# of it) and conflict with unrelated WebGL-only changes landed on main since. `patch.diff` is
+# the real, clean diff between `actual_base_commit` and `patched_commit` (verified with
+# `git apply --check` against a checkout of `actual_base_commit`) - it is applied against THAT
+# commit below, not `base_commit`. `base_commit` is still recorded per this workspace's own
+# convention, for provenance.
+#
+# `patched_commit` only exists on an open, unmerged PR branch (not on any commit a plain
+# `git clone` of the default branch would fetch), so `clone_patched` fetches it directly by SHA
+# (GitHub allows fetching any reachable commit by SHA, not just branch tips) rather than relying
+# on a branch name that could move or disappear.
+#
+# -c filter.lfs.*: this repo's .gitattributes wires up Git LFS for reference PNG snapshots this
+# candidate's own bench doesn't touch; disabling the filter means this works even without
+# `git-lfs` installed (this candidate's own investigation was run in an environment without it).
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+actual_base_commit := "896806de88a72b42915f1b9fd7e68e97f7eac480"
+patched_commit := "9f56470c01302ce90d8a1392cf609c2f8b65442c"
+
+test: clone build-baseline build-patched bench
+
+clone:
+    rm -rf clone_baseline clone_patched
+    git -c filter.lfs.required=false -c filter.lfs.smudge= -c filter.lfs.process= clone --no-checkout {{repo_url}} clone_baseline
+    cd clone_baseline && git config filter.lfs.required false && git config filter.lfs.smudge "" && git config filter.lfs.process "" && git checkout {{actual_base_commit}}
+    git -c filter.lfs.required=false -c filter.lfs.smudge= -c filter.lfs.process= clone --no-checkout {{repo_url}} clone_patched
+    cd clone_patched && git config filter.lfs.required false && git config filter.lfs.smudge "" && git config filter.lfs.process "" && git fetch origin {{patched_commit}} && git checkout FETCH_HEAD
+    cp bench/bench_damage_baseline.rs clone_baseline/sparse_strips/vello_hybrid/examples/bench_damage.rs
+    cp bench/bench_damage_patched.rs clone_patched/sparse_strips/vello_hybrid/examples/bench_damage.rs
+
+# `patch.diff` reproduces `clone_patched`'s own delta over `clone_baseline` (git apply --check
+# already verified clean against actual_base_commit) - shown here for completeness/review, not
+# actually applied, since `clone_patched` is checked out directly from the real upstream commit
+# instead (see header comment above for why).
+show-patch:
+    cd clone_baseline && git apply --check "{{justfile_directory()}}/patch.diff" && echo "patch.diff applies cleanly to actual_base_commit"
+
+build-baseline:
+    cd clone_baseline && cargo build --release -p vello_hybrid --example bench_damage --features vello_hybrid/text
+    cp clone_baseline/target/release/examples/bench_damage ./bin_baseline
+
+build-patched:
+    cd clone_patched && cargo build --release -p vello_hybrid --example bench_damage --features vello_hybrid/text
+    cp clone_patched/target/release/examples/bench_damage ./bin_patched
+
+# Full-frame render (both binaries support this - control for API-overhead regression),
+# then the damage-region "partial" mode and the rect-clip "clip"/"clip_rect" modes (patched
+# binary only, since the baseline has neither RenderRegion nor push_clip_rect).
+bench:
+    @echo "=== baseline: full-frame render (every frame, no partial-render API exists) ==="
+    ./bin_baseline full
+    @echo "=== patched: full-frame render (control - confirms no regression from the new API) ==="
+    ./bin_patched full
+    @echo "=== patched: RenderRegion::Rects damage-region render (one scrolled-in row, vs baseline's full render above) ==="
+    ./bin_patched partial
+    @echo "=== baseline: path-based clip (existing clip path, no rect fast path) ==="
+    ./bin_baseline clip
+    @echo "=== patched: same path-based clip (auto-detected as an integer rect by the new ClipContext) ==="
+    ./bin_patched clip
+    @echo "=== patched: explicit push_clip_rect (same scene, explicit API) ==="
+    ./bin_patched clip_rect
+
+clean:
+    rm -rf clone_baseline clone_patched bin_baseline bin_patched

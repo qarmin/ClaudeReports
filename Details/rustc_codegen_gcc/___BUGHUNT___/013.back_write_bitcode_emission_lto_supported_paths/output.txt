@@ -1,0 +1,70 @@
+Approach 1: real environment (lto_supported = gccjit::is_lto_supported() = false here), --emit=llvm-bc
+=======================================================================================================
+$ CHANNEL=release ./y.sh rustc /tmp/bughunt013/repro_bc/main.rs --emit=llvm-bc -o /tmp/bughunt013/repro_bc/out
+[BUILD] build system
+    Finished `release` profile [optimized] target(s) in 0.00s
+Using `/home/rafal/Projekty/Obce/rustc_codegen_gcc/build/libgccjit/badf78d09d16e66f4ca07971c51aa6a227558d4f` as path for libgccjit
+EXIT: 0
+
+$ ls -la /tmp/bughunt013/repro_bc/out
+-rw-r--r-- 1 rafal rafal 8456 Sep  2 07:59 out
+
+
+Approach 2: source instrumented to force `lto_supported = true` (the natural value is false on this
+environment's downloaded libgccjit, per gccjit::is_lto_supported(), so the guarded -flto=auto /
+-flto-partition=one / -ffat-lto-objects options are otherwise dead code here) - added a temporary
+eprintln! + hardcoded `let lto_supported = true;` in src/back/write.rs (reverted with `git checkout`
+before finishing this candidate), rebuilt, then exercised all three code paths gated by that
+condition at write.rs:47-70:
+
+(a) `config.emit_bc` branch (line 48, first half) via `--emit=llvm-bc`, 3 runs:
+$ CHANNEL=release ./y.sh rustc /tmp/bughunt013/repro_bc/main.rs --emit=llvm-bc -o /tmp/bughunt013/repro_bc/rep_1
+BUGHUNT013_DEBUG lto_supported=true bitcode_needed=true emit_bc=true
+BUGHUNT013_DEBUG lto_supported=true bitcode_needed=false emit_bc=false
+exit=0
+(rep_2, rep_3: identical output, exit=0)
+
+(b) `config.emit_obj == EmitObj::Bitcode` branch (line 48, second half) via `-C linker-plugin-lto`, 3 runs:
+$ CHANNEL=release ./y.sh rustc /tmp/bughunt013/repro_bc/main.rs -C linker-plugin-lto --emit=obj -o /tmp/bughunt013/repro_bc/rep2_1
+BUGHUNT013_DEBUG lto_supported=true bitcode_needed=true emit_bc=false
+BUGHUNT013_DEBUG lto_supported=true bitcode_needed=false emit_bc=false
+exit=0
+(rep2_2, rep2_3: identical output, exit=0)
+
+Also tried the same `-C linker-plugin-lto` flag while requesting a final link (no `--emit=obj`
+override), to see the whole pipeline; codegen (the code under test) still exits 0/no crash - the
+only failure is a later, unrelated `rust-lld` linker-argument-syntax error, well past the
+compile_to_file call under test:
+$ CHANNEL=release ./y.sh rustc /tmp/bughunt013/repro_bc/main.rs -C linker-plugin-lto -o /tmp/bughunt013/repro_bc/out4
+BUGHUNT013_DEBUG lto_supported=true bitcode_needed=true emit_bc=false
+BUGHUNT013_DEBUG lto_supported=true bitcode_needed=true emit_bc=false
+error: linking with `cc` failed: exit status: 1
+  = note: ... "-Wl,-plugin-opt=-O0,-plugin-opt=-mcpu=x86-64" ...
+  = note: rust-lld: error: -plugin-opt=-: rust-lld: Unknown command line argument '-O0'.
+error: aborting due to 1 previous error
+EXIT: 1   (ordinary compiler error, not a crash/signal)
+
+(c) `config.emit_obj == EmitObj::ObjectCode(BitcodeSection::Full)` branch (line 59) via
+`--crate-type=rlib --emit=obj,link -C embed-bitcode=yes`, 3 runs:
+$ CHANNEL=release ./y.sh rustc /tmp/bughunt013/repro_bc/main.rs --crate-type=rlib --emit=obj,link -C embed-bitcode=yes -o /tmp/bughunt013/repro_bc/rep3_1
+warning: function `main` is never used
+BUGHUNT013_DEBUG lto_supported=true bitcode_needed=true emit_bc=false
+warning: 2 warnings emitted
+exit=0
+(rep3_2, rep3_3: identical output, exit=0)
+
+$ objdump -h /tmp/bughunt013/repro_bc/out3
+/tmp/bughunt013/repro_bc/out3: ELF 64-bit LSB relocatable, x86-64, version 1 (SYSV), not stripped
+Sections:
+Idx Name          Size      ...
+  3 .gnu.lto_.inline.f3988af178f264b2   ...  CONTENTS, READONLY, EXCLUDE
+  4 .gnu.lto_.jmpfuncs.f3988af178f264b2 ...  CONTENTS, READONLY, EXCLUDE
+  ...
+  11 .gnu.lto__RINvNtCs91A6wUlMT7e_3std2rt10lang_startuECsb0I2mqYjEWP_4main.5.f3988af178f264b2 ...
+(confirms `-flto=auto` really was honored - the object genuinely carries embedded GIMPLE LTO
+sections - not merely that the flag was silently ignored by GCC)
+
+All 9 forced-lto_supported=true runs across the three sub-branches: exit 0, no SIGSEGV/SIGABRT, no
+gccjit-internal error, deterministic across 3/3 repeats each.
+
+Approach 3: code reading (mechanism confirmation, see RESULT.md's Root cause).

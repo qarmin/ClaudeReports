@@ -1,0 +1,50 @@
+=== BEFORE (pristine clone at ca273499e3e48bd2de6f02aa8e99a148984e45f3, no patches) ===
+$ cd repro && cargo run --release
+input bbox: x in [-884.6077114288375, 365.01378096433245], y in [-40.33291308287755, 929.6901693507418]
+output: M365.01378096433245,929.6901693507418 L-884.6077114288375,-40.33291308287755 C-884.4758411094294,-40.33291308287755 6504.4074466172,5457.7803383418295 34.80217370492994,643.7370968446294 C8.74591077354949,624.3485914919648 -17.310352157830927,604.9600861393004 -43.366615089211344,585.5715807866359
+REPRODUCED - a control/end point escaped the input bounding box (+/-50 slack) by 6089.393665652868 units
+
+Repeated 3/3 times (release build, no fixed seed / no RNG at all - deterministic pure f64
+arithmetic on a fixed literal input): bit-for-bit identical output all three runs.
+
+=== AFTER (same clone, patch.diff applied) ===
+$ cd clone && git apply ../patch.diff
+$ cd repro && cargo run --release
+input bbox: x in [-884.6077114288375, 365.01378096433245], y in [-40.33291308287755, 929.6901693507418]
+output: M365.01378096433245,929.6901693507418 L-884.6077114288375,-40.33291308287755 C-884.6076803651564,-40.33291308287755 113.71227783024449,702.4542267815707 112.39689074068383,701.4754452236039 C60.47572213071872,662.8408237446146 8.554553520753686,624.2062022656252 -43.36661508921135,585.5715807866359
+did not reproduce - every point stayed within the input bounding box
+
+=== Project test suite (cargo test --workspace, run in the same clone before/after patch.diff) ===
+Before:
+test result: ok. 187 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s   (kurbo lib tests)
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.00s    (polycool lib tests)
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s    (kurbo doctests)
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s     (polycool doctests, 1 pre-existing ignored)
+
+After:
+test result: ok. 187 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.00s
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Identical pass counts before/after, no regressions.
+
+Note: an unpatched, unrelated re-run of `cargo test --workspace` (before applying patch.diff, on
+a separate invocation) once showed `poly::tests::planted_root_deg5` FAILED (9 passed/1 failed in
+the polycool lib tests). Re-running `cargo test -p polycool` three more times immediately after
+showed 10/10 passed every time - this is the pre-existing, independently-documented flaky/
+ill-conditioned test already recorded in this workspace's own candidate
+017.POLYCOOL_PLANTED_ROOT_ILL_CONDITIONED_TOLERANCE, unrelated to kurbo/src/fit.rs and to this
+candidate's patch. The before/after counts quoted above are from consistent, non-flaky runs.
+
+=== Broader validation (not part of the standalone repro/, run in a separate scratch worktree
+against the same base commit) ===
+A short property-fuzz harness (random polylines, 3-40 vertices, coordinate scale 1 to 1e7,
+accuracy 1e-4 to 50, both SimplifyOptLevel::Optimize and ::Subdivide) checking for panics,
+non-finite output, and control points straying far outside the input polyline's own bounding box:
+
+- Against vanilla HEAD with candidate 008's and 009's patches applied (MAX_ARM_LEN = 10.0, the
+  value candidate 009 chose): 1 failure in 50,000 iterations (the case reduced to this repro).
+- Against vanilla HEAD with candidate 008/009 NOT applied at all, only this candidate's own
+  standalone MAX_ARM_LEN = 3.0 cap applied on top of plain HEAD: 0 failures in 150,000 iterations
+  (3-40 vertices, scale 1 to 1e7, accuracy 1e-4 to 50).

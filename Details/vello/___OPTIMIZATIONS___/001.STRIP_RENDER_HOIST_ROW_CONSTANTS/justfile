@@ -1,0 +1,51 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# repo_url/base_commit: read via `git remote get-url origin` / `git rev-parse HEAD` in the
+# main project at the moment patch.diff was captured.
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone at the pinned commit, build a BASELINE binary before touching anything,
+# apply the patch, build a PATCHED binary, then run both and print both results.
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# vello already ships a dedicated criterion benchmark for this exact code path
+# (sparse_strips/vello_bench, `render_strips` group -> vello_common::strip::render_impl) - reused
+# directly rather than writing a standalone bench crate.
+build-baseline:
+    cd clone && cargo build --release -p vello_bench --bench main
+    cp clone/target/release/deps/main-* ./bin_baseline 2>/dev/null || \
+        cp "$(ls -t clone/target/release/deps/main-* | grep -v '\.d$' | head -1)" ./bin_baseline
+
+apply-and-rebuild: apply
+    cd clone && cargo build --release -p vello_bench --bench main
+    cp "$(ls -t clone/target/release/deps/main-* | grep -v '\.d$' | head -1)" ./bin_patched
+
+build-patched: apply-and-rebuild
+
+bench:
+    @echo "=== baseline (before patch) - render_strips/Ghostscript_Tiger_simd ==="
+    ./bin_baseline --bench render_strips
+    @echo "=== patched (after patch) - render_strips/Ghostscript_Tiger_simd ==="
+    ./bin_patched --bench render_strips
+    @echo ""
+    @echo "NOTE: on the machine this candidate was measured on, two back-to-back runs of the"
+    @echo "SAME (baseline) binary varied by ~6-20%% due to machine noise (see RESULT.md) - a"
+    @echo "single before/after pair here is NOT sufficient to draw a conclusion; re-run this"
+    @echo "recipe several times and compare medians, or use criterion's --save-baseline/--baseline"
+    @echo "flags for its built-in paired statistics."
+
+clean:
+    rm -rf clone bin_baseline bin_patched target

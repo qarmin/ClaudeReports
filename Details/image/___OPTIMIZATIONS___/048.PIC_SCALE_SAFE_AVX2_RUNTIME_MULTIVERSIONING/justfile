@@ -1,0 +1,51 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+# patch.diff bundles the harness hunk (Cargo.toml's `benches/imageops.rs` addition of
+# `bench_resize_dynamic`, reused verbatim from candidate 040) together with the actual fix
+# (Cargo.toml's `[patch.crates-io]` hunk, plus the entire vendored+patched `vendor/pic-scale-safe/`
+# tree, which adds runtime AVX2 multiversioning - `is_x86_feature_detected!("avx2")` selecting an
+# explicit `#[target_feature(enable = "avx2")]` variant of the vertical convolution tap loop's
+# 32/16/8-column tiers - to `fixed_point_vertical.rs`, plus relaxing `lib.rs`'s
+# `#![forbid(unsafe_code)]` to `#![deny(unsafe_code)]` so those `unsafe fn`s can exist at all,
+# each locally re-allowed with `#[allow(unsafe_code)]`). apply-harness applies just the bench
+# addition so it exists for both the baseline (S) and the patched build (E); apply-fix applies the
+# Cargo.toml + vendor/ + lib.rs hunks on top, for the patched build only. Both S and E are built
+# with default RUSTFLAGS (no `-C target-feature=+avx2`, unlike candidate 044) - the whole point of
+# this candidate is that the speedup shows up on a normal `cargo build --release` via runtime
+# detection, not a special build flag.
+test: clone apply-harness bench-baseline apply-fix bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-harness:
+    cd clone && git apply --exclude='Cargo.toml' --exclude='vendor/*' "{{justfile_directory()}}/patch.diff"
+
+apply-fix:
+    cd clone && git apply --include='Cargo.toml' --include='vendor/*' "{{justfile_directory()}}/patch.diff"
+
+# S: registry pic-scale-safe 0.1.11, completely unmodified - default RUSTFLAGS, no multiversioning.
+bench-baseline:
+    @echo "=== S: registry pic-scale-safe 0.1.11 (main today), default RUSTFLAGS - Lanczos3 4032x3024->400x300 ==="
+    cd clone && cargo bench --bench imageops -- "dynamic_resize/DynamicImage::resize_exact 4032x3024->400x300 Lanczos3"
+
+# E: this candidate's fix - vendored pic-scale-safe with runtime AVX2 multiversioning of the
+# vertical convolution tap loop, default RUSTFLAGS (relies on is_x86_feature_detected! at runtime,
+# not a build-time target-feature flag).
+bench-patched:
+    @echo "=== E: this candidate's fix (vendored pic-scale-safe, runtime AVX2 multiversioning), default RUSTFLAGS - Lanczos3 4032x3024->400x300 ==="
+    cd clone && cargo bench --bench imageops -- "dynamic_resize/DynamicImage::resize_exact 4032x3024->400x300 Lanczos3"
+
+clean:
+    rm -rf clone

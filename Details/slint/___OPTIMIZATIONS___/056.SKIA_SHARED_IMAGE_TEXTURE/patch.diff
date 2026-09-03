@@ -1,0 +1,177 @@
+diff --git a/internal/renderers/skia/itemrenderer.rs b/internal/renderers/skia/itemrenderer.rs
+index 4f22b2b83..ad5d11c33 100644
+--- a/internal/renderers/skia/itemrenderer.rs
++++ b/internal/renderers/skia/itemrenderer.rs
+@@ -41,18 +41,44 @@ pub struct SkiaItemRenderer<'a> {
+     state_stack: Vec<RenderState>,
+     current_state: RenderState,
+     image_cache: &'a ItemCache<Option<skia_safe::Image>>,
++    shared_image_texture_cache:
++        &'a std::cell::RefCell<Vec<(i_slint_core::graphics::Image, skia_safe::Image)>>,
+     layer_cache: &'a ItemCache<Option<(PhysicalPoint, skia_safe::Image)>>,
+     path_cache: &'a ItemCache<Option<(Vector2D<f32, PhysicalPx>, skia_safe::Path)>>,
+     text_layout_cache: &'a sharedparley::TextLayoutCache,
+     box_shadow_cache: &'a SkiaBoxShadowCache,
+ }
+ 
++/// Upper bound on how many distinct sources' converted textures are kept alive in
++/// [`SkiaItemRenderer::shared_image_texture_cache`] - see its doc comment for why this exists.
++const SHARED_IMAGE_TEXTURE_CACHE_LIMIT: usize = 128;
++
++/// Whether converting `image_inner` to a Skia texture is independent of the requesting item, so
++/// its result can be shared across every item using the same source - unlike SVGs, which
++/// rasterize to a target size chosen by whichever item asks first, or borrowed/imported textures,
++/// which may not have a stable identity to key on at all.
++///
++/// `Image`'s own `PartialEq` already compares raster sources by buffer identity (not content -
++/// see `SharedImageBuffer::eq`), which is exactly "the same source" in the TODO this replaces, so
++/// it's reused directly below instead of inventing a second identity notion.
++fn is_shareable_image_source(image_inner: &i_slint_core::ImageInner) -> bool {
++    match image_inner {
++        i_slint_core::ImageInner::EmbeddedImage { .. } => true,
++        i_slint_core::ImageInner::BackendStorage(..) => true,
++        i_slint_core::ImageInner::NineSlice(nine) => is_shareable_image_source(&nine.0),
++        _ => false,
++    }
++}
++
+ impl<'a> SkiaItemRenderer<'a> {
+     pub fn new(
+         canvas: &'a skia_safe::Canvas,
+         window: &'a i_slint_core::api::Window,
+         surface: Option<&'a dyn crate::Surface>,
+         image_cache: &'a ItemCache<Option<skia_safe::Image>>,
++        shared_image_texture_cache: &'a std::cell::RefCell<
++            Vec<(i_slint_core::graphics::Image, skia_safe::Image)>,
++        >,
+         layer_cache: &'a ItemCache<Option<(PhysicalPoint, skia_safe::Image)>>,
+         path_cache: &'a ItemCache<Option<(Vector2D<f32, PhysicalPx>, skia_safe::Path)>>,
+         text_layout_cache: &'a sharedparley::TextLayoutCache,
+@@ -69,6 +95,7 @@ pub fn new(
+                 transform: i_slint_core::lengths::ItemTransform::identity(),
+             },
+             image_cache,
++            shared_image_texture_cache,
+             layer_cache,
+             path_cache,
+             text_layout_cache,
+@@ -339,18 +366,42 @@ fn draw_image_impl(
+     ) {
+         let tiling = item.tiling();
+ 
+-        // TODO: avoid doing creating an SkImage multiple times when the same source is used in multiple image elements
+         let skia_image = self.image_cache.get_or_update_cache_entry(item_rc, || {
+             let image = item.source();
+-            super::cached_image::as_skia_image(
+-                image,
+-                &|| item.target_size(),
+-                if tiling != Default::default() { ImageFit::Preserve } else { item.image_fit() },
+-                self.scale_factor,
+-                self.canvas,
+-                self.surface,
+-            )
+-            .and_then(|skia_image| {
++            // Raster sources (unlike SVGs, which rasterize to a size that depends on this
++            // item's own target size) convert to the same texture no matter which item asks -
++            // share the conversion (and the GPU upload) across every item using the same source
++            // instead of redoing it once per item.
++            let shareable = is_shareable_image_source((&image).into());
++            let already_converted = shareable
++                .then(|| {
++                    self.shared_image_texture_cache
++                        .borrow()
++                        .iter()
++                        .find(|(source, _)| *source == image)
++                        .map(|(_, texture)| texture.clone())
++                })
++                .flatten();
++            let converted_image = already_converted.or_else(|| {
++                let key_image = shareable.then(|| image.clone());
++                let converted = super::cached_image::as_skia_image(
++                    image,
++                    &|| item.target_size(),
++                    if tiling != Default::default() { ImageFit::Preserve } else { item.image_fit() },
++                    self.scale_factor,
++                    self.canvas,
++                    self.surface,
++                );
++                if let (Some(key_image), Some(converted)) = (key_image, &converted) {
++                    let mut cache = self.shared_image_texture_cache.borrow_mut();
++                    if cache.len() >= SHARED_IMAGE_TEXTURE_CACHE_LIMIT {
++                        cache.remove(0);
++                    }
++                    cache.push((key_image, converted.clone()));
++                }
++                converted
++            });
++            converted_image.and_then(|skia_image| {
+                 let brush = item.colorize();
+                 if !brush.is_transparent() {
+                     self.colorize_image(skia_image, brush)
+@@ -1002,6 +1053,7 @@ fn render_into_layer(
+             self.window,
+             self.surface,
+             self.image_cache,
++            self.shared_image_texture_cache,
+             self.layer_cache,
+             self.path_cache,
+             self.text_layout_cache,
+diff --git a/internal/renderers/skia/lib.rs b/internal/renderers/skia/lib.rs
+index 667c89fd2..96b844a95 100644
+--- a/internal/renderers/skia/lib.rs
++++ b/internal/renderers/skia/lib.rs
+@@ -263,6 +263,14 @@ pub struct SkiaRenderer {
+     maybe_window_adapter: RefCell<Option<Weak<dyn WindowAdapter>>>,
+     rendering_notifier: RefCell<Option<Box<dyn RenderingNotifier>>>,
+     image_cache: ItemCache<Option<skia_safe::Image>>,
++    /// Converted-texture cache shared across items that use the same source `Image` (by buffer
++    /// identity, see `Image`'s own `PartialEq`), so N items sharing one source share one texture
++    /// upload instead of each independently converting it (see `itemrenderer::draw_image_impl`).
++    /// Only ever populated for size-independent sources (raster images), never SVGs, whose
++    /// rasterization depends on the requesting item's target size. Bounded (oldest evicted first)
++    /// since, unlike the per-item `image_cache` above, entries here aren't tied to any item's
++    /// lifetime and would otherwise never shrink.
++    shared_image_texture_cache: RefCell<Vec<(i_slint_core::graphics::Image, skia_safe::Image)>>,
+     layer_cache: ItemCache<Option<(PhysicalPoint, skia_safe::Image)>>,
+     path_cache: ItemCache<Option<(Vector2D<f32, PhysicalPx>, skia_safe::Path)>>,
+     box_shadow_cache: itemrenderer::SkiaBoxShadowCache,
+@@ -310,6 +318,7 @@ fn new_with_surface_factory(
+             maybe_window_adapter: Default::default(),
+             rendering_notifier: Default::default(),
+             image_cache: Default::default(),
++            shared_image_texture_cache: Default::default(),
+             layer_cache: Default::default(),
+             path_cache: Default::default(),
+             box_shadow_cache: Default::default(),
+@@ -438,6 +447,7 @@ pub fn new_with_surface(
+     /// Reset the surface to a new surface. (destroy the previously set surface if any)
+     pub fn set_surface(&self, surface: Box<dyn Surface + 'static>) {
+         self.image_cache.clear_all();
++        self.shared_image_texture_cache.borrow_mut().clear();
+         self.path_cache.clear_all();
+         self.box_shadow_cache.clear();
+         self.text_layout_cache.clear_all();
+@@ -471,6 +481,7 @@ fn clear_surface(&self) {
+     /// window surface for subsequent rendering.
+     pub fn suspend(&self) -> Result<(), PlatformError> {
+         self.image_cache.clear_all();
++        self.shared_image_texture_cache.borrow_mut().clear();
+         self.path_cache.clear_all();
+         self.box_shadow_cache.clear();
+         self.text_layout_cache.clear_all();
+@@ -629,6 +640,7 @@ fn render_components_to_canvas(
+             window,
+             surface,
+             &self.image_cache,
++            &self.shared_image_texture_cache,
+             &self.layer_cache,
+             &self.path_cache,
+             &self.text_layout_cache,
+@@ -840,6 +852,7 @@ fn free_graphics_resources(
+     fn set_window_adapter(&self, window_adapter: &Rc<dyn WindowAdapter>) {
+         *self.maybe_window_adapter.borrow_mut() = Some(Rc::downgrade(window_adapter));
+         self.image_cache.clear_all();
++        self.shared_image_texture_cache.borrow_mut().clear();
+         self.path_cache.clear_all();
+         self.box_shadow_cache.clear();
+         self.text_layout_cache.clear_all();

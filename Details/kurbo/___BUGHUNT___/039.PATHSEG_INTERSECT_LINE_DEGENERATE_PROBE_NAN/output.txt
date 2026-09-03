@@ -1,0 +1,43 @@
+=== BEFORE (pristine tree, base_commit ca273499e3e48bd2de6f02aa8e99a148984e45f3) ===
+$ cargo run   (in repro/, kurbo path dependency pointing at the pristine checkout)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running `target/debug/repro`
+Quad: point (50.0, 50.0) is exactly on curve at t=0.5; intersect_line(Line::new(p, p)) -> []
+REPRODUCED (Quad): genuine on-curve intersection silently dropped
+Quad: point (30.0, 42.0) on curve at t=0.3; near-zero-length probe (dx=1e-100) -> []
+REPRODUCED (Quad, near-zero probe): genuine on-curve intersection silently dropped
+Cubic: point (50.0, 67.5) is exactly on curve at t=0.5; intersect_line(Line::new(pc, pc)) -> []
+REPRODUCED (Cubic): genuine on-curve intersection silently dropped
+$ echo $?
+1
+
+Repeated 5/5 times (identical output, exit code 1 every time - pure floating-point
+arithmetic, no randomness/seed involved, fully deterministic).
+
+=== AFTER (patch.diff applied to the same base_commit) ===
+$ cargo run   (in repro/, kurbo path dependency pointing at the patched checkout)
+   Compiling kurbo v0.13.1
+   Compiling repro v0.1.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running `target/debug/repro`
+Quad: point (50.0, 50.0) is exactly on curve at t=0.5; intersect_line(Line::new(p, p)) -> [LineIntersection { line_t: 0.0, segment_t: 0.5 }]
+Quad: point (30.0, 42.0) on curve at t=0.3; near-zero-length probe (dx=1e-100) -> [LineIntersection { line_t: 0.0, segment_t: 0.3 }]
+Cubic: point (50.0, 67.5) is exactly on curve at t=0.5; intersect_line(Line::new(pc, pc)) -> [LineIntersection { line_t: 0.0, segment_t: 0.4999999999999997 }]
+did not reproduce - all genuine on-curve degenerate-probe intersections were found
+$ echo $?
+0
+
+=== Additional boundary-value checks (manual, not in repro/, same patched tree) ===
+- Off-curve point with a degenerate probe (Quad, point (50.0, 51.0), 1.0 above the curve at
+  x=50.0) -> [] (correctly no hit; the fix does not turn every degenerate probe into a match).
+- Degenerate probe exactly at the curve's own t=0 endpoint -> [LineIntersection { line_t: 0.0,
+  segment_t: -0.0 }] (correct; -0.0 == 0.0).
+- Cubic off-curve point (50.0, 68.5), 1.0 above the true curve point at t=0.5, degenerate probe
+  -> [] (correctly no hit).
+
+=== Project test suite (kurbo crate), before vs after patch.diff ===
+`cargo test -p kurbo --lib`:      before: 187 passed; 0 failed. after: 187 passed; 0 failed.
+`cargo test -p kurbo --doc`:      before: 55 passed; 0 failed.  after: 55 passed; 0 failed.
+`cargo clippy -p kurbo --all-targets`: 1 pre-existing warning in kurbo/src/common.rs (K_C /
+  needless_late_init, unrelated to bezpath.rs) present identically before and after; no new
+  warnings introduced by the patch.

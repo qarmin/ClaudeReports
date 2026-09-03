@@ -1,0 +1,41 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate found no source bug in the three suspected classes (Status: Not reproducible) -
+# there is no patch.diff. What this justfile reproduces instead is the actual evidence behind that
+# result: a differential probe (probe/simd, probe/scalar - two binaries built from identical
+# source, differing only in which Cargo features are enabled on the `pic-scale` dependency) run
+# against a pristine clone, comparing SIMD-dispatched vs. scalar-reference convolution output
+# byte-for-byte across Plane (1-channel), CbCr (2-channel), and i16 (signed planar) resampling
+# entry points, many resampling functions, sizes and bit depths.
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+test: clone build run-diff baseline-tests
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build:
+    cd probe/simd && cargo build --release
+    cd probe/scalar && cargo build --release
+
+# Runs both binaries and diffs their output. The u8 Plane/CbCr block and the u16/i16
+# bit_depth<=12 fixed-point blocks are expected to match byte-for-byte - any diff there would
+# indicate a real accumulator/indexing/rounding bug. The bit_depth=16 (f32-accumulator) Plane16/
+# CbCr16 lines are expected to show a small number of +/-1 or +/-2 differences - see RESULT.md for
+# why that's floating-point summation-order noise (the same class candidate 013 already documented
+# for RGB/RGBA), not a logic bug.
+run-diff:
+    ./probe/simd/target/release/conv_simd > simd_out.txt
+    ./probe/scalar/target/release/conv_scalar > scalar_out.txt
+    diff simd_out.txt scalar_out.txt || true
+
+# The project's own test suite against the pristine clone (no source change made this candidate).
+baseline-tests:
+    cd clone && cargo test --lib --features nightly_f16
+
+clean:
+    rm -rf clone simd_out.txt scalar_out.txt

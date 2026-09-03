@@ -1,0 +1,65 @@
+Real captured output of `repro/` (release build), run via SwiftShader's software Vulkan adapter
+(the same real GPU adapter documented in ___BUGHUNT___/README.md's "GPU-based tests" row).
+Command used both times: `VK_ICD_FILENAMES=<path-to-vk_swiftshader_icd.json> cargo run --release`.
+
+====================================================================
+BEFORE (pristine tree, base_commit 7516831426fb70f36d62c521c5477f6a7265b36a)
+====================================================================
+adapter: AdapterInfo { name: "SwiftShader Device (Subzero)", vendor: 6880, device: 49374, device_type: Cpu, device_pci_bus_id: "", driver: "SwiftShader driver", driver_info: "", backend: Vulkan, subgroup_min_size: 4, subgroup_max_size: 4, transient_saves_memory: false }
+adapter max_texture_array_layers: 2048
+device max_texture_array_layers: 2048
+uploaded 257 images; last image id = ImageId(256) (should be backed by atlas_id 256)
+rendered pixel (expected [255, 0, 0, 255] - the opaque red image): [0, 0, 0, 0]
+REPRODUCED - atlas_id 256's image_params bit-packing collided with the is_external bit; got [0, 0, 0, 0] instead of the uploaded image's real color. This matches sampling the always-zero placeholder external texture instead of the atlas.
+
+Process exit code: 1
+
+Re-run twice more (same release binary, same command) to check repeatability:
+run 2: rendered pixel: [0, 0, 0, 0]  -> REPRODUCED
+run 3: rendered pixel: [0, 0, 0, 0]  -> REPRODUCED
+(3/3 runs reproduced identically - this is a deterministic bit-packing bug, not layout/seed-dependent.)
+
+Debug-build cross-check (same tree, `cargo run` without --release) - confirms the exact mechanism
+independently via the library's own debug_assert, before it gets compiled out in release:
+
+adapter max_texture_array_layers: 2048
+device max_texture_array_layers: 2048
+uploaded 257 images; last image id = ImageId(256) (should be backed by atlas_id 256)
+
+thread 'main' panicked at /tmp/vello_wt_060/sparse_strips/vello_hybrid/src/render/common.rs:663:5:
+atlas_index must be 0-255 (8 bits)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+====================================================================
+AFTER (patch.diff applied)
+====================================================================
+adapter: AdapterInfo { name: "SwiftShader Device (Subzero)", vendor: 6880, device: 49374, device_type: Cpu, device_pci_bus_id: "", driver: "SwiftShader driver", driver_info: "", backend: Vulkan, subgroup_min_size: 4, subgroup_max_size: 4, transient_saves_memory: false }
+adapter max_texture_array_layers: 2048
+device max_texture_array_layers: 2048
+
+thread 'main' panicked at /tmp/vello_wt_060/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs:593:69:
+called `Result::unwrap()` on an `Err` value: AtlasLimitReached { max_atlases: 256, diagnostics: Allocation { requested: 1x1, layer_size: 1x1, max_atlases: 256, atlas_layers: [Layer { atlas_id: AtlasId(0), utilization: 100.0%, capacity: 1, free: 0, largest_free_rectangle: 0x0, free_rectangles: 0, fragmentation: 0.0% }, ...
+  [... truncated here for readability: the AtlasSpaceDiagnostics::Allocation Debug dump lists all
+  256 already-full atlas layers verbatim, ~74KB total - each entry is identical in shape to the
+  ones shown, just a different atlas_id (0..255) ...]
+  ..., Layer { atlas_id: AtlasId(255), utilization: 100.0%, capacity: 1, free: 0, largest_free_rectangle: 0x0, free_rectangles: 0, fragmentation: 0.0% }] } }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+did not reproduce - allocating the 257th atlas correctly failed with AtlasLimitReached instead of silently overflowing atlas_index into the is_external bit: called `Result::unwrap()` on an `Err` value: AtlasLimitReached { max_atlases: 256, diagnostics: Allocation { ... same diagnostics as above ... } }
+
+Process exit code: 0
+
+(This is the correct fixed behavior: `MemorySettings::normalize` now caps `max_atlases` at 256 -
+the packed format's real 8-bit `atlas_index` domain - regardless of how much array-layer headroom
+the device itself reports, so the 257th atlas allocation is honestly rejected with a typed
+`AtlasLimitReached` error instead of silently succeeding and corrupting the render. The panic here
+comes from `Renderer::upload_image`'s own pre-existing internal `.unwrap()` on that `Result` - a
+separate, pre-existing API design choice in the convenience wrapper, not something introduced by
+this patch or this repro.)
+
+====================================================================
+Project test suite (cargo test -p vello_hybrid --lib --release / cargo test -p vello_common --lib --release)
+====================================================================
+BEFORE (pristine): vello_hybrid: 122 passed; 0 failed; 0 ignored
+                   vello_common: 159 passed; 0 failed; 1 ignored
+AFTER  (patched):  vello_hybrid: 123 passed; 0 failed; 0 ignored (122 pre-existing + 1 new regression test)
+                   vello_common: 159 passed; 0 failed; 1 ignored (unchanged, vello_common not touched by the fix)

@@ -1,0 +1,101 @@
+diff --git a/internal/backends/qt/Cargo.toml b/internal/backends/qt/Cargo.toml
+index 4e8f558..78f2fbb 100644
+--- a/internal/backends/qt/Cargo.toml
++++ b/internal/backends/qt/Cargo.toml
+@@ -17,6 +17,8 @@ links = "i_slint_backend_qt"                   # just so we can pass metadata to
+ rtti = ["i-slint-core/rtti"]
+ default = ["enable"]
+ enable = ["dep:cpp", "dep:lyon_path", "dep:pin-project", "dep:pin-weak", "dep:qttypes", "dep:cpp_build"]
++# TEMPORARY, for candidate 114's baseline-only repaint probe - reverted before the session ends.
++bench-probe = []
+ 
+ [lib]
+ path = "lib.rs"
+diff --git a/internal/backends/qt/lib.rs b/internal/backends/qt/lib.rs
+index 8140b07..1162dd9 100644
+--- a/internal/backends/qt/lib.rs
++++ b/internal/backends/qt/lib.rs
+@@ -34,6 +34,9 @@ mod qt_accessible;
+ mod qt_widgets;
+ #[cfg(not(no_qt))]
+ mod qt_window;
++// TEMPORARY, for candidate 114's baseline-only repaint probe - reverted before the session ends.
++#[cfg(all(not(no_qt), feature = "bench-probe"))]
++pub use qt_window::bench_probe_counters;
+ 
+ mod accessible_generated;
+ mod key_generated;
+diff --git a/internal/backends/qt/qt_widgets/button.rs b/internal/backends/qt/qt_widgets/button.rs
+index aff2e2b..fdab736 100644
+--- a/internal/backends/qt/qt_widgets/button.rs
++++ b/internal/backends/qt/qt_widgets/button.rs
+@@ -170,8 +170,18 @@ impl NativeButton {
+             Some(StandardButtonKind::Ignore) => QStyle_StandardPixmap_SP_DialogIgnoreButton,
+             _ => {
+                 let icon_size = self.icon_size().get().round() as u32;
++                let icon = self.icon();
++                #[cfg(feature = "bench-probe")]
++                {
++                    let has_icon = !matches!(
++                        <&i_slint_core::ImageInner>::from(&icon),
++                        i_slint_core::ImageInner::None
++                    );
++                    crate::qt_window::bench_probe_record_call(has_icon);
++                    crate::qt_window::bench_probe_record_miss(has_icon);
++                }
+                 let source_size = Some(euclid::Size2D::new(icon_size, icon_size));
+-                return crate::qt_window::image_to_pixmap((&self.icon()).into(), source_size)
++                return crate::qt_window::image_to_pixmap((&icon).into(), source_size)
+                     .unwrap_or_default();
+             }
+         };
+diff --git a/internal/backends/qt/qt_window.rs b/internal/backends/qt/qt_window.rs
+index eb10670..60d8e65 100644
+--- a/internal/backends/qt/qt_window.rs
++++ b/internal/backends/qt/qt_window.rs
+@@ -1636,6 +1636,45 @@ pub(crate) fn image_to_pixmap(
+     shared_image_buffer_to_pixmap(&image.render_to_buffer(source_size)?)
+ }
+ 
++// TEMPORARY, for candidate 114's baseline-only repaint probe - reverted before the session ends,
++// never shipped. See bench_probe.patch (the patched-tree variant) for the full explanation; this
++// baseline variant has no cache to check, so every call is also a miss.
++#[cfg(feature = "bench-probe")]
++pub static BENCH_PROBE_CALLS_ICON: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++#[cfg(feature = "bench-probe")]
++pub static BENCH_PROBE_MISSES_ICON: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++#[cfg(feature = "bench-probe")]
++pub static BENCH_PROBE_CALLS_EMPTY: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++#[cfg(feature = "bench-probe")]
++pub static BENCH_PROBE_MISSES_EMPTY: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++
++#[cfg(feature = "bench-probe")]
++pub fn bench_probe_record_call(has_icon: bool) {
++    let counter = if has_icon { &BENCH_PROBE_CALLS_ICON } else { &BENCH_PROBE_CALLS_EMPTY };
++    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++}
++
++#[cfg(feature = "bench-probe")]
++pub fn bench_probe_record_miss(has_icon: bool) {
++    let counter = if has_icon { &BENCH_PROBE_MISSES_ICON } else { &BENCH_PROBE_MISSES_EMPTY };
++    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++}
++
++#[cfg(feature = "bench-probe")]
++pub fn bench_probe_counters() -> (u64, u64, u64, u64) {
++    use std::sync::atomic::Ordering::Relaxed;
++    (
++        BENCH_PROBE_CALLS_ICON.load(Relaxed),
++        BENCH_PROBE_MISSES_ICON.load(Relaxed),
++        BENCH_PROBE_CALLS_EMPTY.load(Relaxed),
++        BENCH_PROBE_MISSES_EMPTY.load(Relaxed),
++    )
++}
++
+ /// Converts a Qt image to a Slint `SharedPixelBuffer<Rgba8Pixel>`, repacking each
+ /// scan line so the result has no row padding. Returns `None` for empty images.
+ pub(crate) fn qimage_to_shared_pixel_buffer(

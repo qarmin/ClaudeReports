@@ -1,0 +1,43 @@
+Sweep of declared_rows_cols against the real 64x64 embedded JPEG2000 codestream
+(pydicom/emri_small_jpeg_2k_lossless.dcm, 10 real frames), each run a fresh subprocess (crashes
+kill the whole process, one declared size per run):
+
+declared_rows_cols=32 (4.0x fewer declared pixels/frame than real):
+  fixture=pydicom/emri_small_jpeg_2k_lossless.dcm n_frames=10 real embedded per-frame codestream declares 64x64, patching DICOM header Rows/Columns to 32x32 (gap factor vs real: 4.0x fewer declared pixels/frame)
+  calling decode_pixel_data() via the gdcm feature's FFI path...
+  double free or corruption (out)
+  exit status=134 (killed by signal 6, SIGABRT)
+
+declared_rows_cols=16 (16.0x fewer declared pixels/frame than real):
+  calling decode_pixel_data() via the gdcm feature's FFI path...
+  exit status=139 (killed by signal 11, SIGSEGV)
+
+declared_rows_cols=8 (64.0x fewer declared pixels/frame than real):
+  calling decode_pixel_data() via the gdcm feature's FFI path...
+  exit status=139 (killed by signal 11, SIGSEGV)
+
+declared_rows_cols=4 (256.0x fewer declared pixels/frame than real):
+  calling decode_pixel_data() via the gdcm feature's FFI path...
+  free(): corrupted unsorted chunks
+  exit status=134 (killed by signal 6, SIGABRT)
+
+declared_rows_cols=1 (4096.0x fewer declared pixels/frame than real):
+  calling decode_pixel_data() via the gdcm feature's FFI path...
+  munmap_chunk(): invalid pointer
+  exit status=134 (killed by signal 6, SIGABRT)
+
+Repeat runs at declared_rows_cols=8 (checking symptom stability at a fixed gap size):
+  run 1: exit=139 (SIGSEGV)
+  run 2: exit=139 (SIGSEGV)
+  run 3: exit=139 (SIGSEGV)
+
+Summary: crashed 8/8 runs across 5 distinct gap sizes spanning 4x to 4096x fewer declared
+pixels/frame than the real embedded codestream, plus 3/3 repeat runs at a fixed gap size (8x8).
+Every run is a genuine process-killing crash (heap-corruption-class SIGABRT via glibc's malloc
+consistency checks, or SIGSEGV) - no run silently "succeeded" or returned a graceful error.
+Symptom (SIGABRT-with-varying-glibc-message vs SIGSEGV) does not vary monotonically with gap
+size in this sample: size=32 and size=4/1 produced SIGABRT (different glibc messages each time,
+consistent with candidate 103's existing observation), while size=16/8 consistently produced
+SIGSEGV across repeats. No exact "corrupted byte count" was measured (would need a dedicated
+ASAN-instrumented rebuild of vendored GDCM specifically to get a diagnostic with an exact
+out-of-bounds write size and offset - not attempted this session, see RESULT.md).

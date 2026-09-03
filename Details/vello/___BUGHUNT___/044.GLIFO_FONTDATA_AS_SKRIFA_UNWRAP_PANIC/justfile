@@ -1,0 +1,43 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+# LFS is only used for test-snapshot PNGs, never for source; the filter overrides below make
+# this work even on a machine without the `git-lfs` binary installed (no LFS content is needed
+# to build/run the repro).
+clone:
+    rm -rf clone
+    git clone --no-checkout {{repo_url}} clone
+    cd clone && git config filter.lfs.smudge "git-lfs smudge --skip -- %f"
+    cd clone && git config filter.lfs.process ""
+    cd clone && git config filter.lfs.required false
+    cd clone && git checkout {{base_commit}}
+
+# Build+run both standalone repro binaries against the pristine clone - both should demonstrate
+# the bug (a panic, non-zero exit code - the `-` below lets `just test` keep going into `apply`).
+# `repro` uses a valid single font with an out-of-range collection index (InvalidCollectionIndex);
+# `variant_garbage` uses non-font garbage bytes (InvalidSfnt) - same class, different input shape.
+reproduce-before:
+    -cd repro && cargo run --release --bin repro
+    -cd repro && cargo run --release --bin variant_garbage
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repros again, now against the patched clone - neither should reproduce the bug anymore.
+reproduce-after:
+    cd repro && cargo run --release --bin repro
+    cd repro && cargo run --release --bin variant_garbage
+
+clean:
+    rm -rf clone repro/target

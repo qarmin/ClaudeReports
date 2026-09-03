@@ -1,0 +1,69 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+#
+# Unlike most candidates in this workspace, `patch.diff` here does NOT add a faster kernel -
+# RGB/RGBA (CN=3/4) u8 already ship an AVX2 horizontal-convolution tier in the base commit
+# (src/avx2/rgb_u8.rs, src/avx2/rgba_u8.rs), unlike the plane/CbCr cases (candidates 003/004)
+# where AVX2 was newly added by this workspace. So there is no "baseline lacks AVX2" state to
+# recreate by adding code - instead `patch.diff` DISABLES the existing AVX2 dispatch branch
+# (forces the SSE4.1 fallback), which is the only way to get a comparison point against the
+# real, shipped default behavior. Concretely:
+#   - baseline (this recipe's "bench" step, clone + bench_addition.diff only) = pristine,
+#     dispatches to AVX2 for real (the actual shipped behavior on an avx2-capable x86_64 host).
+#   - "patched" (clone + bench_addition.diff + patch.diff) = AVX2 dispatch disabled, forces
+#     SSE4.1 - i.e. the artificially crippled comparison variant, not a proposed change.
+# See RESULT.md for why this inversion was necessary and how to read the numbers.
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Full cycle: clone at the pinned commit, apply the bench addition, build+run both variants,
+# check bit-exactness at each stage (before/after disabling AVX2).
+test: clone apply-bench bench-baseline correctness-baseline apply-disable-avx2 bench-sse-forced correctness-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Adds "Pic scale RGB8 wide filter: Lanczos 3" / "Pic scale RGBA8 wide filter: Lanczos 3"
+# (1/16 downscale, so kernel_size~96 taps - the AVX2 16-tap main loop fires several times per
+# output pixel instead of ~0-1 times at the existing 1/4-downscale cases) to
+# app/benches/resize_rgb/main.rs and resize_rgba/main.rs. Also flips app/Cargo.toml's
+# pic-scale feature list to include "avx"/"sse" (its default list has neither, so a plain
+# `cargo bench -p app` never reaches src/avx2/ at all).
+apply-bench:
+    cd clone && git apply "{{justfile_directory()}}/bench_addition.diff"
+    cd clone && sed -i 's/"colorspaces", "rdm", "nightly_i8mm", "nightly_f16"/"colorspaces", "rdm", "nightly_i8mm", "nightly_f16", "avx", "sse"/' app/Cargo.toml
+
+bench-baseline:
+    cd clone && cargo bench -p app --bench resize_rgb -- --bench "Pic scale RGB8 wide filter: Lanczos 3"
+    cd clone && cargo bench -p app --bench resize_rgba -- --bench "Pic scale RGBA8 wide filter: Lanczos 3"
+
+# Forces the SSE4.1 fallback by disabling the AVX2 dispatch condition in
+# src/factory/rgb_u8.rs / src/factory/rgba_u8.rs's horizontal_plan (`if false && ...`) -
+# see the file header above for why this is the "patch" here rather than an addition.
+apply-disable-avx2:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+bench-sse-forced:
+    cd clone && cargo bench -p app --bench resize_rgb -- --bench "Pic scale RGB8 wide filter: Lanczos 3"
+    cd clone && cargo bench -p app --bench resize_rgba -- --bench "Pic scale RGBA8 wide filter: Lanczos 3"
+
+# Bit-exact correctness check: resizes several synthetic RGB/RGBA-shaped u8 sources (sweeping
+# tap counts, both workload strategies, with/without alpha premultiply) and hashes the output.
+# Run once before disabling AVX2 (pristine, real AVX2) and once after (patch.diff applied,
+# SSE4.1 forced) - both printed FINAL_HASH values should be identical (see RESULT.md).
+correctness-baseline:
+    cd bit_exact_check && cargo run --release
+
+correctness-patched:
+    cd bit_exact_check && cargo run --release
+
+clean:
+    rm -rf clone bit_exact_check/target

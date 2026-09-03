@@ -1,0 +1,1346 @@
+diff --git a/sparse_strips/vello_bench/benches/main.rs b/sparse_strips/vello_bench/benches/main.rs
+index 4e3a6662..dfb732d5 100644
+--- a/sparse_strips/vello_bench/benches/main.rs
++++ b/sparse_strips/vello_bench/benches/main.rs
+@@ -25,6 +25,7 @@ criterion_group!(render_rect, strip::render_rect);
+ criterion_group!(glyph, glyph::glyph);
+ criterion_group!(sort_tiles, sort::sort);
+ criterion_group!(integration_bench, integration::images);
++criterion_group!(integration_background_bench, integration::background);
+ criterion_main!(
+     pixmap_bench,
+     allocator_bench,
+@@ -43,5 +44,6 @@ criterion_main!(
+     fine_blend,
+     fine_image,
+     sort_tiles,
+-    integration_bench
++    integration_bench,
++    integration_background_bench
+ );
+diff --git a/sparse_strips/vello_bench/src/integration.rs b/sparse_strips/vello_bench/src/integration.rs
+index 4d45f814..f4a8722b 100644
+--- a/sparse_strips/vello_bench/src/integration.rs
++++ b/sparse_strips/vello_bench/src/integration.rs
+@@ -5,9 +5,10 @@
+ 
+ use std::sync::Arc;
+ 
+-use criterion::Criterion;
++use criterion::{BatchSize, Criterion};
+ use vello_common::kurbo::{Affine, Rect};
+ use vello_common::paint::{Image, ImageSource};
++use vello_common::peniko::Color;
+ use vello_common::peniko::ImageSampler;
+ use vello_common::peniko::{Extend, ImageAlphaType, ImageQuality};
+ use vello_common::pixmap::{PixelMetadata, Pixmap};
+@@ -68,6 +69,97 @@ pub fn images(c: &mut Criterion) {
+     g.finish();
+ }
+ 
++/// Opaque-background rendering benchmark (candidate 012, PR #1850).
++///
++/// Draws a viewport-covering, fully opaque `fill_rect` first (the pattern the PR detects as a
++/// "root background"), followed by a grid of smaller, semi-transparent rects on top - a scene
++/// shape close to a typical UI screenshot (opaque page background + some translucent overlay
++/// content), so the background is eligible for detection but doesn't cover 100% of the render
++/// commands afterward. Measures both the full `render()` call (which the PR's `RootBackground`
++/// detection also speeds up, by skipping the background's own `fill_rect` command entirely and
++/// filling now-uncovered fine-buffer regions directly with the solid background color instead of
++/// unpacking/zeroing them) and, isolated from `render()`, `take_unpremultiplied()` on the
++/// resulting pixmap (the specific mechanism this candidate targets: skipping per-pixel
++/// unpremultiplication once the whole pixmap is known to be opaque).
++pub fn background(c: &mut Criterion) {
++    if !crate::EXTENDED {
++        return;
++    }
++
++    const VIEWPORT_WIDTH: u16 = 1920;
++    const VIEWPORT_HEIGHT: u16 = 1080;
++
++    fn build_scene(renderer: &mut RenderContext) {
++        renderer.reset();
++        renderer.set_paint(Color::from_rgba8(255, 255, 255, 255));
++        renderer.fill_rect(&Rect::new(
++            0.0,
++            0.0,
++            f64::from(VIEWPORT_WIDTH),
++            f64::from(VIEWPORT_HEIGHT),
++        ));
++
++        for i in 0..40_u32 {
++            let x = f64::from((i * 47) % 1800);
++            let y = f64::from((i * 91) % 1000);
++            renderer.set_paint(Color::from_rgba8(
++                (i * 5 % 255) as u8,
++                (i * 11 % 255) as u8,
++                (i * 17 % 255) as u8,
++                200,
++            ));
++            renderer.fill_rect(&Rect::new(x, y, x + 120.0, y + 120.0));
++        }
++
++        renderer.flush();
++    }
++
++    let mut g = c.benchmark_group("integration/background");
++
++    g.bench_function("render", |b| {
++        let mut renderer = RenderContext::new(VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
++        let mut resources = Resources::default();
++        let mut pixmap = Pixmap::new(VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
++
++        b.iter(|| {
++            build_scene(&mut renderer);
++            renderer.render(&mut pixmap, &mut resources);
++            std::hint::black_box(&pixmap);
++        });
++    });
++
++    g.bench_function("render_and_take_unpremultiplied", |b| {
++        let mut renderer = RenderContext::new(VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
++        let mut resources = Resources::default();
++
++        b.iter(|| {
++            build_scene(&mut renderer);
++            let mut pixmap = Pixmap::new(VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
++            renderer.render(&mut pixmap, &mut resources);
++            std::hint::black_box(pixmap.take_unpremultiplied());
++        });
++    });
++
++    // Isolate just the unpremultiply step given an already-rendered pixmap - this reflects
++    // exactly the mechanism this candidate changes (`Pixmap::may_have_transparency`), without
++    // the render-side changes from the same PR mixed in.
++    let mut prebuilt_renderer = RenderContext::new(VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
++    let mut prebuilt_resources = Resources::default();
++    build_scene(&mut prebuilt_renderer);
++    let mut prebuilt_pixmap = Pixmap::new(VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
++    prebuilt_renderer.render(&mut prebuilt_pixmap, &mut prebuilt_resources);
++
++    g.bench_function("take_unpremultiplied_only", |b| {
++        b.iter_batched(
++            || prebuilt_pixmap.clone(),
++            |pixmap| std::hint::black_box(pixmap.take_unpremultiplied()),
++            BatchSize::LargeInput,
++        );
++    });
++
++    g.finish();
++}
++
+ fn load_flower_image() -> ImageSource {
+     let image_data = include_bytes!("../../../examples/assets/splash-flower.jpg");
+     let image = image::load_from_memory(image_data).expect("Failed to decode image");
+diff --git a/sparse_strips/vello_common/src/paint.rs b/sparse_strips/vello_common/src/paint.rs
+index 042697d1..618cd473 100644
+--- a/sparse_strips/vello_common/src/paint.rs
++++ b/sparse_strips/vello_common/src/paint.rs
+@@ -10,7 +10,7 @@ use alloc::sync::Arc;
+ pub use peniko::Color;
+ use peniko::{
+     Gradient,
+-    color::{AlphaColor, PremulRgba8, Srgb},
++    color::{AlphaColor, OpaqueColor, PremulRgba8, Srgb},
+ };
+ 
+ /// A paint that needs to be resolved via its index.
+@@ -262,6 +262,11 @@ impl PremulColor {
+     pub fn is_opaque(&self) -> bool {
+         self.premul_f32.components[3] == 1.0
+     }
++
++    /// Return this color without an alpha channel if it is fully opaque.
++    pub fn as_opaque_color(&self) -> Option<OpaqueColor<Srgb>> {
++        self.is_opaque().then(|| self.premul_f32.discard_alpha())
++    }
+ }
+ 
+ /// How tint color is applied to an image.
+diff --git a/sparse_strips/vello_common/src/pixmap.rs b/sparse_strips/vello_common/src/pixmap.rs
+index b7204d4b..e7f9d04c 100644
+--- a/sparse_strips/vello_common/src/pixmap.rs
++++ b/sparse_strips/vello_common/src/pixmap.rs
+@@ -43,6 +43,8 @@ pub struct PixmapMut<'a> {
+     height: u16,
+     /// Buffer of the pixmap in RGBA8 format.
+     buf: &'a mut [u8],
++    /// Opacity metadata of the owning [`Pixmap`], when this view was created from one.
++    may_have_transparency: Option<&'a mut bool>,
+ }
+ 
+ impl<'a> PixmapMut<'a> {
+@@ -51,7 +53,12 @@ impl<'a> PixmapMut<'a> {
+     /// Returns `None` if `buf` is not exactly `width * height * 4` bytes long.
+     pub fn new(width: u16, height: u16, buf: &'a mut [u8]) -> Option<Self> {
+         if buf.len() == usize::from(width) * usize::from(height) * 4 {
+-            Some(Self { width, height, buf })
++            Some(Self {
++                width,
++                height,
++                buf,
++                may_have_transparency: None,
++            })
+         } else {
+             None
+         }
+@@ -71,6 +78,13 @@ impl<'a> PixmapMut<'a> {
+     pub fn data_mut(&mut self) -> &mut [u8] {
+         self.buf
+     }
++
++    /// Update the opacity hint.
++    pub fn set_may_have_transparency(&mut self, may_have_transparency: bool) {
++        if let Some(flag) = self.may_have_transparency.as_deref_mut() {
++            *flag = may_have_transparency;
++        }
++    }
+ }
+ 
+ impl<'a> From<&'a mut Pixmap> for PixmapMut<'a> {
+@@ -359,6 +373,7 @@ impl Pixmap {
+             width: self.width,
+             height: self.height,
+             buf: bytemuck::cast_slice_mut(&mut self.buf),
++            may_have_transparency: Some(&mut self.may_have_transparency),
+         }
+     }
+ 
+diff --git a/sparse_strips/vello_common/src/record.rs b/sparse_strips/vello_common/src/record.rs
+index 8a2f8797..bf9f31df 100644
+--- a/sparse_strips/vello_common/src/record.rs
++++ b/sparse_strips/vello_common/src/record.rs
+@@ -34,7 +34,9 @@
+ 
+ use crate::filter::{FilterData, FilterLayerPlacement};
+ use crate::geometry::{RectU16, SizeU16};
++use crate::kurbo::Rect;
+ use crate::mask::Mask;
++use crate::paint::{Paint, PremulColor};
+ use crate::peniko::BlendMode;
+ use crate::strip::Strip;
+ use crate::util::RectExt;
+@@ -448,13 +450,84 @@ pub enum PoppedLayer {
+     Filter,
+ }
+ 
++/// Track the background color of the root viewport.
++#[derive(Clone, Copy, Debug)]
++pub struct RootBackground {
++    viewport: Rect,
++    color: Option<PremulColor>,
++    /// Whether only opaque colors should be accepted as a background color.
++    only_opaque: bool,
++    /// Whether the background is guaranteed to be preserved.
++    is_preserved: bool,
++}
++
++impl RootBackground {
++    /// Create a root background for the given viewport.
++    #[inline]
++    pub fn new(viewport: Rect, only_opaque: bool) -> Self {
++        Self {
++            viewport,
++            color: None,
++            only_opaque,
++            is_preserved: true,
++        }
++    }
++
++    /// Try to extract a background from the given rectangle and its paint.
++    #[inline]
++    pub fn try_extract(&mut self, rect: Rect, paint: &Paint, blend_mode: BlendMode) -> bool {
++        if blend_mode != BlendMode::default() {
++            return false;
++        }
++
++        let Paint::Solid(color) = paint else {
++            return false;
++        };
++
++        if rect.contains_rect(self.viewport) && (!self.only_opaque || color.is_opaque()) {
++            self.color = Some(*color);
++
++            true
++        } else {
++            // If we already have a background and the rect has the same color, we can just
++            // absorb it into the background, even if it doesn't cover the whole area.
++            color.is_opaque() && self.color == Some(*color)
++        }
++    }
++
++    /// Record a blend operation against the root background.
++    #[inline]
++    pub fn record_blend(&mut self, blend_mode: BlendMode) {
++        self.is_preserved &= blend_mode == BlendMode::default();
++    }
++
++    /// Return the color used to initialize the root target.
++    #[inline]
++    pub fn color(&self) -> Option<PremulColor> {
++        self.color
++    }
++
++    /// Return whether the background is guaranteed to.
++    #[inline]
++    pub fn is_preserved(&self) -> bool {
++        self.is_preserved
++    }
++
++    /// Reset the state of the background.
++    #[inline]
++    pub fn reset(&mut self, scene_viewport: Rect) {
++        *self = Self::new(scene_viewport, self.only_opaque);
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+     use crate::filter_effects::{Filter, FilterPrimitive};
+     use crate::geometry::PaddingU16;
+     use crate::kurbo::Affine;
+-    use crate::peniko::Mix;
++    use crate::peniko::color::palette::css::{BLUE, RED};
++    use crate::peniko::{Compose, Mix};
+     use crate::tile::Tile;
+ 
+     const DEFAULT_SIZE: u16 = 10;
+@@ -511,6 +584,102 @@ mod tests {
+         }
+     }
+ 
++    fn root_background(only_opaque: bool) -> RootBackground {
++        RootBackground::new(Rect::new(2.0, 3.0, 12.0, 13.0), only_opaque)
++    }
++
++    #[test]
++    fn root_background_extracts_latest_eligible_covering_draw() {
++        let scene_viewport = Rect::new(2.0, 3.0, 12.0, 13.0);
++        let mut background = root_background(true);
++        let red = Paint::from(RED);
++        let blue = Paint::from(BLUE);
++
++        assert!(!background.try_extract(
++            Rect::new(2.0, 3.0, 11.0, 13.0),
++            &red,
++            BlendMode::default(),
++        ));
++        assert!(!background.try_extract(scene_viewport, &red, Mix::Multiply.into()));
++        assert!(background.try_extract(
++            Rect::new(0.0, 0.0, 14.0, 14.0),
++            &red,
++            BlendMode::default(),
++        ));
++        assert_eq!(
++            background.color().unwrap().as_premul_rgba8(),
++            RED.premultiply().to_rgba8()
++        );
++        assert!(background.try_extract(scene_viewport, &blue, BlendMode::default()));
++        assert_eq!(
++            background.color().unwrap().as_premul_rgba8(),
++            BLUE.premultiply().to_rgba8()
++        );
++    }
++
++    #[test]
++    fn root_background_applies_non_opaque_policy() {
++        let scene_viewport = Rect::new(2.0, 3.0, 12.0, 13.0);
++        let translucent_red = Paint::from(RED.with_alpha(0.5));
++        assert!(!root_background(true).try_extract(
++            scene_viewport,
++            &translucent_red,
++            BlendMode::default(),
++        ));
++
++        let mut accepting = root_background(false);
++        assert!(accepting.try_extract(scene_viewport, &translucent_red, BlendMode::default(),));
++        assert!(accepting.color().is_some_and(|color| !color.is_opaque()));
++        assert!(!accepting.try_extract(
++            Rect::new(4.0, 5.0, 6.0, 7.0),
++            &translucent_red,
++            BlendMode::default(),
++        ));
++    }
++
++    #[test]
++    fn root_background_absorbs_matching_opaque_draw() {
++        let scene_viewport = Rect::new(2.0, 3.0, 12.0, 13.0);
++        let partial_rect = Rect::new(4.0, 5.0, 6.0, 7.0);
++        let mut background = root_background(true);
++        let red = Paint::from(RED);
++
++        assert!(background.try_extract(scene_viewport, &red, BlendMode::default()));
++        assert!(background.try_extract(partial_rect, &red, BlendMode::default()));
++        assert!(!background.try_extract(partial_rect, &red, Mix::Multiply.into()));
++    }
++
++    #[test]
++    fn root_background_does_not_absorb_different_color() {
++        let scene_viewport = Rect::new(2.0, 3.0, 12.0, 13.0);
++        let mut background = root_background(true);
++
++        assert!(background.try_extract(scene_viewport, &Paint::from(RED), BlendMode::default(),));
++        assert!(!background.try_extract(
++            Rect::new(4.0, 5.0, 6.0, 7.0),
++            &Paint::from(BLUE),
++            BlendMode::default(),
++        ));
++    }
++
++    #[test]
++    fn root_background_tracks_transparency_invalidation() {
++        let scene_viewport = Rect::new(2.0, 3.0, 12.0, 13.0);
++        let mut background = root_background(true);
++        assert!(background.try_extract(scene_viewport, &Paint::from(RED), BlendMode::default(),));
++        assert!(background.is_preserved());
++
++        background.record_blend(BlendMode::new(Mix::Multiply, Compose::SrcOver));
++        assert!(!background.is_preserved());
++
++        background.reset(Rect::new(0.0, 0.0, 5.0, 5.0));
++        assert!(background.color().is_none());
++        assert!(background.is_preserved());
++
++        background.record_blend(BlendMode::new(Mix::Normal, Compose::Clear));
++        assert!(!background.is_preserved());
++    }
++
+     fn layer_cmds(recorder: &CommandRecorder<TestDraw>, id: usize) -> &[Node] {
+         &recorder.layers[id].nodes
+     }
+diff --git a/sparse_strips/vello_cpu/src/dispatch/mod.rs b/sparse_strips/vello_cpu/src/dispatch/mod.rs
+index 4d84cd86..db9fb680 100644
+--- a/sparse_strips/vello_cpu/src/dispatch/mod.rs
++++ b/sparse_strips/vello_cpu/src/dispatch/mod.rs
+@@ -9,6 +9,7 @@ use crate::RasterizerSettings;
+ use crate::kurbo::{Affine, BezPath, Rect, Stroke};
+ use crate::peniko::{BlendMode, Fill};
+ use core::fmt::Debug;
++use vello_common::color::{OpaqueColor, Srgb};
+ use vello_common::encode::EncodedPaint;
+ use vello_common::filter::FilterData;
+ use vello_common::mask::Mask;
+@@ -16,6 +17,7 @@ use vello_common::paint::{ImageResolver, Paint};
+ use vello_common::pixmap::PixmapMut;
+ 
+ pub(crate) trait Dispatcher: Debug + Send {
++    fn is_empty(&self) -> bool;
+     fn has_layers(&self) -> bool;
+     fn fill_path(
+         &mut self,
+@@ -69,12 +71,13 @@ pub(crate) trait Dispatcher: Debug + Send {
+     fn flush(&mut self);
+     fn rasterize(
+         &self,
+-        target: PixmapMut<'_>,
++        target: &mut PixmapMut<'_>,
+         scene_width: u16,
+         scene_height: u16,
+         settings: RasterizerSettings,
+         encoded_paints: &[EncodedPaint],
+         image_resolver: &dyn ImageResolver,
++        background_color: Option<OpaqueColor<Srgb>>,
+     );
+     fn is_multi_threaded(&self) -> bool;
+ }
+diff --git a/sparse_strips/vello_cpu/src/dispatch/multi_threaded.rs b/sparse_strips/vello_cpu/src/dispatch/multi_threaded.rs
+index c90a3396..4bff3a95 100644
+--- a/sparse_strips/vello_cpu/src/dispatch/multi_threaded.rs
++++ b/sparse_strips/vello_cpu/src/dispatch/multi_threaded.rs
+@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+ use std::sync::{Barrier, Mutex};
+ use thread_local::ThreadLocal;
+ use vello_common::clip::ClipContext;
++use vello_common::color::{OpaqueColor, Srgb};
+ use vello_common::encode::EncodedPaint;
+ use vello_common::fearless_simd::{Level, Simd, dispatch};
+ use vello_common::filter::FilterData;
+@@ -163,29 +164,31 @@ impl MultiThreadedDispatcher {
+     #[cfg(feature = "f32_pipeline")]
+     fn rasterize_f32(
+         &self,
+-        target: PixmapMut<'_>,
++        target: &mut PixmapMut<'_>,
+         scene_width: u16,
+         scene_height: u16,
+         settings: RasterizerSettings,
+         encoded_paints: &[EncodedPaint],
+         image_resolver: &dyn ImageResolver,
++        background_color: Option<OpaqueColor<Srgb>>,
+     ) {
+         use crate::fine::F32Kernel;
+-        dispatch!(self.level, simd => self.rasterize_with::<_, F32Kernel>(simd, target, scene_width, scene_height, settings, encoded_paints, image_resolver));
++        dispatch!(self.level, simd => self.rasterize_with::<_, F32Kernel>(simd, target, scene_width, scene_height, settings, encoded_paints, image_resolver, background_color));
+     }
+ 
+     #[cfg(feature = "u8_pipeline")]
+     fn rasterize_u8(
+         &self,
+-        target: PixmapMut<'_>,
++        target: &mut PixmapMut<'_>,
+         scene_width: u16,
+         scene_height: u16,
+         settings: RasterizerSettings,
+         encoded_paints: &[EncodedPaint],
+         image_resolver: &dyn ImageResolver,
++        background_color: Option<OpaqueColor<Srgb>>,
+     ) {
+         use crate::fine::U8Kernel;
+-        dispatch!(self.level, simd => self.rasterize_with::<_, U8Kernel>(simd, target, scene_width, scene_height, settings, encoded_paints, image_resolver));
++        dispatch!(self.level, simd => self.rasterize_with::<_, U8Kernel>(simd, target, scene_width, scene_height, settings, encoded_paints, image_resolver, background_color));
+     }
+ 
+     fn init(&mut self) {
+@@ -388,12 +391,13 @@ impl MultiThreadedDispatcher {
+     fn rasterize_with<S: Simd, F: FineKernel<S>>(
+         &self,
+         simd: S,
+-        mut target: PixmapMut<'_>,
++        target: &mut PixmapMut<'_>,
+         scene_width: u16,
+         scene_height: u16,
+         settings: RasterizerSettings,
+         encoded_paints: &[EncodedPaint],
+         image_resolver: &dyn ImageResolver,
++        background_color: Option<OpaqueColor<Srgb>>,
+     ) {
+         let mut bucketer = self.bucketer.lock().unwrap();
+         let filters = FilterContext::new(0);
+@@ -423,7 +427,7 @@ impl MultiThreadedDispatcher {
+             };
+ 
+             let mut regions = Regions::new(
+-                &mut target,
++                target,
+                 params.scene_size,
+                 params.target_offset,
+                 bucketer.rows().len(),
+@@ -448,6 +452,7 @@ impl MultiThreadedDispatcher {
+                         &bucketer,
+                         resources,
+                         use_src_over,
++                        background_color,
+                     );
+                 });
+             });
+@@ -458,6 +463,13 @@ impl MultiThreadedDispatcher {
+ }
+ 
+ impl Dispatcher for MultiThreadedDispatcher {
++    fn is_empty(&self) -> bool {
++        self.task_idx == 0
++            && self.allocation_group.render_tasks.is_empty()
++            && self.recorder.nodes.is_empty()
++            && self.clip_context.get().is_none()
++    }
++
+     fn has_layers(&self) -> bool {
+         self.layer_depth != 0
+     }
+@@ -636,12 +648,13 @@ impl Dispatcher for MultiThreadedDispatcher {
+ 
+     fn rasterize(
+         &self,
+-        target: PixmapMut<'_>,
++        target: &mut PixmapMut<'_>,
+         scene_width: u16,
+         scene_height: u16,
+         settings: RasterizerSettings,
+         encoded_paints: &[EncodedPaint],
+         image_resolver: &dyn ImageResolver,
++        background_color: Option<OpaqueColor<Srgb>>,
+     ) {
+         assert!(self.flushed, "attempted to rasterize before flushing");
+ 
+@@ -655,6 +668,7 @@ impl Dispatcher for MultiThreadedDispatcher {
+                 settings,
+                 encoded_paints,
+                 image_resolver,
++                background_color,
+             );
+         }
+         // Only f32 pipeline enabled
+@@ -667,6 +681,7 @@ impl Dispatcher for MultiThreadedDispatcher {
+                 settings,
+                 encoded_paints,
+                 image_resolver,
++                background_color,
+             );
+         }
+ 
+@@ -681,6 +696,7 @@ impl Dispatcher for MultiThreadedDispatcher {
+                     settings,
+                     encoded_paints,
+                     image_resolver,
++                    background_color,
+                 );
+             }
+             crate::RenderMode::OptimizeQuality => {
+@@ -691,6 +707,7 @@ impl Dispatcher for MultiThreadedDispatcher {
+                     settings,
+                     encoded_paints,
+                     image_resolver,
++                    background_color,
+                 );
+             }
+         }
+diff --git a/sparse_strips/vello_cpu/src/dispatch/single_threaded.rs b/sparse_strips/vello_cpu/src/dispatch/single_threaded.rs
+index 234860b6..28931893 100644
+--- a/sparse_strips/vello_cpu/src/dispatch/single_threaded.rs
++++ b/sparse_strips/vello_cpu/src/dispatch/single_threaded.rs
+@@ -12,6 +12,7 @@ use crate::record::RecordedFill;
+ use crate::region::Regions;
+ use crate::{CompositeMode, RasterizerSettings};
+ use core::cell::RefCell;
++use vello_common::color::{OpaqueColor, Srgb};
+ use vello_common::encode::EncodedPaint;
+ use vello_common::fearless_simd::{Level, Simd};
+ use vello_common::filter::FilterData;
+@@ -65,16 +66,17 @@ impl SingleThreadedDispatcher {
+     #[cfg(feature = "f32_pipeline")]
+     fn rasterize_f32(
+         &self,
+-        target: PixmapMut<'_>,
++        target: &mut PixmapMut<'_>,
+         scene_width: u16,
+         scene_height: u16,
+         settings: RasterizerSettings,
+         encoded_paints: &[EncodedPaint],
+         image_resolver: &dyn ImageResolver,
++        background_color: Option<OpaqueColor<Srgb>>,
+     ) {
+         use crate::fine::F32Kernel;
+         use vello_common::fearless_simd::dispatch;
+-        dispatch!(self.level, simd => self.rasterize_with::<_, F32Kernel>(simd, target, scene_width, scene_height, settings, encoded_paints, image_resolver));
++        dispatch!(self.level, simd => self.rasterize_with::<_, F32Kernel>(simd, target, scene_width, scene_height, settings, encoded_paints, image_resolver, background_color));
+     }
+ 
+     /// Rasterizes the scene using u8 precision (fast).
+@@ -84,16 +86,17 @@ impl SingleThreadedDispatcher {
+     #[cfg(feature = "u8_pipeline")]
+     fn rasterize_u8(
+         &self,
+-        target: PixmapMut<'_>,
++        target: &mut PixmapMut<'_>,
+         scene_width: u16,
+         scene_height: u16,
+         settings: RasterizerSettings,
+         encoded_paints: &[EncodedPaint],
+         image_resolver: &dyn ImageResolver,
++        background_color: Option<OpaqueColor<Srgb>>,
+     ) {
+         use crate::fine::U8Kernel;
+         use vello_common::fearless_simd::dispatch;
+-        dispatch!(self.level, simd => self.rasterize_with::<_, U8Kernel>(simd, target, scene_width, scene_height, settings, encoded_paints, image_resolver));
++        dispatch!(self.level, simd => self.rasterize_with::<_, U8Kernel>(simd, target, scene_width, scene_height, settings, encoded_paints, image_resolver, background_color));
+     }
+ 
+     // Note: We purposefully don't add `vectorize` to each of these helpers,
+@@ -101,12 +104,13 @@ impl SingleThreadedDispatcher {
+     fn rasterize_with<S: Simd, F: FineKernel<S>>(
+         &self,
+         simd: S,
+-        target: PixmapMut<'_>,
++        target: &mut PixmapMut<'_>,
+         scene_width: u16,
+         scene_height: u16,
+         settings: RasterizerSettings,
+         encoded_paints: &[EncodedPaint],
+         image_resolver: &dyn ImageResolver,
++        background_color: Option<OpaqueColor<Srgb>>,
+     ) {
+         let filters = self.rasterize_filter_layers::<S, F>(simd, encoded_paints, image_resolver);
+         let use_src_over = settings.composite_mode == CompositeMode::SrcOver;
+@@ -125,6 +129,7 @@ impl SingleThreadedDispatcher {
+             use_src_over,
+             encoded_paints,
+             image_resolver,
++            background_color,
+         );
+     }
+ 
+@@ -134,11 +139,12 @@ impl SingleThreadedDispatcher {
+         cmds: &[Node],
+         viewport: RectU16,
+         filter_ctx: &FilterContext,
+-        mut target: PixmapMut<'_>,
++        target: &mut PixmapMut<'_>,
+         params: FineRenderParams,
+         use_src_over: bool,
+         encoded_paints: &[EncodedPaint],
+         image_resolver: &dyn ImageResolver,
++        background_color: Option<OpaqueColor<Srgb>>,
+     ) {
+         let mut bucketer = self.bucketer.borrow_mut();
+         bucketer.reset(viewport);
+@@ -159,12 +165,19 @@ impl SingleThreadedDispatcher {
+             image_resolver,
+         };
+         let mut regions = Regions::new(
+-            &mut target,
++            target,
+             params.scene_size,
+             params.target_offset,
+             bucketer.rows().len(),
+         );
+-        Self::rasterize_target::<S, F>(simd, &bucketer, resources, &mut regions, use_src_over);
++        Self::rasterize_target::<S, F>(
++            simd,
++            &bucketer,
++            resources,
++            &mut regions,
++            use_src_over,
++            background_color,
++        );
+     }
+ 
+     fn rasterize_target<S: Simd, F: FineKernel<S>>(
+@@ -173,6 +186,7 @@ impl SingleThreadedDispatcher {
+         resources: FineResources<'_>,
+         regions: &mut Regions<'_>,
+         use_src_over: bool,
++        background_color: Option<OpaqueColor<Srgb>>,
+     ) {
+         // TODO: Reuse fine and depth buffer across targets?
+         let mut fine = Fine::<S, F>::new(simd, bucketer.width());
+@@ -185,6 +199,7 @@ impl SingleThreadedDispatcher {
+                 bucketer,
+                 resources,
+                 use_src_over,
++                background_color,
+             );
+         });
+     }
+@@ -239,16 +254,18 @@ impl SingleThreadedDispatcher {
+                 target_offset: (0, 0),
+             };
+ 
++            let mut target = (&mut pixmap).into();
+             self.bucket_and_rasterize::<S, F>(
+                 simd,
+                 &self.recorder.layers[id as usize].nodes,
+                 pixmap_bbox,
+                 &filter_ctx,
+-                (&mut pixmap).into(),
++                &mut target,
+                 params,
+                 false,
+                 encoded_paints,
+                 image_resolver,
++                None,
+             );
+ 
+             F::filter_layer(
+@@ -270,6 +287,10 @@ impl SingleThreadedDispatcher {
+ }
+ 
+ impl Dispatcher for SingleThreadedDispatcher {
++    fn is_empty(&self) -> bool {
++        self.recorder.nodes.is_empty() && self.viewport.clip().is_none()
++    }
++
+     fn has_layers(&self) -> bool {
+         self.recorder.has_layers()
+     }
+@@ -414,12 +435,13 @@ impl Dispatcher for SingleThreadedDispatcher {
+ 
+     fn rasterize(
+         &self,
+-        target: PixmapMut<'_>,
++        target: &mut PixmapMut<'_>,
+         scene_width: u16,
+         scene_height: u16,
+         settings: RasterizerSettings,
+         encoded_paints: &[EncodedPaint],
+         image_resolver: &dyn ImageResolver,
++        background_color: Option<OpaqueColor<Srgb>>,
+     ) {
+         // If only the u8 pipeline is enabled, then use it.
+         #[cfg(all(feature = "u8_pipeline", not(feature = "f32_pipeline")))]
+@@ -431,6 +453,7 @@ impl Dispatcher for SingleThreadedDispatcher {
+                 settings,
+                 encoded_paints,
+                 image_resolver,
++                background_color,
+             );
+         }
+ 
+@@ -444,6 +467,7 @@ impl Dispatcher for SingleThreadedDispatcher {
+                 settings,
+                 encoded_paints,
+                 image_resolver,
++                background_color,
+             );
+         }
+ 
+@@ -459,6 +483,7 @@ impl Dispatcher for SingleThreadedDispatcher {
+                     settings,
+                     encoded_paints,
+                     image_resolver,
++                    background_color,
+                 );
+             }
+             crate::RenderMode::OptimizeQuality => {
+@@ -470,6 +495,7 @@ impl Dispatcher for SingleThreadedDispatcher {
+                     settings,
+                     encoded_paints,
+                     image_resolver,
++                    background_color,
+                 );
+             }
+         }
+diff --git a/sparse_strips/vello_cpu/src/fine/mod.rs b/sparse_strips/vello_cpu/src/fine/mod.rs
+index fdfdb7ca..1859dc00 100644
+--- a/sparse_strips/vello_cpu/src/fine/mod.rs
++++ b/sparse_strips/vello_cpu/src/fine/mod.rs
+@@ -28,6 +28,7 @@ use alloc::vec;
+ use alloc::vec::Vec;
+ use core::fmt::Debug;
+ use core::iter;
++use vello_common::color::{OpaqueColor, Srgb};
+ use vello_common::encode::{
+     EncodedBlurredRoundedRectangle, EncodedGradient, EncodedImage, EncodedKind, EncodedPaint,
+ };
+@@ -470,6 +471,7 @@ pub(crate) fn rasterize_region<S: Simd, T: FineKernel<S>>(
+     bucketer: &CommandBucketer,
+     resources: FineResources<'_>,
+     unpack_dest: bool,
++    background_color: Option<OpaqueColor<Srgb>>,
+ ) {
+     let scene_y = region.row_idx as u16 * Tile::HEIGHT;
+     let row = &bucketer.rows()[region.row_idx];
+@@ -488,8 +490,8 @@ pub(crate) fn rasterize_region<S: Simd, T: FineKernel<S>>(
+         });
+     }
+ 
+-    // Clear any regions in the fine buffer that haven't been filled with an opaque fill.
+-    fine.init_uncovered_range(span, region, unpack_dest, depth);
++    // Initialize any regions in the fine buffer that haven't been filled with an opaque fill.
++    fine.init_uncovered_range(span, region, unpack_dest, background_color, depth);
+ 
+     // Render the main commands back-to-front, with depth-buffer read.
+     for cmd in &row.render_cmds {
+@@ -569,24 +571,36 @@ impl<S: Simd, T: FineKernel<S>> Fine<S, T> {
+     /// with a solid paint.
+     ///
+     /// In case [`ComositeMode::SrcOver`] was chosen, it will be initialized with
+-    /// the pixels from the user-supplied pixmap. Otherwise, the range will simply be zeroed.
++    /// the pixels from the user-supplied pixmap. Otherwise, the range will simply be
++    /// filled with the background color.
+     fn init_uncovered_range(
+         &mut self,
+         scratch_span: Span,
+         region: &mut Region<'_>,
+         use_src_over: bool,
++        background_color: Option<OpaqueColor<Srgb>>,
+         depth: &DepthBuffer,
+     ) {
++        let background_color = background_color
++            .map(|color| T::extract_color(PremulColor::from_premul_color(color.into())));
++
+         depth.for_each_unset_run(scratch_span, |span| {
+             let x = span.pixel_x();
+-            let end = span.pixel_end();
+-
+-            if use_src_over {
+-                let mut region = region.sub_span(x, end - x);
+-                self.unpack(x, &mut region);
+-            } else {
+-                self.blend_buffers[0][Self::scratch_range(Span::new(x, end - x))]
+-                    .fill(T::Numeric::ZERO);
++            let width = span.pixel_width();
++            let scratch_range = Self::scratch_range(span);
++            match background_color {
++                Some(color) => {
++                    // Note that the background color for Vello CPU is always opaque,
++                    // so we don't need to handle the case of `SrcOver` + non-opaque color.
++                    T::copy_solid(self.simd, &mut self.blend_buffers[0][scratch_range], color);
++                }
++                None if use_src_over => {
++                    let mut region = region.sub_span(x, width);
++                    self.unpack(x, &mut region);
++                }
++                None => {
++                    self.blend_buffers[0][scratch_range].fill(T::Numeric::ZERO);
++                }
+             }
+         });
+     }
+diff --git a/sparse_strips/vello_cpu/src/render.rs b/sparse_strips/vello_cpu/src/render.rs
+index d604c5d5..3ef674ee 100644
+--- a/sparse_strips/vello_cpu/src/render.rs
++++ b/sparse_strips/vello_cpu/src/render.rs
+@@ -30,6 +30,7 @@ use vello_common::paint::{ImageId, ImageResolver, Paint, PaintType, Tint};
+ use vello_common::peniko::color::palette::css::BLACK;
+ use vello_common::peniko::{BlendMode, Fill};
+ use vello_common::pixmap::{Pixmap, PixmapMut};
++use vello_common::record::RootBackground;
+ use vello_common::render_state::RenderState;
+ use vello_common::transforms::{RootTransforms, Transforms};
+ use vello_common::util::is_axis_aligned;
+@@ -170,6 +171,7 @@ pub struct RenderContext {
+     pub(crate) aliasing_threshold: Option<u8>,
+     pub(crate) encoded_paints: Vec<EncodedPaint>,
+     pub(crate) filter: Option<Filter>,
++    root_background: RootBackground,
+     #[cfg_attr(
+         not(feature = "text"),
+         allow(dead_code, reason = "used when the `text` feature is enabled")
+@@ -231,6 +233,7 @@ impl RenderContext {
+         let encoded_paints = vec![];
+         let temp_path = BezPath::new();
+         let aliasing_threshold = None;
++        let scene_viewport = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
+ 
+         Self {
+             width,
+@@ -244,6 +247,28 @@ impl RenderContext {
+             temp_path,
+             encoded_paints,
+             filter: None,
++            root_background: RootBackground::new(
++                scene_viewport,
++                // Handling non-opaque colors is a bit more complicated when using `CompositeMode::SrcOver`,
++                // so we don't do that for now.
++                true,
++            ),
++        }
++    }
++
++    fn try_extract_background(&mut self, rect: Rect, paint: &Paint) -> bool {
++        if !self.dispatcher.is_empty() || self.mask.is_some() {
++            return false;
++        }
++
++        self.root_background
++            .try_extract(rect, paint, self.state.blend_mode)
++    }
++
++    #[inline]
++    fn record_blend(&mut self, blend_mode: BlendMode) {
++        if !self.dispatcher.has_layers() {
++            self.root_background.record_blend(blend_mode);
+         }
+     }
+ 
+@@ -283,6 +308,7 @@ impl RenderContext {
+             let transform = ctx
+                 .root_transforms
+                 .effective_path_transform(ctx.transforms());
++            ctx.record_blend(ctx.state.blend_mode);
+             ctx.dispatcher.fill_path(
+                 path,
+                 ctx.state.fill_rule,
+@@ -302,6 +328,7 @@ impl RenderContext {
+             let transform = ctx
+                 .root_transforms
+                 .effective_path_transform(ctx.transforms());
++            ctx.record_blend(ctx.state.blend_mode);
+             ctx.dispatcher.stroke_path(
+                 path,
+                 &ctx.state.stroke,
+@@ -321,6 +348,7 @@ impl RenderContext {
+             let transform = ctx
+                 .root_transforms
+                 .effective_path_transform(ctx.transforms());
++            ctx.record_blend(ctx.state.blend_mode);
+ 
+             // Fast path: Use optimized rect filling if we have no skew in the path transform
+             // and anti-aliasing is enabled.
+@@ -328,6 +356,11 @@ impl RenderContext {
+             if is_axis_aligned(&transform) && ctx.aliasing_threshold.is_none() {
+                 // Transform the rect to screen coordinates.
+                 let transformed_rect = transform.transform_rect_bbox(*rect);
++
++                if ctx.try_extract_background(transformed_rect, &paint) {
++                    return;
++                }
++
+                 ctx.dispatcher.fill_rect_fast(
+                     &transformed_rect,
+                     paint,
+@@ -358,6 +391,7 @@ impl RenderContext {
+             let transform = ctx
+                 .root_transforms
+                 .effective_path_transform(ctx.transforms());
++            ctx.record_blend(ctx.state.blend_mode);
+             ctx.dispatcher.stroke_path(
+                 &ctx.temp_path,
+                 &ctx.state.stroke,
+@@ -429,6 +463,7 @@ impl RenderContext {
+         self.rect_to_temp_path(&inflated_rect);
+ 
+         let paint = blurred_rect.encode_into(&mut self.encoded_paints, paint_transform, None);
++        self.record_blend(self.state.blend_mode);
+         self.dispatcher.fill_path(
+             &self.temp_path,
+             Fill::NonZero,
+@@ -486,6 +521,7 @@ impl RenderContext {
+ 
+         let blend_mode = blend_mode.unwrap_or_default();
+         let opacity = opacity.unwrap_or(1.0).clamp(0.0, 1.0);
++        self.record_blend(blend_mode);
+         let layer_transform = self
+             .root_transforms
+             .effective_path_transform(self.transforms());
+@@ -717,6 +753,12 @@ impl RenderContext {
+         self.mask = None;
+         self.root_transforms.reset();
+         self.state.reset();
++        self.root_background.reset(Rect::new(
++            0.0,
++            0.0,
++            f64::from(self.width),
++            f64::from(self.height),
++        ));
+     }
+ 
+     /// Push a new clip path to the clip stack.
+@@ -814,14 +856,31 @@ impl RenderContext {
+             target.data_mut().fill(0);
+         }
+ 
++        let background_color = self
++            .root_background
++            .color()
++            .map(|color| color.as_opaque_color().unwrap());
++        let background_is_preserved = self.root_background.is_preserved();
++
+         self.dispatcher.rasterize(
+-            target,
++            &mut target,
+             self.width,
+             self.height,
+             settings,
+             &self.encoded_paints,
+             &resources.image_registry,
++            background_color,
+         );
++
++        // Three conditions that need to be fulfilled so we can actually claim the pixmap
++        // has no transparency:
++        // 1) We must be rendering to the whole pixmap.
++        // 2) The (opaque) background must exist.
++        // 3) The background must not (potentially) have been destroyed by a blend operation.
++        let is_opaque =
++            target_fully_covered && background_color.is_some() && background_is_preserved;
++
++        target.set_may_have_transparency(!is_opaque);
+         // TODO: We need to figure something out here API-wise. At the moment, the user can
+         // theoretically rasterize the same `RenderContext` multiple times without resetting in-between.
+         // However, if glyph caching is enabled, this method call could now evict that were previously
+@@ -971,7 +1030,7 @@ mod tests {
+     use vello_common::color::PremulRgba8;
+     use vello_common::color::palette::css::{BLUE, RED};
+     use vello_common::kurbo::{Rect, Shape};
+-    use vello_common::peniko::ImageAlphaType;
++    use vello_common::peniko::{BlendMode, Compose, ImageAlphaType, Mix};
+     use vello_common::pixmap::{PixelMetadata, Pixmap, PixmapMut};
+     use vello_common::tile::Tile;
+ 
+@@ -1011,6 +1070,147 @@ mod tests {
+         ctx
+     }
+ 
++    #[test]
++    fn opaque_background_updates_pixmap_opacity() {
++        let ctx = red_rect_context(1, 1, Rect::new(0.0, 0.0, 1.0, 1.0));
++        let mut resources = Resources::new();
++        let mut pixmap = Pixmap::new(1, 1);
++
++        ctx.render(&mut pixmap, &mut resources);
++
++        assert!(!pixmap.may_have_transparency());
++        assert_eq!(pixmap.sample(0, 0), red_pixel());
++    }
++
++    #[test]
++    fn opaque_background_replaces_src_over_destination() {
++        let ctx = red_rect_context(1, 1, Rect::new(0.0, 0.0, 1.0, 1.0));
++        let mut resources = Resources::new();
++        let mut pixmap = solid_pixmap(1, 1, blue_pixel());
++
++        ctx.render_with(
++            &mut pixmap,
++            &mut resources,
++            RasterizerSettings {
++                composite_mode: CompositeMode::SrcOver,
++                ..Default::default()
++            },
++        );
++
++        assert!(!pixmap.may_have_transparency());
++        assert_eq!(pixmap.sample(0, 0), red_pixel());
++    }
++
++    #[test]
++    fn inline_non_src_over_invalidates_opaque_background() {
++        let mut ctx = RenderContext::new(2, 2);
++        ctx.set_paint(RED);
++        ctx.fill_rect(&Rect::new(0.0, 0.0, 2.0, 2.0));
++        ctx.set_blend_mode(BlendMode::new(Mix::Normal, Compose::Clear));
++        ctx.fill_rect(&Rect::new(0.0, 0.0, 1.0, 1.0));
++        ctx.flush();
++
++        let mut resources = Resources::new();
++        let mut pixmap = Pixmap::new(2, 2);
++        ctx.render(&mut pixmap, &mut resources);
++
++        assert!(pixmap.may_have_transparency());
++        assert_eq!(pixmap.sample(0, 0), transparent_pixel());
++    }
++
++    #[test]
++    fn unused_non_default_blend_preserves_opaque_background() {
++        let mut ctx = RenderContext::new(1, 1);
++        ctx.set_paint(RED);
++        ctx.fill_rect(&Rect::new(0.0, 0.0, 1.0, 1.0));
++        ctx.set_blend_mode(BlendMode::new(Mix::Normal, Compose::Clear));
++        ctx.flush();
++
++        let mut resources = Resources::new();
++        let mut pixmap = Pixmap::new(1, 1);
++        ctx.render(&mut pixmap, &mut resources);
++
++        assert!(!pixmap.may_have_transparency());
++        assert_eq!(pixmap.sample(0, 0), red_pixel());
++    }
++
++    #[test]
++    fn intermediate_non_src_over_preserves_opaque_root() {
++        let mut ctx = RenderContext::new(2, 2);
++        ctx.set_paint(RED);
++        ctx.fill_rect(&Rect::new(0.0, 0.0, 2.0, 2.0));
++        ctx.push_blend_layer(BlendMode::default());
++        ctx.set_blend_mode(BlendMode::new(Mix::Normal, Compose::Clear));
++        ctx.fill_rect(&Rect::new(0.0, 0.0, 1.0, 1.0));
++        ctx.pop_layer();
++        ctx.flush();
++
++        let mut resources = Resources::new();
++        let mut pixmap = Pixmap::new(2, 2);
++        ctx.render(&mut pixmap, &mut resources);
++
++        assert!(!pixmap.may_have_transparency());
++        assert!(pixmap.data().iter().all(|pixel| *pixel == red_pixel()));
++    }
++
++    #[test]
++    fn root_blend_target_invalidates_opaque_background() {
++        let mut ctx = RenderContext::new(2, 2);
++        ctx.set_paint(RED);
++        ctx.fill_rect(&Rect::new(0.0, 0.0, 2.0, 2.0));
++        // Technically multiply doesn't change the background, but we are conservative
++        // and only permit scr-over with normal mix.
++        ctx.push_blend_layer(BlendMode::new(Mix::Multiply, Compose::SrcOver));
++        ctx.set_paint(BLUE);
++        ctx.fill_rect(&Rect::new(0.0, 0.0, 1.0, 1.0));
++        ctx.pop_layer();
++        ctx.flush();
++
++        let mut resources = Resources::new();
++        let mut pixmap = Pixmap::new(2, 2);
++        ctx.render(&mut pixmap, &mut resources);
++
++        assert!(pixmap.may_have_transparency());
++    }
++
++    #[test]
++    fn active_clip_prevents_background_extraction() {
++        let mut ctx = RenderContext::new(2, 2);
++        ctx.push_clip_path(&Rect::new(0.0, 0.0, 1.0, 2.0).to_path(0.1));
++        ctx.set_paint(RED);
++        ctx.fill_rect(&Rect::new(0.0, 0.0, 2.0, 2.0));
++        ctx.pop_clip_path();
++        ctx.flush();
++
++        let mut resources = Resources::new();
++        let mut pixmap = Pixmap::new(2, 2);
++        ctx.render(&mut pixmap, &mut resources);
++
++        assert!(pixmap.may_have_transparency());
++        assert_eq!(pixmap.sample(0, 0), red_pixel());
++        assert_eq!(pixmap.sample(1, 0), transparent_pixel());
++    }
++
++    #[test]
++    fn background_after_another_draw_is_not_extracted() {
++        // This test only documents current behavior. In theory, it would be
++        // correct to emit a background here.
++
++        let mut ctx = RenderContext::new(2, 2);
++        ctx.set_paint(RED);
++        ctx.fill_rect(&Rect::new(0.0, 0.0, 1.0, 1.0));
++        ctx.set_paint(BLUE);
++        ctx.fill_rect(&Rect::new(0.0, 0.0, 2.0, 2.0));
++        ctx.flush();
++
++        let mut resources = Resources::new();
++        let mut pixmap = Pixmap::new(2, 2);
++        ctx.render(&mut pixmap, &mut resources);
++
++        assert!(pixmap.may_have_transparency());
++        assert!(pixmap.data().iter().all(|pixel| *pixel == blue_pixel()));
++    }
++
+     #[test]
+     fn clip_overflow() {
+         let mut ctx = RenderContext::new(100, 100);
+@@ -1184,7 +1384,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn render_src_over_transparent() {
++    fn no_background_src_over_composites_destination() {
+         let mut ctx = RenderContext::new(1, 1);
+         ctx.set_paint(RED.with_alpha(0.5));
+         ctx.fill_rect(&Rect::new(0.0, 0.0, 1.0, 1.0));
+@@ -1213,6 +1413,25 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn no_background_replace_replaces_destination() {
++        let mut ctx = RenderContext::new(1, 1);
++        ctx.set_paint(RED.with_alpha(0.5));
++        ctx.fill_rect(&Rect::new(0.0, 0.0, 1.0, 1.0));
++        ctx.flush();
++
++        let mut resources = Resources::new();
++        let mut pixmap = solid_pixmap(1, 1, blue_pixel());
++
++        ctx.render(&mut pixmap, &mut resources);
++
++        assert_eq!(
++            pixmap.sample(0, 0),
++            RED.with_alpha(0.5).premultiply().to_rgba8()
++        );
++        assert!(pixmap.may_have_transparency());
++    }
++
+     #[cfg(feature = "multithreading")]
+     #[test]
+     fn multithreaded_crash_after_reset() {
+diff --git a/sparse_strips/vello_sparse_tests/snapshots/clip_prevents_background.png b/sparse_strips/vello_sparse_tests/snapshots/clip_prevents_background.png
+new file mode 100644
+index 00000000..1f19d56b
+--- /dev/null
++++ b/sparse_strips/vello_sparse_tests/snapshots/clip_prevents_background.png
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:f1e4a5ba743d95d4ece0249aa729653fd0fe8dccfced222fd130efa3c37aa0e6
++size 116
+diff --git a/sparse_strips/vello_sparse_tests/snapshots/compose_clear_after_background.png b/sparse_strips/vello_sparse_tests/snapshots/compose_clear_after_background.png
+new file mode 100644
+index 00000000..a351311b
+--- /dev/null
++++ b/sparse_strips/vello_sparse_tests/snapshots/compose_clear_after_background.png
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:5df0da52aaba923344202c1e30e377e11cce5ceef303d4dc1c460078637e908c
++size 98
+diff --git a/sparse_strips/vello_sparse_tests/snapshots/layer_prevents_background.png b/sparse_strips/vello_sparse_tests/snapshots/layer_prevents_background.png
+new file mode 100644
+index 00000000..8a893f27
+--- /dev/null
++++ b/sparse_strips/vello_sparse_tests/snapshots/layer_prevents_background.png
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:57323a1f6a0fde37a71896d89a98321e14d2f8ef41b8f77510f6874ec5c2d3dd
++size 104
+diff --git a/sparse_strips/vello_sparse_tests/snapshots/mask_prevents_background.png b/sparse_strips/vello_sparse_tests/snapshots/mask_prevents_background.png
+new file mode 100644
+index 00000000..1f19d56b
+--- /dev/null
++++ b/sparse_strips/vello_sparse_tests/snapshots/mask_prevents_background.png
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:f1e4a5ba743d95d4ece0249aa729653fd0fe8dccfced222fd130efa3c37aa0e6
++size 116
+diff --git a/sparse_strips/vello_sparse_tests/tests/clip.rs b/sparse_strips/vello_sparse_tests/tests/clip.rs
+index 3efc0b61..9f8b77ed 100644
+--- a/sparse_strips/vello_sparse_tests/tests/clip.rs
++++ b/sparse_strips/vello_sparse_tests/tests/clip.rs
+@@ -18,6 +18,15 @@ use vello_cpu::peniko::{
+ };
+ use vello_dev_macros::vello_test;
+ 
++#[vello_test(transparent)]
++fn clip_prevents_background(ctx: &mut impl Renderer) {
++    let clip = Rect::new(25.0, 25.0, 75.0, 75.0).to_path(0.1);
++    ctx.push_clip_path(&clip);
++    ctx.set_paint(RED);
++    ctx.fill_rect(&Rect::new(0.0, 0.0, 100.0, 100.0));
++    ctx.pop_clip_path();
++}
++
+ #[vello_test(hybrid_tolerance = 1)]
+ fn clip_triangle_with_star(ctx: &mut impl Renderer) {
+     let mut triangle_path = BezPath::new();
+diff --git a/sparse_strips/vello_sparse_tests/tests/compose.rs b/sparse_strips/vello_sparse_tests/tests/compose.rs
+index 1b36a8e3..97c1db85 100644
+--- a/sparse_strips/vello_sparse_tests/tests/compose.rs
++++ b/sparse_strips/vello_sparse_tests/tests/compose.rs
+@@ -37,6 +37,20 @@ fn compose_clear(ctx: &mut impl Renderer) {
+     compose(ctx, Compose::Clear);
+ }
+ 
++#[vello_test(transparent)]
++fn compose_clear_after_background(ctx: &mut impl Renderer) {
++    ctx.set_paint(RED);
++    ctx.fill_rect(&Rect::new(0.0, 0.0, 100.0, 100.0));
++
++    ctx.set_paint(BLUE.with_alpha(0.5));
++    ctx.fill_path(&Circle::new(Point::new(50.0, 50.0), 35.0).to_path(0.1));
++
++    ctx.push_blend_layer(BlendMode::new(Mix::Normal, Compose::Clear));
++    ctx.set_paint(GREEN);
++    ctx.fill_rect(&Rect::new(35.0, 35.0, 65.0, 65.0));
++    ctx.pop_layer();
++}
++
+ #[vello_test(width = 100, height = 100)]
+ fn compose_clear_empty_layer(ctx: &mut impl Renderer) {
+     ctx.push_layer(None, None, None, None, None);
+diff --git a/sparse_strips/vello_sparse_tests/tests/layer.rs b/sparse_strips/vello_sparse_tests/tests/layer.rs
+index 0aabcf1a..b9629bd8 100644
+--- a/sparse_strips/vello_sparse_tests/tests/layer.rs
++++ b/sparse_strips/vello_sparse_tests/tests/layer.rs
+@@ -9,6 +9,14 @@ use vello_common::kurbo::Rect;
+ use vello_common::peniko::{BlendMode, Compose, Mix};
+ use vello_dev_macros::vello_test;
+ 
++#[vello_test(transparent)]
++fn layer_prevents_background(ctx: &mut impl Renderer) {
++    ctx.push_opacity_layer(0.5);
++    ctx.set_paint(RED);
++    ctx.fill_rect(&Rect::new(0.0, 0.0, 100.0, 100.0));
++    ctx.pop_layer();
++}
++
+ #[vello_test(cpu_u8_tolerance = 1)]
+ fn layer_multiple_properties_1(ctx: &mut impl Renderer) {
+     let mask = example_mask(true);
+diff --git a/sparse_strips/vello_sparse_tests/tests/mask.rs b/sparse_strips/vello_sparse_tests/tests/mask.rs
+index 4d1d7cd0..4d2726c4 100644
+--- a/sparse_strips/vello_sparse_tests/tests/mask.rs
++++ b/sparse_strips/vello_sparse_tests/tests/mask.rs
+@@ -57,6 +57,17 @@ pub(crate) fn example_mask(alpha_mask: bool) -> Mask {
+     }
+ }
+ 
++#[vello_test(transparent)]
++fn mask_prevents_background(ctx: &mut impl Renderer) {
++    let mut data = vec![0; 100 * 100];
++    for row in data.chunks_exact_mut(100).skip(25).take(50) {
++        row[25..75].fill(255);
++    }
++    ctx.set_mask(Mask::from_parts(data, 100, 100));
++    ctx.set_paint(RED);
++    ctx.fill_rect(&Rect::new(0.0, 0.0, 100.0, 100.0));
++}
++
+ fn mask(ctx: &mut impl Renderer, alpha_mask: bool) {
+     let mask = example_mask(alpha_mask);
+ 

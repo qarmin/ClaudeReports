@@ -1,0 +1,96 @@
+=== BEFORE fix (pristine base_commit ac975f5d1b3362feb3974811db6cc5a37a77b02b) ===
+$ cargo run   (debug build, run 1/3)
+
+   Compiling rawler v0.7.2 (.../rawler)
+   Compiling repro v0.0.0 (.../repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.11s
+     Running `target/debug/repro`
+--- real issue #573 crash file (top > bottom in ActiveArea): "/tmp/bughunt_010_issue573_real_crash_file.dng" ---
+
+thread 'main' (104516) panicked at rawler/src/imgop/mod.rs:131:5:
+assertion failed: p1.y <= p2.y
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+PANICKED with this candidate's own assert! ("assertion failed: p1.y <= p2.y")
+--- hand-built boundary variant (left > right in ActiveArea): "/tmp/bughunt_010_activearea_inverted_x.dng" ---
+
+thread 'main' (104516) panicked at rawler/src/imgop/mod.rs:130:5:
+assertion failed: p1.x <= p2.x
+PANICKED with this candidate's own assert! ("assertion failed: p1.x <= p2.x")
+
+RESULT: candidate 010's assert! bug IS present (at least one variant panicked on it).
+
+--- full backtrace (RUST_BACKTRACE=1), real crash file variant, debug build ---
+
+thread 'main' (97573) panicked at rawler/src/imgop/mod.rs:131:5:
+assertion failed: p1.y <= p2.y
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/.../library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/.../library/core/src/panicking.rs:80:14
+   2: core::panicking::panic
+             at /rustc/.../library/core/src/panicking.rs:150:5
+   3: <rawler::imgop::Rect>::new_with_points
+             at rawler/src/imgop/mod.rs:131:5
+   4: <rawler::imgop::Rect>::new_with_dng
+             at rawler/src/imgop/mod.rs:147:5
+   5: <rawler::decoders::dng::DngDecoder>::get_active_area
+             at rawler/src/decoders/dng.rs:376:12
+   6: <rawler::decoders::dng::DngDecoder>::make_camera
+             at rawler/src/decoders/dng.rs:247:28
+   7: <rawler::decoders::dng::DngDecoder as rawler::decoders::Decoder>::raw_metadata
+             at rawler/src/decoders/dng.rs:84:24
+   8: repro::run_on_path
+             at ./src/main.rs:36:19
+   9: repro::main
+             at ./src/main.rs:86:5
+  10: <fn() as core::ops::function::FnOnce<()>>::call_once
+             at .../library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+Repeat runs: identical panic (both variants) in debug build, 3/3 runs.
+Release build (`cargo run --release`): same panic also occurs, 1/1 run - confirming this is a hard
+`assert!`, not `debug_assert!`/checked-arithmetic, so it is NOT gated by debug-assertions/
+overflow-checks the way candidate 007's sibling bug is (see "before candidate 007's fix ever runs"
+below).
+
+Note on the real crash file's stack trace: it is byte-for-byte identical in shape (same function
+sequence, same panic message "assertion failed: p1.y <= p2.y") to the backtrace pasted into the
+real GitHub issue #573 report itself (see IDEAS.md/RESULT.md) - the only differences are absolute
+source paths (this session's checkout vs. the reporter's CI runner) and Rust compiler-version-
+specific internal frame line numbers.
+
+=== AFTER fix (patch.diff applied to the same base_commit) ===
+$ cargo run   (debug build)
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running `target/debug/repro`
+--- real issue #573 crash file (top > bottom in ActiveArea): "/tmp/bughunt_010_issue573_real_crash_file.dng" ---
+
+thread 'main' (104175) panicked at rawler/src/imgop/mod.rs:168:26:
+attempt to subtract with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+panicked, but with a DIFFERENT message (not this candidate's assert! bug - likely candidate 007's separate, still-unfixed downstream bug): "attempt to subtract with overflow"
+--- hand-built boundary variant (left > right in ActiveArea): "/tmp/bughunt_010_activearea_inverted_x.dng" ---
+raw_metadata returned Ok (this candidate's assert!-panic bug not present)
+
+RESULT: candidate 010's assert! bug is NOT present in either variant.
+
+Repeated 3/3 (debug) + 1/1 (release, both variants return Ok, no panic at all - candidate 007's
+own bug is itself debug-build-only, same as documented in its own RESULT.md) with identical
+results each time.
+
+IMPORTANT: the real issue #573 crash file, once this candidate's own assert! stops blocking it,
+goes on to panic on a SEPARATE, already-independently-confirmed, still-unfixed bug in this
+codebase: candidate 007 (rect_active_area_offset_underflow, `imgop/mod.rs:168`,
+`width.saturating_sub`/`as_ltrb_offsets` underflow), in debug builds only. This is expected and is
+exactly the relationship this candidate's own task description predicted ("a different, unfixed
+mechanism than candidate 007's as_ltrb_offsets underflow - this is the earlier hard assert! in the
+Rect constructor itself, hit before candidate 007's fix ever runs"). The hand-built boundary
+variant (left > right, which does not exceed the image's own width/height once clamped) does NOT
+chain into candidate 007's bug and returns a clean `Ok` after this candidate's fix - demonstrating
+this candidate's own fix is complete and correct on its own terms.
+
+=== cargo test -p rawler --lib ===
+Before fix: 66 passed; 0 failed; 0 ignored
+After fix:  66 passed; 0 failed; 0 ignored

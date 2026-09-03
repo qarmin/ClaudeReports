@@ -1,0 +1,25 @@
+diff --git a/src/decoder.rs b/src/decoder.rs
+index 72581eb..5195ed1 100644
+--- a/src/decoder.rs
++++ b/src/decoder.rs
+@@ -927,13 +927,18 @@ impl<R: Read> Decoder<R> {
+         let batch_this_scan = {
+             let mut total_rows = 0usize;
+             for mcu_y in 0..max_mcu_y {
+-                if mcu_y * 8 >= frame.image_size.height {
++                // Widen to u32 before multiplying: mcu_y and frame.image_size.height are u16,
++                // and a malformed SOF can make max_mcu_y large enough (e.g. height == 0xFFFF)
++                // that `(mcu_y + 1) * 8` overflows u16 before this dry run's own loop bound
++                // would otherwise stop it - unlike the real per-row decode loop below, this dry
++                // run has no early-exit on a decode error to keep mcu_y small in practice.
++                if mcu_y as u32 * 8 >= frame.image_size.height as u32 {
+                     break;
+                 }
+                 for (i, component) in components.iter().enumerate() {
+                     if finished[i] {
+                         if !is_interleaved
+-                            && (mcu_y + 1) * 8 < frame.image_size.height
++                            && (mcu_y as u32 + 1) * 8 < frame.image_size.height as u32
+                             && (mcu_y + 1) % component.vertical_sampling_factor as u16 > 0
+                         {
+                             continue;

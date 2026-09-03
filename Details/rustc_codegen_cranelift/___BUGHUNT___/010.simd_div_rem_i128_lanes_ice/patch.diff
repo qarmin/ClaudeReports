@@ -1,0 +1,107 @@
+diff --git a/src/base.rs b/src/base.rs
+index 2f6bb30d..c1b5907b 100644
+--- a/src/base.rs
++++ b/src/base.rs
+@@ -200,6 +200,17 @@ pub(crate) fn compile_fn(
+                     name = codegened_func.symbol_name
+                 ));
+             }
++            // A missing Cranelift lowering is a known gap in this backend, not a bug in the user's
++            // code, so report it as a diagnostic instead of "the compiler unexpectedly panicked".
++            Err(ModuleError::Compilation(CodegenError::Unsupported(msg))) => {
++                dcx.fatal(format!(
++                    "the Cranelift codegen backend cannot compile {name}: {msg}\n\
++                     note: this operation is not yet supported by the Cranelift backend for this \
++                     target; please report it at \
++                     https://github.com/rust-lang/rustc_codegen_cranelift/issues",
++                    name = codegened_func.symbol_name
++                ));
++            }
+             Err(ModuleError::Compilation(CodegenError::Verifier(err))) => {
+                 dcx.err(format!("{err:?}"));
+                 let pretty_error = cranelift_codegen::print_errors::pretty_verifier_error(
+diff --git a/src/codegen_i128.rs b/src/codegen_i128.rs
+index df5a7908..d529598f 100644
+--- a/src/codegen_i128.rs
++++ b/src/codegen_i128.rs
+@@ -26,20 +26,9 @@ pub(crate) fn maybe_codegen<'tcx>(
+         BinOp::Mul | BinOp::MulUnchecked => None,
+         BinOp::Offset => unreachable!("offset should only be used on pointers, not 128bit ints"),
+         BinOp::Div | BinOp::Rem => {
+-            let name = match (bin_op, is_signed) {
+-                (BinOp::Div, false) => "__udivti3",
+-                (BinOp::Div, true) => "__divti3",
+-                (BinOp::Rem, false) => "__umodti3",
+-                (BinOp::Rem, true) => "__modti3",
+-                _ => unreachable!(),
+-            };
++            let is_div = bin_op == BinOp::Div;
+             let args = [lhs.load_scalar(fx), rhs.load_scalar(fx)];
+-            let ret_val = fx.lib_call(
+-                name,
+-                vec![AbiParam::new(types::I128), AbiParam::new(types::I128)],
+-                vec![AbiParam::new(types::I128)],
+-                &args,
+-            )[0];
++            let ret_val = codegen_div_rem(fx, is_div, is_signed, args[0], args[1]);
+             Some(CValue::by_val(ret_val, lhs.layout()))
+         }
+         BinOp::Lt | BinOp::Le | BinOp::Eq | BinOp::Ge | BinOp::Gt | BinOp::Ne | BinOp::Cmp => None,
+@@ -48,6 +37,31 @@ pub(crate) fn maybe_codegen<'tcx>(
+     }
+ }
+ 
++/// Cranelift has no `sdiv`/`udiv`/`srem`/`urem` lowering for `I128` on any backend, so 128-bit
++/// division and remainder always have to go through compiler-builtins. Callers that build the
++/// `I128` values themselves (e.g. the per-lane SIMD path) must use this rather than emitting the
++/// Cranelift instruction directly.
++pub(crate) fn codegen_div_rem(
++    fx: &mut FunctionCx<'_, '_, '_>,
++    is_div: bool,
++    is_signed: bool,
++    lhs: Value,
++    rhs: Value,
++) -> Value {
++    let name = match (is_div, is_signed) {
++        (true, false) => "__udivti3",
++        (true, true) => "__divti3",
++        (false, false) => "__umodti3",
++        (false, true) => "__modti3",
++    };
++    fx.lib_call(
++        name,
++        vec![AbiParam::new(types::I128), AbiParam::new(types::I128)],
++        vec![AbiParam::new(types::I128)],
++        &[lhs, rhs],
++    )[0]
++}
++
+ pub(crate) fn maybe_codegen_mul_checked<'tcx>(
+     fx: &mut FunctionCx<'_, '_, 'tcx>,
+     lhs: CValue<'tcx>,
+diff --git a/src/intrinsics/simd.rs b/src/intrinsics/simd.rs
+index 270ea4e8..04bc881a 100644
+--- a/src/intrinsics/simd.rs
++++ b/src/intrinsics/simd.rs
+@@ -430,6 +430,21 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
+                         (ty::Uint(_), sym::simd_add) => fx.bcx.ins().iadd(x_lane, y_lane),
+                         (ty::Uint(_), sym::simd_sub) => fx.bcx.ins().isub(x_lane, y_lane),
+                         (ty::Uint(_), sym::simd_mul) => fx.bcx.ins().imul(x_lane, y_lane),
++                        // Cranelift has no `I128` division lowering, so 128-bit lanes have to go
++                        // through compiler-builtins just like scalar `u128`/`i128` division does.
++                        (ty::Uint(ty::UintTy::U128), sym::simd_div) => {
++                            crate::codegen_i128::codegen_div_rem(fx, true, false, x_lane, y_lane)
++                        }
++                        (ty::Uint(ty::UintTy::U128), sym::simd_rem) => {
++                            crate::codegen_i128::codegen_div_rem(fx, false, false, x_lane, y_lane)
++                        }
++                        (ty::Int(ty::IntTy::I128), sym::simd_div) => {
++                            crate::codegen_i128::codegen_div_rem(fx, true, true, x_lane, y_lane)
++                        }
++                        (ty::Int(ty::IntTy::I128), sym::simd_rem) => {
++                            crate::codegen_i128::codegen_div_rem(fx, false, true, x_lane, y_lane)
++                        }
++
+                         (ty::Uint(_), sym::simd_div) => fx.bcx.ins().udiv(x_lane, y_lane),
+                         (ty::Uint(_), sym::simd_rem) => fx.bcx.ins().urem(x_lane, y_lane),
+ 

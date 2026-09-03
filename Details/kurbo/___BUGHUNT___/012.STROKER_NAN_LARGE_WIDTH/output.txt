@@ -1,0 +1,76 @@
+Real captured output of `just test` (fresh clone at base_commit ca273499e3e48bd2de6f02aa8e99a148984e45f3),
+run from /tmp/012_verify (a standalone copy of this candidate folder):
+
+rm -rf clone
+git clone https://github.com/linebender/kurbo.git clone
+Cloning into 'clone'...
+cd clone && git checkout ca273499e3e48bd2de6f02aa8e99a148984e45f3
+Note: switching to 'ca273499e3e48bd2de6f02aa8e99a148984e45f3'.
+HEAD is now at ca27349 ci: Update to stable Rust 1.97.1, typos 1.48.0 (#596)
+cd repro && cargo run
+   Compiling polycool v0.4.0 (/tmp/012_verify/clone/polycool)
+   Compiling kurbo v0.13.1 (/tmp/012_verify/clone/kurbo)
+   Compiling stroker-nan-large-width-repro v0.1.0 (/tmp/012_verify/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.34s
+     Running `target/debug/stroker-nan-large-width-repro`
+width=4 is_nan=false
+width=5 is_nan=false
+width=6 is_nan=false
+width=7 is_nan=false
+width=8 is_nan=false
+width=9 is_nan=false
+width=10 is_nan=true
+width=15 is_nan=false
+width=20 is_nan=false
+width=50 is_nan=true
+width=100 is_nan=false
+width=1000 is_nan=false
+REPRODUCED - kurbo::stroke() produced a path containing NaN coordinates
+cd clone && git apply "/tmp/012_verify/patch.diff"
+cd repro && cargo run
+   Compiling kurbo v0.13.1 (/tmp/012_verify/clone/kurbo)
+   Compiling stroker-nan-large-width-repro v0.1.0 (/tmp/012_verify/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.28s
+     Running `target/debug/stroker-nan-large-width-repro`
+width=4 is_nan=false
+width=5 is_nan=false
+width=6 is_nan=false
+width=7 is_nan=false
+width=8 is_nan=false
+width=9 is_nan=false
+width=10 is_nan=false
+width=15 is_nan=false
+width=20 is_nan=false
+width=50 is_nan=false
+width=100 is_nan=false
+width=1000 is_nan=false
+did not reproduce - all widths produced a finite (non-NaN) stroked path
+
+---
+
+Repeat-run check (before the fix, same debug build, 3 consecutive runs of the exact issue #519
+repro - width=10.0 only, matching the reporter's exact example):
+
+$ cargo run -p kurbo --example nan_repro   (run 1)
+width=10.0 is_nan=true
+width=5.0 is_nan=false
+$ cargo run -p kurbo --example nan_repro   (run 2)
+width=10.0 is_nan=true
+width=5.0 is_nan=false
+$ cargo run -p kurbo --example nan_repro   (run 3)
+width=10.0 is_nan=true
+width=5.0 is_nan=false
+
+Deterministic, 3/3 runs, debug build (`cargo build`/`cargo run` in this workspace has
+debug-assertions/overflow-checks on by default; the bug is a NaN produced by ordinary floating
+point arithmetic, not a debug-assertion panic, so it reproduces identically in release too - not
+re-verified separately since the repro doesn't depend on assertion checks).
+
+---
+
+Debug trace (temporary instrumentation, not part of the shipped fix) that pinpointed the
+mechanism, captured while investigating - kept here as evidence, not reproducible via `just test`:
+
+DEBUG do_cubic (curved path) c=CubicBez { p0: (47.4321, 317.6239), p1: (46.7915, 317.7801), p2: (46.7915, 317.2176), p3: (46.7915, 317.2176) } width=10
+DEBUG offset_rec depth=0 t0=0.00000000000000000000 t1=1.00000000000000000000 cusp0=-3.189899898221924 cusp1=1 utan0=Vec2 { x: -0.9715356645708174, y: 0.23689333563217932 } utan1=Vec2 { x: 0.0, y: -1.0 }
+DEBUG offset_rec depth=1 t0=0.00000000000000000000 t1=1.00000000000000000000 cusp0=-3.189899898221924 cusp1=-0.000000000001 utan0=Vec2 { x: -0.9715356645708174, y: 0.23689333563217932 } utan1=Vec2 { x: NaN, y: NaN }

@@ -1,0 +1,68 @@
+diff --git a/parser/src/dataset/read.rs b/parser/src/dataset/read.rs
+index 9f592edf..f18c3446 100644
+--- a/parser/src/dataset/read.rs
++++ b/parser/src/dataset/read.rs
+@@ -66,6 +66,19 @@ pub enum Error {
+     UnexpectedItemTag { tag: Tag, backtrace: Backtrace },
+     /// Undefined pixel item length
+     UndefinedItemLength,
++    #[snafu(display(
++        "Element {} declares a value length of {} bytes, \
++         which exceeds the {} bytes remaining in its enclosing item/sequence",
++        tag,
++        len,
++        remaining
++    ))]
++    ElementLengthExceedsContainer {
++        tag: Tag,
++        len: u32,
++        remaining: u64,
++        backtrace: Backtrace,
++    },
+ }
+ 
+ pub type Result<T> = std::result::Result<T, Error>;
+@@ -562,7 +575,43 @@ where
+         })
+     }
+ 
++    /// The number of bytes remaining in the innermost currently open
++    /// item/sequence, according to its own declared (defined) length -
++    /// `None` if there is no enclosing container or its length is
++    /// undefined (in which case there is nothing to bound against here).
++    fn remaining_bytes_in_container(&self) -> Option<u64> {
++        let sd = self.seq_delimiters.last()?;
++        let len = sd.len.get()?;
++        let end_of_sequence = sd.base_offset + len as u64;
++        let bytes_read = self.parser.position();
++        Some(end_of_sequence.saturating_sub(bytes_read))
++    }
++
+     fn read_value(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
++        // Guard against a declared value length that would read past the
++        // bounds of the immediately enclosing item/sequence (only
++        // meaningful when that container itself has a defined length).
++        // This is most easily triggered by CP-246-style undefined-length
++        // private elements (turned into a pseudo-sequence with one
++        // explicit-length item) whose actual content is opaque binary
++        // data, not a nested data set - bytes that happen to look like a
++        // plausible tag+length pair are otherwise read as a real element
++        // header, and the resulting bogus, oversized length then drives an
++        // attempt to read arbitrarily far past this item (and often past
++        // EOF), surfacing only as a generic, hard-to-diagnose I/O error.
++        if let Some(len) = header.len.get() {
++            if let Some(remaining) = self.remaining_bytes_in_container() {
++                if len as u64 > remaining {
++                    return ElementLengthExceedsContainerSnafu {
++                        tag: header.tag,
++                        len,
++                        remaining,
++                    }
++                    .fail();
++                }
++            }
++        }
++
+         match self.options.value_read {
+             ValueReadStrategy::Interpreted => self.parser.read_value(header),
+             ValueReadStrategy::Preserved => self.parser.read_value_preserved(header),

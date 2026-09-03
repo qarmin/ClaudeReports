@@ -1,0 +1,97 @@
+=== Standalone repro/ (own Cargo.toml, cloned pristine upstream df2b9e4236298efa3fa37a1f360fc4bf284d586a via `just clone`), `just reproduce`, --release cargo profile ===
+
+$ just reproduce
+cd repro && cargo run --quiet -- jpeg2000; echo "jpeg2000 variant exit code: $?"
+variant=jpeg2000 fixture=pydicom/emri_small_jpeg_2k_lossless.dcm n_frames=10 real embedded per-frame codestream declares 64x64, patching DICOM header Rows/Columns to 32x32
+calling decode_pixel_data() via the gdcm feature's FFI path...
+Segmentation fault (core dumped)
+jpeg2000 variant exit code: 139
+cd repro && cargo run --quiet -- jpegls; echo "jpegls variant exit code: $?"
+variant=jpegls fixture=pydicom/emri_small_jpeg_ls_lossless.dcm n_frames=10 real embedded per-frame codestream declares 64x64, patching DICOM header Rows/Columns to 256x256
+calling decode_pixel_data() via the gdcm feature's FFI path...
+repro: /home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gdcm-rs-0.6.0/GDCM/Source/MediaStorageAndFileFormat/gdcmBitmap.cxx:731: bool gdcm::Bitmap::TryJPEGLSCodec(char*, bool&) const: Assertion `len <= outbv->GetLength()' failed.
+Aborted (core dumped)
+jpegls variant exit code: 134
+
+=== Standalone repro/, 3 additional repeat runs each variant (cargo run directly) ===
+
+=== jpeg2000 run 1 ===
+variant=jpeg2000 fixture=pydicom/emri_small_jpeg_2k_lossless.dcm n_frames=10 real embedded per-frame codestream declares 64x64, patching DICOM header Rows/Columns to 32x32
+calling decode_pixel_data() via the gdcm feature's FFI path...
+Segmentation fault (core dumped)
+exit: 139
+
+=== jpeg2000 run 2 ===
+variant=jpeg2000 fixture=pydicom/emri_small_jpeg_2k_lossless.dcm n_frames=10 real embedded per-frame codestream declares 64x64, patching DICOM header Rows/Columns to 32x32
+calling decode_pixel_data() via the gdcm feature's FFI path...
+free(): chunks in smallbin corrupted
+Aborted (core dumped)
+exit: 134
+
+=== jpeg2000 run 3 ===
+variant=jpeg2000 fixture=pydicom/emri_small_jpeg_2k_lossless.dcm n_frames=10 real embedded per-frame codestream declares 64x64, patching DICOM header Rows/Columns to 32x32
+calling decode_pixel_data() via the gdcm feature's FFI path...
+double free or corruption (out)
+Aborted (core dumped)
+exit: 134
+
+=== jpegls run 1 ===
+variant=jpegls fixture=pydicom/emri_small_jpeg_ls_lossless.dcm n_frames=10 real embedded per-frame codestream declares 64x64, patching DICOM header Rows/Columns to 256x256
+calling decode_pixel_data() via the gdcm feature's FFI path...
+repro: gdcmBitmap.cxx:731: bool gdcm::Bitmap::TryJPEGLSCodec(char*, bool&) const: Assertion `len <= outbv->GetLength()' failed.
+Aborted (core dumped)
+exit: 134
+
+=== jpegls run 2 === (same assertion failure, Aborted, exit 134)
+=== jpegls run 3 === (same assertion failure, Aborted, exit 134)
+
+Summary: jpeg2000 variant crashed 5/5 runs total (1 via `just reproduce` + 2 earlier ad hoc runs
++ 3 in this batch); jpegls variant crashed 5/5 runs total, all with the identical assertion
+message. The exact symptom for jpeg2000 varies run to run (SIGSEGV vs different glibc
+heap-corruption abort messages) - expected for a genuine heap-buffer-overflow write, where the
+corrupted allocator metadata is only detected whenever a later malloc/free call happens to
+inspect the corrupted region.
+
+=== In-tree temporary #[test] (reverted before this write-up), debug build, real public API ===
+
+`cargo test -p dicom-pixeldata --features gdcm,image --lib bughunt_multiframe_declared_dims_mismatch -- --nocapture --test-threads=1`, run per-case, 3 runs each:
+
+--- JPEG2000 multi-frame (fragments=10, NumberOfFrames=10, emri_small_jpeg_2k_lossless.dcm), declared Rows/Columns patched to 32x32 vs real per-frame embedded codestream 64x64 ---
+run 1: signal 11 SIGSEGV
+run 2: signal 11 SIGSEGV
+run 3: signal 6 SIGABRT ("free(): chunks in smallbin corrupted" / "munmap_chunk(): invalid pointer" / "double free or corruption (out)", varies by run)
+
+--- JPEG-LS multi-frame (fragments=10, NumberOfFrames=10, emri_small_jpeg_ls_lossless.dcm), declared Rows/Columns patched to 256x256 vs real per-frame embedded codestream 64x64 ---
+run 1: signal 6 SIGABRT, "gdcmBitmap.cxx:731: ... Assertion `len <= outbv->GetLength()' failed."
+run 2: signal 6 SIGABRT, same assertion
+run 3: signal 6 SIGABRT, same assertion
+
+=== In-tree temporary #[test], --release cargo build (GDCM built by the cmake-crate invocation triggered by this build) ===
+
+`cargo test --release -p dicom-pixeldata --features gdcm,image --lib bughunt_multiframe_declared_dims_mismatch -- --nocapture --test-threads=1`, 3 runs each:
+
+--- jpeg2000 ---
+run 1: signal 6 SIGABRT ("munmap_chunk(): invalid pointer")
+run 2: signal 11 SIGSEGV
+run 3: signal 6 SIGABRT ("double free or corruption (out)")
+
+--- jpegls ---
+run 1: signal 11 SIGSEGV
+run 2: signal 11 SIGSEGV
+run 3: signal 11 SIGSEGV
+(the guarding assert() is compiled out under this GDCM build's NDEBUG, so the out-of-bounds
+memcpy read itself now runs far enough to hit an unmapped page, same pattern candidate 100
+observed for its single-fragment case)
+
+=== Confirming the multi-frame code path is genuinely different from candidate 100's ===
+
+Temporary #[test] `bughunt_check_fragment_count` (reverted), printing `SequenceOfFragments::fragments().len()` for both fixtures before any patching:
+
+pydicom/emri_small_jpeg_2k_lossless.dcm: fragments=10
+pydicom/emri_small_jpeg_ls_lossless.dcm: fragments=10
+
+Since `pixeldata/src/gdcm.rs` only calls `decode_multi_frame_compressed` (dims[2] = number_of_frames,
+here 10) when `fragments.len() > 1`, this confirms both crashes above went through GDCM's
+per-fragment loop in `JPEG2000Codec::Decode`/`JPEGLSCodec::Decode`'s `NumberOfDimensions == 3`
+branch with `Dimensions[2] == 10`, genuinely processing 10 fragments/frames in one decode call -
+not the `Dimensions[2] == 1` single-fragment case candidate 100 used.

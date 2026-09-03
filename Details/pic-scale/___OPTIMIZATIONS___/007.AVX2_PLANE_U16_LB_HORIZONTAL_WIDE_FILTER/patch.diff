@@ -1,0 +1,132 @@
+diff --git a/src/avx2/plane_u16_lb.rs b/src/avx2/plane_u16_lb.rs
+index 7ba80ef..708ced9 100644
+--- a/src/avx2/plane_u16_lb.rs
++++ b/src/avx2/plane_u16_lb.rs
+@@ -27,7 +27,7 @@
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+-use crate::avx2::utils::{_mm_dot16_avx_epi32, _mm_reduce_r_epi32};
++use crate::avx2::utils::{_mm256_dot16_avx_epi32, _mm_dot16_avx_epi32, _mm_reduce_r_epi32};
+ use crate::filter_weights::FilterWeights;
+ use crate::support::{PRECISION, ROUNDING_CONST};
+ use std::arch::x86_64::*;
+@@ -73,6 +73,33 @@ fn acc_8_dot<const D: bool>(start_x: usize, src: &[u16], w0: __m128i, store: __m
+     }
+ }
+ 
++#[inline]
++#[target_feature(enable = "avx2")]
++fn acc_16_dot<const D: bool>(
++    start_x: usize,
++    src: &[u16],
++    w0: __m256i,
++    store: __m256i,
++) -> __m256i {
++    unsafe {
++        const CN: usize = 1;
++        let src_ptr = src.get_unchecked((start_x * CN)..);
++        let px = _mm256_loadu_si256(src_ptr.as_ptr().cast());
++
++        _mm256_dot16_avx_epi32::<D>(store, px, w0)
++    }
++}
++
++#[inline(always)]
++fn fold_store_256(store256: __m256i) -> __m128i {
++    unsafe {
++        _mm_add_epi32(
++            _mm256_castsi256_si128(store256),
++            _mm256_extracti128_si256::<1>(store256),
++        )
++    }
++}
++
+ pub(crate) fn convolve_horizontal_plane_avx_rows_4_u16(
+     src: &[u16],
+     src_stride: usize,
+@@ -168,6 +195,7 @@ impl<const D: bool> Row4ExecutionHandler<D> {
+             let iter_row3 = row3_ref.iter_mut();
+ 
+             let base_val = _mm_setr_epi32(ROUNDING_CONST, 0, 0, 0);
++            let base_val256 = _mm256_setr_epi32(ROUNDING_CONST, 0, 0, 0, 0, 0, 0, 0);
+ 
+             for (((((chunk0, chunk1), chunk2), chunk3), &bounds), weights) in iter_row0
+                 .zip(iter_row1)
+@@ -181,10 +209,6 @@ impl<const D: bool> Row4ExecutionHandler<D> {
+                 )
+             {
+                 let mut jx = 0usize;
+-                let mut store_0 = base_val;
+-                let mut store_1 = base_val;
+-                let mut store_2 = base_val;
+-                let mut store_3 = base_val;
+ 
+                 let bounds_size = bounds.size;
+ 
+@@ -193,6 +217,34 @@ impl<const D: bool> Row4ExecutionHandler<D> {
+                 let src2 = src1.get_unchecked(src_stride..);
+                 let src3 = src2.get_unchecked(src_stride..);
+ 
++                let mut astore_0 = base_val256;
++                let mut astore_1 = base_val256;
++                let mut astore_2 = base_val256;
++                let mut astore_3 = base_val256;
++
++                while jx + 16 <= bounds_size {
++                    let w_ptr = weights.get_unchecked(jx..);
++                    let wl = _mm256_loadu_si256(w_ptr.as_ptr().cast());
++                    let bounds_start = bounds.start + jx;
++                    astore_0 = acc_16_dot::<D>(bounds_start, src0, wl, astore_0);
++                    astore_1 = acc_16_dot::<D>(bounds_start, src1, wl, astore_1);
++                    astore_2 = acc_16_dot::<D>(bounds_start, src2, wl, astore_2);
++                    astore_3 = acc_16_dot::<D>(bounds_start, src3, wl, astore_3);
++                    jx += 16;
++                }
++
++                let mut store_0 = fold_store_256(astore_0);
++                let mut store_1 = fold_store_256(astore_1);
++                let mut store_2 = fold_store_256(astore_2);
++                let mut store_3 = fold_store_256(astore_3);
++
++                if jx == 0 {
++                    store_0 = base_val;
++                    store_1 = base_val;
++                    store_2 = base_val;
++                    store_3 = base_val;
++                }
++
+                 while jx + 8 <= bounds_size {
+                     let w_ptr = weights.get_unchecked(jx..);
+                     let wl = _mm_loadu_si128(w_ptr.as_ptr().cast());
+@@ -313,6 +365,7 @@ impl<const D: bool> OneRowExecutionUnit<D> {
+         unsafe {
+             let v_max_colors = _mm_set1_epi16((1 << bit_depth) - 1);
+             let base_val = _mm_setr_epi32(ROUNDING_CONST, 0, 0, 0);
++            let base_val256 = _mm256_setr_epi32(ROUNDING_CONST, 0, 0, 0, 0, 0, 0, 0);
+ 
+             for ((dst, bounds), weights) in dst.iter_mut().zip(filter_weights.bounds.iter()).zip(
+                 filter_weights
+@@ -321,7 +374,21 @@ impl<const D: bool> OneRowExecutionUnit<D> {
+             ) {
+                 let bounds_size = bounds.size;
+                 let mut jx = 0usize;
+-                let mut store = base_val;
++
++                let mut astore = base_val256;
++
++                while jx + 16 <= bounds_size {
++                    let w_ptr = weights.get_unchecked(jx..);
++                    let wl = _mm256_loadu_si256(w_ptr.as_ptr().cast());
++                    let bounds_start = bounds.start + jx;
++                    astore = acc_16_dot::<D>(bounds_start, src, wl, astore);
++                    jx += 16;
++                }
++
++                let mut store = fold_store_256(astore);
++                if jx == 0 {
++                    store = base_val;
++                }
+ 
+                 while jx + 8 <= bounds_size {
+                     let w_ptr = weights.get_unchecked(jx..);

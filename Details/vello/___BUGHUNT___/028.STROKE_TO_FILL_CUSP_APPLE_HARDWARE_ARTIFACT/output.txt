@@ -1,0 +1,69 @@
+=== main.rs (real CPU-shader production pipeline, real vello::Scene::stroke public API) ===
+scale=    1.0000  n_lines=  66  total_polyline_length=    667.1875 (device px)
+scale=    2.0000  n_lines=  82  total_polyline_length=   1133.9221 (device px)
+scale=    5.0000  n_lines= 102  total_polyline_length=   2537.4455 (device px)
+scale=    5.3332  n_lines= 110  total_polyline_length=   2693.2394 (device px)
+scale=    8.0000  n_lines= 122  total_polyline_length=   3941.2737 (device px)
+scale=   16.0000  n_lines= 154  total_polyline_length=   7685.3890 (device px)
+scale=   32.0000  n_lines= 194  total_polyline_length=  15174.0746 (device px)
+scale=   64.0000  n_lines= 254  total_polyline_length=  30151.7496 (device px)
+scale=  100.0000  n_lines= 300  total_polyline_length=  47001.6381 (device px)
+scale=  113.5797  n_lines= 320  total_polyline_length=  53357.6788 (device px)
+scale=  120.0000  n_lines= 332  total_polyline_length=  56362.6947 (device px)
+scale=  150.0000  n_lines= 364  total_polyline_length=  70404.1811 (device px)
+scale=  200.0000  n_lines= 408  total_polyline_length=  93806.7844 (device px)
+
+did not reproduce: the real production CPU-shader `flatten` pipeline (plain scalar f32 Rust arithmetic, strictly IEEE-754, no fast-math/reassociation of any kind) never crashes, never emits a non-finite point, and produces a consistently-growing segment count/polyline length as `s` increases (no sudden collapse or blow-up) across the reporter's own affected scale range and well outside it, on this exact near-cusp cubic. This matches the issue reporter's own finding that the artifact is absent on CPU shaders - see RESULT.md for the additional real-GPU-shader-dispatch check (bin/gpu_check) and why a genuine Metal/Apple-hardware repro was not attempted this session.
+
+=== running again (repeat 2/2, determinism check) ===
+scale=    1.0000  n_lines=  66  total_polyline_length=    667.1875 (device px)
+scale=    2.0000  n_lines=  82  total_polyline_length=   1133.9221 (device px)
+scale=    5.0000  n_lines= 102  total_polyline_length=   2537.4455 (device px)
+scale=    5.3332  n_lines= 110  total_polyline_length=   2693.2394 (device px)
+scale=    8.0000  n_lines= 122  total_polyline_length=   3941.2737 (device px)
+scale=   16.0000  n_lines= 154  total_polyline_length=   7685.3890 (device px)
+scale=   32.0000  n_lines= 194  total_polyline_length=  15174.0746 (device px)
+scale=   64.0000  n_lines= 254  total_polyline_length=  30151.7496 (device px)
+scale=  100.0000  n_lines= 300  total_polyline_length=  47001.6381 (device px)
+scale=  113.5797  n_lines= 320  total_polyline_length=  53357.6788 (device px)
+scale=  120.0000  n_lines= 332  total_polyline_length=  56362.6947 (device px)
+scale=  150.0000  n_lines= 364  total_polyline_length=  70404.1811 (device px)
+scale=  200.0000  n_lines= 408  total_polyline_length=  93806.7844 (device px)
+
+did not reproduce: the real production CPU-shader `flatten` pipeline (plain scalar f32 Rust arithmetic, strictly IEEE-754, no fast-math/reassociation of any kind) never crashes, never emits a non-finite point, and produces a consistently-growing segment count/polyline length as `s` increases (no sudden collapse or blow-up) across the reporter's own affected scale range and well outside it, on this exact near-cusp cubic. This matches the issue reporter's own finding that the artifact is absent on CPU shaders - see RESULT.md for the additional real-GPU-shader-dispatch check (bin/gpu_check) and why a genuine Metal/Apple-hardware repro was not attempted this session.
+
+=== gpu_check.rs (real GPU shader dispatch via SwiftShader/Vulkan software adapter vs CPU fallback) ===
+Using adapter: AdapterInfo { name: "SwiftShader Device (Subzero)", vendor: 6880, device: 49374, device_type: Cpu, device_pci_bus_id: "", driver: "SwiftShader driver", driver_info: "", backend: Vulkan, subgroup_min_size: 4, subgroup_max_size: 4, transient_saves_memory: false }
+scale=    1.0000  differing_pixels(>8/255)=     0  max_channel_diff=  1
+scale=    5.3332  differing_pixels(>8/255)=     0  max_channel_diff=  1
+scale=    8.0000  differing_pixels(>8/255)=     0  max_channel_diff=  1
+scale=   32.0000  differing_pixels(>8/255)=     6  max_channel_diff= 10
+scale=   64.0000  differing_pixels(>8/255)=    24  max_channel_diff= 18
+scale=  113.5797  differing_pixels(>8/255)=    60  max_channel_diff= 36
+scale=  200.0000  differing_pixels(>8/255)=    18  max_channel_diff= 14
+
+=== Additional diagnostic (Approach 3): temporary instrumentation, reverted after capture ===
+# Temporary println!s were added to vello_shaders/src/cpu/euler.rs (CubicParams::from_points_derivs)
+# and flatten.rs (the ACCEPT/SUBDIVIDE decision site), gated behind BUGHUNT028_DEBUG env var,
+# to inspect the real intermediate values the reporter's own diagnosis points at. Reverted via
+# `git checkout --` immediately after capturing this output; not part of patch.diff (no patch.diff
+# exists for this candidate).
+#
+# Full capture at scale=113.5797 (13 subdivision steps for the "offset >= 0" half of the near-cusp
+# stroke) is in output_debug_113.5797.txt alongside this file. Representative excerpt showing the
+# ACCEPT/SUBDIVIDE decision sitting within ~1.3% of the tolerance boundary, computed via a
+# subtraction of two nearly-equal values (a - amin) that loses ~2 significant decimal digits:
+    halo_asymm: 0.00016829208
+  t0=0.5625 t1=0.625 dt=0.0625 err=0.0029579333 scale=113.5797 err*scale=0.33596116 tol=0.25 decision=SUBDIVIDE
+    th0: 0.032701924 th1: 0.028333541 cth0: 0.99946535 cth1: 0.9995986 cth0*cth1: 0.9990642
+    e0: 0.33342248
+    e1: 0.33340025
+    s0: 0.032696094
+    s1: 0.02832975
+    s01: 0.060997576
+    amin: 0.005086926
+    a: 0.0050436417
+    a-amin (pre-abs): -0.000043284148
+    aerr: 0.000043284148
+    symm: 0.061035465
+  t0=0.3125 t1=0.375 dt=0.0625 err=0.0021734978 scale=113.5797 err*scale=0.24686523 tol=0.25 decision=ACCEPT

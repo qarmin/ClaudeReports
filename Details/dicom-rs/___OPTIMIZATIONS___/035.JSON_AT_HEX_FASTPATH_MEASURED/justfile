@@ -1,0 +1,45 @@
+# Self-contained reproduction for candidate 035.JSON_AT_HEX_FASTPATH_MEASURED.
+#
+# Re-applies candidate 027's own patch.diff unchanged (see RESULT.md - no new library source
+# change here; the AsAttributeTags half of that patch was applied "for consistency" back then
+# but never benchmarked - this candidate finally measures it, via a harness-only gen-at mode).
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern), self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched genfixtures bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+    rm -rf clone/___OPTIMIZATIONS___/harness/bench_pipeline/target
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+genfixtures:
+    ./bin_baseline gen-at testdata_at50k.dcm 50000
+    ./bin_baseline gen-at testdata_at10.dcm 10
+
+bench:
+    @echo "=== json-encode, 50,000 AT tags ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- json-encode testdata_at50k.dcm 30
+    @echo "=== json-encode, 10 AT tags (realistic size) ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- json-encode testdata_at10.dcm 30
+
+clean:
+    rm -rf clone bin_baseline bin_patched testdata_at50k.dcm testdata_at10.dcm

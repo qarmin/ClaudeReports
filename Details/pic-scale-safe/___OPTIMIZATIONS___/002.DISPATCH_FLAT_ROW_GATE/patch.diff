@@ -1,0 +1,415 @@
+diff --git a/src/fixed_point_dispatch.rs b/src/fixed_point_dispatch.rs
+index 0851737..85b721f 100644
+--- a/src/fixed_point_dispatch.rs
++++ b/src/fixed_point_dispatch.rs
+@@ -120,40 +120,15 @@ pub(crate) fn convolve_trampoline_fixed_point<T, J, const CHANNELS: usize>(
+     let quads = destination_size.height / 4;
+     let (dst_quads, dst_rem) = destination.split_at_mut(quads * 4 * dst_stride);
+ 
+-    #[cfg(not(feature = "rayon"))]
+-    {
+-        let mut scratch = vec![T::default(); scratch_len];
+-
+-        for (quad, dst) in dst_quads.chunks_exact_mut(dst_stride * 4).enumerate() {
+-            vertical_pass_into_scratch::<T, J>(
+-                image_store,
+-                src_stride,
+-                &mut scratch,
+-                &v_weights,
+-                quad * 4,
+-                bit_depth,
+-            );
+-            T::handle_row_4::<CHANNELS>(
+-                &scratch, src_stride, dst, dst_stride, &h_weights, bit_depth,
+-            );
+-        }
+-
+-        let scratch_row = &mut scratch[..src_stride];
++    // Below this many output rows, rayon's own dispatch/join overhead dwarfs the actual
++    // convolution work regardless of which/how-large a rayon pool absorbs it - see image-rs
++    // candidate 033 (`resize_nearest`'s own gate) and candidate 049 (this gate, extended to the
++    // rest of pic-scale-safe's dispatch sites) for the measurements that motivated this.
++    #[cfg(feature = "rayon")]
++    const MIN_ROWS_FOR_RAYON: usize = 32;
+ 
+-        for (y, dst) in dst_rem.chunks_exact_mut(dst_stride).enumerate() {
+-            vertical_pass_into_scratch::<T, J>(
+-                image_store,
+-                src_stride,
+-                scratch_row,
+-                &v_weights,
+-                quads * 4 + y,
+-                bit_depth,
+-            );
+-            T::handle_row::<CHANNELS>(scratch_row, dst, &h_weights, bit_depth);
+-        }
+-    }
+     #[cfg(feature = "rayon")]
+-    {
++    if destination_size.height >= MIN_ROWS_FOR_RAYON {
+         for_each_chunk_with_scratch(
+             dst_quads,
+             dst_stride * 4,
+@@ -189,6 +164,39 @@ pub(crate) fn convolve_trampoline_fixed_point<T, J, const CHANNELS: usize>(
+                 T::handle_row::<CHANNELS>(&scratch, dst, &h_weights, bit_depth);
+             }
+         }
++        return;
++    }
++
++    {
++        let mut scratch = vec![T::default(); scratch_len];
++
++        for (quad, dst) in dst_quads.chunks_exact_mut(dst_stride * 4).enumerate() {
++            vertical_pass_into_scratch::<T, J>(
++                image_store,
++                src_stride,
++                &mut scratch,
++                &v_weights,
++                quad * 4,
++                bit_depth,
++            );
++            T::handle_row_4::<CHANNELS>(
++                &scratch, src_stride, dst, dst_stride, &h_weights, bit_depth,
++            );
++        }
++
++        let scratch_row = &mut scratch[..src_stride];
++
++        for (y, dst) in dst_rem.chunks_exact_mut(dst_stride).enumerate() {
++            vertical_pass_into_scratch::<T, J>(
++                image_store,
++                src_stride,
++                scratch_row,
++                &v_weights,
++                quads * 4 + y,
++                bit_depth,
++            );
++            T::handle_row::<CHANNELS>(scratch_row, dst, &h_weights, bit_depth);
++        }
+     }
+ }
+ 
+@@ -225,27 +233,12 @@ pub(crate) fn convolve_row_fixed_point<T, J, const CHANNELS: usize>(
+     let dst_stride_4 = dst_stride * 4;
+ 
+     let weights = filter_weights.numerical_approximation_i16::<PRECISION>(0);
+-    #[cfg(not(feature = "rayon"))]
+-    {
+-        let image_store_4_iter = image_store.chunks_exact(src_stride_4);
+-        let dst_store_4_iter = destination.chunks_exact_mut(dst_stride_4);
+ 
+-        for (src, dst) in image_store_4_iter.zip(dst_store_4_iter) {
+-            T::handle_row_4::<CHANNELS>(src, src_stride, dst, dst_stride, &weights, bit_depth);
+-        }
+-
+-        let image_store_iter_rem = image_store.chunks_exact(src_stride_4).remainder();
+-        let dst_store_iter_rem = destination.chunks_exact_mut(dst_stride_4).into_remainder();
+-
+-        let image_store_iter = image_store_iter_rem.chunks_exact(src_stride);
+-        let dst_store_iter = dst_store_iter_rem.chunks_exact_mut(dst_stride);
++    #[cfg(feature = "rayon")]
++    const MIN_ROWS_FOR_RAYON: usize = 32;
+ 
+-        for (src, dst) in image_store_iter.zip(dst_store_iter) {
+-            T::handle_row::<CHANNELS>(src, dst, &weights, bit_depth);
+-        }
+-    }
+     #[cfg(feature = "rayon")]
+-    {
++    if destination_size.height >= MIN_ROWS_FOR_RAYON {
+         let image_store_4_iter = image_store.par_chunks_exact(src_stride_4);
+         let dst_store_4_iter = destination.par_chunks_exact_mut(dst_stride_4);
+ 
+@@ -266,6 +259,26 @@ pub(crate) fn convolve_row_fixed_point<T, J, const CHANNELS: usize>(
+         image_store_iter.zip(dst_store_iter).for_each(|(src, dst)| {
+             T::handle_row::<CHANNELS>(src, dst, &weights, bit_depth);
+         });
++        return;
++    }
++
++    {
++        let image_store_4_iter = image_store.chunks_exact(src_stride_4);
++        let dst_store_4_iter = destination.chunks_exact_mut(dst_stride_4);
++
++        for (src, dst) in image_store_4_iter.zip(dst_store_4_iter) {
++            T::handle_row_4::<CHANNELS>(src, src_stride, dst, dst_stride, &weights, bit_depth);
++        }
++
++        let image_store_iter_rem = image_store.chunks_exact(src_stride_4).remainder();
++        let dst_store_iter_rem = destination.chunks_exact_mut(dst_stride_4).into_remainder();
++
++        let image_store_iter = image_store_iter_rem.chunks_exact(src_stride);
++        let dst_store_iter = dst_store_iter_rem.chunks_exact_mut(dst_stride);
++
++        for (src, dst) in image_store_iter.zip(dst_store_iter) {
++            T::handle_row::<CHANNELS>(src, dst, &weights, bit_depth);
++        }
+     }
+ }
+ 
+@@ -301,7 +314,10 @@ pub(crate) fn convolve_column_fixed_point<T, J, const CHANNELS: usize>(
+     let weights = filter_weights.numerical_approximation_i16::<PRECISION>(0);
+ 
+     #[cfg(feature = "rayon")]
+-    {
++    const MIN_ROWS_FOR_RAYON: usize = 32;
++
++    #[cfg(feature = "rayon")]
++    if destination_size.height >= MIN_ROWS_FOR_RAYON {
+         let dst_store_iter = destination.par_chunks_exact_mut(dst_stride);
+         dst_store_iter
+             .zip(weights.bounds.par_iter())
+@@ -309,8 +325,9 @@ pub(crate) fn convolve_column_fixed_point<T, J, const CHANNELS: usize>(
+             .for_each(|((dst, bounds), weights)| {
+                 T::handle_column(bounds, image_store, dst, src_stride, weights, bit_depth);
+             });
++        return;
+     }
+-    #[cfg(not(feature = "rayon"))]
++
+     {
+         let dst_store_iter = destination.chunks_exact_mut(dst_stride);
+         for ((dst, bounds), weights) in dst_store_iter
+diff --git a/src/floating_point_dispatch.rs b/src/floating_point_dispatch.rs
+index bac2b9b..f01f766 100644
+--- a/src/floating_point_dispatch.rs
++++ b/src/floating_point_dispatch.rs
+@@ -106,7 +106,7 @@ pub(crate) fn convolve_trampoline_floating_point<T, J, F, const CHANNELS: usize>
+     assert_eq!(
+         destination.len(),
+         destination_size.width * destination_size.height * CHANNELS,
+-        "Destination image slice must match its dimensions"
++        "Source image slice must match its dimensions"
+     );
+ 
+     let (src_stride, k_overflowed) = image_size.width.overflowing_mul(CHANNELS);
+@@ -120,45 +120,15 @@ pub(crate) fn convolve_trampoline_floating_point<T, J, F, const CHANNELS: usize>
+     let quads = destination_size.height / 4;
+     let (dst_quads, dst_rem) = destination.split_at_mut(quads * 4 * dst_stride);
+ 
+-    #[cfg(not(feature = "rayon"))]
+-    {
+-        let mut scratch = vec![T::default(); scratch_len];
+-
+-        for (quad, dst) in dst_quads.chunks_exact_mut(dst_stride * 4).enumerate() {
+-            vertical_pass_into_scratch::<T, J, F>(
+-                image_store,
+-                src_stride,
+-                &mut scratch,
+-                &vertical_weights,
+-                quad * 4,
+-                bit_depth,
+-            );
+-            T::handle_row_4::<CHANNELS>(
+-                &scratch,
+-                src_stride,
+-                dst,
+-                dst_stride,
+-                &horizontal_weights,
+-                bit_depth,
+-            );
+-        }
+-
+-        let scratch_row = &mut scratch[..src_stride];
++    // Below this many output rows, rayon's own dispatch/join overhead dwarfs the actual
++    // convolution work regardless of which/how-large a rayon pool absorbs it - see image-rs
++    // candidate 033 (`resize_nearest`'s own gate) and candidate 049 (this gate, extended to the
++    // rest of pic-scale-safe's dispatch sites) for the measurements that motivated this.
++    #[cfg(feature = "rayon")]
++    const MIN_ROWS_FOR_RAYON: usize = 32;
+ 
+-        for (y, dst) in dst_rem.chunks_exact_mut(dst_stride).enumerate() {
+-            vertical_pass_into_scratch::<T, J, F>(
+-                image_store,
+-                src_stride,
+-                scratch_row,
+-                &vertical_weights,
+-                quads * 4 + y,
+-                bit_depth,
+-            );
+-            T::handle_row::<CHANNELS>(scratch_row, dst, &horizontal_weights, bit_depth);
+-        }
+-    }
+     #[cfg(feature = "rayon")]
+-    {
++    if destination_size.height >= MIN_ROWS_FOR_RAYON {
+         for_each_chunk_with_scratch(
+             dst_quads,
+             dst_stride * 4,
+@@ -198,6 +168,44 @@ pub(crate) fn convolve_trampoline_floating_point<T, J, F, const CHANNELS: usize>
+                 T::handle_row::<CHANNELS>(&scratch, dst, &horizontal_weights, bit_depth);
+             }
+         }
++        return;
++    }
++
++    {
++        let mut scratch = vec![T::default(); scratch_len];
++
++        for (quad, dst) in dst_quads.chunks_exact_mut(dst_stride * 4).enumerate() {
++            vertical_pass_into_scratch::<T, J, F>(
++                image_store,
++                src_stride,
++                &mut scratch,
++                &vertical_weights,
++                quad * 4,
++                bit_depth,
++            );
++            T::handle_row_4::<CHANNELS>(
++                &scratch,
++                src_stride,
++                dst,
++                dst_stride,
++                &horizontal_weights,
++                bit_depth,
++            );
++        }
++
++        let scratch_row = &mut scratch[..src_stride];
++
++        for (y, dst) in dst_rem.chunks_exact_mut(dst_stride).enumerate() {
++            vertical_pass_into_scratch::<T, J, F>(
++                image_store,
++                src_stride,
++                scratch_row,
++                &vertical_weights,
++                quads * 4 + y,
++                bit_depth,
++            );
++            T::handle_row::<CHANNELS>(scratch_row, dst, &horizontal_weights, bit_depth);
++        }
+     }
+ }
+ 
+@@ -234,27 +242,11 @@ pub(crate) fn convolve_row_floating_point<T, J, F, const CHANNELS: usize>(
+     assert!(!k_overflowed, "Stride must be always less than usize::MAX");
+     let dst_stride_4 = dst_stride * 4;
+ 
+-    #[cfg(not(feature = "rayon"))]
+-    {
+-        let image_store_4_iter = image_store.chunks_exact(src_stride_4);
+-        let dst_store_4_iter = destination.chunks_exact_mut(dst_stride_4);
+-
+-        for (src, dst) in image_store_4_iter.zip(dst_store_4_iter) {
+-            T::handle_row_4::<CHANNELS>(src, src_stride, dst, dst_stride, &weights, bit_depth);
+-        }
+-
+-        let image_store_iter_rem = image_store.chunks_exact(src_stride_4).remainder();
+-        let dst_store_iter_rem = destination.chunks_exact_mut(dst_stride_4).into_remainder();
+-
+-        let image_store_iter = image_store_iter_rem.chunks_exact(src_stride);
+-        let dst_store_iter = dst_store_iter_rem.chunks_exact_mut(dst_stride);
++    #[cfg(feature = "rayon")]
++    const MIN_ROWS_FOR_RAYON: usize = 32;
+ 
+-        for (src, dst) in image_store_iter.zip(dst_store_iter) {
+-            T::handle_row::<CHANNELS>(src, dst, &weights, bit_depth);
+-        }
+-    }
+     #[cfg(feature = "rayon")]
+-    {
++    if destination_size.height >= MIN_ROWS_FOR_RAYON {
+         let image_store_4_iter = image_store.par_chunks_exact(src_stride_4);
+         let dst_store_4_iter = destination.par_chunks_exact_mut(dst_stride_4);
+ 
+@@ -275,6 +267,26 @@ pub(crate) fn convolve_row_floating_point<T, J, F, const CHANNELS: usize>(
+         image_store_iter.zip(dst_store_iter).for_each(|(src, dst)| {
+             T::handle_row::<CHANNELS>(src, dst, &weights, bit_depth);
+         });
++        return;
++    }
++
++    {
++        let image_store_4_iter = image_store.chunks_exact(src_stride_4);
++        let dst_store_4_iter = destination.chunks_exact_mut(dst_stride_4);
++
++        for (src, dst) in image_store_4_iter.zip(dst_store_4_iter) {
++            T::handle_row_4::<CHANNELS>(src, src_stride, dst, dst_stride, &weights, bit_depth);
++        }
++
++        let image_store_iter_rem = image_store.chunks_exact(src_stride_4).remainder();
++        let dst_store_iter_rem = destination.chunks_exact_mut(dst_stride_4).into_remainder();
++
++        let image_store_iter = image_store_iter_rem.chunks_exact(src_stride);
++        let dst_store_iter = dst_store_iter_rem.chunks_exact_mut(dst_stride);
++
++        for (src, dst) in image_store_iter.zip(dst_store_iter) {
++            T::handle_row::<CHANNELS>(src, dst, &weights, bit_depth);
++        }
+     }
+ }
+ 
+@@ -315,7 +327,10 @@ pub(crate) fn convolve_column_floating_point<T, J, F, const CHANNELS: usize>(
+     assert!(!k_overflowed, "Stride must be always less than usize::MAX");
+ 
+     #[cfg(feature = "rayon")]
+-    {
++    const MIN_ROWS_FOR_RAYON: usize = 32;
++
++    #[cfg(feature = "rayon")]
++    if destination_size.height >= MIN_ROWS_FOR_RAYON {
+         let dst_store_iter = destination.par_chunks_exact_mut(dst_stride);
+         dst_store_iter
+             .zip(weights.bounds.par_iter())
+@@ -323,8 +338,9 @@ pub(crate) fn convolve_column_floating_point<T, J, F, const CHANNELS: usize>(
+             .for_each(|((dst, bounds), weights)| {
+                 T::handle_column(bounds, image_store, dst, src_stride, weights, bit_depth);
+             });
++        return;
+     }
+-    #[cfg(not(feature = "rayon"))]
++
+     {
+         let dst_store_iter = destination.chunks_exact_mut(dst_stride);
+         for ((dst, bounds), weights) in dst_store_iter
+diff --git a/src/resize_nearest.rs b/src/resize_nearest.rs
+index 65ca914..7681e6a 100644
+--- a/src/resize_nearest.rs
++++ b/src/resize_nearest.rs
+@@ -49,17 +49,7 @@ pub(crate) fn resize_nearest<T: Copy + Send + Sync, const CHANNELS: usize>(
+     let dst_stride = dst_width * CHANNELS;
+     let src_stride = src_width * CHANNELS;
+ 
+-    let iter;
+-    #[cfg(not(feature = "rayon"))]
+-    {
+-        iter = dst.chunks_exact_mut(dst_stride);
+-    }
+-    #[cfg(feature = "rayon")]
+-    {
+-        iter = dst.par_chunks_exact_mut(dst_stride);
+-    }
+-
+-    iter.enumerate().for_each(|(y, dst_row)| {
++    let process_row = |y: usize, dst_row: &mut [T]| {
+         let src_y = ((y as u64 * k_y + k_y_half) >> SHIFT) as usize;
+         let src_offset_y = src_y * src_stride;
+ 
+@@ -78,5 +68,25 @@ pub(crate) fn resize_nearest<T: Copy + Send + Sync, const CHANNELS: usize>(
+ 
+             src_x_fixed += k_x;
+         }
+-    });
++    };
++
++    // Below this many output rows, `par_chunks_exact_mut`'s own dispatch/join overhead
++    // (measured ~9-26us fixed cost on a 24-thread machine) dwarfs the ~1us of actual
++    // nearest-neighbor work, regardless of which/how-large a rayon pool absorbs it - see
++    // image-rs candidates 019-032 (`___OPTIMIZATIONS___/032.NEAREST_FILTER_SKIP_POOL_BELOW_THRESHOLD`)
++    // and this candidate (033) for the measurements that motivated this gate.
++    #[cfg(feature = "rayon")]
++    const MIN_ROWS_FOR_RAYON: usize = 32;
++
++    #[cfg(feature = "rayon")]
++    if dst_height >= MIN_ROWS_FOR_RAYON {
++        dst.par_chunks_exact_mut(dst_stride)
++            .enumerate()
++            .for_each(|(y, dst_row)| process_row(y, dst_row));
++        return;
++    }
++
++    dst.chunks_exact_mut(dst_stride)
++        .enumerate()
++        .for_each(|(y, dst_row)| process_row(y, dst_row));
+ }

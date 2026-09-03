@@ -1,0 +1,50 @@
+diff --git a/parser/src/stateful/decode.rs b/parser/src/stateful/decode.rs
+index 39e8e856..c594f3f6 100644
+--- a/parser/src/stateful/decode.rs
++++ b/parser/src/stateful/decode.rs
+@@ -1088,7 +1088,16 @@ where
+     }
+ 
+     fn read_u32_to_vec(&mut self, length: u32, vec: &mut Vec<u32>) -> Result<()> {
+-        self.read_u32((length >> 2) as usize, vec)
++        if length % 4 != 0 {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::InvalidData,
++                format!("offset table length {length} is not a multiple of 4"),
++            ))
++            .context(ReadValueDataSnafu {
++                position: self.position,
++            });
++        }
++        self.read_u32((length / 4) as usize, vec)
+     }
+ 
+     fn read_to<W>(&mut self, length: u32, mut out: W) -> Result<()>
+@@ -1200,6 +1209,27 @@ mod tests {
+     {
+     }
+ 
++    #[test]
++    fn read_u32_to_vec_misaligned_repro() {
++        // 5 bytes: a full u32, plus 1 leftover byte that isn't a multiple of 4
++        let raw: &[u8] = &[0x01, 0x00, 0x00, 0x00, 0xFF];
++        let mut cursor = Cursor::new(raw);
++        let mut decoder = StatefulDecoder::new(
++            &mut cursor,
++            ExplicitVRLittleEndianDecoder::default(),
++            LittleEndianBasicDecoder,
++            SpecificCharacterSet::default(),
++        );
++
++        let mut vec = Vec::new();
++        let result = decoder.read_u32_to_vec(5, &mut vec);
++
++        // a misaligned length should be rejected outright, rather than
++        // silently consuming only 4 of the 5 declared bytes and leaving the
++        // stream desynchronized for whatever gets parsed next
++        assert!(result.is_err());
++    }
++
+     #[test]
+     fn decode_data_elements() {
+         let mut cursor = Cursor::new(&RAW[..]);

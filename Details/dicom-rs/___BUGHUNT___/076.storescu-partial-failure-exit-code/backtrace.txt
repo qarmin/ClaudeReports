@@ -1,0 +1,27 @@
+REBUILT to meet CONFIRMATION.md section 11's real end-to-end bar (this candidate's original
+repro replicated the status-handling control flow in a standalone script, never running the real
+storescu binary or a real socket - see RESULT.md's note on this). The repro below runs the REAL
+`dicom-storescu` binary against a genuine SCP built on `dicom-ul`'s own real server association
+API, over a REAL loopback TCP socket, checking storescu's own real process exit code.
+
+$ just clone && just reproduce-before   (pristine clone at df2b9e4236298efa3fa37a1f360fc4bf284d586a)
+
+fake SCP: sent a real C-STORE-RSP with a FAILURE status (0xA700)
+ERROR dicom_storescu::store_sync: Failed to store instance `1.2.3.4.5.6.7.8.9` (status code A700H)
+fake SCP: done
+dicom-storescu exit code: 0
+BUG REPRODUCED: storescu exited 0 (success) despite the C-STORE genuinely failing
+(exit 1 expected here: bug reproduced)
+
+$ just apply && just reproduce-after   (patch.diff applied to the same clone)
+
+fake SCP: sent a real C-STORE-RSP with a FAILURE status (0xA700)
+ERROR dicom_storescu::store_sync: Failed to store instance `1.2.3.4.5.6.7.8.9` (status code A700H)
+fake SCP: done
+ERROR dicom_storescu: One or more instances failed to store (partial failure)
+dicom-storescu exit code: 254
+no bug: storescu correctly exited non-zero on the C-STORE failure
+
+Also confirmed directly against the live project tree's own built binaries (a separate
+confirmation before packaging this repro): identical exit 0 (bug) before the patch, identical
+exit 254 with a clear "partial failure" error message after.

@@ -1,0 +1,67 @@
+=== BEFORE patch (real hayro::render entry point, self_type3.pdf, 3 runs, dev build via /tmp/t3test scratch harness against the actual working tree at 5a5f0e24) ===
+
+$ ./target/debug/t3test /tmp/t3test/self_type3.pdf
+thread 'main' (53091) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+EXIT: 134
+
+$ ./target/debug/t3test /tmp/t3test/self_type3.pdf
+thread 'main' (53107) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+run 1 exit: 134
+
+$ ./target/debug/t3test /tmp/t3test/self_type3.pdf
+thread 'main' (53110) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+run 2 exit: 134
+
+$ ./target/debug/t3test /tmp/t3test/self_type3.pdf
+thread 'main' (53113) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+run 3 exit: 134
+
+=== AFTER patch (same harness, same input, 3 runs) ===
+
+$ ./target/debug/t3test /tmp/t3test/self_type3.pdf
+rendered 100x100 without crashing
+run 1 exit: 0
+
+$ ./target/debug/t3test /tmp/t3test/self_type3.pdf
+rendered 100x100 without crashing
+run 2 exit: 0
+
+$ ./target/debug/t3test /tmp/t3test/self_type3.pdf
+rendered 100x100 without crashing
+run 3 exit: 0
+
+=== `just test` run from a fresh clone (repro/ folder's own standalone reproduction, release build) ===
+
+--- reproduce-before (pristine clone at base_commit 5a5f0e247c970df948505ee0bb36e2df2504bf86) ---
+Running `target/release/repro`
+
+thread 'main' (68451) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+[self-referential Type3 font] REPRODUCED - child process crashed (child status: signal: 6 (SIGABRT) (core dumped))
+
+--- apply (patch.diff applies cleanly) ---
+cd clone && git apply patch.diff
+(no output - clean apply)
+
+--- reproduce-after (clone + patch.diff applied) ---
+Running `target/release/repro`
+rendered a 100x100 pixmap without crashing
+[self-referential Type3 font] did not reproduce - render() completed normally (child status: exit status: 0)
+
+=== Project test suite (cargo test --workspace --release --no-fail-fast) ===
+
+Before patch: 788 passed, 1286 failed
+After patch:  788 passed, 1286 failed
+Failing test name sets before/after are byte-for-byte identical (diff of sorted "FAILED" test
+name lists is empty). All 1286 pre-existing failures are the same asset-download issue noted in
+candidate 002's RESULT.md: e.g.
+
+  thread 'render::pdfjs_cable' panicked at hayro-tests/tests/mod.rs:171:40:
+  called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+- external test assets not present in this environment (needs `python sync.py`), unrelated to
+  hayro-interpret::font::type3 and not exercised by this change.

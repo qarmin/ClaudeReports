@@ -1,0 +1,49 @@
+# Self-contained reproduction for candidate 081 (COLR_SWEEP_GRADIENT_DEGENERATE_ANGLE_TRANSPARENT).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+# `reproduce-before` is prefixed with `-` because the repro intentionally exits non-zero when the
+# bug is present (see repro/src/main.rs's exit code convention) - without it, `just`'s
+# fail-fast default would stop the chain right after demonstrating the bug and never reach
+# `apply`/`reproduce-after`.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false clone {{repo_url}} clone
+    cd clone && git config filter.lfs.smudge cat && git config filter.lfs.process "" && git config filter.lfs.required false
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug (classic
+# vello's real GPU render of a degenerate COLRv1 sweep-gradient glyph is almost entirely
+# transparent, while vello_cpu's real render of the exact same glyph is a large solid disc).
+reproduce-before:
+    -cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer reproduce (both renderers
+# show the same solid disc).
+reproduce-after:
+    cd repro && cargo run --release
+
+# Regenerate repro/assets/degenerate_sweep.ttf from a pristine clone's own
+# examples/assets/colr_test_glyphs/test_glyphs-glyf_colr_1.ttf (not needed for `just test` - the
+# mutated font is already checked into repro/assets/ - but documents exactly how it was produced).
+regenerate-font: clone
+    cd tools/font_patch && cargo build --release
+    ./tools/font_patch/target/release/font_patch \
+        clone/examples/assets/colr_test_glyphs/test_glyphs-glyf_colr_1.ttf \
+        repro/assets/degenerate_sweep.ttf
+
+clean:
+    rm -rf clone

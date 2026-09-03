@@ -1,0 +1,66 @@
+Captured output from `just test` (fresh clone of pristine upstream df2b9e42, reproduce-before,
+apply patch.diff, reproduce-after), run twice independently for determinism confirmation.
+
+=== Run 1 ===
+
+--- reproduce-before (pristine df2b9e42) ---
+decoded value: ["AB\210CD "]
+BUG - the invalid byte was decoded into a literal backslash character, DICOM's own value multiplicity separator
+BUG REPRODUCED: an invalid byte under a declared non-default character set was decoded in a way that corrupts the value's structure.
+(exit code: 1, as expected: bug reproduced)
+
+--- reproduce-after (patched clone) ---
+decoded value: ["AB\u{FFFD}CD "]
+No corruption observed: the invalid byte was replaced without introducing a separator.
+(exit code: 0, as expected: bug fixed)
+
+=== Run 2 (independent, fresh clone) ===
+
+--- reproduce-before (pristine df2b9e42) ---
+decoded value: ["AB\210CD "]
+BUG - the invalid byte was decoded into a literal backslash character, DICOM's own value multiplicity separator
+BUG REPRODUCED: an invalid byte under a declared non-default character set was decoded in a way that corrupts the value's structure.
+(exit code: 1, as expected: bug reproduced)
+
+--- reproduce-after (patched clone) ---
+decoded value: ["AB\u{FFFD}CD "]
+No corruption observed: the invalid byte was replaced without introducing a separator.
+(exit code: 0, as expected: bug fixed)
+
+=== Provenance and full round-trip demonstration ===
+
+Found by temporarily stacking candidates 001, 048, 049, 050, 051's already-confirmed patches onto
+the tree and re-running the existing `object/fuzz/fuzz_targets/open_file.rs` for 150s
+(`ASAN_OPTIONS=symbolize=0 cargo +nightly fuzz run open_file -- -max_total_time=150`), which
+turned up a 366-byte crashing input (`cargo +nightly fuzz tmin` could not reduce it further).
+Diagnosing that crash (a `NOT EQUAL` result from a parse/write/re-parse/compare cycle) traced a
+`(0008,0016) SOPClassUID` (VR UI) element's raw byte 0x88 (declared `SpecificCharacterSet` =
+"ISO_IR 192", i.e. UTF-8) being decoded via this crate's `decode_text_trap` fallback into the
+literal 4-character sequence `\210` (backslash + octal digits) - which, upon being written back
+out and read a second time, was mistaken for a value-multiplicity separator, splitting one string
+into two. That specific fuzz input's proximate trigger for invoking the trap at all also involved
+already-documented candidate 002 (VR::UI should always decode under the default character
+repertoire, not the declared one) - stacking 002's patch as well made that particular crash
+disappear entirely (`EQUAL`) without needing this candidate's fix, since UI's byte 0x88 decodes
+without error under the default ISO-8859-1 codec (which maps every byte 0-255) and never reaches
+the trap in the first place. This candidate's fix and repro are independent of 002, however:
+`decode_text_trap` is shared by every non-default character set codec (ISO_IR 192/UTF-8 and every
+ISO-8859-* variant), and this repro demonstrates the same defect directly, using an ordinary text
+VR (LO, `InstitutionName`) that legitimately uses the declared non-default character set (unlike
+UI), independent of candidate 002 or any fuzzer-specific byte layout.
+
+A before/after comparison of the full decode -> encode -> decode round trip (not just the single
+decode step this repro's `main.rs` checks) further confirms the structural corruption directly:
+
+  pristine (before fix):
+    first decode:  Strs(["AB\210CD "])       (1 item, containing a literal `\`)
+    after write+re-decode: Strs(["AB", "210CD  "])   (2 items - split at the injected `\`)
+
+  patched (after fix):
+    first decode:  Strs(["AB\u{FFFD}CD "])   (1 item, no `\`)
+    after write+re-decode: Strs(["AB\u{FFFD}CD "])   (still 1 item - only a length/byte-count
+                                                       difference from U+FFFD's 3-byte UTF-8
+                                                       encoding replacing the original single
+                                                       invalid byte, which is expected and
+                                                       unavoidable for any lossy decoding of
+                                                       genuinely invalid input)

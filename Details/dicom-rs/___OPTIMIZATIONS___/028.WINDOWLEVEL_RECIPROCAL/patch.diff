@@ -1,0 +1,127 @@
+diff --git a/pixeldata/src/transform.rs b/pixeldata/src/transform.rs
+index 88225e00..1e3095cd 100644
+--- a/pixeldata/src/transform.rs
++++ b/pixeldata/src/transform.rs
+@@ -78,6 +78,15 @@ pub struct WindowLevel {
+ pub struct WindowLevelTransform {
+     voi_lut_function: VoiLutFunction,
+     window_level: WindowLevel,
++    // Reciprocals of `window_level.width` (and `width - 1`), computed once here instead of
++    // inside `apply` - `width` is fixed for the lifetime of this transform, but `apply` is
++    // called once per LUT table entry (up to 65,536 times for a 16-bit LUT), so recomputing
++    // `1. / width` on every call and dividing by it was pure redundant work. NOTE: multiplying
++    // by a precomputed reciprocal is not always bit-identical to a direct division in IEEE 754
++    // (two roundings vs one) - see RESULT.md for this candidate's actual measured bit-exactness
++    // check, not assumed here.
++    inv_width: f64,
++    inv_width_minus_1: f64,
+ }
+ 
+ impl WindowLevelTransform {
+@@ -89,15 +98,18 @@ impl WindowLevelTransform {
+     /// and `>= 1` in other functions.
+     #[inline]
+     pub fn new(voi_lut_function: VoiLutFunction, window_level: WindowLevel) -> Self {
++        let width = match voi_lut_function {
++            VoiLutFunction::LinearExact => window_level.width.max(0.),
++            VoiLutFunction::Linear | VoiLutFunction::Sigmoid => window_level.width.max(1.),
++        };
+         WindowLevelTransform {
+             voi_lut_function,
+             window_level: WindowLevel {
+                 center: window_level.center,
+-                width: match voi_lut_function {
+-                    VoiLutFunction::LinearExact => window_level.width.max(0.),
+-                    VoiLutFunction::Linear | VoiLutFunction::Sigmoid => window_level.width.max(1.),
+-                },
++                width,
+             },
++            inv_width: 1. / width,
++            inv_width_minus_1: 1. / (width - 1.),
+         }
+     }
+ 
+@@ -119,25 +131,34 @@ impl WindowLevelTransform {
+                 value,
+                 self.window_level.width,
+                 self.window_level.center,
++                self.inv_width_minus_1,
+                 y_max,
+             ),
+             VoiLutFunction::LinearExact => window_level_linear_exact(
+                 value,
+                 self.window_level.width,
+                 self.window_level.center,
++                self.inv_width,
+                 y_max,
+             ),
+             VoiLutFunction::Sigmoid => window_level_sigmoid(
+                 value,
+                 self.window_level.width,
+                 self.window_level.center,
++                self.inv_width,
+                 y_max,
+             ),
+         }
+     }
+ }
+ 
+-fn window_level_linear(value: f64, window_width: f64, window_center: f64, y_max: f64) -> f64 {
++fn window_level_linear(
++    value: f64,
++    window_width: f64,
++    window_center: f64,
++    inv_ww_minus_1: f64,
++    y_max: f64,
++) -> f64 {
+     let ww = window_width;
+     let wc = window_center;
+     debug_assert!(ww >= 1.);
+@@ -157,11 +178,17 @@ fn window_level_linear(value: f64, window_width: f64, window_center: f64, y_max:
+         y_max
+     } else {
+         // else y = ((x - (c - 0.5)) / (w-1) + 0.5) * (ymax- ymin) + ymin
+-        ((value - (wc - 0.5)) / (ww - 1.) + 0.5) * y_max
++        ((value - (wc - 0.5)) * inv_ww_minus_1 + 0.5) * y_max
+     }
+ }
+ 
+-fn window_level_linear_exact(value: f64, window_width: f64, window_center: f64, y_max: f64) -> f64 {
++fn window_level_linear_exact(
++    value: f64,
++    window_width: f64,
++    window_center: f64,
++    inv_ww: f64,
++    y_max: f64,
++) -> f64 {
+     let ww = window_width;
+     let wc = window_center;
+     debug_assert!(ww >= 0.);
+@@ -179,18 +206,24 @@ fn window_level_linear_exact(value: f64, window_width: f64, window_center: f64,
+         y_max
+     } else {
+         // else y = ((x - c) / w + 0.5) * (ymax - ymin) + ymin
+-        ((value - wc) / ww + 0.5) * y_max
++        ((value - wc) * inv_ww + 0.5) * y_max
+     }
+ }
+ 
+-fn window_level_sigmoid(value: f64, window_width: f64, window_center: f64, y_max: f64) -> f64 {
++fn window_level_sigmoid(
++    value: f64,
++    window_width: f64,
++    window_center: f64,
++    inv_ww: f64,
++    y_max: f64,
++) -> f64 {
+     let ww = window_width;
+     let wc = window_center;
+     assert!(ww >= 1.);
+ 
+     // C.11.2.1.3.1
+ 
+-    y_max / (1. + f64::exp(-4. * (value - wc) / ww))
++    y_max / (1. + f64::exp(-4. * (value - wc) * inv_ww))
+ }
+ 
+ /// A full description of a VOI LUT function transformation

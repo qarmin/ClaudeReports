@@ -1,0 +1,30 @@
+# Self-contained reproduction notes for this candidate.
+#
+# Status: Not reproducible through the crate's public API (see RESULT.md) - there is no
+# patch.diff and no repro/ crate, since `welch` is `pub(crate)` and no public entry point can
+# reach the defect (generate_weights, the only caller, always passes a non-negative argument).
+# The actual reproduction of the function-level defect was done with temporary #[cfg(test)]
+# probes added directly inside src/math/welch.rs in the main checkout (reverted immediately
+# after, see output.txt for the captured output) - that approach only works from inside the
+# crate itself, so it's reproduced here as a clone+patch-in-a-test-module recipe rather than a
+# standalone `repro/` crate.
+
+repo_url := "https://github.com/awxkee/pic-scale-safe.git"
+base_commit := "83c4801428c436678d7c6b6bea74af800924a469"
+
+# Clone pristine and re-run the same in-crate probes used for this candidate's output.txt.
+test: clone probe
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Reinserts the same temporary #[cfg(test)] probe module used to produce output.txt, builds,
+# and runs each probe.
+probe:
+    cd clone && python3 "{{justfile_directory()}}/inject_probe.py"
+    cd clone && cargo test --lib math::welch::bughunt_probe -- --nocapture --test-threads=1
+
+clean:
+    rm -rf clone

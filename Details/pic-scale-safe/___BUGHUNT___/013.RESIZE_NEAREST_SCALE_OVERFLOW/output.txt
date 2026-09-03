@@ -1,0 +1,56 @@
+Captured output of `repro/` (cargo run --release) run against a pristine clone of the main
+project at base_commit 83c4801428c436678d7c6b6bea74af800924a469, BEFORE the fix, twice in a row:
+
+=== run 1 ===
+    Updating crates.io index
+     Locking 3 packages to latest compatible versions
+   Compiling autocfg v1.5.1
+   Compiling num-traits v0.2.19
+   Compiling pic-scale-safe v0.1.11 (.../013.RESIZE_NEAREST_SCALE_OVERFLOW/clone)
+   Compiling repro v0.1.0 (.../013.RESIZE_NEAREST_SCALE_OVERFLOW/repro)
+    Finished `release` profile [optimized] target(s) in 1.61s
+     Running `target/release/repro`
+case_kx (src_width=2^32, dst_width=2): output=[17, 17]
+case_ky (src_height=2^32, dst_height=2): output=[17, 17]
+case_non_power_of_two: expected sample indices = [715828012, 2147484036, 3579140060]
+case_non_power_of_two: output=[0, 0, 0], spread_ok=true
+REPRODUCED - k_x/k_y truncated to 0 for a >=2^32 source dimension, collapsing every destination sample onto source index 0
+
+=== run 2 ===
+    Finished `release` profile [optimized] target(s) in 0.00s
+     Running `target/release/repro`
+case_kx (src_width=2^32, dst_width=2): output=[17, 17]
+case_ky (src_height=2^32, dst_height=2): output=[17, 17]
+case_non_power_of_two: expected sample indices = [715828012, 2147484036, 3579140060]
+case_non_power_of_two: output=[0, 0, 0], spread_ok=true
+REPRODUCED - k_x/k_y truncated to 0 for a >=2^32 source dimension, collapsing every destination sample onto source index 0
+
+For both `case_kx` and `case_ky`, the pristine tree returns [0x11, 0x11] (17 decimal, printed as
+17) instead of the expected [0xAA, 0xBB] (170, 187) - both destination pixels sampled source
+index 0 instead of two distinct, widely separated source indices, exactly matching the predicted
+failure mode of `k_x`/`k_y` truncating to 0.
+
+=== after applying patch.diff to the same clone, run 1 ===
+   Compiling pic-scale-safe v0.1.11 (.../013.RESIZE_NEAREST_SCALE_OVERFLOW/clone)
+   Compiling repro v0.1.0 (.../013.RESIZE_NEAREST_SCALE_OVERFLOW/repro)
+    Finished `release` profile [optimized] target(s) in 1.04s
+     Running `target/release/repro`
+case_kx (src_width=2^32, dst_width=2): output=[170, 187]
+case_ky (src_height=2^32, dst_height=2): output=[170, 187]
+case_non_power_of_two: expected sample indices = [715828012, 2147484036, 3579140060]
+case_non_power_of_two: output=[0, 0, 0], spread_ok=true
+did not reproduce - fixed-point scale factors are computed correctly
+
+=== after applying patch.diff to the same clone, run 2 ===
+    Finished `release` profile [optimized] target(s) in 0.00s
+     Running `target/release/repro`
+case_kx (src_width=2^32, dst_width=2): output=[170, 187]
+case_ky (src_height=2^32, dst_height=2): output=[170, 187]
+case_non_power_of_two: expected sample indices = [715828012, 2147484036, 3579140060]
+case_non_power_of_two: output=[0, 0, 0], spread_ok=true
+did not reproduce - fixed-point scale factors are computed correctly
+
+Environment: x86_64 Linux, 24 cores, 29 GiB RAM (19 GiB free at time of testing) - the ~4 GiB
+`Vec<u8>` allocations used by case_kx/case_ky (src_width or src_height == 2^32, 1 byte/pixel) were
+allocated without difficulty; this is not a theoretical construction, it ran on an ordinary
+development machine.

@@ -1,0 +1,37 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench (baseline first,
+# then patched).
+test: clone bench-baseline apply bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# CARGO_TARGET_DIR is forced here so this always builds into ./bench/target, even if this
+# folder happens to be copied somewhere with its own ancestor .cargo/config.toml overriding
+# the target directory (as the main Slint checkout's does, to share one target/ across its
+# several workspaces).
+bench-baseline:
+    cd bench && CARGO_TARGET_DIR=target cargo build --release
+    ./bench/target/release/bench_sort_model_remove 200000 1,50,200,1000,5000 15
+
+bench-patched:
+    cd bench && CARGO_TARGET_DIR=target cargo build --release
+    ./bench/target/release/bench_sort_model_remove 200000 1,50,200,1000,5000 15
+
+clean:
+    rm -rf clone bench/target

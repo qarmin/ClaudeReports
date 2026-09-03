@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# Requires a system libdav1d shared library to be installed (Debian/Ubuntu: `libdav1d7` or
+# similar runtime package) -- dev headers/pkg-config file are NOT required, since dav1d-sys ships
+# pre-generated FFI bindings and only needs to *link* against the .so. This justfile builds a
+# tiny local pkg-config shim (symlink + .pc file, entirely inside ./dav1d_shim, nothing installed
+# system-wide) pointing at whatever libdav1d.so.* is already on the system, so `cargo build
+# --features avif-native` can succeed without root/apt access.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+test: clone shim reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build a local, non-system pkg-config shim for dav1d from whatever libdav1d.so.* is already
+# installed on this machine (dav1d-sys only needs to link, not compile against headers).
+shim:
+    rm -rf dav1d_shim
+    mkdir -p dav1d_shim/lib dav1d_shim/pkgconfig
+    bash -c '\
+      SO=$(ldconfig -p | grep -m1 "libdav1d.so" | awk "{print \$NF}"); \
+      if [ -z "$SO" ]; then echo "libdav1d shared library not found on this system - install e.g. libdav1d7 first"; exit 1; fi; \
+      ln -sf "$SO" dav1d_shim/lib/libdav1d.so; \
+      printf "prefix=%s\nlibdir=\${prefix}/lib\n\nName: dav1d\nDescription: local link-only shim (no headers needed, dav1d-sys ships pre-generated bindings)\nVersion: 1.5.0\nLibs: -L\${libdir} -ldav1d\nCflags:\n" "$(pwd)/dav1d_shim" > dav1d_shim/pkgconfig/dav1d.pc \
+    '
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug (exit 1).
+reproduce-before:
+    cd repro && PKG_CONFIG_PATH="{{justfile_directory()}}/dav1d_shim/pkgconfig" LD_LIBRARY_PATH="{{justfile_directory()}}/dav1d_shim/lib" cargo run --release || true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer demonstrate the bug (exit 0).
+reproduce-after:
+    cd repro && PKG_CONFIG_PATH="{{justfile_directory()}}/dav1d_shim/pkgconfig" LD_LIBRARY_PATH="{{justfile_directory()}}/dav1d_shim/lib" cargo run --release
+
+clean:
+    rm -rf clone dav1d_shim

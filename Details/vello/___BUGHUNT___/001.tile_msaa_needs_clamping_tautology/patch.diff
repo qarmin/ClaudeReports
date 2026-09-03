@@ -1,0 +1,165 @@
+diff --git a/sparse_strips/vello_common/src/tile.rs b/sparse_strips/vello_common/src/tile.rs
+index b0d09df4..1d89dff1 100644
+--- a/sparse_strips/vello_common/src/tile.rs
++++ b/sparse_strips/vello_common/src/tile.rs
+@@ -1088,13 +1088,6 @@ impl Tiles {
+                     let w_start_base = dx_dir << WINDING_SHIFT;
+                     let w_end_base = not_dx_dir << WINDING_SHIFT;
+ 
+-                    // Check if the line is fully within the horizontal viewport bounds. If it is,
+-                    // we can skip the min/max clamping per row.
+-                    let min_x = p0_x.min(p1_x);
+-                    let max_x = p0_x.max(p1_x);
+-                    // Note: We use >= on the right edge to ensure strictly safe integer truncation
+-                    let needs_clamping = min_x < line_left_x || max_x >= line_right_x;
+-
+                     // Handles the bitmask logic for start/end tiles. Invariant to clamping.
+                     macro_rules! push_edge {
+                         ($x:expr, $y:expr, $row_top_x:expr, $row_bottom_x:expr,
+@@ -1150,22 +1143,29 @@ impl Tiles {
+                     }
+ 
+                     // Handles row geometry and clamping logic.
++                    //
++                    // The per-row min/max is always clamped to `line_left_x`/`line_right_x` (and
++                    // the result to `tile_columns`). This isn't merely a viewport-bounds safety
++                    // net: for perfectly horizontal (or near-horizontal, non-tile-aligned) lines,
++                    // `x_slope` is `+-infinity`, and `0.0 * infinity` (e.g. when `row_top_y ==
++                    // row_bottom_y == p0_y`) yields NaN in `row_top_x`/`row_bottom_x`. The
++                    // `.max(line_left_x)`/`.min(line_right_x)` clamp relies on `f32::max`/`f32::min`
++                    // discarding a NaN operand in favor of the other (finite) one, which is what
++                    // substitutes a correct value for the NaN. Skipping this clamp as a "fast path"
++                    // therefore isn't just a redundant bounds check to drop - it silently breaks
++                    // horizontal-line handling. See tile.rs history/bug-hunt notes for the previous
++                    // (dead, never-actually-exercised) attempt at such a fast path.
+                     macro_rules! process_row {
+                         ($y_idx:expr, $row_top_y:expr, $row_bottom_y:expr, $w_mask:expr,
+-                     $check_s:tt, $check_e:tt, $clamped:tt) => {{
++                     $check_s:tt, $check_e:tt) => {{
+                             let row_top_x = p0_x + ($row_top_y - p0_y) * x_slope;
+                             let row_bottom_x = p0_x + ($row_bottom_y - p0_y) * x_slope;
+ 
+-                            let (row_left_x, row_right_x, x_end) = if $clamped {
++                            let (row_left_x, row_right_x, x_end) = {
+                                 let lx = f32::min(row_top_x, row_bottom_x).max(line_left_x);
+                                 let rx = f32::max(row_top_x, row_bottom_x).min(line_right_x);
+                                 let xe = (rx as u16).min(tile_columns.saturating_sub(1));
+                                 (lx, rx, xe)
+-                            } else {
+-                                let lx = f32::min(row_top_x, row_bottom_x);
+-                                let rx = f32::max(row_top_x, row_bottom_x);
+-                                let xe = rx as u16; // Safe because we checked bounds earlier
+-                                (lx, rx, xe)
+                             };
+ 
+                             let canonical_x_start = row_left_x.floor() as i32;
+@@ -1211,77 +1211,42 @@ impl Tiles {
+                         }};
+                     }
+ 
+-                    // Central macro
+-                    macro_rules! run_loops {
+-                        ($clamped:tt) => {{
+-                            // Top Row
+-                            let is_start_culled = line_top_y < 0.0;
+-                            if !is_start_culled {
+-                                let y = f32::from(y_top_tiles);
+-                                let row_bottom_y = (y + 1.0).min(line_bottom_y);
+-                                let mask = ((y >= line_top_y) as u32) << WINDING_SHIFT;
+-                                process_row!(
+-                                    y_top_tiles,
+-                                    line_top_y,
+-                                    row_bottom_y,
+-                                    mask,
+-                                    true,
+-                                    true,
+-                                    $clamped
+-                                );
+-                            }
++                    // Top Row
++                    let is_start_culled = line_top_y < 0.0;
++                    if !is_start_culled {
++                        let y = f32::from(y_top_tiles);
++                        let row_bottom_y = (y + 1.0).min(line_bottom_y);
++                        let mask = ((y >= line_top_y) as u32) << WINDING_SHIFT;
++                        process_row!(y_top_tiles, line_top_y, row_bottom_y, mask, true, true);
++                    }
+ 
+-                            let y_start_middle = if is_start_culled {
+-                                y_top_tiles
+-                            } else {
+-                                y_top_tiles + 1
+-                            };
+-                            let line_bottom_floor = line_bottom_y.floor();
+-                            let y_end_middle = (line_bottom_floor as u16).min(tile_rows);
+-                            let has_separate_bottom_row = line_bottom_y != line_bottom_floor
+-                                && y_end_middle < tile_rows
+-                                && (is_start_culled || y_end_middle != y_top_tiles);
+-
+-                            if y_start_middle < y_end_middle {
+-                                for y_idx in y_start_middle..y_end_middle {
+-                                    let y = f32::from(y_idx);
+-                                    let row_bottom_y = (y + 1.0).min(line_bottom_y);
+-                                    let is_last_middle = y_idx == y_end_middle - 1;
+-                                    let check_end = is_last_middle && !has_separate_bottom_row;
+-
+-                                    process_row!(
+-                                        y_idx,
+-                                        y,
+-                                        row_bottom_y,
+-                                        u32::MAX,
+-                                        false,
+-                                        check_end,
+-                                        $clamped
+-                                    );
+-                                }
+-                            }
++                    let y_start_middle = if is_start_culled {
++                        y_top_tiles
++                    } else {
++                        y_top_tiles + 1
++                    };
++                    let line_bottom_floor = line_bottom_y.floor();
++                    let y_end_middle = (line_bottom_floor as u16).min(tile_rows);
++                    let has_separate_bottom_row = line_bottom_y != line_bottom_floor
++                        && y_end_middle < tile_rows
++                        && (is_start_culled || y_end_middle != y_top_tiles);
+ 
+-                            // Bottom Row
+-                            if has_separate_bottom_row {
+-                                let y_idx = y_end_middle;
+-                                let y = f32::from(y_idx);
+-                                process_row!(
+-                                    y_idx,
+-                                    y,
+-                                    line_bottom_y,
+-                                    u32::MAX,
+-                                    false,
+-                                    true,
+-                                    $clamped
+-                                );
+-                            }
+-                        }};
++                    if y_start_middle < y_end_middle {
++                        for y_idx in y_start_middle..y_end_middle {
++                            let y = f32::from(y_idx);
++                            let row_bottom_y = (y + 1.0).min(line_bottom_y);
++                            let is_last_middle = y_idx == y_end_middle - 1;
++                            let check_end = is_last_middle && !has_separate_bottom_row;
++
++                            process_row!(y_idx, y, row_bottom_y, u32::MAX, false, check_end);
++                        }
+                     }
+ 
+-                    if needs_clamping {
+-                        run_loops!(true);
+-                    } else {
+-                        run_loops!(false);
++                    // Bottom Row
++                    if has_separate_bottom_row {
++                        let y_idx = y_end_middle;
++                        let y = f32::from(y_idx);
++                        process_row!(y_idx, y, line_bottom_y, u32::MAX, false, true);
+                     }
+                 }
+             } else {

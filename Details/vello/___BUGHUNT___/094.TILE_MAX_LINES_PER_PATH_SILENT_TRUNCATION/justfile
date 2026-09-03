@@ -1,0 +1,49 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# Note: the upstream repo uses Git LFS for a couple of PNG snapshot files unrelated to this crate
+# (vello_tests/snapshots, sparse_strips/vello_sparse_tests/snapshots) - nothing this repro
+# touches. If `git-lfs` isn't installed, and the local/global git config has `filter.lfs.required
+# = true` (git-lfs's own installer sets this globally), a plain `git clone`/`git checkout` can
+# fail outright rather than just warn. The `git -c filter.lfs...` overrides below disable LFS
+# filtering for these specific invocations so cloning/checking out works either way; they are
+# harmless no-ops if git-lfs is actually installed.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+git_no_lfs := "git -c filter.lfs.smudge= -c filter.lfs.clean= -c filter.lfs.process= -c filter.lfs.required=false"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    {{git_no_lfs}} clone {{repo_url}} clone
+    cd clone && {{git_no_lfs}} checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone.
+# In release mode (vello_cpu's normal deployment configuration), this demonstrates the bug: the
+# real, public `RenderContext::fill_path` + `RenderContext::render` entry point completes with NO
+# panic/error/log despite silently discarding 527,191 of the path's 134,744,919 flattened lines.
+# `cargo run` (dev profile, debug-assertions on) instead panics inside `tile.rs`'s
+# `debug_assert!` - showing the release/debug split this candidate is about.
+reproduce-before:
+    cd repro && cargo run --release
+    cd repro && cargo run || true
+
+apply:
+    cd clone && {{git_no_lfs}} apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - neither build panics anymore, and both now
+# print a visible `log::warn!` line reporting the truncation instead of staying silent.
+reproduce-after:
+    cd repro && cargo run --release
+    cd repro && cargo run
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

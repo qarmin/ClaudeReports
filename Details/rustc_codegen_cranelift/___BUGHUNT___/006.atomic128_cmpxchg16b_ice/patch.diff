@@ -1,0 +1,271 @@
+diff --git a/src/intrinsics/mod.rs b/src/intrinsics/mod.rs
+index 4a779e22..8711029d 100644
+--- a/src/intrinsics/mod.rs
++++ b/src/intrinsics/mod.rs
+@@ -54,6 +54,48 @@ fn report_atomic_type_validation_error<'tcx>(
+     fx.bcx.ins().trap(TrapCode::user(1 /* unreachable */).unwrap());
+ }
+ 
++/// Cranelift only has lowering rules for 128bit atomics on x86_64 with `cmpxchg16b`. Without it
++/// `define_function` fails with `Unsupported`, which cg_clif turns into an ICE, so every atomic
++/// intrinsic has to check this before handing an `I128` to `atomic_load`/`atomic_store`/
++/// `atomic_cas`/`atomic_rmw`.
++fn has_128bit_atomics(fx: &FunctionCx<'_, '_, '_>) -> bool {
++    fx.module
++        .isa()
++        .isa_flags()
++        .iter()
++        .any(|flag| flag.name == "has_cmpxchg16b" && flag.as_bool() == Some(true))
++}
++
++/// Reports that 128bit atomics can't be codegened for the current target. Returns `true` if the
++/// caller must stop codegening this intrinsic (`false` means it may proceed).
++fn reject_unsupported_128bit_atomic<'tcx>(
++    fx: &mut FunctionCx<'_, '_, 'tcx>,
++    ty: Ty<'tcx>,
++    span: Span,
++) -> bool {
++    if !matches!(ty.kind(), ty::Uint(UintTy::U128) | ty::Int(IntTy::I128)) {
++        return false;
++    }
++    if has_128bit_atomics(fx) {
++        return false;
++    }
++
++    let msg = if fx.module.isa().triple().architecture == target_lexicon::Architecture::X86_64 {
++        "128bit atomics require the cmpxchg16b target feature; \
++         try `-Ctarget-feature=+cmpxchg16b` or a `-Ctarget-cpu` that implies it"
++    } else {
++        "128bit atomics not yet supported"
++    };
++
++    if fx.tcx.is_compiler_builtins(LOCAL_CRATE) {
++        // special case for compiler-builtins to avoid having to patch it
++        crate::base::codegen_panic_nounwind(fx, msg, span);
++    } else {
++        fx.tcx.dcx().span_fatal(span, msg);
++    }
++    true
++}
++
+ pub(crate) fn clif_vector_type<'tcx>(tcx: TyCtxt<'tcx>, layout: TyAndLayout<'tcx>) -> Type {
+     let (element, count) = match layout.backend_repr {
+         BackendRepr::SimdVector { element, count } => (element, count),
+@@ -870,28 +912,15 @@ fn codegen_regular_intrinsic_call<'tcx>(
+ 
+             let ty = generic_args.type_at(0);
+             match ty.kind() {
+-                ty::Uint(UintTy::U128) | ty::Int(IntTy::I128) => {
+-                    // FIXME implement 128bit atomics
+-                    if fx.tcx.is_compiler_builtins(LOCAL_CRATE) {
+-                        // special case for compiler-builtins to avoid having to patch it
+-                        crate::base::codegen_panic_nounwind(
+-                            fx,
+-                            "128bit atomics not yet supported",
+-                            source_info.span,
+-                        );
+-                        return Ok(());
+-                    } else {
+-                        fx.tcx
+-                            .dcx()
+-                            .span_fatal(source_info.span, "128bit atomics not yet supported");
+-                    }
+-                }
+                 ty::Uint(_) | ty::Int(_) | ty::RawPtr(..) => {}
+                 _ => {
+                     report_atomic_type_validation_error(fx, intrinsic, source_info.span, ty);
+                     return Ok(());
+                 }
+             }
++            if reject_unsupported_128bit_atomic(fx, ty, source_info.span) {
++                return Ok(());
++            }
+             let clif_ty = fx.clif_type(ty).unwrap();
+ 
+             let val = fx.bcx.ins().atomic_load(clif_ty, MemFlagsData::trusted(), ptr);
+@@ -906,28 +935,15 @@ fn codegen_regular_intrinsic_call<'tcx>(
+ 
+             let ty = generic_args.type_at(0);
+             match ty.kind() {
+-                ty::Uint(UintTy::U128) | ty::Int(IntTy::I128) => {
+-                    // FIXME implement 128bit atomics
+-                    if fx.tcx.is_compiler_builtins(LOCAL_CRATE) {
+-                        // special case for compiler-builtins to avoid having to patch it
+-                        crate::base::codegen_panic_nounwind(
+-                            fx,
+-                            "128bit atomics not yet supported",
+-                            source_info.span,
+-                        );
+-                        return Ok(());
+-                    } else {
+-                        fx.tcx
+-                            .dcx()
+-                            .span_fatal(source_info.span, "128bit atomics not yet supported");
+-                    }
+-                }
+                 ty::Uint(_) | ty::Int(_) | ty::RawPtr(..) => {}
+                 _ => {
+                     report_atomic_type_validation_error(fx, intrinsic, source_info.span, ty);
+                     return Ok(());
+                 }
+             }
++            if reject_unsupported_128bit_atomic(fx, ty, source_info.span) {
++                return Ok(());
++            }
+ 
+             let val = val.load_scalar(fx);
+ 
+@@ -945,6 +961,9 @@ fn codegen_regular_intrinsic_call<'tcx>(
+                     return Ok(());
+                 }
+             }
++            if reject_unsupported_128bit_atomic(fx, layout.ty, source_info.span) {
++                return Ok(());
++            }
+             let ty = fx.clif_type(layout.ty).unwrap();
+ 
+             let new = new.load_scalar(fx);
+@@ -967,6 +986,9 @@ fn codegen_regular_intrinsic_call<'tcx>(
+                     return Ok(());
+                 }
+             }
++            if reject_unsupported_128bit_atomic(fx, layout.ty, source_info.span) {
++                return Ok(());
++            }
+ 
+             let test_old = test_old.load_scalar(fx);
+             let new = new.load_scalar(fx);
+@@ -990,6 +1012,9 @@ fn codegen_regular_intrinsic_call<'tcx>(
+                     return Ok(());
+                 }
+             }
++            if reject_unsupported_128bit_atomic(fx, layout.ty, source_info.span) {
++                return Ok(());
++            }
+             let ty = fx.clif_type(layout.ty).unwrap();
+ 
+             let amount = amount.load_scalar(fx);
+@@ -1012,6 +1037,9 @@ fn codegen_regular_intrinsic_call<'tcx>(
+                     return Ok(());
+                 }
+             }
++            if reject_unsupported_128bit_atomic(fx, layout.ty, source_info.span) {
++                return Ok(());
++            }
+             let ty = fx.clif_type(layout.ty).unwrap();
+ 
+             let amount = amount.load_scalar(fx);
+@@ -1034,6 +1062,9 @@ fn codegen_regular_intrinsic_call<'tcx>(
+                     return Ok(());
+                 }
+             }
++            if reject_unsupported_128bit_atomic(fx, layout.ty, source_info.span) {
++                return Ok(());
++            }
+             let ty = fx.clif_type(layout.ty).unwrap();
+ 
+             let src = src.load_scalar(fx);
+@@ -1056,6 +1087,9 @@ fn codegen_regular_intrinsic_call<'tcx>(
+                     return Ok(());
+                 }
+             }
++            if reject_unsupported_128bit_atomic(fx, layout.ty, source_info.span) {
++                return Ok(());
++            }
+             let ty = fx.clif_type(layout.ty).unwrap();
+ 
+             let src = src.load_scalar(fx);
+@@ -1078,6 +1112,9 @@ fn codegen_regular_intrinsic_call<'tcx>(
+                     return Ok(());
+                 }
+             }
++            if reject_unsupported_128bit_atomic(fx, layout.ty, source_info.span) {
++                return Ok(());
++            }
+             let ty = fx.clif_type(layout.ty).unwrap();
+ 
+             let src = src.load_scalar(fx);
+@@ -1100,6 +1137,9 @@ fn codegen_regular_intrinsic_call<'tcx>(
+                     return Ok(());
+                 }
+             }
++            if reject_unsupported_128bit_atomic(fx, layout.ty, source_info.span) {
++                return Ok(());
++            }
+             let ty = fx.clif_type(layout.ty).unwrap();
+ 
+             let src = src.load_scalar(fx);
+@@ -1122,6 +1162,9 @@ fn codegen_regular_intrinsic_call<'tcx>(
+                     return Ok(());
+                 }
+             }
++            if reject_unsupported_128bit_atomic(fx, layout.ty, source_info.span) {
++                return Ok(());
++            }
+             let ty = fx.clif_type(layout.ty).unwrap();
+ 
+             let src = src.load_scalar(fx);
+@@ -1144,6 +1187,9 @@ fn codegen_regular_intrinsic_call<'tcx>(
+                     return Ok(());
+                 }
+             }
++            if reject_unsupported_128bit_atomic(fx, layout.ty, source_info.span) {
++                return Ok(());
++            }
+             let ty = fx.clif_type(layout.ty).unwrap();
+ 
+             let src = src.load_scalar(fx);
+@@ -1166,6 +1212,9 @@ fn codegen_regular_intrinsic_call<'tcx>(
+                     return Ok(());
+                 }
+             }
++            if reject_unsupported_128bit_atomic(fx, layout.ty, source_info.span) {
++                return Ok(());
++            }
+             let ty = fx.clif_type(layout.ty).unwrap();
+ 
+             let src = src.load_scalar(fx);
+@@ -1188,6 +1237,9 @@ fn codegen_regular_intrinsic_call<'tcx>(
+                     return Ok(());
+                 }
+             }
++            if reject_unsupported_128bit_atomic(fx, layout.ty, source_info.span) {
++                return Ok(());
++            }
+             let ty = fx.clif_type(layout.ty).unwrap();
+ 
+             let src = src.load_scalar(fx);
+diff --git a/src/lib.rs b/src/lib.rs
+index 6d2a3537..73514fd1 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -341,7 +341,7 @@ fn build_isa(sess: &Session, jit: bool) -> Arc<dyn TargetIsa + 'static> {
+ 
+     let flags = settings::Flags::new(flags_builder);
+ 
+-    let isa_builder = match sess.opts.cg.target_cpu.as_deref() {
++    let mut isa_builder = match sess.opts.cg.target_cpu.as_deref() {
+         Some(NATIVE_CPU) => cranelift_native::builder_with_options(true).unwrap(),
+         Some(value) => {
+             let mut builder =
+@@ -368,6 +368,20 @@ fn build_isa(sess: &Session, jit: bool) -> Arc<dyn TargetIsa + 'static> {
+         }
+     };
+ 
++    // FIXME forward all of `-C target-feature` to Cranelift. For now only `cmpxchg16b` is
++    // forwarded: it is the one x86 ISA flag Cranelift consults purely to decide whether 128bit
++    // atomics have a lowering at all, so honouring it cannot change the codegen of anything else,
++    // while ignoring it makes `core::arch::x86_64::cmpxchg16b` uncompilable on the default cpu.
++    if target_tuple.architecture == target_lexicon::Architecture::X86_64 {
++        for feature in sess.opts.cg.target_feature.split(',') {
++            match feature.trim() {
++                "+cmpxchg16b" => isa_builder.set("has_cmpxchg16b", "true").unwrap(),
++                "-cmpxchg16b" => isa_builder.set("has_cmpxchg16b", "false").unwrap(),
++                _ => {}
++            }
++        }
++    }
++
+     match isa_builder.finish(flags) {
+         Ok(target_isa) => target_isa,
+         Err(err) => sess.dcx().fatal(format!("failed to build TargetIsa: {}", err)),

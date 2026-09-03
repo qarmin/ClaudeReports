@@ -1,0 +1,52 @@
+# Self-contained reproduction for candidate 021.TRANSCODE_INLINE_CONSUME_PIXELS.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern). Self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+# The harness's own `transcode-to-native`/`transcode-to-native-peak-mem` modes (added this
+# session) are part of the harness copy below, not something this justfile adds itself.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cp "{{justfile_directory()}}/testdata/color3d_jpeg_baseline.dcm" clone/
+    echo "=== bit-exactness check (transcode-to-native, 1 iter, checksum only) ==="
+    ./bin_baseline transcode-to-native clone/color3d_jpeg_baseline.dcm 1
+    ./bin_patched transcode-to-native clone/color3d_jpeg_baseline.dcm 1
+    echo "(expect identical checksum= on both lines above)"
+
+    echo ""
+    echo "=== peak RSS (expect NO consistent difference - see RESULT.md) ==="
+    ./bin_baseline transcode-to-native-peak-mem clone/color3d_jpeg_baseline.dcm
+    ./bin_patched transcode-to-native-peak-mem clone/color3d_jpeg_baseline.dcm
+
+    echo ""
+    echo "=== wall-clock (expect patched ~20-24% faster, consistent) ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- transcode-to-native clone/color3d_jpeg_baseline.dcm 5
+
+clean:
+    rm -rf clone bin_baseline bin_patched

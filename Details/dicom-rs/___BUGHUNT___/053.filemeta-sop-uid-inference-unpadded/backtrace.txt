@@ -1,0 +1,60 @@
+Captured output from `just test` (fresh clone of pristine upstream df2b9e42, reproduce-before,
+apply patch.diff, reproduce-after), run twice independently for determinism confirmation.
+
+=== Run 1 ===
+
+--- reproduce-before (pristine df2b9e42) ---
+inferred media_storage_sop_class_uid = "1.2.3.4" (byte len 7)
+after round trip: media_storage_sop_class_uid = "1.2.3.4\0" (byte len 8)
+BUG - the inferred Media Storage SOP Class UID has odd length (7), which is invalid DICOM and will silently grow by one byte the next time this object is written out
+BUG - Media Storage SOP Class UID did not survive a write/re-read round trip
+BUG REPRODUCED: the SOP Class UID inference fallback stores an unpadded, odd-length value that does not survive its own round trip.
+(exit code: 1, as expected: bug reproduced)
+
+--- reproduce-after (patched clone) ---
+inferred media_storage_sop_class_uid = "1.2.3.4\0" (byte len 8)
+after round trip: media_storage_sop_class_uid = "1.2.3.4\0" (byte len 8)
+No corruption observed: the inferred UID has even length and round-trips stably.
+(exit code: 0, as expected: bug fixed)
+
+=== Run 2 (independent, fresh clone) ===
+
+--- reproduce-before (pristine df2b9e42) ---
+inferred media_storage_sop_class_uid = "1.2.3.4" (byte len 7)
+after round trip: media_storage_sop_class_uid = "1.2.3.4\0" (byte len 8)
+BUG - the inferred Media Storage SOP Class UID has odd length (7), which is invalid DICOM and will silently grow by one byte the next time this object is written out
+BUG - Media Storage SOP Class UID did not survive a write/re-read round trip
+BUG REPRODUCED: the SOP Class UID inference fallback stores an unpadded, odd-length value that does not survive its own round trip.
+(exit code: 1, as expected: bug reproduced)
+
+--- reproduce-after (patched clone) ---
+inferred media_storage_sop_class_uid = "1.2.3.4\0" (byte len 8)
+after round trip: media_storage_sop_class_uid = "1.2.3.4\0" (byte len 8)
+No corruption observed: the inferred UID has even length and round-trips stably.
+(exit code: 0, as expected: bug fixed)
+
+=== Provenance ===
+
+Found by temporarily stacking candidates 001, 002, 008, 048, 049, 050, 051, 052's already-
+confirmed patches onto the tree and re-running the existing `object/fuzz/fuzz_targets/open_file.rs`
+for 150s (`ASAN_OPTIONS=symbolize=0 cargo +nightly fuzz run open_file -- -max_total_time=150`),
+which turned up a 367-byte crashing input (`cargo +nightly fuzz tmin` could not reduce it
+further). A parse/write/re-parse/compare diagnostic traced the discrepancy specifically to
+`meta.media_storage_sop_class_uid`: the fuzzed file's own (0002,0002) element was absent from the
+actual byte stream (its expected position was consumed by a different, oddly-tagged element
+earlier in the malformed meta group), so `FileMetaTable::build()` left the field empty, and
+`object/src/mem.rs`'s "infer from the data set's own SOPClassUID" fallback then ran - exposing
+this bug independently of every other stacked fix or of the fuzz input's other, unrelated
+inconsistencies (a mismatched `information_group_length`, itself an inherent, expected property of
+recomputing group length from corrected content and not itself a bug). The minimal, hand-built
+reproduction here isolates the fallback's defect directly, with no dependency on the fuzzer, file
+meta byte misalignment, or any of the other stacked candidates.
+
+Two related fallback sites, both in `object/src/meta.rs`/`object/src/mem.rs`, shared the exact
+same defect and are covered by this same fix:
+  1. `mem.rs`'s Media Storage SOP Class/Instance UID inference (fixed with `ui_padded(...)`).
+  2. `meta.rs`'s `FileMetaTableBuilder::build()` fallback for a missing Implementation Class UID,
+     which also overrides Implementation Version Name with this crate's own hardcoded
+     `IMPLEMENTATION_VERSION_NAME` constant ("DICOM-rs 0.10.0", 15 characters - already odd-length
+     on its own, independent of any particular input file). This second site can affect *any* file
+     missing (0002,0012), not just crafted/fuzzed ones.

@@ -1,0 +1,195 @@
+diff --git a/src/alpha_handle_f32.rs b/src/alpha_handle_f32.rs
+index 7ee58e8..34bcb7e 100644
+--- a/src/alpha_handle_f32.rs
++++ b/src/alpha_handle_f32.rs
+@@ -253,3 +253,52 @@ pub(crate) fn unpremultiply_alpha_gray_alpha_f32(
+         unpremultiply_alpha_gray_alpha_impl_f32;
+     _dispatcher(in_place, stride, width, height, pool);
+ }
++
++#[cfg(test)]
++mod bughunt_diff_tests {
++    use super::*;
++
++    #[test]
++    fn gray_alpha_matches_rgba_reference_premultiply_f32() {
++        for i in 0..=200 {
++            for j in 0..=200 {
++                let luma = i as f32 / 200.0;
++                let alpha = j as f32 / 200.0;
++                let mut la_dst = [0f32; 2];
++                premultiply_gray_alpha_f32_row(&mut la_dst, &[luma, alpha]);
++
++                let mut rgba_dst = [0f32; 4];
++                premultiply_rgba_f32_row(&mut rgba_dst, &[luma, luma, luma, alpha]);
++
++                assert_eq!(
++                    la_dst[0], rgba_dst[0],
++                    "premultiply mismatch luma={luma} alpha={alpha}: la={la_dst:?} rgba={rgba_dst:?}"
++                );
++                assert_eq!(
++                    la_dst[1], rgba_dst[3],
++                    "premultiply alpha-channel mismatch luma={luma} alpha={alpha}: la={la_dst:?} rgba={rgba_dst:?}"
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn gray_alpha_matches_rgba_reference_unpremultiply_f32() {
++        for i in 0..=200 {
++            for j in 0..=200 {
++                let pixel = i as f32 / 200.0;
++                let alpha = j as f32 / 200.0;
++                let mut la = [pixel, alpha];
++                unpremultiply_gray_alpha_f32_row(&mut la);
++
++                let mut rgba = [pixel, pixel, pixel, alpha];
++                unpremultiply_rgba_f32_row(&mut rgba);
++
++                assert_eq!(
++                    la[0], rgba[0],
++                    "unpremultiply mismatch pixel={pixel} alpha={alpha}: la={la:?} rgba={rgba:?}"
++                );
++            }
++        }
++    }
++}
+diff --git a/src/alpha_handle_u16.rs b/src/alpha_handle_u16.rs
+index 820aba8..685d442 100644
+--- a/src/alpha_handle_u16.rs
++++ b/src/alpha_handle_u16.rs
+@@ -371,3 +371,74 @@ pub(crate) fn unpremultiply_alpha_gray_alpha_u16(
+         unpremultiply_alpha_gray_alpha_impl;
+     _dispatcher(in_place, src_stride, width, height, bit_depth, pool);
+ }
++
++#[cfg(test)]
++mod bughunt_diff_tests {
++    use super::*;
++
++    #[test]
++    fn gray_alpha_matches_rgba_reference_premultiply_u16() {
++        for bit_depth in [10usize, 12, 16] {
++            let max_colors = (1u32 << bit_depth) - 1;
++            let mut luma = 0u32;
++            while luma <= max_colors {
++                let mut alpha = 0u32;
++                while alpha <= max_colors {
++                    let luma16 = luma as u16;
++                    let alpha16 = alpha as u16;
++                    let mut la_dst = [0u16; 2];
++                    premultiply_alpha_gray_alpha_row(
++                        &mut la_dst,
++                        &[luma16, alpha16],
++                        max_colors,
++                    );
++
++                    let mut rgba_dst = [0u16; 4];
++                    premultiply_alpha_rgba_row(
++                        &mut rgba_dst,
++                        &[luma16, luma16, luma16, alpha16],
++                        bit_depth,
++                    );
++
++                    assert_eq!(
++                        la_dst[0], rgba_dst[0],
++                        "premultiply mismatch bit_depth={bit_depth} luma={luma} alpha={alpha}: la={la_dst:?} rgba={rgba_dst:?}"
++                    );
++                    assert_eq!(
++                        la_dst[1], rgba_dst[3],
++                        "premultiply alpha-channel mismatch bit_depth={bit_depth} luma={luma} alpha={alpha}: la={la_dst:?} rgba={rgba_dst:?}"
++                    );
++                    alpha += (max_colors / 251).max(1);
++                }
++                luma += (max_colors / 251).max(1);
++            }
++        }
++    }
++
++    #[test]
++    fn gray_alpha_matches_rgba_reference_unpremultiply_u16() {
++        for bit_depth in [10usize, 12, 16] {
++            let max_colors = (1u32 << bit_depth) - 1;
++            let mut pixel = 0u32;
++            while pixel <= max_colors {
++                let mut alpha = 0u32;
++                while alpha <= max_colors {
++                    let pixel16 = pixel as u16;
++                    let alpha16 = alpha as u16;
++                    let mut la = [pixel16, alpha16];
++                    unpremultiply_alpha_gray_alpha_row(&mut la, max_colors);
++
++                    let mut rgba = [pixel16, pixel16, pixel16, alpha16];
++                    unpremultiply_alpha_rgba_row(&mut rgba, bit_depth);
++
++                    assert_eq!(
++                        la[0], rgba[0],
++                        "unpremultiply mismatch bit_depth={bit_depth} pixel={pixel} alpha={alpha}: la={la:?} rgba={rgba:?}"
++                    );
++                    alpha += (max_colors / 251).max(1);
++                }
++                pixel += (max_colors / 251).max(1);
++            }
++        }
++    }
++}
+diff --git a/src/alpha_handle_u8.rs b/src/alpha_handle_u8.rs
+index dad69cd..fa7137b 100644
+--- a/src/alpha_handle_u8.rs
++++ b/src/alpha_handle_u8.rs
+@@ -289,3 +289,54 @@ pub(crate) fn unpremultiply_alpha_gray_alpha(
+         unpremultiply_alpha_gray_alpha_impl;
+     _dispatcher(in_place, width, height, stride, pool, workload_strategy);
+ }
++
++#[cfg(test)]
++mod bughunt_diff_tests {
++    use super::*;
++
++    // Differential: gray-alpha premultiply/unpremultiply must equal running the RGBA path
++    // on a pixel with R=G=B=luma and the same alpha.
++    #[test]
++    fn gray_alpha_matches_rgba_reference_premultiply() {
++        for luma in 0..=255u16 {
++            for alpha in 0..=255u16 {
++                let luma = luma as u8;
++                let alpha = alpha as u8;
++                let mut la_dst = [0u8; 2];
++                premultiply_alpha_gray_alpha_row_impl(&mut la_dst, &[luma, alpha]);
++
++                let mut rgba_dst = [0u8; 4];
++                premultiply_alpha_rgba_row_impl(&mut rgba_dst, &[luma, luma, luma, alpha]);
++
++                assert_eq!(
++                    la_dst[0], rgba_dst[0],
++                    "premultiply mismatch luma={luma} alpha={alpha}: la={la_dst:?} rgba={rgba_dst:?}"
++                );
++                assert_eq!(
++                    la_dst[1], rgba_dst[3],
++                    "premultiply alpha-channel mismatch luma={luma} alpha={alpha}: la={la_dst:?} rgba={rgba_dst:?}"
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn gray_alpha_matches_rgba_reference_unpremultiply() {
++        for pixel in 0..=255u16 {
++            for alpha in 0..=255u16 {
++                let pixel = pixel as u8;
++                let alpha = alpha as u8;
++                let mut la = [pixel, alpha];
++                unpremultiply_alpha_gray_alpha_row_impl(&mut la);
++
++                let mut rgba = [pixel, pixel, pixel, alpha];
++                unpremultiply_alpha_rgba_row_impl(&mut rgba);
++
++                assert_eq!(
++                    la[0], rgba[0],
++                    "unpremultiply mismatch pixel={pixel} alpha={alpha}: la={la:?} rgba={rgba:?}"
++                );
++            }
++        }
++    }
++}

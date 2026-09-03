@@ -1,0 +1,44 @@
+=== reproduce-before (Cargo.toml forces overflow-checks=true in release, so a
+    plain `cargo run --release` panics deterministically) ===
+
+thread '<unnamed>' (156267) panicked at /home/rafal/Projekty/Obce/dicom-rs/pixeldata/src/transform.rs:238:22:
+attempt to subtract with overflow
+stack backtrace (trimmed of repetitive rayon internals; the full trace was
+captured with RUST_BACKTRACE=1 during investigation):
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::panicking::panic_const::panic_const_sub_overflow
+   3: <&<dicom_pixeldata::lut::Lut<u8>>::new_with_fn<<dicom_pixeldata::lut::Lut<u8>>::new_rescale_and_lut::{closure#0}>::{closure#0} as core::ops::function::FnMut<(usize,)>>::call_mut
+      (this is pixeldata/src/transform.rs:238's `VoiLutTransform::apply`, inlined
+      into the per-index closure passed to `Lut::new_with_fn`)
+   4-30: rayon parallel-iterator plumbing (Lut::new_with_fn iterates the LUT
+      table with `into_par_iter()` when the "rayon" feature is enabled) -
+      each of the (default) worker threads hits the same overflow independently,
+      which is why multiple "thread '<unnamed>' panicked" lines appear per run.
+
+This confirms the panic originates at pixeldata/src/transform.rs:238, inside
+`VoiLutTransform::apply`, exactly as expected from the code-reading analysis:
+`(value_rounded - self.lut.min_pixel_value) as usize` overflows i32 when
+`value_rounded` is close to i32::MAX and `min_pixel_value` is negative.
+
+Because the LUT table is filled with `rayon`'s `into_par_iter()` by default,
+every worker thread independently computes the same out-of-range table index
+and panics - hence the repeated "thread '<unnamed>' (PID) panicked" lines
+when running with several CPU cores. Only one panic is needed to fail the
+`.collect::<Result<Vec<_>, _>>()` call and abort image conversion.
+
+=== Additional signal gathered during investigation (not part of the
+    self-contained repro/justfile flow): a plain release build with
+    overflow-checks left at their Cargo default (off) does NOT panic - the
+    subtraction silently wraps in two's-complement arithmetic. In this
+    specific crafted input the wrapped index still lands out of the LUT
+    data's bounds, so `.get(...).unwrap_or(self.lut.data.last().unwrap())`
+    happens to fall back to the last table entry (pixel value 255) - the
+    same value the fixed code also happens to produce here. This does not
+    mean the wraparound is harmless in general: for other (min_pixel_value,
+    value_rounded) pairs, the wrapped index can land *inside* the table's
+    bounds by coincidence, silently returning the wrong LUT entry instead of
+    the correct one or a bounded fallback. The debug-reachable panic above
+    is the reliably reproducible half of this bug; the silent-wrong-value
+    half is real but was not independently reproduced with a concrete
+    diverging pixel value in the time available. ===

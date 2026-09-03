@@ -1,0 +1,56 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# `just test` clones vello at base_commit, builds a baseline `vello_bench` bench binary,
+# applies patch.diff, builds a patched one, then runs the existing `sort` Criterion group
+# (already part of vello_bench, gated behind the `extended` feature) for both and prints
+# both results.
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone build-baseline apply build-patched bench
+
+# The vello repo is configured for Git LFS (a few snapshot-test PNGs); none of the LFS-tracked
+# files are needed to build/bench vello_common or vello_bench, so LFS filtering and the repo's
+# own post-checkout hook (which errors out - not just warns - if `git-lfs` isn't on PATH) are
+# both disabled here. Without this, `just clone` would abort on any machine without git-lfs
+# installed even though the checkout itself is otherwise fine.
+clone:
+    rm -rf clone
+    git -c filter.lfs.smudge='git-lfs smudge --skip -- %f' -c filter.lfs.process= \
+        -c filter.lfs.required=false -c core.hookspath=/dev/null \
+        clone {{repo_url}} clone
+    cd clone && git -c filter.lfs.smudge='git-lfs smudge --skip -- %f' -c filter.lfs.process= \
+        -c filter.lfs.required=false -c core.hookspath=/dev/null \
+        checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/sparse_strips/vello_bench && cargo build --release --bench main --features extended
+    cp clone/target/release/deps/main-* ./bin_baseline 2>/dev/null || \
+        find clone/target/release/deps -maxdepth 1 -name 'main-*' -type f -executable -exec cp {} ./bin_baseline \;
+
+build-patched:
+    cd clone/sparse_strips/vello_bench && cargo build --release --bench main --features extended
+    find clone/target/release/deps -maxdepth 1 -name 'main-*' -type f -executable -newer ./bin_baseline -exec cp {} ./bin_patched \;
+
+# Run the `sort` Criterion group only (Tiles::sort_tiles on the Ghostscript Tiger scene) for
+# both binaries. Pin to core 0 for a low-noise single-core number; also run unpinned once for
+# a realistic multi-core/system-noise number.
+bench:
+    @echo "=== baseline (before patch), single-core ==="
+    taskset -c 0 ./bin_baseline --bench sort
+    @echo "=== patched (after patch), single-core ==="
+    taskset -c 0 ./bin_patched --bench sort
+    @echo "=== baseline (before patch), unpinned ==="
+    ./bin_baseline --bench sort
+    @echo "=== patched (after patch), unpinned ==="
+    ./bin_patched --bench sort
+
+clean:
+    rm -rf clone bin_baseline bin_patched

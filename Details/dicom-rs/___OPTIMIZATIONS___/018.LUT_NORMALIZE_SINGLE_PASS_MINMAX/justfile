@@ -1,0 +1,47 @@
+# Self-contained reproduction for candidate 018.LUT_NORMALIZE_SINGLE_PASS_MINMAX.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern). Self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+# The harness's own colorspace-normalize mode (added this session) is part of the harness copy
+# below, not something this justfile has to add itself.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cp "{{justfile_directory()}}/testdata/mono_above.dcm" clone/
+    echo "=== bit-exactness check (VoiLutOption::Normalize path) ==="
+    ./bin_baseline colorspace-normalize clone/mono_above.dcm 1 > /tmp/candidate018_baseline.txt
+    ./bin_patched colorspace-normalize clone/mono_above.dcm 1 > /tmp/candidate018_patched.txt
+    diff <(grep -oE 'checksum=0x[0-9a-f]+' /tmp/candidate018_baseline.txt) \
+         <(grep -oE 'checksum=0x[0-9a-f]+' /tmp/candidate018_patched.txt) \
+        && echo "checksums match: bit-exact" || echo "DIFFERS (unexpected)"
+    echo "=== mono_above.dcm (2048x512, ~1M px, forced VoiLutOption::Normalize) - expect a ~15-18% win ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- colorspace-normalize clone/mono_above.dcm 30
+
+clean:
+    rm -rf clone bin_baseline bin_patched

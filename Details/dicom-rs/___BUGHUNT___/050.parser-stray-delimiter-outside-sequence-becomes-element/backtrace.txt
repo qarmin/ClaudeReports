@@ -1,0 +1,56 @@
+Captured output from `just test` (fresh clone of pristine upstream df2b9e42, reproduce-before,
+apply patch.diff, reproduce-after), run twice independently for determinism confirmation.
+
+=== Run 1 ===
+
+--- reproduce-before (pristine df2b9e42) ---
+stray Item followed by delimiters: BUG - parsed to a top-level DataElement with reserved tag (FFFE,E000) (vr SQ, len Length(Undefined))
+stray Item followed by delimiters: BUG - parsed to a top-level DataElement with reserved tag (FFFE,E0DD) (vr UN, len Length(0))
+stray SequenceDelimiter (FFFE,E0DD): BUG - parsed to a top-level DataElement with reserved tag (FFFE,E0DD) (vr UN, len Length(0))
+BUG REPRODUCED: a stray delimiter/item marker outside of a sequence was turned into an ordinary DataElement carrying a reserved tag.
+(exit code: 1, as expected: bug reproduced)
+
+--- reproduce-after (patched clone) ---
+stray Item followed by delimiters: rejected with a clean parse error: Could not read data set token
+stray SequenceDelimiter (FFFE,E0DD): parsed to an empty object (delimiter cleanly ignored)
+No corruption observed: stray markers are cleanly rejected or ignored.
+(exit code: 0, as expected: bug fixed)
+
+=== Run 2 (independent, fresh clone) ===
+
+--- reproduce-before (pristine df2b9e42) ---
+stray Item followed by delimiters: BUG - parsed to a top-level DataElement with reserved tag (FFFE,E000) (vr SQ, len Length(Undefined))
+stray Item followed by delimiters: BUG - parsed to a top-level DataElement with reserved tag (FFFE,E0DD) (vr UN, len Length(0))
+stray SequenceDelimiter (FFFE,E0DD): BUG - parsed to a top-level DataElement with reserved tag (FFFE,E0DD) (vr UN, len Length(0))
+BUG REPRODUCED: a stray delimiter/item marker outside of a sequence was turned into an ordinary DataElement carrying a reserved tag.
+(exit code: 1, as expected: bug reproduced)
+
+--- reproduce-after (patched clone) ---
+stray Item followed by delimiters: rejected with a clean parse error: Could not read data set token
+stray SequenceDelimiter (FFFE,E0DD): parsed to an empty object (delimiter cleanly ignored)
+No corruption observed: stray markers are cleanly rejected or ignored.
+(exit code: 0, as expected: bug fixed)
+
+=== Provenance: original fuzz discovery ===
+
+Found by temporarily stacking candidates 001's and 048's already-confirmed-and-patched fixes
+onto the tree and re-running the existing `object/fuzz/fuzz_targets/open_file.rs` for 150s
+(`ASAN_OPTIONS=symbolize=0 cargo +nightly fuzz run open_file -- -max_total_time=150`), which
+turned up a 324-byte crashing input (`cargo +nightly fuzz tmin` could not reduce it further).
+Replaying that original input through the fuzz target crashed with:
+
+    thread '<unnamed>' panicked at fuzz_targets/open_file.rs:26:10:
+    writing DICOM file should always be successful: PrintDataSet { source: WriteValue {
+    source: ReservedTag { tag: Tag(0xFFFE, 0xE0DD), .. } } }
+
+i.e. the object successfully "parsed", but contained a `DataElement` with tag (FFFE,0xE0DD) -
+one that candidate 049's write-side guard (correctly) refuses to encode, since group 0xFFFE is
+reserved for delimiter markers and can never be represented as an ordinary element on the wire.
+That symptom is a consequence of 049's fix turning a previously-silent write-side corruption into
+a loud failure - the actual, pre-existing defect being exposed here is on the *read* side: this
+crate's own data set reader was capable of manufacturing that invalid `DataElement` in the first
+place. Byte-level analysis of the original 324-byte input traced the element back precisely to
+the data set reader's handling of the file's tail bytes, right after file meta parsing handed off
+to the main data set (see the "Root cause" section of `RESULT.md` for the full byte-offset
+derivation). The `repro/` reproduction here isolates that mechanism directly, independent of the
+fuzzer, the specific file meta content, and candidates 001/048/049.

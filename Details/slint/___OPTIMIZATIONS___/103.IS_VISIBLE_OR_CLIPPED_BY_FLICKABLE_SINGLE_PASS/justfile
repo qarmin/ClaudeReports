@@ -1,0 +1,46 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+
+# Full cycle: clone at the pinned commit, apply this candidate's patch alone, build, bench.
+# This patch.diff applies cleanly on its own (it doesn't depend on candidate 100's patch),
+# but the RESULT.md numbers on top of candidate 100 (+ candidate 055) need those two patches
+# applied first - see `bench-on-100-055` below for that variant.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Additionally applies candidates 100 and 055's patches first, to isolate this candidate's own
+# effect the way RESULT.md's "Scenario C" does (their O(2^k) / O(n^2) costs otherwise dominate
+# and mask this candidate's O(k)-constant-factor improvement).
+apply-on-100-055:
+    cd clone && git apply ../../100.ABSOLUTE_CLIP_RECT_GEOMETRY_MEMOIZATION/patch.diff
+    cd clone && git apply ../../055.MOVE_FOCUS_CYCLE_DETECTION/patch.diff
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Standalone bench crate in ./bench, depending on `{ path = "../clone/api/rs/slint" }`.
+# `count` HiddenChain leaves (TextInput nested 15 `clip: true` levels deep, itself
+# `visible: false`) sit before one always-visible `tail` TextInput; one Tab press with nothing
+# focused must call `is_visible_or_clipped_by_flickable()` on every hidden leaf before reaching
+# `tail`. Against a pristine tree (no candidate 100) each such call is O(2^15) - keep `count`
+# small (see RESULT.md's "Scenario A"); on top of candidate 100 it's O(15), so much larger
+# counts are fine (see "Scenario C").
+bench:
+    cd bench && cargo build --release
+    ./bench/target/release/focus_sweep_bench 10 10
+
+clean:
+    rm -rf clone bench/target

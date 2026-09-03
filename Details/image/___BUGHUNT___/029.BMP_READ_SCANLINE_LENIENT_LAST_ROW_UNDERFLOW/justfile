@@ -1,0 +1,40 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# Important: this bug is an *overflow-checked-arithmetic* panic (`end_pos - current_pos`
+# underflowing a `u64`), which only panics when `overflow-checks` are enabled - true for Cargo's
+# default `dev` profile (used by `cargo run` and `cargo test`), false for a plain `cargo build
+# --release`. So, unlike most of this project's other BMP candidates, this repro is run with the
+# default (debug) profile, not `--release` - a release build would silently take the same
+# `checked_sub`-equivalent fallback path both before and after the fix and look like nothing
+# changed.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro (debug profile) against the pristine clone - should panic (bug
+# present). `|| true`: the repro's own non-zero/panic exit *is* the expected signal here, not a
+# justfile failure - without it, `just test`'s recipe chain would stop right here and never reach
+# reproduce-after.
+reproduce-before:
+    cd repro && cargo run || true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again (debug profile), now against the patched clone - should no longer panic (bug
+# fixed, returns a clean decode error instead).
+reproduce-after:
+    cd repro && cargo run
+
+clean:
+    rm -rf clone repro/target

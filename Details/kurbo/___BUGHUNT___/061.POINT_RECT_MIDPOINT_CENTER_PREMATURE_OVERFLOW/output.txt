@@ -1,0 +1,91 @@
+Captured by running `just test` (fresh clone of https://github.com/linebender/kurbo.git at
+ca273499e3e48bd2de6f02aa8e99a148984e45f3, `repro/` run before and after `patch.diff`).
+
+=== reproduce-before (pristine clone, bug present) ===
+$ just reproduce-before
+cd repro && cargo run --release
+    Updating crates.io index
+     Locking 7 packages to latest compatible versions
+   Compiling arrayvec v0.7.8
+   Compiling smallvec v1.16.0
+   Compiling polycool v0.4.0 (.../clone/polycool)
+   Compiling kurbo v0.13.1 (.../clone/kurbo)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 1.73s
+     Running `target/release/repro`
+Point::new(1.5e308, 0.0).midpoint(Point::new(1.7e308, 0.0)) = (inf, 0.0)
+REPRODUCED: Point::midpoint returned (inf, 0.0) instead of (1.6e308, 0.0)
+Rect::new(1.5e308, 0.0, 1.7e308, 0.0).center() = (inf, 0.0)
+REPRODUCED: Rect::center returned (inf, 0.0) instead of (1.6e308, 0.0)
+midpoint(1e150, 1e150) = (1e150, 0.0) (finite: true)
+midpoint(1e153, 1e153) = (1e153, 0.0) (finite: true)
+midpoint(8.9e307, 8.9e307) = (8.9e307, 0.0) (finite: true)
+midpoint(9e307, 9e307) = (inf, 0.0) (finite: false)
+midpoint(1e308, 1e308) = (inf, 0.0) (finite: false)
+midpoint(1.5e308, 1.5e308) = (inf, 0.0) (finite: false)
+midpoint(1.7e308, 1.7e308) = (inf, 0.0) (finite: false)
+midpoint(1.7976931348623157e308, 1.7976931348623157e308) = (inf, 0.0) (finite: false)
+f64::MAX = 17976931348623157...(elided, full value in stdout)
+error: Recipe `reproduce-before` failed on line 23 with exit code 1
+
+=== apply ===
+$ just apply
+cd clone && git apply ".../patch.diff"
+(no output - applied cleanly)
+
+=== reproduce-after (patched clone, bug fixed) ===
+$ just reproduce-after
+cd repro && cargo run --release
+   Compiling kurbo v0.13.1 (.../clone/kurbo)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 0.75s
+     Running `target/release/repro`
+Point::new(1.5e308, 0.0).midpoint(Point::new(1.7e308, 0.0)) = (1.6e308, 0.0)
+Rect::new(1.5e308, 0.0, 1.7e308, 0.0).center() = (1.6e308, 0.0)
+midpoint(1e150, 1e150) = (1e150, 0.0) (finite: true)
+midpoint(1e153, 1e153) = (1e153, 0.0) (finite: true)
+midpoint(8.9e307, 8.9e307) = (8.9e307, 0.0) (finite: true)
+midpoint(9e307, 9e307) = (9e307, 0.0) (finite: true)
+midpoint(1e308, 1e308) = (1e308, 0.0) (finite: true)
+midpoint(1.5e308, 1.5e308) = (1.5e308, 0.0) (finite: true)
+midpoint(1.7e308, 1.7e308) = (1.7e308, 0.0) (finite: true)
+midpoint(1.7976931348623157e308, 1.7976931348623157e308) = (1.7976931348623157e308, 0.0) (finite: true)
+f64::MAX = 17976931348623157...(elided, full value in stdout)
+did not reproduce - Point::midpoint()/Rect::center() stayed correct and finite
+(exit code 0)
+
+=== Repeat-run confirmation (3/3), against a path-dependency probe crate in the project's own
+worktree, matching the exact repro's output above ===
+$ cargo run --release   (x3, identical each time)
+Point::midpoint(1.5e308,1.7e308) = (inf, 0.0)
+Rect::center = (inf, 0.0)
+Point::midpoint(1.5e308,1.7e308) = (inf, 0.0)
+Rect::center = (inf, 0.0)
+Point::midpoint(1.5e308,1.7e308) = (inf, 0.0)
+Rect::center = (inf, 0.0)
+
+=== Extra boundary sweep after the fix (CONFIRMATION.md section 7: more than just the one
+triggering input), against the patched worktree ===
+Point::midpoint(1.5e308,1.7e308) = (1.6e308, 0.0)
+Rect::center = (1.6e308, 0.0)
+negative midpoint = (-1.6e308, -1.6e308)
+mixed-sign midpoint = (0.0, 0.0)
+MAX,MAX midpoint = (1.7976931348623157e308, 1.7976931348623157e308)
+zero midpoint = (0.0, 0.0)
+normal midpoint = (2.0, 3.0)
+NaN midpoint = (NaN, 0.0)
+inf midpoint = (inf, 0.0)
+Rect neg center = (-1.6e308, -1.6e308)
+
+=== Project test suite, run directly in the worktree (cargo test --workspace) ===
+Before fix: 187 unit tests (kurbo) + 10 tests (polycool) + 55 doctests (kurbo) + 1 ignored
+            doctest (polycool) - all passing, 0 failed.
+After fix:  187 unit tests (kurbo) + 10 tests (polycool) + 55 doctests (kurbo) + 1 ignored
+            doctest (polycool) - all passing, 0 failed. Identical counts, no new failures.
+
+=== Partial propagation into CubicBez/QuadBez::subdivide (not part of this fix's scope) ===
+CubicBez::subdivide -> c1=CubicBez { p0: (1.5e308, 0.0), p1: (1.5e308, 0.0), p2: (inf, 0.0), p3: (inf, 0.0) } c2=CubicBez { p0: (inf, 0.0), p1: (inf, 0.0), p2: (1.7e308, 0.0), p3: (1.7e308, 0.0) }
+QuadBez::subdivide -> q1=QuadBez { p0: (1.5e308, 0.0), p1: (1.55e308, 0.0), p2: (inf, 0.0) } q2=QuadBez { p0: (inf, 0.0), p1: (1.6499999999999999e308, 0.0), p2: (1.7e308, 0.0) }
+(p1.midpoint(p1_next)-shaped terms are now fixed by this patch; the remaining `inf` values come
+from a *different* code path - self.eval(0.5) and a weighted-sum blend formula, not Point::midpoint
+- so subdivide() still partially overflows for the same class of extreme input even after this fix.)

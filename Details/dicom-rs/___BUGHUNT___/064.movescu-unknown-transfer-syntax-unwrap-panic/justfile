@@ -1,0 +1,37 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# NOTE on this candidate's shape: the confirmed bug is in movescu/src/store_async.rs, a
+# binary-only crate with no library target, deep inside a network association receiving loop -
+# repro/ can't call the vulnerable code path directly. Instead, repro/ replicates the exact
+# vulnerable line (`TransferSyntaxRegistry.get(ts).unwrap()`) directly against the public
+# dicom-transfer-syntax-registry API, which is sufficient to demonstrate the panic mechanism
+# itself. `reproduce-after` here instead confirms the patched movescu crate builds cleanly (see
+# RESULT.md's "What's not done" for why a full live-network reproduction wasn't attempted).
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should panic (non-zero exit:
+# bug reproduced).
+reproduce-before:
+    cd repro && cargo run; test "$?" -ne 0 && echo "(non-zero exit expected here: bug reproduced)"; true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Confirm the patched movescu crate still builds cleanly after the fix.
+reproduce-after:
+    cd clone && cargo build -p dicom-movescu --all-features
+
+clean:
+    rm -rf clone

@@ -1,0 +1,57 @@
+diff --git a/kurbo/src/bezpath.rs b/kurbo/src/bezpath.rs
+index a290df1..78d2159 100644
+--- a/kurbo/src/bezpath.rs
++++ b/kurbo/src/bezpath.rs
+@@ -1324,33 +1324,45 @@ impl PathSeg {
+     ///
+     /// This version is robust to the path segment not being a regular curve.
+     pub(crate) fn tangents(&self) -> (Vec2, Vec2) {
+-        const EPS: f64 = 1e-12;
++        // Relative rather than absolute, so a control point that's only a handful of
++        // ULPs away from an endpoint (common at large coordinate magnitudes, where a
++        // single ULP can itself exceed an absolute 1e-12 threshold) still falls back
++        // to a farther, meaningfully-nonzero control point instead of being treated
++        // as a real tangent direction.
++        const EPS_REL: f64 = 1e-12;
+         match self {
+             PathSeg::Line(l) => {
+                 let d = l.p1 - l.p0;
+                 (d, d)
+             }
+             PathSeg::Quad(q) => {
++                let scale = (q.p2 - q.p0).hypot2();
++                let eps = EPS_REL * scale;
+                 let d01 = q.p1 - q.p0;
+-                let d0 = if d01.hypot2() > EPS { d01 } else { q.p2 - q.p0 };
++                let d0 = if d01.hypot2() > eps { d01 } else { q.p2 - q.p0 };
+                 let d12 = q.p2 - q.p1;
+-                let d1 = if d12.hypot2() > EPS { d12 } else { q.p2 - q.p0 };
++                let d1 = if d12.hypot2() > eps { d12 } else { q.p2 - q.p0 };
+                 (d0, d1)
+             }
+             PathSeg::Cubic(c) => {
++                let scale = (c.p2 - c.p0)
++                    .hypot2()
++                    .max((c.p3 - c.p0).hypot2())
++                    .max((c.p3 - c.p1).hypot2());
++                let eps = EPS_REL * scale;
+                 let d01 = c.p1 - c.p0;
+-                let d0 = if d01.hypot2() > EPS {
++                let d0 = if d01.hypot2() > eps {
+                     d01
+                 } else {
+                     let d02 = c.p2 - c.p0;
+-                    if d02.hypot2() > EPS { d02 } else { c.p3 - c.p0 }
++                    if d02.hypot2() > eps { d02 } else { c.p3 - c.p0 }
+                 };
+                 let d23 = c.p3 - c.p2;
+-                let d1 = if d23.hypot2() > EPS {
++                let d1 = if d23.hypot2() > eps {
+                     d23
+                 } else {
+                     let d13 = c.p3 - c.p1;
+-                    if d13.hypot2() > EPS { d13 } else { c.p3 - c.p0 }
++                    if d13.hypot2() > eps { d13 } else { c.p3 - c.p0 }
+                 };
+                 (d0, d1)
+             }

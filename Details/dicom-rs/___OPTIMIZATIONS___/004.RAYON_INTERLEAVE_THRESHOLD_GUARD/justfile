@@ -1,0 +1,53 @@
+# Self-contained reproduction for candidate 004.RAYON_INTERLEAVE_THRESHOLD_GUARD.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern). Self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+#
+# `just test` clones dicom-rs at base_commit, builds baseline + patched binaries (default
+# features, rayon enabled), and runs paired comparisons at a below-threshold and an
+# above-threshold pixel count using the checked-in testdata/planar_*.dcm fixtures.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cp "{{justfile_directory()}}/testdata/planar_below.dcm" clone/
+    cp "{{justfile_directory()}}/testdata/planar_above.dcm" clone/
+    echo "=== bit-exactness check ==="
+    for f in planar_below planar_above; do
+        ./bin_baseline dump-image "clone/$f.dcm" > "/tmp/candidate004_${f}_baseline.raw"
+        ./bin_patched dump-image "clone/$f.dcm" > "/tmp/candidate004_${f}_patched.raw"
+        cmp "/tmp/candidate004_${f}_baseline.raw" "/tmp/candidate004_${f}_patched.raw" && echo "$f: bit-exact" || echo "$f: DIFFERS (unexpected)"
+    done
+    echo "=== below-threshold (2.5M px) - expect NOT consistent (no change) ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- colorspace-fast clone/planar_below.dcm 20
+    echo "=== above-threshold (10M px) - expect a small (~8%) consistent win ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- colorspace-fast clone/planar_above.dcm 10
+
+clean:
+    rm -rf clone bin_baseline bin_patched

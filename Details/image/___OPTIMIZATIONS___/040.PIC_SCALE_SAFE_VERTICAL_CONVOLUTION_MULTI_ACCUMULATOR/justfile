@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+# patch.diff bundles the harness hunk (Cargo.toml's `benches/imageops.rs` addition of
+# `bench_resize_dynamic`) together with the actual fix (Cargo.toml's `[patch.crates-io]` hunk,
+# plus the entire vendored+patched `vendor/pic-scale-safe/` tree, which adds one new 64-column
+# "octo" tier to `fixed_point_vertical.rs`'s vertical convolution dispatch). apply-harness
+# applies just the bench addition so it exists for both the serial baseline (S) and the patched
+# build (E); apply-fix applies the Cargo.toml + vendor/ hunks on top, for the patched build only.
+test: clone apply-harness bench-baseline apply-fix bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-harness:
+    cd clone && git apply --exclude='Cargo.toml' --exclude='vendor/*' "{{justfile_directory()}}/patch.diff"
+
+apply-fix:
+    cd clone && git apply --include='Cargo.toml' --include='vendor/*' "{{justfile_directory()}}/patch.diff"
+
+# S: registry pic-scale-safe 0.1.11, unmodified - column_handler_fixed_point's existing
+# 8/16/32(/64 on aarch64)-element buffer-size tiers, no candidate-040 change.
+bench-baseline:
+    @echo "=== S: registry pic-scale-safe 0.1.11 (main today) - Lanczos3 4032x3024->400x300 ==="
+    cd clone && cargo bench --bench imageops -- "dynamic_resize/DynamicImage::resize_exact 4032x3024->400x300 Lanczos3"
+
+# E: this candidate's fix - vendored pic-scale-safe with an added 64-column, 8x8-wide
+# register-resident multi-accumulator tier in the vertical convolution pass's cascading dispatch.
+bench-patched:
+    @echo "=== E: this candidate's fix (vendored pic-scale-safe, 64-col 8x8-wide multi-accumulator tier) - Lanczos3 4032x3024->400x300 ==="
+    cd clone && cargo bench --bench imageops -- "dynamic_resize/DynamicImage::resize_exact 4032x3024->400x300 Lanczos3"
+
+clean:
+    rm -rf clone

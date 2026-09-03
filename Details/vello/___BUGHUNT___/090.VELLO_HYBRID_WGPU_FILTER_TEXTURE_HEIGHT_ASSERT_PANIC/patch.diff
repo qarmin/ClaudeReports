@@ -1,0 +1,157 @@
+diff --git a/sparse_strips/vello_hybrid/src/filter.rs b/sparse_strips/vello_hybrid/src/filter.rs
+index 9d5a1d47..b9335b5a 100644
+--- a/sparse_strips/vello_hybrid/src/filter.rs
++++ b/sparse_strips/vello_hybrid/src/filter.rs
+@@ -656,9 +656,17 @@ impl FilterContext {
+ 
+     /// Calculate the required height for the filter data texture.
+     /// Returns `None` if no filters are present.
++    ///
++    /// `resource_texture_dimension_2d` bounds the texture's *width* (see
++    /// `DeviceLimits::resource_texture_dimension_2d`'s own doc comment for why that's
++    /// intentionally capped below what many devices actually support), while
++    /// `max_resource_texture_height` is the device's real (uncapped) maximum 2D texture
++    /// dimension - the required height is only bounded by the latter, since there's no reason
++    /// to also shrink how tall this texture may grow to match the artificially-capped width.
+     pub(crate) fn required_filter_data_height(
+         &self,
+         resource_texture_dimension_2d: u32,
++        max_resource_texture_height: u32,
+     ) -> Option<u32> {
+         let required_texels = self.total_texels();
+ 
+@@ -668,8 +676,8 @@ impl FilterContext {
+         let height = required_texels.div_ceil(resource_texture_dimension_2d);
+         // TODO: Turn into error.
+         assert!(
+-            height <= resource_texture_dimension_2d,
+-            "Filter texture height exceeds resource texture dimensions"
++            height <= max_resource_texture_height,
++            "Filter texture height exceeds device texture dimensions"
+         );
+ 
+         Some(height)
+@@ -726,13 +734,13 @@ mod tests {
+     }
+ 
+     #[test]
+-    #[should_panic(expected = "Filter texture height exceeds resource texture dimensions")]
++    #[should_panic(expected = "Filter texture height exceeds device texture dimensions")]
+     fn filter_data_height_must_fit_resource_texture_limit() {
+         let context = FilterContext {
+             filters: alloc::vec![gpu_offset()],
+         };
+ 
+-        let _ = context.required_filter_data_height(1);
++        let _ = context.required_filter_data_height(1, 1);
+     }
+ 
+     fn step_layout(plan: &FilterPassPlan) -> Vec<Vec<(u32, u32)>> {
+diff --git a/sparse_strips/vello_hybrid/src/render/webgl/mod.rs b/sparse_strips/vello_hybrid/src/render/webgl/mod.rs
+index 633ee8d2..2118bfcb 100644
+--- a/sparse_strips/vello_hybrid/src/render/webgl/mod.rs
++++ b/sparse_strips/vello_hybrid/src/render/webgl/mod.rs
+@@ -1652,8 +1652,13 @@ impl WebGlPrograms {
+     ) {
+         let resource_texture_dimension_2d = self.resources.resource_texture_dimension_2d;
+ 
+-        let Some(required_height) =
+-            filter_context.required_filter_data_height(resource_texture_dimension_2d)
++        // WebGL2 keeps the height bound tied to the same artificially-capped
++        // `resource_texture_dimension_2d` used for width (see candidate 055/090's own notes in
++        // `wgpu/mod.rs`/`filter.rs`): this backend is the actual target of the driver-hang
++        // workaround that introduced that cap, so raising its real limit independently of width
++        // needs separate judgment this session didn't make.
++        let Some(required_height) = filter_context
++            .required_filter_data_height(resource_texture_dimension_2d, resource_texture_dimension_2d)
+         else {
+             return;
+         };
+@@ -1683,7 +1688,7 @@ impl WebGlPrograms {
+ 
+         let width = self.resources.resource_texture_dimension_2d;
+         let used_height = filter_context
+-            .required_filter_data_height(width)
++            .required_filter_data_height(width, width)
+             .expect("non-empty filter context must have a data height");
+         let used_size = ((width * used_height) << 4) as usize;
+         filter_context.serialize_to_buffer(&mut self.filter_data);
+diff --git a/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs b/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
+index 9521829f..3bb580fd 100644
+--- a/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
++++ b/sparse_strips/vello_hybrid/src/render/wgpu/mod.rs
+@@ -198,6 +198,7 @@ impl Renderer {
+         let gradient_cache = GradientRampCache::new(max_gradient_cache_size, settings.level);
+         let layer_config = settings.memory_settings.layers_config;
+ 
++        let max_resource_texture_height = u32::from(device_limits.max_texture_dimension_2d);
+         let renderer = Self {
+             programs: Programs::new(
+                 device,
+@@ -205,6 +206,7 @@ impl Renderer {
+                 render_target_config,
+                 layer_config,
+                 resource_texture_dimension_2d,
++                max_resource_texture_height,
+             ),
+             gradient_cache,
+             encoded_paints: Vec::new(),
+@@ -1016,6 +1018,14 @@ struct Programs {
+     encoded_paints_data: Vec<u8>,
+     /// Scratch buffer for staging filter data texture data.
+     filter_data: Vec<u8>,
++    /// The device's real (uncapped) maximum 2D texture dimension.
++    ///
++    /// `resource_texture_dimension_2d` intentionally caps the *width* of data textures at a
++    /// fixed value lower than what many devices actually support (see
++    /// `DeviceLimits::resource_texture_dimension_2d` for why). That cap has nothing to do with
++    /// how tall those textures may grow, so the filter-data resize logic bounds required
++    /// heights against this real device limit instead of reusing the artificially-capped width.
++    max_resource_texture_height: u32,
+ }
+ 
+ /// Contains all GPU resources needed for rendering
+@@ -1123,6 +1133,7 @@ impl Programs {
+         render_target_config: &RenderTargetConfig,
+         layer_config: LayersConfig,
+         resource_texture_dimension_2d: u32,
++        max_resource_texture_height: u32,
+     ) -> Self {
+         let strip_bind_group_layout =
+             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+@@ -1818,6 +1829,7 @@ impl Programs {
+             strip_layer_bind_groups: HashMap::new(),
+             blend_layer_bind_groups: HashMap::new(),
+             filter_pair_bind_groups: HashMap::new(),
++            max_resource_texture_height,
+         }
+     }
+ 
+@@ -2254,7 +2266,12 @@ impl Programs {
+         let resource_texture_dimension_2d = self.resources.resource_texture_dimension_2d;
+         self.maybe_resize_alphas_tex(device, resource_texture_dimension_2d, alphas.len());
+         self.maybe_resize_encoded_paints_tex(device, resource_texture_dimension_2d, paint_idxs);
+-        self.maybe_resize_filter_tex(device, resource_texture_dimension_2d, filter_context);
++        self.maybe_resize_filter_tex(
++            device,
++            resource_texture_dimension_2d,
++            self.max_resource_texture_height,
++            filter_context,
++        );
+         self.maybe_update_config_buffer(queue, resource_texture_dimension_2d, new_render_size);
+ 
+         self.upload_alpha_texture(queue, alphas);
+@@ -2272,10 +2289,11 @@ impl Programs {
+         &mut self,
+         device: &Device,
+         resource_texture_dimension_2d: u32,
++        max_resource_texture_height: u32,
+         filter_context: &FilterContext,
+     ) {
+-        let Some(required_filter_height) =
+-            filter_context.required_filter_data_height(resource_texture_dimension_2d)
++        let Some(required_filter_height) = filter_context
++            .required_filter_data_height(resource_texture_dimension_2d, max_resource_texture_height)
+         else {
+             return;
+         };

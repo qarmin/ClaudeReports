@@ -1,0 +1,86 @@
+# Reproduce every candidate in this workspace. Each folder also has its own justfile.
+# `just run` here = the headless numbers for all candidates that have them.
+
+harness := justfile_directory() + "/.."
+
+run: build
+    @echo "=== 01 scrollview row structure ==="
+    just 01_scrollview_row_structure/run
+    @echo "=== 02 listview text reshaping ==="
+    just 02_listview_text_reshaping/run
+    @echo "=== 03 text document shaping ==="
+    just 03_text_document_shaping/run
+    @echo "=== 04 parley nowrap segmentation ==="
+    just 04_parley_nowrap_segmentation/run
+    @echo "=== 05 paragraph shaping cost ==="
+    just 05_paragraph_shaping_cost/run
+    @echo "=== 06 femtovg path reuse (needs a display or xvfb) ==="
+    just 06_femtovg_path_reuse/run
+    @echo "=== 07 allocator ceiling ==="
+    just 07_allocator_ceiling/run
+    @echo "=== 08 duplicate dependency registrations ==="
+    just 08_duplicate_dependency_registrations/run
+    @echo "=== 11 femtovg buffer reuse (needs a display or xvfb) ==="
+    just 11_femtovg_buffer_reuse/run
+    @echo "=== 12 subtree pruning prize ==="
+    just 12_subtree_pruning_prize/run
+
+build:
+    cd {{ harness }} && cargo build --profile rdebug --bin perf_test
+
+# ~1 minute on a real display: is the tree still fast, and how big is the remaining win.
+# This is the one to run when you have a spare minute.
+gpu-quick:
+    {{ justfile_directory() }}/tools/gpu_quick.sh
+
+# Candidate 03 on real hardware: builds a binary from the *pristine* `internal/core/textlayout`
+# and runs both, so a difference is attributable to that change rather than to the machine. ~3
+# minutes, writes GPU_03.md. Restores the working tree even if it fails. Needs a display.
+gpu-03:
+    {{ justfile_directory() }}/tools/gpu_before_after.sh
+
+# The thorough one (~10 minutes: it rebuilds a pristine and a mimalloc binary too): pristine vs session vs mimalloc, all scenes,
+# pristine vs session vs mimalloc, all scenes, writes GPU_RESULTS.md. Needs a display.
+gpu-report:
+    {{ justfile_directory() }}/tools/gpu_report.sh
+
+# Everything that needs a GPU/display, run through Xvfb
+run-xvfb: build
+    just 06_femtovg_path_reuse/run-xvfb
+    just 09_gradient_stops_vec/run-xvfb
+    just 10_gradient_bbox_tessellation/run-xvfb
+    just 11_femtovg_buffer_reuse/run-xvfb
+
+# Rebuild a pristine binary (this session's core/renderer changes stashed) and compare every
+# scene against the current tree. This is what FINAL_NUMBERS.md contains.
+final-numbers:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo="{{ harness }}/.."
+    cd "$repo"
+    git stash push internal/core/properties.rs internal/core/graphics/brush.rs \
+        internal/renderers/femtovg/itemrenderer.rs internal/core/Cargo.toml
+    trap 'cd "$repo" && git stash pop' EXIT
+    cd "{{ harness }}"
+    sed -i 's/^dep-stats = \["dep:i-slint-core"\]/dep-stats = []/' Cargo.toml
+    cargo build --profile rdebug --bin perf_test
+    cp ../target/rdebug/perf_test /tmp/perf_test_pristine
+    git checkout Cargo.toml
+    cd "$repo" && git stash pop && git stash push -m dummy --allow-empty >/dev/null 2>&1 || true
+    cd "{{ harness }}" && cargo build --profile rdebug --bin perf_test
+    med() { python3 -c "import sys;v=sorted(float(x) for x in sys.argv[1:]);print(f'{v[len(v)//2]:.2f}')" "$@"; }
+    printf "%-26s %-10s %-10s %-12s %-12s\n" scene pristine session allocs-pre allocs-post
+    for scene in "scroll 100000 " "list 100000 " "rects 3000 " "rects 3000 --gradient" "text 100000 "; do
+        set -- $scene; mode=$1; count=$2; extra=${3:-}
+        out=""
+        for bin in /tmp/perf_test_pristine ../target/rdebug/perf_test; do
+            vals=""
+            for i in 1 2 3; do
+                vals="$vals $($bin --bench --mode $mode --count $count $extra --frames 6 | awk '/^later frames/{gsub("ms","",$3);print $3}')"
+            done
+            a=$($bin --bench --mode $mode --count $count $extra --frames 4 | awk '/^later frames/{gsub("[()]","",$7);print $7}')
+            out="$out $(med $vals) $a"
+        done
+        set -- $out
+        printf "%-26s %-10s %-10s %-12s %-12s\n" "$mode $count $extra" "$1" "$3" "$2" "$4"
+    done

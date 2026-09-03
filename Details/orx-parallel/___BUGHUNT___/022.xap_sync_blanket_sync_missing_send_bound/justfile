@@ -1,0 +1,54 @@
+# Self-contained reproduction for candidate 022 (XapSync unconditional `unsafe impl Sync`).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# NOTE: there is no verified `patch.diff` for this candidate (see RESULT.md "The fix") -
+# `attempted_fix.diff` closes the type-level Sync inconsistency but does NOT eliminate the
+# demonstrated race (verified: still reproduces 10/10 after applying it). It is kept here purely
+# as supporting evidence for that claim, not as a fix to apply for real.
+
+repo_url := "https://github.com/orxfun/orx-parallel.git"
+base_commit := "b9214fbeb714e4bb8f8858676a818cef2f21b097"
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Main reproduction: the real public `par_recursive(...).map(h).for_each(...)` entry point,
+# real OS worker threads, a Copy + Send-but-!Sync witness closure racing a plain counter.
+# Expected: "RACE DETECTED..." and a nonzero exit code (lost updates, counter far below 200000).
+# Run more than once (or `just test-repeat`) since the exact lost-update count varies per run.
+reproduce-before: clone
+    cd repro && cargo run --bin repro022
+
+# Supplementary: the crate's OTHER, non-recursive execution path, which never constructs
+# `XapSync` and already gives each worker thread its own Copy of the closure - races identically,
+# demonstrating this class of race is not unique to XapSync (see RESULT.md).
+reproduce-direct: clone
+    cd repro && cargo run --bin direct_check
+
+test: reproduce-before
+
+test-repeat: clone
+    #!/usr/bin/env bash
+    set -e
+    cd repro
+    for i in $(seq 1 10); do cargo run --bin repro022 -q || true; done
+
+# Demonstrates RESULT.md's central caveat: applying the attempted fix does NOT make the race go
+# away (still reproduces). Both "before" and "after" runs are *expected* to print "RACE DETECTED"
+# and exit non-zero (`|| true` below is deliberate, not error-hiding - a non-reproducing "after"
+# run would be the actually-surprising outcome here, and is what would make this a real fix).
+test-attempted-fix-does-not-help: clone
+    #!/usr/bin/env bash
+    set -e
+    echo "--- before attempted_fix.diff ---"
+    (cd repro && cargo run --bin repro022) || true
+    (cd clone && git apply "{{justfile_directory()}}/attempted_fix.diff")
+    echo "--- after attempted_fix.diff (still expected to race) ---"
+    (cd repro && cargo run --bin repro022) || true
+
+clean:
+    rm -rf clone repro/target

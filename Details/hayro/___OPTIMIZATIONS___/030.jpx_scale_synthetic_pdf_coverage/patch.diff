@@ -1,0 +1,52 @@
+diff --git a/hayro-syntax/src/math.rs b/hayro-syntax/src/math.rs
+index 60bf95e0..623b5b29 100644
+--- a/hayro-syntax/src/math.rs
++++ b/hayro-syntax/src/math.rs
+@@ -4,16 +4,43 @@
+ #[cfg(feature = "images")]
+ #[inline(always)]
+ pub(crate) fn round_f32(x: f32) -> f32 {
+-    #[cfg(feature = "std")]
++    // `f32::round()` lowers to a `roundf` libm call (not a hardware instruction) unless the
++    // target has `sse4.1`/`neon`, which isn't enabled by default for e.g.
++    // `x86_64-unknown-linux-gnu`. The manual fallback below is measurably cheaper in that case.
++    #[cfg(all(
++        feature = "std",
++        any(
++            all(
++                any(target_arch = "x86", target_arch = "x86_64"),
++                target_feature = "sse4.1"
++            ),
++            all(target_arch = "aarch64", target_feature = "neon")
++        )
++    ))]
+     {
+         x.round()
+     }
+-    #[cfg(not(feature = "std"))]
++    #[cfg(not(all(
++        feature = "std",
++        any(
++            all(
++                any(target_arch = "x86", target_arch = "x86_64"),
++                target_feature = "sse4.1"
++            ),
++            all(target_arch = "aarch64", target_feature = "neon")
++        )
++    )))]
+     {
++        fn floor_manual(x: f32) -> f32 {
++            let xi = x as i32;
++            let xf = xi as f32;
++            if x < xf { xf - 1.0 } else { xf }
++        }
++
+         if x >= 0.0 {
+-            floor_f32(x + 0.5)
++            floor_manual(x + 0.5)
+         } else {
+-            -floor_f32(-x + 0.5)
++            -floor_manual(-x + 0.5)
+         }
+     }
+ }

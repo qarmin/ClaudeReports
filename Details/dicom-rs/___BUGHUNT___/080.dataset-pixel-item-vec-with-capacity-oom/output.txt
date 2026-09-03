@@ -1,0 +1,65 @@
+Captured via `just test` (see justfile) against a fresh clone of df2b9e4236298efa3fa37a1f360fc4bf284d586a,
+under `ulimit -v 500000` (500 MB virtual-memory cap).
+
+=== reproduce-before (pristine tree, unpatched) ===
+=== spawning scenario: offset_table ===
+--- scenario: offset_table (236 byte input file) ---
+memory allocation of 800000000 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+=== scenario offset_table exited with: signal: 6 (SIGABRT) (core dumped) ===
+
+=== spawning scenario: fragment ===
+--- scenario: fragment (244 byte input file) ---
+memory allocation of 4294967280 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+=== scenario fragment exited with: signal: 6 (SIGABRT) (core dumped) ===
+
+=== reproduce-after (patch.diff applied) ===
+=== spawning scenario: offset_table ===
+--- scenario: offset_table (236 byte input file) ---
+[offset_table] did not abort - parser returned a graceful error: Could not read data set token
+=== scenario offset_table exited with: exit status: 0 ===
+
+=== spawning scenario: fragment ===
+--- scenario: fragment (244 byte input file) ---
+[fragment] did not abort - parsed successfully (unexpected)
+=== scenario fragment exited with: exit status: 0 ===
+
+Repeat-run check (3/3, release build, no ulimit wrapper needed for determinism - both scenarios
+depend only on input content, not memory layout or timing), run directly against the main
+project's own working tree before reverting:
+
+=== offset_table (pre-fix) ===
+memory allocation of 800000000 bytes failed -> Aborted (core dumped), exit 134   (run 1)
+memory allocation of 800000000 bytes failed -> Aborted (core dumped), exit 134   (run 2)
+memory allocation of 800000000 bytes failed -> Aborted (core dumped), exit 134   (run 3)
+
+=== fragment (pre-fix) ===
+memory allocation of 4294967280 bytes failed -> Aborted (core dumped), exit 134   (run 1)
+memory allocation of 4294967280 bytes failed -> Aborted (core dumped), exit 134   (run 2)
+memory allocation of 4294967280 bytes failed -> Aborted (core dumped), exit 134   (run 3)
+
+=== offset_table (post-fix) ===
+did not abort - parser returned a graceful error: Could not read data set token   (run 1, exit 0)
+did not abort - parser returned a graceful error: Could not read data set token   (run 2, exit 0)
+did not abort - parser returned a graceful error: Could not read data set token   (run 3, exit 0)
+
+=== fragment (post-fix) ===
+did not abort - parsed successfully (unexpected)   (run 1, exit 0)
+did not abort - parsed successfully (unexpected)   (run 2, exit 0)
+did not abort - parsed successfully (unexpected)   (run 3, exit 0)
+
+Additional check (not part of the verified fix, kept here as evidence for the "what's not done"
+note in RESULT.md): re-running the `offset_table` scenario post-fix with a much larger declared
+length (4,294,967,280 instead of 200,000,000) still aborts the same way, because the residual
+allocation now happens one layer down, inside `StatefulDecoder::read_u32`
+(parser/src/stateful/decode.rs), which is the same untrusted-length-driven `vec.resize(base + n, 0)`
+call site already identified (but not applied/merged) by candidate 004's own fix:
+
+memory allocation of 4294967280 bytes failed -> Aborted (core dumped), exit 134
+
+Project test suite, run both before applying patch.diff and after, on the main project's own
+working tree (not the standalone clone):
+  cargo test -p dicom-parser --lib : 49 passed; 0 failed  (before and after, identical)
+  cargo test -p dicom-object --lib : 75 passed; 0 failed  (before and after, identical)
+  cargo test --workspace           : 537 passed; 0 failed (before and after, identical)

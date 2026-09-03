@@ -1,0 +1,67 @@
+Captured output from `just test` (fresh clone of pristine upstream df2b9e42, reproduce-before,
+apply patch.diff, reproduce-after), run twice independently for determinism confirmation. Both
+phases use `cargo run --release` (see justfile's comment for why: a debug build hits the pristine
+code's `debug_assert!` on the very first operation and aborts before printing anything - itself
+part of the bug, captured separately below).
+
+=== Run 1 ===
+
+--- reproduce-before (pristine df2b9e42, release) ---
+Length(0xFFFFFFFE) + Length(1) = Length(Undefined) (is_undefined=true)
+Length(0xFFFFFFFE) + 1i32 = Length(Undefined) (is_undefined=true)
+Length(0) -= Length(1) => Length(Undefined) (is_undefined=true)
+Length(0) -= 1i32 => Length(Undefined) (is_undefined=true)
+BUG REPRODUCED: a defined-length arithmetic result silently collided with the UNDEFINED sentinel.
+(exit code: 1, as expected: bug reproduced)
+
+--- reproduce-after (patched clone, release) ---
+Length(0xFFFFFFFE) + Length(1) = Length(4294967294) (is_undefined=false)
+Length(0xFFFFFFFE) + 1i32 = Length(4294967294) (is_undefined=false)
+Length(0) -= Length(1) => Length(0) (is_undefined=false)
+Length(0) -= 1i32 => Length(0) (is_undefined=false)
+No corruption observed: all results stayed correctly defined.
+(exit code: 0, as expected: bug fixed)
+
+=== Run 2 (independent, fresh clone) ===
+
+Identical output to Run 1 in both phases (same deterministic arithmetic, no randomness
+involved).
+
+=== Debug-mode panic (pristine df2b9e42, separately captured, fresh clone) ===
+
+$ cargo run   # (not --release)
+
+    Compiling dicom-core v0.10.0 (.../clone/core)
+    Compiling repro v0.1.0 (.../repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.06s
+     Running `target/debug/repro`
+
+thread 'main' (233960) panicked at .../clone/core/src/header.rs:1219:17:
+integer overflow (0xFFFF_FFFF reserved for undefined length)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+This confirms the bug has two distinct manifestations depending on build profile: an uncatchable
+panic in debug/test builds (via the pre-existing `debug_assert!`), and silent, undetected
+corruption to `Length::UNDEFINED` in release builds (the `debug_assert!` compiles out entirely,
+letting the wrapped `u32` arithmetic's result flow through unchecked).
+
+=== Provenance ===
+
+Found via git archaeology: `git log --all --grep="#768"` surfaced an unmerged remote branch
+(`origin/fix/length-arithmetic-overflow`, commit `dd6e81aa`, authored "Co-Authored-By: Claude
+Sonnet 4.6") titled "fix(core): prevent Length arithmetic from silently wrapping to UNDEFINED
+sentinel", referencing external report items OVF_3/OVF_4/OVF_5. `git merge-base --is-ancestor
+dd6e81aa df2b9e42` confirmed this commit is **not** part of the current tree's history - the fix
+was never merged into master, so the bug it describes is still live in the exact commit
+(`df2b9e42`) this bug-hunt session is auditing.
+
+That unmerged fix was independently verified by reproducing the described defect from scratch
+(the two example call sites above, `Add<Length>` and `SubAssign<i32>`), and found to be
+**incomplete**: it only touched `Add<Length>`, `SubAssign<i32>`, and `DataElement::update_value`,
+leaving `Add<i32>` and `SubAssign<Length>` with the exact same unguarded `debug_assert!`-only
+pattern. This candidate's fix covers all five call sites (the three already described externally,
+plus the two the external fix missed), verified against fresh, hand-built reproductions for all
+four arithmetic operators. `update_value`'s analogous fix (capping `byte_len` before the `u32`
+cast) was carried over by direct analogy - it shares the exact same root cause but requires
+allocating close to 4 GiB to trigger in practice, so it was not independently reproduced with its
+own dedicated test in this session (see RESULT.md's "What's not done" section).

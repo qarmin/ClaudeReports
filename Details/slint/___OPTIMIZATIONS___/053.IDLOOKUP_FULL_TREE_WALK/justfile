@@ -1,0 +1,63 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# Fill in repo_url/base_commit when this candidate is created (read them once with
+# `git remote get-url origin` / `git rev-parse HEAD` in the main project, at the moment
+# patch.diff is captured) - patch.diff is a diff against that exact commit and may stop
+# applying cleanly once the main branch moves on.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, generate fixtures, bench.
+test: clone apply build fixtures bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build:
+    cd clone && cargo build --release -p slint-compiler
+
+# Property-dense flat fixtures: N sibling Rectangles, each with a chain of plain-property
+# (in-scope, not element-id) identifier bindings - this is exactly the case IdLookup's
+# full-tree walk pays for on every single one of them before InScopeLookup ever runs.
+fixtures:
+    mkdir -p testdata
+    for n in 200 500 1000 2000 4000 8000 ; do \
+        python3 testdata/gen_propdense.py $n 4 testdata/propdense_$n.slint ; \
+    done
+
+# Compares the unpatched (rebuilt from a second checkout at base_commit, no patch applied)
+# binary against the patched one built above. Run `just bench-baseline` first if you want
+# an explicit baseline binary; this recipe alone just times the patched build.
+bench:
+    for n in 200 500 1000 2000 4000 8000 ; do \
+        echo "=== n=$n ===" ; \
+        hyperfine --warmup 2 --min-runs 10 \
+            "./clone/target/release/slint-compiler -f rust testdata/propdense_$n.slint -o /tmp/out_$n.rs" ; \
+    done
+
+# Optional: build an unpatched binary in a second clone to get a real paired baseline/patched
+# comparison instead of just timing the patched build alone.
+bench-paired:
+    rm -rf clone_baseline
+    git clone {{repo_url}} clone_baseline
+    cd clone_baseline && git checkout {{base_commit}}
+    cd clone_baseline && cargo build --release -p slint-compiler
+    for n in 200 500 1000 2000 4000 8000 ; do \
+        echo "=== n=$n ===" ; \
+        hyperfine --warmup 2 --min-runs 10 \
+            -n baseline "./clone_baseline/target/release/slint-compiler -f rust testdata/propdense_$n.slint -o /tmp/out_b_$n.rs" \
+            -n patched  "./clone/target/release/slint-compiler -f rust testdata/propdense_$n.slint -o /tmp/out_p_$n.rs" ; \
+        cmp /tmp/out_b_$n.rs /tmp/out_p_$n.rs && echo "  output identical" || echo "  OUTPUT DIFFERS" ; \
+    done
+
+clean:
+    rm -rf clone clone_baseline

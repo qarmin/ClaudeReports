@@ -1,0 +1,31 @@
+# Self-contained reproduction for candidate 023 (FLAC_APPLICATION_BLOCK_LENGTH_UNDERFLOW).
+#
+# This candidate is Not reproducible via the real end-to-end trigger path - there is no
+# patch.diff, so `test` only clones pristine and runs the real repro, showing the honest
+# (clean-error, no-panic) result described in RESULT.md, plus a control demonstrating the
+# underflow/panic IS real when the low-level function is called directly, bypassing the real
+# caller's own length-scoping.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone.
+# Part 1: crafted FLAC files with an APPLICATION block declaring length 0..4, fed to the real
+# public FlacReader::try_new entry point - expected to return a clean Err, never panic.
+# Part 2 (control, NOT the claimed real path): a direct, unscoped call to
+# read_flac_application_block with a mismatched length - expected to panic, showing the
+# underflow is real in the function in isolation but unreachable via the real caller.
+# Part 2 is expected to panic (that's the point of the control) - `|| true` so `just test` still
+# reports success for the overall (Not reproducible) demonstration instead of a spurious failure.
+reproduce-before:
+    cd repro && cargo run --release || true
+
+clean:
+    rm -rf clone repro/target

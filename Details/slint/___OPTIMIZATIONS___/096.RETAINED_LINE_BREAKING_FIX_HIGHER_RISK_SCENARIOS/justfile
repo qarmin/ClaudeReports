@@ -1,0 +1,69 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# This is a correctness-verification candidate, not a timing candidate: it re-runs the pixel
+# comparison from candidates 093/095 against the two scenarios candidate 093's own doc comment
+# flagged as higher-risk (`--resize-step`, a third distinct width; `--select-all`, which reads
+# `.lines()` directly via `selection.rs`) with candidate 095's one-line `drop(other)` fix applied.
+# `patch.diff` is candidate 093's own patch.diff (bundling 091+092+093) with candidate 095's
+# `experimental_partial_fix.diff` applied on top - i.e. exactly the "fixed" tree this candidate
+# tested, against pristine `master`.
+#
+# repo_url/base_commit read via `git remote get-url origin` / `git rev-parse HEAD` in the main
+# project, at the moment patch.diff was captured.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the pixel comparisons.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# perf_test is the repo's own existing harness (perf_test/), reused as-is - no standalone bench
+# crate needed for this candidate. This builds only the "fixed" binary; RESULT.md's own numbers
+# compare it against an unfixed (093-only) binary and a pre-093 (091+092) binary, which need their
+# own separate clones/builds - see `unfixed` and `pre093` recipes below, and RESULT.md's
+# "Reproduce" section for the full three-way comparison.
+bench:
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug --features software
+    cd clone/perf_test && ./../target/rdebug/perf_test --bench --mode text --count 10000 \
+        --type-text --scroll-step 0 --resize-step 50 --frames 150 --snapshot fixed_resizestep_150.ppm
+    cd clone/perf_test && ./../target/rdebug/perf_test --bench --mode text --count 10000 \
+        --type-text --select-all --scroll-step 0 --frames 300 --snapshot fixed_selectall_300.ppm
+    @echo "Snapshots written to clone/perf_test/*.ppm. See RESULT.md's Reproduce section for the"
+    @echo "pre-093 and unfixed-093 binaries needed to reproduce the pixel-diff tables."
+
+# Builds the pre-093 (091+092 only) reference binary in the same clone, into a separate binary
+# name so it can coexist with the `fixed` one built by `bench` above.
+pre093:
+    cd clone && git stash
+    cd clone && git apply "{{justfile_directory()}}/../092.RETAINED_LINE_BREAKING_ACROSS_RESHAPE/patch.diff"
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug --features software
+    cp clone/target/rdebug/perf_test clone/perf_test/perf_test_pre093
+    cd clone && git checkout -- . && git stash pop
+
+# Builds the unfixed-093 (091+092+093, no candidate 095 fix) reference binary.
+unfixed093:
+    cd clone && git stash
+    cd clone && git apply "{{justfile_directory()}}/../093.RETAINED_LINE_BREAKING_2SLOT_CACHE/patch.diff"
+    cd clone/perf_test && cargo build --bin perf_test --profile rdebug --features software
+    cp clone/target/rdebug/perf_test clone/perf_test/perf_test_unfixed093
+    cd clone && git checkout -- . && git stash pop
+
+clean:
+    rm -rf clone

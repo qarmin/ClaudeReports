@@ -1,0 +1,198 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index e869c49..2fd6853 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -940,8 +940,28 @@ impl<T: CellType> Range<T> {
+     /// ```
+     ///
+     pub fn from_sparse(cells: Vec<Cell<T>>) -> Range<T> {
++        match Range::from_sparse_bounded(cells, usize::MAX) {
++            Ok(range) => range,
++            // max_cells is usize::MAX here, so the dense grid (bounded by real cell
++            // positions, at most u32::MAX * u32::MAX) can never exceed it.
++            Err(_) => unreachable!(),
++        }
++    }
++
++    /// Like [`Range::from_sparse()`], but rejects a `cells` vector whose bounding box (the
++    /// dense grid `from_sparse` would otherwise unconditionally allocate) would exceed
++    /// `max_cells` elements, returning the size that would have been requested instead.
++    ///
++    /// `cells`' bounding box comes from the min/max row/column actually present, which can be
++    /// attacker-controlled when parsing an untrusted file - two genuine cells positioned near
++    /// opposite corners of a worksheet are enough to request a dense grid of billions of
++    /// elements. This is the guard XLSX/XLSB parsing uses to avoid that.
++    pub(crate) fn from_sparse_bounded(
++        cells: Vec<Cell<T>>,
++        max_cells: usize,
++    ) -> Result<Range<T>, usize> {
+         if cells.is_empty() {
+-            return Range::empty();
++            return Ok(Range::empty());
+         }
+         // cells do not always appear in (row, col) order
+         // search bounds
+@@ -958,6 +978,9 @@ impl<T: CellType> Range<T> {
+         let cols = (col_end - col_start + 1) as usize;
+         let rows = (row_end - row_start + 1) as usize;
+         let len = cols.saturating_mul(rows);
++        if len > max_cells {
++            return Err(len);
++        }
+         let mut v = vec![T::default(); len];
+         v.shrink_to_fit();
+         for c in cells {
+@@ -968,11 +991,11 @@ impl<T: CellType> Range<T> {
+                 *v = c.val;
+             }
+         }
+-        Range {
++        Ok(Range {
+             start: (row_start, col_start),
+             end: (row_end, col_end),
+             inner: v,
+-        }
++        })
+     }
+ 
+     /// Set a value at an absolute position in a `Range`.
+diff --git a/src/xlsb/mod.rs b/src/xlsb/mod.rs
+index cab7ab5..1bf48b7 100644
+--- a/src/xlsb/mod.rs
++++ b/src/xlsb/mod.rs
+@@ -89,8 +89,19 @@ pub enum XlsbError {
+     WorksheetNotFound(String),
+     /// XML Encoding error
+     Encoding(quick_xml::encoding::EncodingError),
++    /// The worksheet's used range would require more cells than `MAX_DENSE_RANGE_CELLS`.
++    CellLimitExceeded {
++        /// Number of cells requested
++        requested: usize,
++        /// Maximum allowed cells
++        max: usize,
++    },
+ }
+ 
++/// Maximum number of cells in the dense grid a `worksheet_range()`/`worksheet_range_ref()` call
++/// will build - see the identical constant and rationale in `crate::xlsx::MAX_DENSE_RANGE_CELLS`.
++pub const MAX_DENSE_RANGE_CELLS: usize = 100_000_000;
++
+ from_err!(std::io::Error, XlsbError, Io);
+ from_err!(zip::result::ZipError, XlsbError, Zip);
+ from_err!(quick_xml::Error, XlsbError, Xml);
+@@ -127,6 +138,12 @@ impl std::fmt::Display for XlsbError {
+             XlsbError::Password => write!(f, "Workbook is password protected"),
+             XlsbError::WorksheetNotFound(name) => write!(f, "Worksheet '{name}' not found"),
+             XlsbError::Encoding(e) => write!(f, "XML encoding error: {e}"),
++            XlsbError::CellLimitExceeded { requested, max } => {
++                write!(
++                    f,
++                    "Cell limit exceeded ({requested} cells requested, max {max})"
++                )
++            }
+         }
+     }
+ }
+@@ -536,7 +553,12 @@ impl<RS: Read + Seek> Reader<RS> for Xlsb<RS> {
+                 cells.push(cell);
+             }
+         }
+-        Ok(Range::from_sparse(cells))
++        Range::from_sparse_bounded(cells, MAX_DENSE_RANGE_CELLS).map_err(|requested| {
++            XlsbError::CellLimitExceeded {
++                requested,
++                max: MAX_DENSE_RANGE_CELLS,
++            }
++        })
+     }
+ 
+     /// MS-XLSB 2.1.7.62
+@@ -621,7 +643,12 @@ impl<RS: Read + Seek> ReaderRef<RS> for Xlsb<RS> {
+             }
+         }
+ 
+-        Ok(Range::from_sparse(cells))
++        Range::from_sparse_bounded(cells, MAX_DENSE_RANGE_CELLS).map_err(|requested| {
++            XlsbError::CellLimitExceeded {
++                requested,
++                max: MAX_DENSE_RANGE_CELLS,
++            }
++        })
+     }
+ }
+ 
+diff --git a/src/xlsx/mod.rs b/src/xlsx/mod.rs
+index 9d12ede..4fe2658 100644
+--- a/src/xlsx/mod.rs
++++ b/src/xlsx/mod.rs
+@@ -46,6 +46,14 @@ pub const MAX_ROWS: u32 = 1_048_576;
+ /// Maximum number of columns allowed in an XLSX file.
+ pub const MAX_COLUMNS: u32 = 16_384;
+ 
++/// Maximum number of cells in the dense grid a `worksheet_range()`/`worksheet_range_ref()` call
++/// will build. The used range is derived from the actual min/max cell position found in the
++/// file, which two genuinely positioned cells near opposite corners of a worksheet can inflate
++/// to `MAX_ROWS * MAX_COLUMNS` (~17.2 billion) regardless of how many cells are actually
++/// present - this bounds the resulting allocation instead of attempting it unconditionally.
++/// Matches the cap `ods.rs` already uses for the same reason.
++pub const MAX_DENSE_RANGE_CELLS: usize = 100_000_000;
++
+ /// An enum for Xlsx specific errors.
+ #[derive(Debug)]
+ pub enum XlsxError {
+@@ -152,6 +160,14 @@ pub enum XlsxError {
+ 
+     /// Specified Pivot Table was not found on worksheet.
+     PivotTableNotFound(String),
++
++    /// The worksheet's used range would require more cells than `MAX_DENSE_RANGE_CELLS`.
++    CellLimitExceeded {
++        /// Number of cells requested
++        requested: usize,
++        /// Maximum allowed cells
++        max: usize,
++    },
+ }
+ 
+ from_err!(std::io::Error, XlsxError, Io);
+@@ -209,6 +225,12 @@ impl std::fmt::Display for XlsxError {
+             XlsxError::PivotTableNotFound(pt) => {
+                 write!(f, "Pivot Table '{pt}' was not found on worksheet")
+             }
++            XlsxError::CellLimitExceeded { requested, max } => {
++                write!(
++                    f,
++                    "Cell limit exceeded ({requested} cells requested, max {max})"
++                )
++            }
+         }
+     }
+ }
+@@ -2619,7 +2641,12 @@ impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
+                 cells.push(cell);
+             }
+         }
+-        Ok(Range::from_sparse(cells))
++        Range::from_sparse_bounded(cells, MAX_DENSE_RANGE_CELLS).map_err(|requested| {
++            XlsxError::CellLimitExceeded {
++                requested,
++                max: MAX_DENSE_RANGE_CELLS,
++            }
++        })
+     }
+ 
+     fn worksheets(&mut self) -> Vec<(String, Range<Data>)> {
+@@ -2719,7 +2746,12 @@ impl<RS: Read + Seek> ReaderRef<RS> for Xlsx<RS> {
+             }
+         }
+ 
+-        Ok(Range::from_sparse(cells))
++        Range::from_sparse_bounded(cells, MAX_DENSE_RANGE_CELLS).map_err(|requested| {
++            XlsxError::CellLimitExceeded {
++                requested,
++                max: MAX_DENSE_RANGE_CELLS,
++            }
++        })
+     }
+ }
+ 

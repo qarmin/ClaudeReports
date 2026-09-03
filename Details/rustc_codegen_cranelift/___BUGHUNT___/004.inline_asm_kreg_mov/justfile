@@ -1,0 +1,66 @@
+# Self-contained reproduction for candidate 004 (AVX-512 mask registers spilled with `mov`).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing here reaches outside the folder it lives in, so the folder can be
+# copied/posted standalone and `just test` still works.
+#
+# The subject is a rustc codegen backend, so "run the repro" means: build repro/ with plain
+# rustc/LLVM (the oracle) and with the cg_clif built from ./clone, then compare. The bug is a
+# *build* failure under cg_clif, so it reproduces on any x86-64 host; the value checks in repro/
+# additionally need an AVX-512 CPU and print SKIP without one.
+#
+# `just clone` + two `./y.sh build`s take a few minutes and ~4 GB. `just test` is the full cycle.
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+# Override the URL if ssh to github isn't set up, e.g.
+#   just repo_url=https://github.com/rust-lang/rustc_codegen_cranelift.git test
+# (that https form is what this justfile was actually validated with).
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test:
+    {{just_executable()}} repo_url={{repo_url}} base_commit={{base_commit}} clone
+    {{just_executable()}} build-clif
+    {{just_executable()}} reproduce-before
+    {{just_executable()}} apply
+    {{just_executable()}} build-clif
+    {{just_executable()}} reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build the cg_clif backend (+ its sysroot) out of ./clone, in whatever state it is now.
+build-clif:
+    cd clone && ./y.sh build
+
+# LLVM is the oracle: this must always compile and (on an AVX-512 CPU) print all-ok.
+reproduce-llvm:
+    ulimit -c 0 && cd repro && cargo run --target-dir target-llvm
+
+# cg_clif from ./clone. Unpatched this fails to build ("invalid operand for instruction" on
+# `mov k1, [rbx+0x18]"); patched it builds and prints the same values as LLVM.
+reproduce-clif:
+    ulimit -c 0 && cd repro && ../clone/dist/cargo-clif run --target-dir target-clif
+
+reproduce-before:
+    @echo "=== BEFORE: LLVM (oracle) ==="
+    {{just_executable()}} reproduce-llvm
+    @echo ""
+    @echo "=== BEFORE: cg_clif - EXPECTED TO FAIL TO BUILD ==="
+    -{{just_executable()}} reproduce-clif
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+reproduce-after:
+    @echo "=== AFTER: LLVM (oracle) ==="
+    {{just_executable()}} reproduce-llvm
+    @echo ""
+    @echo "=== AFTER: cg_clif - EXPECTED TO BUILD AND MATCH LLVM ==="
+    {{just_executable()}} reproduce-clif
+
+clean:
+    rm -rf clone repro/target-llvm repro/target-clif

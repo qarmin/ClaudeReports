@@ -1,0 +1,94 @@
+# Self-contained reproduction attempt for candidate 008 (llvm.aarch64.neon.tbl1.v8i8/.v16i8).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere and `just test` still works, with no dependency
+# on the main project checkout this candidate was originally found in.
+#
+# RESULT WAS "Not reproducible": both programs below print byte-for-byte the same thing under
+# cg_clif as under LLVM, and neither crashes. `just test` therefore *demonstrates the absence*
+# of a wrong answer; the only positive finding (an out-of-bounds byte load that is emitted but
+# whose value is thrown away) is shown by `just disasm`.
+#
+# The subject is a compiler backend and the code under test is aarch64-only, while the host is
+# x86_64 - so "run the repro" means: build a `#![no_std] #![no_main]` static-PIE twice (plain
+# rustc = the LLVM oracle, and the freshly built cg_clif from ./clone), run both under
+# qemu-aarch64, and diff their stdout. There is no aarch64 rust-std and no aarch64 C toolchain
+# here, so `core` is compiled from rust-src by each backend and rust-lld does the linking; see
+# repro/aarch64_diffcheck.sh (a copy of ___BUGHUNT___/tools/aarch64_diffcheck.sh) for the details.
+#
+# Needs on PATH/installed: rustup with the pinned nightly *including the rust-src component*,
+# qemu-aarch64 (qemu-user), just, git.
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+# Full cycle: clone pristine, build cg_clif, show the two programs agree with LLVM, then show
+# the out-of-bounds load in the emitted machine code.
+test: clone build-clif reproduce-before disasm
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# ~2-5 min cold. Produces clone/dist/{cargo-clif,rustc-clif}.
+#
+# The 128bit_atomics_measurement.diff is a PREREQUISITE, not a fix: unpatched cg_clif cannot
+# compile `core` for aarch64 at all, because atomic_load::<u128>/atomic_store::<u128> are
+# monomorphised on aarch64 (target_has_atomic = "128") and src/intrinsics/mod.rs makes those a
+# span_fatal. The project's own sysroot build avoids this with
+# patches/0027-stdlib-128bit-atomic-operations.patch, which does not apply to a hand-built core.
+# The diff flips those two span_fatals to the existing codegen_panic_nounwind path; nothing in
+# these programs executes a 128-bit atomic.
+build-clif:
+    cd clone && git apply "{{justfile_directory()}}/repro/128bit_atomics_measurement.diff"
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build
+
+# LLVM-vs-cg_clif differential, both programs. Exit 0 from each = the outputs are identical,
+# which is the actual (negative) result of this candidate.
+reproduce-before:
+    #!/usr/bin/env bash
+    ulimit -c 0
+    set -uo pipefail
+    mkdir -p work
+    for p in tbl1 tbl1_sweep; do
+        echo "===== $p ====="
+        WORKDIR="{{justfile_directory()}}/work" CLIF_ROOT="{{justfile_directory()}}/clone" \
+            bash repro/aarch64_diffcheck.sh "repro/$p.rs"
+        echo "aarch64_diffcheck exit: $?  (0 = LLVM and cg_clif printed the same bytes)"
+    done
+
+# The one thing that *is* wrong: dump the aarch64 code cg_clif emits for core::arch::aarch64
+# ::vqtbl1 and look for `ldrb wN, [x0, xN]` with an unmasked 0..=255 index, executed before the
+# `cmp #0x10` + `csel` that discards it. With hardening.diff applied there is an `and wN, wN,
+# #0xf` in front of the load instead.
+disasm:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    TC="$(rustc --print sysroot)"
+    OBJD="$TC/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-objdump"
+    W="{{justfile_directory()}}/work"
+    CLIF_TAG="$(echo "{{justfile_directory()}}/clone" | tr -c 'a-zA-Z0-9' '_')"
+    printf '%s\n' '#![no_std]' '#![crate_type = "lib"]' \
+        'use core::arch::aarch64::*;' '#[unsafe(no_mangle)]' \
+        'pub unsafe extern "C" fn f(t: uint8x16_t, i: uint8x8_t) -> uint8x8_t {' \
+        '    unsafe { vqtbl1_u8(t, i) }' '}' > "$W/oneshot.rs"
+    cd "$W"
+    RUSTC_BOOTSTRAP=1 "{{justfile_directory()}}/clone/dist/rustc-clif" \
+        --target aarch64-unknown-linux-gnu --edition 2024 -Copt-level=0 -Awarnings --emit obj \
+        --extern compiler_builtins=libcompiler_builtins.rlib \
+        --extern "core=clif$CLIF_TAG/libcore.rlib" -o oneshot.o oneshot.rs
+    SYM=$("$OBJD" -t oneshot.o | grep -oP '_RNv\S*generated6vqtbl1\S*' | head -1)
+    "$OBJD" -d --disassemble-symbols="$SYM" oneshot.o | sed -n '5,25p'
+
+# Optional: apply the index-masking hardening (NOT a fix for an observable bug - see RESULT.md)
+# and re-run everything. The outputs must stay identical and the `and #0xf` must appear.
+apply-hardening:
+    cd clone && git apply "{{justfile_directory()}}/hardening.diff"
+    cd clone && ./y.sh build
+    rm -rf work
+
+clean:
+    rm -rf clone work

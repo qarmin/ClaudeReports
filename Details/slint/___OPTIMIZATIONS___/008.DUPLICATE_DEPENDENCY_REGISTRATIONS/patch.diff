@@ -1,0 +1,144 @@
+diff --git a/internal/core/properties.rs b/internal/core/properties.rs
+index a093bb4e2..922616866 100644
+--- a/internal/core/properties.rs
++++ b/internal/core/properties.rs
+@@ -205,6 +205,20 @@ pub fn append(&self, node: Pin<&DependencyNode<T>>) {
+             }
+         }
+ 
++        /// Returns true when the first node of the list carries `binding`.
++        ///
++        /// [`Self::append`] inserts at the front and a binding's nodes are unlinked when the
++        /// binding is re-evaluated (dropping its `dep_nodes`), so a match means that this
++        /// binding already has a live dependency on this property and does not need a second
++        /// node. Reading the actual list rather than a remembered address also means a
++        /// destroyed-and-reallocated property cannot be mistaken for a registered one.
++        pub fn front_is(&self, binding: T) -> bool
++        where
++            T: Copy + PartialEq,
++        {
++            unsafe { self.0.get().as_ref().is_some_and(|node| node.binding == binding) }
++        }
++
+         pub fn for_each(&self, mut f: impl FnMut(&T)) {
+             unsafe {
+                 let mut next = self.0.get();
+@@ -463,6 +477,17 @@ fn register_self_as_dependency(
+         property_that_will_notify: *mut DependencyListHead,
+         #[cfg(slint_debug_property)] _other_debug_name: &str,
+     ) {
++        #[cfg(feature = "dep-stats")]
++        dep_stats::record(self_ptr as usize, property_that_will_notify as usize);
++        // The same property is often read several times while one binding is evaluated - a
++        // renderer walking the children of a layout reads that layout's cache once per child,
++        // for example. The second and later reads would add nodes carrying information the
++        // first one already carries, so skip them.
++        if unsafe { (*property_that_will_notify).front_is(self_ptr) } {
++            #[cfg(feature = "dep-stats")]
++            dep_stats::record_skipped();
++            return;
++        }
+         let node = DependencyNode::new(self_ptr);
+         // Safety: self_ptr is valid and pinned
+         unsafe {
+@@ -1546,3 +1571,100 @@ fn test_nested_property_tracker_evaluate_if_dirty() {
+ 
+ #[cfg(feature = "ffi")]
+ pub(crate) mod ffi;
++
++/// Temporary instrumentation for perf_test/___OPTIMIZATIONS___/08: how many dependency
++/// registrations happen per frame, and how many of them repeat a (binding, property) pair that
++/// was already registered since the last [`dep_stats::reset`].
++#[cfg(feature = "dep-stats")]
++pub mod dep_stats {
++    use core::cell::Cell;
++    use std::cell::RefCell;
++    use std::collections::HashSet;
++
++    /// How many previous registrations a hypothetical per-binding cache would remember.
++    const RING: usize = 4;
++
++    std::thread_local! {
++        static SEEN: RefCell<HashSet<(usize, usize)>> = RefCell::new(HashSet::new());
++        static TOTAL: Cell<u64> = const { Cell::new(0) };
++        static DUPLICATES: Cell<u64> = const { Cell::new(0) };
++        /// Duplicates a 1-entry "last registered pair" cache would catch.
++        static CONSECUTIVE: Cell<u64> = const { Cell::new(0) };
++        /// Duplicates a RING-entry cache would catch.
++        static IN_RING: Cell<u64> = const { Cell::new(0) };
++        static SKIPPED: Cell<u64> = const { Cell::new(0) };
++        static LAST: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
++        static RECENT: RefCell<[(usize, usize); RING]> = const { RefCell::new([(0, 0); RING]) };
++        static RECENT_NEXT: Cell<usize> = const { Cell::new(0) };
++    }
++
++    pub(crate) fn record(binding: usize, property: usize) {
++        TOTAL.with(|total| total.set(total.get() + 1));
++        let pair = (binding, property);
++
++        if LAST.with(|last| last.replace(pair)) == pair {
++            CONSECUTIVE.with(|hits| hits.set(hits.get() + 1));
++        }
++
++        let in_ring = RECENT.with(|recent| {
++            let mut recent = recent.borrow_mut();
++            if recent.contains(&pair) {
++                true
++            } else {
++                let slot = RECENT_NEXT.with(|next| {
++                    let slot = next.get();
++                    next.set((slot + 1) % RING);
++                    slot
++                });
++                recent[slot] = pair;
++                false
++            }
++        });
++        if in_ring {
++            IN_RING.with(|hits| hits.set(hits.get() + 1));
++        }
++
++        let fresh = SEEN.with(|seen| seen.borrow_mut().insert(pair));
++        if !fresh {
++            DUPLICATES.with(|duplicates| duplicates.set(duplicates.get() + 1));
++        }
++    }
++
++    pub(crate) fn record_skipped() {
++        SKIPPED.with(|skipped| skipped.set(skipped.get() + 1));
++    }
++
++    pub fn reset() {
++        SEEN.with(|seen| seen.borrow_mut().clear());
++        TOTAL.with(|total| total.set(0));
++        DUPLICATES.with(|duplicates| duplicates.set(0));
++        CONSECUTIVE.with(|hits| hits.set(0));
++        IN_RING.with(|hits| hits.set(0));
++        SKIPPED.with(|skipped| skipped.set(0));
++        LAST.with(|last| last.set((0, 0)));
++        RECENT.with(|recent| *recent.borrow_mut() = [(0, 0); RING]);
++    }
++
++    pub struct Stats {
++        pub registrations: u64,
++        pub duplicates: u64,
++        pub distinct: u64,
++        /// Duplicates that repeat the immediately preceding registration.
++        pub consecutive: u64,
++        /// Duplicates a 4-entry per-binding cache would catch.
++        pub in_ring: u64,
++        /// Registrations actually skipped by the front-of-list check.
++        pub skipped: u64,
++    }
++
++    pub fn report() -> Stats {
++        Stats {
++            registrations: TOTAL.with(|total| total.get()),
++            duplicates: DUPLICATES.with(|duplicates| duplicates.get()),
++            distinct: SEEN.with(|seen| seen.borrow().len() as u64),
++            consecutive: CONSECUTIVE.with(|hits| hits.get()),
++            in_ring: IN_RING.with(|hits| hits.get()),
++            skipped: SKIPPED.with(|skipped| skipped.get()),
++        }
++    }
++}

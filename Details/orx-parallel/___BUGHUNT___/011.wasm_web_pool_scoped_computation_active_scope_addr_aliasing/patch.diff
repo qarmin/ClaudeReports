@@ -1,0 +1,147 @@
+diff --git a/src/pool/pool_impl/wasm_web.rs b/src/pool/pool_impl/wasm_web.rs
+index 648b5c63..fbda248d 100644
+--- a/src/pool/pool_impl/wasm_web.rs
++++ b/src/pool/pool_impl/wasm_web.rs
+@@ -41,7 +41,6 @@ struct WorkerShared {
+ 
+ struct WorkerState {
+     shutdown: bool,
+-    active_scope_addr: Option<usize>,
+     queue: VecDeque<Task>,
+ }
+ 
+@@ -142,7 +141,7 @@ impl ScopeRuntime {
+ 
+ pub struct ScopeRef<'env> {
+     shared: *const WorkerShared,
+-    runtime: *const ScopeRuntime,
++    runtime: Arc<ScopeRuntime>,
+     inline_only: bool,
+     _marker: PhantomData<&'env ()>,
+ }
+@@ -153,7 +152,11 @@ impl<'env> ScopeRef<'env> {
+     }
+ 
+     fn runtime(&self) -> &ScopeRuntime {
+-        unsafe { &*self.runtime }
++        &self.runtime
++    }
++
++    fn runtime_arc(&self) -> Arc<ScopeRuntime> {
++        Arc::clone(&self.runtime)
+     }
+ }
+ 
+@@ -162,13 +165,17 @@ struct Task {
+     data: *mut (),
+     run_fn: unsafe fn(*mut ()),
+     drop_fn: unsafe fn(*mut ()),
++    // Each task carries its own scope's runtime so that concurrently/reentrantly
++    // active scopes (e.g. a nested scoped_computation call) never alias one
++    // another's completion bookkeeping - see candidate 011 in ___BUGHUNT___.
++    runtime: Arc<ScopeRuntime>,
+ }
+ 
+ unsafe impl Send for Task {}
+ 
+ #[cfg_attr(not(target_feature = "atomics"), allow(dead_code))]
+ impl Task {
+-    fn new<W>(work: W) -> Self
++    fn new<W>(work: W, runtime: Arc<ScopeRuntime>) -> Self
+     where
+         W: Fn() + Send,
+     {
+@@ -192,6 +199,7 @@ impl Task {
+             data: Box::into_raw(boxed) as *mut (),
+             run_fn: run_impl::<W>,
+             drop_fn: drop_impl::<W>,
++            runtime,
+         }
+     }
+ 
+@@ -207,7 +215,7 @@ impl Task {
+ #[cfg_attr(not(target_feature = "atomics"), allow(dead_code))]
+ fn worker_loop(shared: Arc<WorkerShared>) {
+     loop {
+-        let (task, runtime_ptr) = {
++        let task = {
+             let mut state = shared.state.lock().expect("poisoned pool lock");
+             loop {
+                 if state.shutdown {
+@@ -215,17 +223,14 @@ fn worker_loop(shared: Arc<WorkerShared>) {
+                 }
+ 
+                 if let Some(task) = state.queue.pop_front() {
+-                    let runtime_ptr = state
+-                        .active_scope_addr
+-                        .expect("active scope must be set while queue is non-empty");
+-                    break (task, runtime_ptr as *const ScopeRuntime);
++                    break task;
+                 }
+ 
+                 state = shared.cv.wait(state).expect("poisoned pool lock");
+             }
+         };
+ 
+-        let runtime = unsafe { &*runtime_ptr };
++        let runtime = Arc::clone(&task.runtime);
+         let result = catch_unwind(AssertUnwindSafe(|| unsafe { task.run() }));
+         if let Err(err) = result {
+             runtime.record_panic(err);
+@@ -239,7 +244,6 @@ fn init_runtime(num_threads: NonZeroUsize) -> Arc<Inner> {
+     let shared = Arc::new(WorkerShared {
+         state: Mutex::new(WorkerState {
+             shutdown: false,
+-            active_scope_addr: None,
+             queue: VecDeque::new(),
+         }),
+         cv: Condvar::new(),
+@@ -362,18 +366,16 @@ impl WasmWebPool {
+         'env: 'scope,
+         for<'s> F: FnOnce(&'s ScopeRef<'env>) + Send,
+     {
+-        let scope_runtime = ScopeRuntime::new();
+-
+-        {
+-            let runtime_ref = runtime();
+-            let mut state = runtime_ref.shared.state.lock().expect("poisoned pool lock");
+-            debug_assert!(state.active_scope_addr.is_none());
+-            state.active_scope_addr = Some(&scope_runtime as *const ScopeRuntime as usize);
+-        }
++        // Each scope owns its own heap-allocated runtime (instead of publishing a
++        // single process-wide "active scope" address) so that concurrently or
++        // reentrantly active scopes - e.g. a scoped_computation call nested inside
++        // another one's still-running user closure - never alias each other's
++        // pending-task/completion bookkeeping. See candidate 011 in ___BUGHUNT___.
++        let scope_runtime = Arc::new(ScopeRuntime::new());
+ 
+         let scope_ref = ScopeRef {
+             shared: Arc::as_ptr(&runtime().shared),
+-            runtime: &scope_runtime,
++            runtime: Arc::clone(&scope_runtime),
+             inline_only: runtime().spawned_workers == 0,
+             _marker: PhantomData,
+         };
+@@ -382,13 +384,6 @@ impl WasmWebPool {
+ 
+         scope_runtime.wait_for_completion();
+ 
+-        {
+-            let runtime_ref = runtime();
+-            let mut state = runtime_ref.shared.state.lock().expect("poisoned pool lock");
+-            state.active_scope_addr = None;
+-            debug_assert!(state.queue.is_empty());
+-        }
+-
+         if let Err(err) = user_result {
+             resume_unwind(err);
+         }
+@@ -423,7 +418,7 @@ impl ParThreadPool for WasmWebPool {
+             return;
+         }
+ 
+-        let task = Task::new(work);
++        let task = Task::new(work, s.runtime_arc());
+ 
+         {
+             let mut state = s.shared().state.lock().expect("poisoned pool lock");

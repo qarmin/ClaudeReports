@@ -1,0 +1,96 @@
+Captured by actually running repro/ (release build) against the pristine worktree (kurbo @
+ca273499e3e48bd2de6f02aa8e99a148984e45f3, `git checkout -- src/stroke.rs` state) and then again
+after applying patch.diff to that same worktree and rebuilding. `cargo run --release` inside
+repro/, kurbo/src/stroke.rs's dash_iter unmodified vs. patched.
+
+=================== BEFORE PATCH (pristine ca27349) - run 1 of 3 ===================
+-- Class 1: period == 0.0 (NaN via rem_euclid(x, 0.0)) --
+dashes=[0.0, 0.0] offset=0 -> BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])  (dash pattern silently ignored, rendered as solid line: true)
+dashes=[-3.0, 3.0] offset=0 -> BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])  (dash pattern silently ignored, rendered as solid line: true)
+dashes=[3.0, -3.0] offset=0 -> BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])  (dash pattern silently ignored, rendered as solid line: true)
+dashes=[0.0, 0.0] offset=5 -> BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])  (dash pattern silently ignored, rendered as solid line: true)
+dashes=[0.0, 0.0, 0.0, 0.0] offset=0 -> BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])  (dash pattern silently ignored, rendered as solid line: true)
+dashes=[0.0] offset=0 -> BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])  (dash pattern silently ignored, rendered as solid line: true)
+
+-- Class 2: period < 0.0 (search loop diverges forever) --
+dashes=[-5.0, -5.0] offset=0 -> HANG DETECTED: dash() did not return within 5s (infinite loop in dash_iter's init search loop)
+dashes=[-5.0, -5.0] offset=2 -> HANG DETECTED: dash() did not return within 5s (infinite loop in dash_iter's init search loop)
+
+RESULT: BUG REPRODUCED - dash() either silently ignored a degenerate dash pattern via NaN, or hung forever on a negative-period pattern.
+exit code: 1
+
+Repeated 3/3 times (runs 2 and 3 below only show the Class 2 tail, which is the part that varies
+run to run due to the timeout thread; Class 1's output was byte-for-byte identical across all 3
+runs, as expected for a deterministic NaN computation with no timing dependency):
+
+--- before-fix repeat run 2 (tail) ---
+-- Class 2: period < 0.0 (search loop diverges forever) --
+dashes=[-5.0, -5.0] offset=0 -> HANG DETECTED: dash() did not return within 5s (infinite loop in dash_iter's init search loop)
+dashes=[-5.0, -5.0] offset=2 -> HANG DETECTED: dash() did not return within 5s (infinite loop in dash_iter's init search loop)
+
+RESULT: BUG REPRODUCED - dash() either silently ignored a degenerate dash pattern via NaN, or hung forever on a negative-period pattern.
+exit code: 0 (this is `timeout 30 ... | tail -5`'s own exit code, not the program's - see run 1
+above for the program's own exit code captured without a pipe)
+
+--- before-fix repeat run 3 (tail) ---
+-- Class 2: period < 0.0 (search loop diverges forever) --
+dashes=[-5.0, -5.0] offset=0 -> HANG DETECTED: dash() did not return within 5s (infinite loop in dash_iter's init search loop)
+dashes=[-5.0, -5.0] offset=2 -> HANG DETECTED: dash() did not return within 5s (infinite loop in dash_iter's init search loop)
+
+RESULT: BUG REPRODUCED - dash() either silently ignored a degenerate dash pattern via NaN, or hung forever on a negative-period pattern.
+
+=================== AFTER PATCH (patch.diff applied to the same worktree) - run 1 of 3 ===================
+-- Class 1: period == 0.0 (NaN via rem_euclid(x, 0.0)) --
+dashes=[0.0, 0.0] offset=0 -> BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])  (dash pattern silently ignored, rendered as solid line: true)
+dashes=[-3.0, 3.0] offset=0 -> BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])  (dash pattern silently ignored, rendered as solid line: true)
+dashes=[3.0, -3.0] offset=0 -> BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])  (dash pattern silently ignored, rendered as solid line: true)
+dashes=[0.0, 0.0] offset=5 -> BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])  (dash pattern silently ignored, rendered as solid line: true)
+dashes=[0.0, 0.0, 0.0, 0.0] offset=0 -> BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])  (dash pattern silently ignored, rendered as solid line: true)
+dashes=[0.0] offset=0 -> BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])  (dash pattern silently ignored, rendered as solid line: true)
+
+-- Class 2: period < 0.0 (search loop diverges forever) --
+dashes=[-5.0, -5.0] offset=0 -> completed: BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])
+dashes=[-5.0, -5.0] offset=2 -> completed: BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])
+
+RESULT: dash() handled every degenerate (non-positive-period) pattern above without hanging or silently ignoring the pattern via NaN - fix appears to be applied.
+exit code: 0
+
+Repeated 3/3 times; runs 2 and 3 (tail) below, both completing (no hang) exactly like run 1:
+
+--- after-fix repeat run 2 (tail) ---
+-- Class 2: period < 0.0 (search loop diverges forever) --
+dashes=[-5.0, -5.0] offset=0 -> completed: BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])
+dashes=[-5.0, -5.0] offset=2 -> completed: BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])
+
+RESULT: dash() handled every degenerate (non-positive-period) pattern above without hanging or silently ignoring the pattern via NaN - fix appears to be applied.
+
+--- after-fix repeat run 3 (tail) ---
+-- Class 2: period < 0.0 (search loop diverges forever) --
+dashes=[-5.0, -5.0] offset=0 -> completed: BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])
+dashes=[-5.0, -5.0] offset=2 -> completed: BezPath([MoveTo((0.0, 0.0)), LineTo((100.0, 0.0))])
+
+RESULT: dash() handled every degenerate (non-positive-period) pattern above without hanging or silently ignoring the pattern via NaN - fix appears to be applied.
+
+=================== NOTE ON CLASS 1's UNCHANGED VISIBLE OUTPUT ===================
+Class 1's printed BezPath is intentionally identical before and after the patch - see RESULT.md's
+"The fix" section for why: the patch makes the zero/negative-period fallback an explicit,
+documented branch instead of an accidental consequence of `x.rem_euclid(0.0)` == NaN, but for
+`period == 0.0` specifically the resulting visible path (a full, undashed passthrough) does not
+change, since NaN-vs-explicit-INFINITY both make every `dash_remaining < seg_remaining` comparison
+in DashIterator::step() evaluate false. Class 2 (period < 0.0) is where the patch's effect is
+visibly dramatic: an unconditional hang becomes a normal, instant return.
+
+=================== PROJECT TEST SUITE (kurbo/, cargo test --release) ===================
+BEFORE patch:
+test result: FAILED. 185 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+  (failures: bezpath::tests::test_elements_to_segments_starts_on_closepath,
+   bezpath::tests::test_must_not_start_on_quad - both pre-existing, unrelated to stroke.rs; see
+   e.g. candidates 011/021/022/023/032's RESULT.md, which independently observed the same 2
+   pre-existing failures on this exact commit)
+stroke:: subset: test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 173 filtered out
+
+AFTER patch:
+test result: FAILED. 185 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+  (identical failure set: bezpath::tests::test_elements_to_segments_starts_on_closepath,
+   bezpath::tests::test_must_not_start_on_quad)
+stroke:: subset: test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 173 filtered out

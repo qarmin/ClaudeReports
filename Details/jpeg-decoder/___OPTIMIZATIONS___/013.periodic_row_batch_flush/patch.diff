@@ -1,0 +1,41 @@
+diff --git a/src/decoder.rs b/src/decoder.rs
+index b8eb531..c0519a5 100644
+--- a/src/decoder.rs
++++ b/src/decoder.rs
+@@ -907,6 +907,14 @@ impl<R: Read> Decoder<R> {
+             )
+         };
+ 
++        // Periodic flush: buffer up to ROW_FLUSH_N rows' coefficients, then hand them to the
++        // worker via one batched `append_rows` call (rayon: one task per row per flush) instead
++        // of every row individually. Unlike whole-scan buffering, this caps how much decoded
++        // data sits unconsumed at once, so it doesn't need a per-scan size gate: see
++        // 013.periodic_row_batch_flush/RESULT.md.
++        const ROW_FLUSH_N: usize = 64;
++        let mut pending_rows: Vec<(usize, Vec<i16>)> = Vec::with_capacity(ROW_FLUSH_N);
++
+         for mcu_y in 0..max_mcu_y {
+             if mcu_y * 8 >= frame.image_size.height {
+                 break;
+@@ -1053,13 +1061,18 @@ impl<R: Read> Decoder<R> {
+                         )
+                     };
+ 
+-                    // FIXME: additional potential work stealing opportunities for rayon case if we
+-                    // also internally can parallelize over components.
+-                    worker.append_row((i, row_coefficients))?;
++                    pending_rows.push((i, row_coefficients));
++                    if pending_rows.len() >= ROW_FLUSH_N {
++                        worker.append_rows(&mut pending_rows.drain(..))?;
++                    }
+                 }
+             }
+         }
+ 
++        if !pending_rows.is_empty() {
++            worker.append_rows(&mut pending_rows.drain(..))?;
++        }
++
+         let mut marker = huffman.take_marker(&mut self.reader)?;
+         while let Some(Marker::RST(_)) = marker {
+             marker = self.read_marker().ok();

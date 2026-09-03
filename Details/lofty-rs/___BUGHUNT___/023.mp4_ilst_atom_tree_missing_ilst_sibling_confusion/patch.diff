@@ -1,0 +1,96 @@
+diff --git a/lofty/src/mp4/ilst/write.rs b/lofty/src/mp4/ilst/write.rs
+index 1be152bb..c6a505dd 100644
+--- a/lofty/src/mp4/ilst/write.rs
++++ b/lofty/src/mp4/ilst/write.rs
+@@ -236,17 +236,7 @@ fn save_to_existing(
+ 	)
+ 	.map_err(Into::<FileParseError>::into)?;
+ 
+-	if tree.is_empty() {
+-		// Nothing to do
+-		if remove_tag {
+-			return Ok(());
+-		}
+-
+-		let meta_end = (meta.start + meta.len) as usize;
+-
+-		replacement = ilst;
+-		range = meta_end..meta_end;
+-	} else {
++	if let Some(ilst_idx) = ilst_idx {
+ 		let existing_ilst = &tree[ilst_idx];
+ 		let existing_ilst_size = existing_ilst.len;
+ 
+@@ -321,6 +311,20 @@ fn save_to_existing(
+ 			replacement = ilst;
+ 			range = range_start as usize..range_end as usize;
+ 		}
++	} else {
++		// No existing `ilst` atom among `meta`'s children (this also covers an empty `tree`,
++		// since `atom_tree` only ever returns `Some` for an atom it actually matched) - nothing
++		// to reuse, so append a new one instead of mistaking an unrelated sibling atom for it.
++
++		// Nothing to do
++		if remove_tag {
++			return Ok(());
++		}
++
++		let meta_end = (meta.start + meta.len) as usize;
++
++		replacement = ilst;
++		range = meta_end..meta_end;
+ 	}
+ 
+ 	drop(write_handle);
+diff --git a/lofty/src/mp4/read/mod.rs b/lofty/src/mp4/read/mod.rs
+index 5954072e..f7128121 100644
+--- a/lofty/src/mp4/read/mod.rs
++++ b/lofty/src/mp4/read/mod.rs
+@@ -151,20 +151,23 @@ where
+ }
+ 
+ // Creates a tree of nested atoms
++//
++// Returns the index into the returned `Vec` of the last child atom matching `up_to`'s fourcc,
++// or `None` if no child matches it (this must be `Option`, not a `usize` sentinel: index `0` is
++// both a valid "matched the first child" result and would otherwise collide with "no match", see
++// the `write.rs` caller which must not mistake an unrelated first child for `up_to` itself).
+ pub(super) fn atom_tree<R>(
+ 	reader: &mut R,
+ 	mut len: u64,
+ 	up_to: &[u8],
+ 	parse_mode: ParsingMode,
+-) -> Result<(usize, Vec<AtomInfo>), Mp4ParseError>
++) -> Result<(Option<usize>, Vec<AtomInfo>), Mp4ParseError>
+ where
+ 	R: Read + Seek,
+ {
+-	let mut found_idx: usize = 0;
++	let mut found_idx = None;
+ 	let mut buf = Vec::new();
+ 
+-	let mut i = 0;
+-
+ 	while len > 8 {
+ 		let Some(atom) = AtomInfo::read(reader, len, parse_mode)? else {
+ 			break;
+@@ -174,18 +177,14 @@ where
+ 		len = len.saturating_sub(atom.len);
+ 
+ 		if let AtomIdent::Fourcc(ref fourcc) = atom.ident {
+-			i += 1;
+-
+ 			if fourcc == up_to {
+-				found_idx = i;
++				found_idx = Some(buf.len());
+ 			}
+ 
+ 			buf.push(atom);
+ 		}
+ 	}
+ 
+-	found_idx = found_idx.saturating_sub(1);
+-
+ 	Ok((found_idx, buf))
+ }
+ 

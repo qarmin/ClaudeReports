@@ -1,0 +1,34 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should hang (never exit on its
+# own; the repro's own threshold is 3s, but real pristine runs observed during this session ran
+# well past 15-30s without completing - see output.txt). The repro binary is expected to be
+# killed by the timeout here rather than exit non-zero on its own, since the bug is a hang, not a
+# panic - `-` (ignore exit code) plus an explicit `timeout` keeps `just test`'s single-command
+# chain moving on to `apply`/`reproduce-after` afterwards instead of blocking forever.
+reproduce-before:
+    -cd repro && timeout 20 cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should complete quickly and print
+# "did not reproduce".
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

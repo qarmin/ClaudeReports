@@ -1,0 +1,49 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# Fill in repo_url/base_commit when this candidate is created (read them once with
+# `git remote get-url origin` / `git rev-parse HEAD` in the main project, at the moment
+# patch.diff is captured) - patch.diff is a diff against that exact commit and may stop applying
+# cleanly once the main branch moves on.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+# If this candidate has no patch.diff (Confirmed with no bounded fix, or Not reproducible /
+# Inconclusive), delete the `apply`/`reproduce-after` steps and keep only `reproduce-before`.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug.
+# Adapt: repro/ depends on `{ path = "../clone/<crate_dir>" }`, so it always tracks whatever
+# state ./clone is currently in. Needs a constrained virtual-memory ulimit to force the
+# allocation to actually fail/abort rather than quietly succeeding on a dev machine with plenty
+# of RAM (see RESULT.md) - a SIGABRT/core dump here is the EXPECTED pre-fix outcome, don't let
+# it abort `just test`.
+reproduce-before:
+    #!/usr/bin/env bash
+    cd repro && cargo build --release
+    ( ulimit -v 500000; ./target/release/repro ); echo "(a SIGABRT/core dump above is expected here: bug reproduced)"; true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer abort, just return a normal
+# graceful error (exit 0 from this repro's own convention, printing a Result::Err).
+reproduce-after:
+    #!/usr/bin/env bash
+    cd repro && cargo build --release
+    ( ulimit -v 500000; ./target/release/repro )
+
+clean:
+    rm -rf clone

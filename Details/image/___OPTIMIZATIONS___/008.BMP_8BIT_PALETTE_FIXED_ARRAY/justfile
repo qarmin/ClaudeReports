@@ -1,0 +1,40 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# Fill in repo_url/base_commit when this candidate is created (read them once with
+# `git remote get-url origin` / `git rev-parse HEAD` in the main project, at the moment
+# patch.diff is captured) - patch.diff is a diff against that exact commit and may stop
+# applying cleanly once the main branch moves on.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+# patch.diff only touches src/codecs/bmp/decoder.rs - no harness change needed, so the baseline
+# build is just the pristine clone and the patched build is clone + apply.
+test: clone bench-baseline apply bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Reuses the project's own existing criterion bench (benches/decode.rs), filtered to the
+# one BMP file large enough in the repo's own test corpus to give a clean signal
+# (435x353, 8-bit indexed). No standalone bench crate needed for this candidate.
+bench-baseline:
+    @echo "=== baseline (before patch) ==="
+    cd clone && cargo build --release --bench decode
+    cd clone && cargo bench --bench decode -- "load-Bmp/Core_8_Bit.bmp" --exact
+
+bench-patched:
+    @echo "=== patched (after patch) ==="
+    cd clone && cargo build --release --bench decode
+    cd clone && cargo bench --bench decode -- "load-Bmp/Core_8_Bit.bmp" --exact
+
+clean:
+    rm -rf clone

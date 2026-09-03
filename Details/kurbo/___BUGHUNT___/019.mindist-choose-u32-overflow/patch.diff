@@ -1,0 +1,96 @@
+diff --git a/kurbo/src/mindist.rs b/kurbo/src/mindist.rs
+index 3c741aa..b29d158 100644
+--- a/kurbo/src/mindist.rs
++++ b/kurbo/src/mindist.rs
+@@ -195,7 +195,7 @@ fn C_rk(r: u8, k: u8, bez1: &[Vec2], bez2: &[Vec2]) -> f64 {
+     let mut left: Vec2 = Vec2::ZERO;
+     for i in theta..upsilon + 1 {
+         let item = bez1[usize::from(i)];
+-        left += item * (choose(n, i) * choose(n, r - i)) as f64 / (choose(2 * n, r) as f64);
++        left += item * (choose(n, i) * choose(n, r - i)) / choose(2 * n, r);
+     }
+ 
+     let varsigma = k.min(m);
+@@ -203,7 +203,7 @@ fn C_rk(r: u8, k: u8, bez1: &[Vec2], bez2: &[Vec2]) -> f64 {
+     let mut right: Vec2 = Vec2::ZERO;
+     for j in sigma..varsigma + 1 {
+         let item = bez2[usize::from(j)];
+-        right += item * (choose(m, j) * choose(m, k - j)) as f64 / (choose(2 * m, k) as f64);
++        right += item * (choose(m, j) * choose(m, k - j)) / choose(2 * m, k);
+     }
+     left.dot(right)
+ }
+@@ -223,7 +223,7 @@ fn A_r(r: u8, p: &[Vec2]) -> f64 {
+     (theta..=upsilon)
+         .map(|i| {
+             let dot = p[usize::from(i)].dot(p[usize::from(r - i)]); // These are bounds checked by the sum limits
+-            let factor = (choose(n, i) * choose(n, r - i)) as f64 / (choose(2 * n, r) as f64);
++            let factor = (choose(n, i) * choose(n, r - i)) / choose(2 * n, r);
+             dot * factor
+         })
+         .sum()
+@@ -237,21 +237,30 @@ fn D_rk(r: u8, k: u8, bez1: &[Vec2], bez2: &[Vec2]) -> f64 {
+ 
+ // Bézier basis function
+ fn basis_function(n: u8, i: u8, u: f64) -> f64 {
+-    choose(n, i) as f64 * (1.0 - u).powi((n - i) as i32) * u.powi(i as i32)
++    choose(n, i) * (1.0 - u).powi((n - i) as i32) * u.powi(i as i32)
+ }
+ 
+-// Binomial co-efficient, but returning zeros for values outside of domain
+-fn choose(n: u8, k: u8) -> u32 {
+-    let mut n = n as u32;
+-    let k = k as u32;
+-    if k > n {
+-        return 0;
++// Binomial co-efficient, but returning zeros for values outside of domain.
++//
++// Accumulates in `f64` rather than an integer type: `C(n, k)` grows far past any fixed-width
++// integer's range long before `n` reaches this module's own documented degree-255 support (e.g.
++// `C(36, 18)` already exceeds `u32::MAX`), and every call site immediately divides by another
++// `choose(...)` result and multiplies into an `f64`-valued curve point anyway, so there is no
++// exact-integer computation being thrown away by doing the whole thing in `f64` up front. This
++// trades exactness for very large `n` (silently, gracefully lossy, as all `f64` math is) for
++// never overflowing/wrapping/panicking within the documented range.
++fn choose(n: u8, k: u8) -> f64 {
++    let n_int = u32::from(n);
++    let k_int = u32::from(k);
++    if k_int > n_int {
++        return 0.0;
+     }
+-    let mut p = 1;
+-    for i in 1..=(n - k) {
+-        p *= n;
+-        p /= i;
+-        n -= 1;
++    let mut n_rem = f64::from(n);
++    let mut p = 1.0;
++    for i in 1..=(n_int - k_int) {
++        p *= n_rem;
++        p /= f64::from(i);
++        n_rem -= 1.0;
+     }
+     p
+ }
+@@ -265,9 +274,18 @@ mod tests {
+ 
+     #[test]
+     fn test_choose() {
+-        assert_eq!(choose(6, 0), 1);
+-        assert_eq!(choose(6, 1), 6);
+-        assert_eq!(choose(6, 2), 15);
++        assert_eq!(choose(6, 0), 1.0);
++        assert_eq!(choose(6, 1), 6.0);
++        assert_eq!(choose(6, 2), 15.0);
++    }
++
++    #[test]
++    fn test_choose_no_overflow_past_u32_range() {
++        // C(36, 18) ~= 9.08e9, which already exceeds `u32::MAX` (~4.29e9) - well within the
++        // module's own documented "up to and including degree 255" support. This must neither
++        // panic (debug) nor silently wrap to a bogus small value (release).
++        let expected = 9_075_135_300.0_f64;
++        assert!((choose(36, 18) - expected).abs() / expected < 1e-9);
+     }
+ 
+     #[test]

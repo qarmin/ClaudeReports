@@ -1,0 +1,62 @@
+=== Reconfirmation directly against the main project's own working tree (this session), before
+landing the fix for real ===
+
+Current mainline HEAD: 5c6565e36d35b9ea7de049daa67acc0be0fd3b01 (matches candidate 033's own
+`base_commit`, i.e. nothing changed on `lofty/src/mp4/properties.rs` between that session and
+this one).
+
+Temporary, non-committed scratch test (`lofty/tests/probe_034_scratch_test.rs`, deleted before
+this candidate folder was finalized) built the same +16-mutated `has-tags.m4a` candidate 033 used
+(on-disk `stbl` size field at byte offset 1862 incremented by 16, every other byte untouched) and
+called the real public `Mp4File::read_from` via
+`cargo test -p lofty --test probe_034_scratch_test minf_stbl_plus16_desync -- --nocapture`, run
+3 times each way:
+
+Unpatched mainline, 3 runs:
+Run 1: OK: duration=3.708s (properties parsed without error)
+Run 2: OK: duration=3.708s (properties parsed without error)
+Run 3: OK: duration=3.708s (properties parsed without error)
+
+With candidate 033's fix applied directly to lofty/src/mp4/properties.rs (`len` -> `len - 8` in
+the `find_child_atom` call for `stbl` within `minf`, the same patch captured in patch.diff),
+3 runs:
+Run 1: Err: FileParseError { ty: Some(Mp4), .. }
+Run 2: Err: FileParseError { ty: Some(Mp4), .. }
+Run 3: Err: FileParseError { ty: Some(Mp4), .. }
+
+=== Project test suite (cargo test -p lofty --lib --tests -- --test-threads=1) ===
+
+Before fix: 647 passed; 0 failed; 73 ignored
+After fix:  647 passed; 0 failed; 73 ignored
+(identical - no change, no new failures; counts include the temporary, non-committed scratch test
+file used only for this candidate's own reconfirmation, which is why this is 647 rather than
+candidate 033's own reported 646 which excluded its scratch test)
+
+=== Captured output from `just test` (full clone-based repro, base_commit
+5c6565e36d35b9ea7de049daa67acc0be0fd3b01), run from this candidate folder. Build noise (cargo
+`Compiling`/`Locking`/`Cloning` lines) trimmed. ===
+
+=== reproduce-before (pristine clone, patch.diff not yet applied) ===
+
+original file: duration=3.708s channels=Some(2)
+malformed file (stbl size +16, everything else untouched): read_from -> Ok, duration=3.708s channels=Some(2)
+REPRODUCED - a `stbl` atom lying about its own size by 16 bytes past the real remaining space inside `minf` was silently accepted instead of rejected, because `find_child_atom`'s search budget for `stbl` within `minf` is `minf`'s full, header-inclusive declared length even though the reader has already been seeked past `minf`'s own 8-byte header by this point.
+
+(exit code 1)
+
+=== apply (git apply patch.diff) === succeeded, no output
+
+=== reproduce-after (same clone, patch.diff applied) ===
+
+original file: duration=3.708s channels=Some(2)
+malformed file: read_from -> Err: FileParseError { ty: Some(Mp4), .. }
+did not reproduce - the malformed input was rejected instead of being silently accepted
+
+(exit code 0)
+
+=== `just test` actually run end-to-end from a scratch invocation of this candidate's own folder
+(not just read) before finalizing, per this skill's "critical pitfalls" - confirmed it clones,
+builds, and reproduces/fixes for real rather than merely printing instructions ===
+
+Ran successfully; `clone/` and `repro/target` removed afterward (`just clean`) so this candidate
+folder ships without build artifacts.

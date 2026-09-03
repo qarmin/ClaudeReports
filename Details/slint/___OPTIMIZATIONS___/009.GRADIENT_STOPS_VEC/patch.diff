@@ -1,0 +1,115 @@
+diff --git a/internal/core/graphics/brush.rs b/internal/core/graphics/brush.rs
+index dd932ef55..576a49149 100644
+--- a/internal/core/graphics/brush.rs
++++ b/internal/core/graphics/brush.rs
+@@ -243,7 +243,7 @@ pub fn angle(&self) -> f32 {
+     }
+     /// Returns the color stops of the linear gradient.
+     /// The stops are sorted by positions.
+-    pub fn stops(&self) -> impl Iterator<Item = &GradientStop> {
++    pub fn stops(&self) -> impl Iterator<Item = &GradientStop> + Clone {
+         // skip the first fake stop that just contains the angle
+         self.0.iter().skip(1)
+     }
+@@ -305,7 +305,7 @@ fn radius(&self) -> f32 {
+     }
+ 
+     /// Returns the color stops of the radial gradient.
+-    pub fn stops(&self) -> impl Iterator<Item = &GradientStop> {
++    pub fn stops(&self) -> impl Iterator<Item = &GradientStop> + Clone {
+         self.0.iter().skip(Self::HEADER)
+     }
+ 
+@@ -614,7 +614,7 @@ fn center_y(&self) -> f32 {
+ 
+     /// Returns the color stops of the conic gradient.
+     /// The stops are already rotated according to the `from_angle` specified in `new()`.
+-    pub fn stops(&self) -> impl Iterator<Item = &GradientStop> {
++    pub fn stops(&self) -> impl Iterator<Item = &GradientStop> + Clone {
+         self.0.iter().skip(Self::HEADER)
+     }
+ 
+diff --git a/internal/renderers/femtovg/itemrenderer.rs b/internal/renderers/femtovg/itemrenderer.rs
+index b1ff658e9..b0514a883 100644
+--- a/internal/renderers/femtovg/itemrenderer.rs
++++ b/internal/renderers/femtovg/itemrenderer.rs
+@@ -102,6 +102,25 @@ pub struct GLItemRenderer<'a, R: femtovg::Renderer + TextureImporter> {
+     metrics: RenderingMetrics,
+ }
+ 
++/// The stops of a Slint gradient as femtovg wants them, with the extra stop at 1.0 that femtovg
++/// needs to keep the last color from being extrapolated.
++///
++/// Returns an iterator instead of a `Vec`: femtovg's `*_gradient_stops` take
++/// `impl IntoIterator`, and this runs once per gradient-filled primitive per frame, so the
++/// collect was one allocation per primitive for nothing. The stops iterator is walked twice
++/// (once for the last stop, once for the values), which is cheap - gradients have a handful of
++/// stops.
++fn gradient_stops<'a>(
++    stops: impl Iterator<Item = &'a i_slint_core::graphics::GradientStop> + Clone,
++) -> impl Iterator<Item = (f32, femtovg::Color)> {
++    let extra = stops
++        .clone()
++        .last()
++        .filter(|last| last.position != 1.0)
++        .map(|last| (1.0, to_femtovg_color(&last.color)));
++    stops.map(|stop| (stop.position, to_femtovg_color(&stop.color))).chain(extra)
++}
++
+ fn rect_with_radius_to_path(
+     rect: PhysicalRect,
+     border_radius: PhysicalBorderRadius,
+@@ -1533,19 +1552,13 @@ fn brush_to_paint(&self, brush: Brush, path: &femtovg::Path) -> Option<femtovg::
+                     [path_width, path_height].into(),
+                 );
+ 
+-                let mut stops: Vec<_> = gradient
+-                    .stops()
+-                    .map(|stop| (stop.position, to_femtovg_color(&stop.color)))
+-                    .collect();
+-
+-                // Add an extra stop at 1.0 with the same color as the last stop
+-                if let Some(last_stop) = stops.last().cloned()
+-                    && last_stop.0 != 1.0
+-                {
+-                    stops.push((1.0, last_stop.1));
+-                }
+-
+-                femtovg::Paint::linear_gradient_stops(start.x, start.y, end.x, end.y, stops)
++                femtovg::Paint::linear_gradient_stops(
++                    start.x,
++                    start.y,
++                    end.x,
++                    end.y,
++                    gradient_stops(gradient.stops()),
++                )
+             }
+             Brush::RadialGradient(gradient) => {
+                 let path_bounds = path_bounding_box(&self.canvas, path);
+@@ -1564,19 +1577,13 @@ fn brush_to_paint(&self, brush: Brush, path: &femtovg::Path) -> Option<femtovg::
+                     self.scale_factor.get(),
+                 );
+ 
+-                let mut stops: Vec<_> = gradient
+-                    .stops()
+-                    .map(|stop| (stop.position, to_femtovg_color(&stop.color)))
+-                    .collect();
+-
+-                // Add an extra stop at 1.0 with the same color as the last stop
+-                if let Some(last_stop) = stops.last().cloned()
+-                    && last_stop.0 != 1.0
+-                {
+-                    stops.push((1.0, last_stop.1));
+-                }
+-
+-                femtovg::Paint::radial_gradient_stops(cx, cy, 0., radius, stops)
++                femtovg::Paint::radial_gradient_stops(
++                    cx,
++                    cy,
++                    0.,
++                    radius,
++                    gradient_stops(gradient.stops()),
++                )
+             }
+             Brush::ConicGradient(gradient) => {
+                 let path_bounds = path_bounding_box(&self.canvas, path);

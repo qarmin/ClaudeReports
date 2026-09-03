@@ -1,0 +1,40 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# NOTE: this repro must run as a DEBUG build (plain `cargo run`, not `--release`) to see the
+# "attempt to multiply with overflow" panic for cases 1/2 - the bug is a usize arithmetic overflow
+# that only panics unconditionally with overflow-checks on (Rust's dev-profile default). Case 3
+# (a width chosen so width*CHANNELS wraps to exactly 0) panics in BOTH debug and release, just
+# with a different message in each build ("attempt to multiply with overflow" in debug,
+# "chunk size must be non-zero" in release) - see output.txt for both captured transcripts.
+
+repo_url := "https://github.com/awxkee/pic-scale-safe.git"
+base_commit := "83c4801428c436678d7c6b6bea74af800924a469"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro (debug build) against the pristine clone - should panic on the
+# overflow/wrap boundary cases and exit non-zero.
+reproduce-before:
+    cd repro && cargo run
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer panic on any case (exit 0).
+reproduce-after:
+    cd repro && cargo run
+
+clean:
+    rm -rf clone repro/target

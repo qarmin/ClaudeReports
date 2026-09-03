@@ -1,0 +1,82 @@
+# Self-contained reproduction for this candidate.
+#
+# This is a measurement/investigation-only candidate - no patch was applied to dicom-rs. There
+# are two independent checks:
+#   1) a wall-clock re-sweep of the real `mono_image_with_narrow_par`/`mono_image_with_narrow`
+#      site, using this workspace's shared `harness/bench_pipeline` (untracked in the main repo,
+#      copied in below per SKILL.md's "shape 3" - see this folder's own RESULT.md and the
+#      workspace's top-level README.md for what that harness is)
+#   2) a standalone `collect_bench` crate (this folder's own `bench/collect_bench/`, self-contained,
+#      depends only on `rayon` - no `dicom-*` crates at all) that isolates just the `collect()`
+#      step under callgrind, per this candidate's own root-causing goal.
+#
+# `just test` runs both checks and prints real before/after numbers.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-harness sweep collect-bench-build callgrind-compare
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+    rm -rf clone/___OPTIMIZATIONS___/harness/bench_pipeline/target
+
+# Two binaries built from the exact same unmodified source: one with rayon linked (default
+# features, reaches mono_image_with_narrow_par), one without (reaches mono_image_with_narrow).
+# The harness's own Cargo.toml paths (`../../../object` etc.) assume it sits 3 levels below the
+# workspace root, hence `clone/___OPTIMIZATIONS___/harness/bench_pipeline` above, not a shallower
+# path - see `clone:`.
+build-harness:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench "{{justfile_directory()}}/bin_rayon"
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --no-default-features
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench "{{justfile_directory()}}/bin_norayon"
+
+# Generates 9 synthetic 16-bit MONOCHROME2 fixtures (262,144px-1,310,720px, tiled from the
+# harness's own mono_below.dcm via its gen-mono mode) and times `colorspace` (decode +
+# to_dynamic_image, exercising the real narrow_par/narrow site) single-core (taskset -c 0) for
+# both binaries, printing a real before/after per size plus checksums (must match - bit-exact).
+sweep:
+    #!/bin/bash
+    set -e
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline
+    mkdir -p gen
+    for mult in 64 96 128 160 192 224 256 288 320; do
+        "{{justfile_directory()}}/bin_rayon" gen-mono testdata/mono_below.dcm gen/mono_m${mult}.dcm $mult
+    done
+    for mult in 64 96 128 160 192 224 256 288 320; do
+        f=gen/mono_m${mult}.dcm
+        px=$((4096 * mult))
+        echo "=== ${px}px ==="
+        echo -n "norayon: "; taskset -c 0 "{{justfile_directory()}}/bin_norayon" colorspace "$f" 9
+        echo -n "rayon (1-thread): "; taskset -c 0 "{{justfile_directory()}}/bin_rayon" colorspace "$f" 9
+    done
+
+collect-bench-build:
+    cd "{{justfile_directory()}}/bench/collect_bench" && cargo build --release
+
+# Isolates just the `collect()` step (no ImageBuffer::from_raw) under callgrind at 3 sizes,
+# printing Ir counts for the sequential (Vec::from_iter) and rayon-1-thread (collect_into_vec)
+# variants - this is the evidence for the "~22.6% more Ir/element for rayon's collect()" finding
+# in RESULT.md. Requires valgrind; if the fd limit is very high (e.g. inside some containers),
+# `ulimit -n 4096` first, per this candidate's own RESULT.md note.
+callgrind-compare:
+    #!/bin/bash
+    set -e
+    ulimit -n 4096
+    export DEBUGINFOD_URLS=
+    BIN="{{justfile_directory()}}/bench/collect_bench/target/release/collect_bench"
+    for n in 32768 262144 1310720; do
+        for mode in seq par; do
+            echo "=== $mode n=$n ==="
+            taskset -c 0 valgrind --tool=callgrind --callgrind-out-file=/dev/null "$BIN" "$mode" "$n" 2>&1 | grep -E "I  |Command:|checksum"
+        done
+    done
+
+clean:
+    rm -rf clone bin_rayon bin_norayon bench/collect_bench/target

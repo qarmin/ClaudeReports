@@ -1,0 +1,63 @@
+=== Approach 1: debug-assertions build + project's own existing test suite ===
+Change made (temporary, reverted after this session): added
+    debug_assert!(count >= 1 && count <= 15, "extend() called with count={count} (out of expected 1..=15 range)");
+as the first line of `fn extend(value: u16, count: u8) -> i16` in src/huffman.rs.
+
+$ cargo test --lib --tests   (rust-toolchain override 1.87.0; dev profile, debug-assertions on by default)
+
+running 5 tests
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 12 tests
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.70s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.31s
+
+Total: 21 passed, 0 failed. This run includes tests/lib.rs's `crashtest` and `reftest`/`reftest_scaled`
+tests, which decode the full tests/crashtest/images/ and tests/reftest/images/ corpora (including the
+tests/reftest/images/lossless/ malformed/legitimate-lossless corpus and known-malicious regression
+images such as dc-predictor-overflow.jpg). The debug_assert never fired on any of them.
+
+=== Approach 2: manual boundary-value construction, baseline (SOF0) path, real Decoder::decode() API ===
+Standalone example: examples/boundary_check.rs (built and run against the same debug_assert-instrumented
+tree, cargo run --example boundary_check, dev profile):
+
+decode() returned Err as expected: invalid JPEG format: invalid DC difference magnitude category
+No debug_assert panic occurred inside huffman::extend() for a crafted 0xFF DHT symbol byte (DC case).
+Confirmed: the crafted 0xFF Huffman symbol was rejected by decode_block's DC match arm, never reaching receive_extend/extend.
+---
+AC 0xFF-symbol decode() result: Ok("Ok(..)")
+No debug_assert panic occurred inside huffman::extend() for a crafted 0xFF DHT AC symbol byte (masked to s=15 via `byte & 0x0f`).
+
+This crafts two real, on-the-wire JPEG files, each with a custom DHT table whose single 1-bit
+Huffman code maps directly to the raw symbol byte 0xFF (255, the maximum byte a DHT segment can
+ever encode as a Huffman leaf value) - once as the DC symbol (decoder.rs:1105's `1..=11` call site),
+once as the AC symbol (decoder.rs:1165's call site, reached via `s = byte & 0x0f`). Both are fed to
+the real public `jpeg_decoder::Decoder::decode()` entry point. The DC case is rejected by the
+`_ => Err(...)` arm before ever reaching `receive_extend`/`extend`. The AC case succeeds because
+`s = byte & 0x0f` masks any byte value down to 0..=15 before it is ever used as the `count` argument.
+Neither run triggered the temporary debug_assert.
+
+=== Approach 3: manual boundary-value construction, lossless (SOF3) path, real Decoder::decode() API ===
+Standalone example: examples/boundary_check_lossless.rs (same instrumented tree):
+
+[bypass-16] DC symbol=0x10: decode() -> Ok(..)
+[reject-0xFF] DC symbol=0xFF: decode() -> Err(invalid JPEG format: invalid DC difference magnitude category)
+[legal-boundary-15] DC symbol=0x0F: decode() -> Ok(..)
+No debug_assert panic occurred inside huffman::extend() for any crafted lossless DC symbol byte (16, 0xFF, or 15).
+
+This targets decoder/lossless.rs:93 specifically, the exact call site named in the candidate
+description, via three crafted real SOF3 (lossless) JPEGs each with a custom DHT table whose 1-bit
+code maps to a chosen raw symbol byte:
+  - symbol 16: the code's own explicit bypass case - `16 => 32768` assigns the difference directly
+    as an i32 without ever calling extend()/receive_extend(). Confirmed Ok, no panic.
+  - symbol 0xFF (255): outside the 0..=16 range entirely, hits the `_ => Err(...)` arm before
+    reaching extend(). Confirmed Err, no panic.
+  - symbol 15: the legal boundary value, which does call `receive_extend(reader, 15)` ->
+    `extend(value, count=15)`. Confirmed Ok, no panic - this is the maximum count value any
+    reachable call site can ever pass to extend().

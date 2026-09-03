@@ -1,0 +1,54 @@
+=== standalone repro/ against pristine base_commit 44ce9226c541dd2b11897b9ef07156a28871cdb7
+=== (image-webp 0.2.4, the version this commit's Cargo.lock actually resolves), via `just test` ===
+=== (real captured output, fresh `git clone` -> `cargo run --release`, no hand-editing) ===
+
+frame 0 pixel(0,0) = [0, 255, 0, 255]
+frame 1 pixel(0,0) = [0, 0, 255, 255]
+frame 2 pixel(0,0) = [0, 0, 255, 255]
+
+frame 3 (after frame 2 disposed to background) = [0, 0, 255, 255]
+expected (disposal respected):   [0, 0, 0, 0] (transparent)
+buggy    (disposal NOT applied): [0, 0, 255, 255] (frame 2's blue bleeds through)
+RESULT: BUG REPRODUCED - frame 3 shows frame 2's undisposed content
+error: Recipe `reproduce-before` failed on line 22 with exit code 1
+(non-zero exit is expected/correct here - the repro's own convention is exit 1 = bug reproduced)
+
+=== repeated 3/3, same result each time (deterministic, no randomness involved) ===
+
+=== Same repro rerun in-tree (main project working tree, `cargo run --release`, image-webp
+=== patched via [patch.crates-io] to image-rs/image-webp git rev
+=== f4d80bd965df2c81e65b6f43c1f70e0750bd4b0f, the `main` branch tip containing upstream PR #171
+=== "fix: dispose transparent animated frames" - the only candidate fix explored this session): ===
+
+frame 0 pixel(0,0) = [0, 255, 0, 255]
+frame 1 pixel(0,0) = [0, 0, 255, 255]
+frame 2 pixel(0,0) = [0, 0, 0, 0]
+
+frame 3 (after frame 2 disposed to background) = [0, 0, 0, 0]
+expected (disposal respected):   [0, 0, 0, 0] (transparent)
+buggy    (disposal NOT applied): [0, 0, 255, 255] (frame 2's blue bleeds through)
+RESULT: disposal handled correctly - bug NOT observed
+(exit 0 - the repro itself is fixed by this dependency bump)
+
+=== BUT: this same dependency bump regresses the project's own pre-existing regression test
+=== `cargo test --test reference_images` for a REAL, already-shipped test fixture: ===
+
+test image webp/extended_images/anim.webp                                                              ... FAILED
+
+failures:
+
+---- image webp/extended_images/anim.webp ----
+Frame 2: Reference image does not match
+
+failures:
+    image webp/extended_images/anim.webp
+
+test result: FAILED. 188 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.27s
+
+=== Same failure reproduced identically whether patched to image-webp's `release-0.2.5` branch
+=== (rev 75f810915d02ae4ff55d3f825bf6a4b07efdf994) or to `main` tip (rev
+=== f4d80bd965df2c81e65b6f43c1f70e0750bd4b0f) - both contain PR #171's fix, both fail the same way.
+=== Without the dependency bump (pristine image-webp 0.2.4): 189 passed, 0 failed.
+
+=== `cargo test --lib` (this repo's own unit test suite) is unaffected either way: 331 passed,
+=== 0 failed, both before and after the dependency bump.

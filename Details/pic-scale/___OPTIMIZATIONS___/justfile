@@ -1,0 +1,50 @@
+# Root justfile for ___OPTIMIZATIONS___/. Run from inside this folder.
+#
+# This does NOT auto-generate SUMMARY.md - table formatting stays a manual/agent step by
+# design (a generic parser across arbitrary bench output formats isn't reliable). What this
+# gives you instead: (1) whether each candidate's patch.diff still applies to the CURRENT
+# state of the main project, and (2) fresh raw numbers dumped to a text file per candidate,
+# to compare by eye against what's already written in that candidate's RESULT.md.
+#
+# project_path defaults to the main project two levels up (___OPTIMIZATIONS___/.. is the
+# project root) - override it if this folder was moved.
+
+# Check every candidate's patch.diff still applies cleanly. Reports STALE ones without
+# touching the project tree (uses `git apply --check`, which never writes).
+verify-patches project_path="..":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for d in */; do
+      d="${d%/}"
+      [ -f "$d/patch.diff" ] || continue
+      if git -C "{{project_path}}" apply --check "$d/patch.diff" 2>/dev/null; then
+        echo "OK      $d"
+      else
+        echo "STALE   $d  (no longer applies cleanly - project moved on since this candidate was made)"
+      fi
+    done
+
+# Re-run one candidate against the MAIN project tree (reuses its target/, unlike the
+# candidate's own clone-based justfile - see that file for the fully standalone version).
+# Adapt the build+bench lines below to the project. Always reverts afterwards.
+rerun candidate project_path="..":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'git -C "{{project_path}}" checkout -- .' EXIT
+    git -C "{{project_path}}" apply "{{justfile_directory()}}/{{candidate}}/patch.diff"
+    # --- adapt below: build + bench command for this project ---
+    ( cd "{{project_path}}" && cargo build --release )
+    OUT="{{justfile_directory()}}/{{candidate}}/rerun_$(date +%Y%m%d_%H%M%S).txt"
+    echo "REPLACE with the actual bench invocation and its output" | tee "$OUT"
+    # --- end adapt ---
+    echo "raw output -> $OUT (compare by hand against RESULT.md, then update it if it drifted)"
+
+# Re-run every candidate that has a patch.diff, one at a time.
+rerun-all project_path="..":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for d in */; do
+      d="${d%/}"
+      [ -f "$d/patch.diff" ] || continue
+      just rerun "$d" "{{project_path}}"
+    done

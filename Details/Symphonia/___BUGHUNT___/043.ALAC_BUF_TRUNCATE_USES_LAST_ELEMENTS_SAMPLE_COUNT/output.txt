@@ -1,0 +1,29 @@
+Command: cd repro && cargo run --release
+(run against symphonia-codec-alac/src/lib.rs at commit ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee)
+
+=== BEFORE (pristine tree, unpatched) ===
+   Compiling symphonia-codec-alac v0.6.1 (.../symphonia-codec-alac)
+   Compiling alac-truncate-repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 0.61s
+     Running `target/release/alac-truncate-repro`
+decoded frames in buffer: 3
+SCE (center) plane contents: [6553600, 6619136, 6684672]
+expected (if the SCE's own 8 decoded samples were preserved): [100, 101, 102, 103, 104, 105, 106, 107]
+REPRODUCED - buf.frames() == 3 (expected 8); SCE plane only has 3 sample(s), samples 103..107 (indices 3..8) were silently dropped even though the SCE decoder validly produced them
+
+(reproduced identically on 3/3 consecutive runs, both `cargo run` (debug) and `cargo run --release`)
+
+=== AFTER (patched tree, patch.diff applied) ===
+   Compiling symphonia-codec-alac v0.6.1 (.../symphonia-codec-alac)
+   Compiling alac-truncate-repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 0.58s
+     Running `target/release/alac-truncate-repro`
+did not reproduce - decode_ref returned an error instead of silently corrupting output: DecodeError("alac: elements in the same frame decoded a different number of samples")
+
+Note on the printed sample values: the SCE plane values are the decoded samples (100, 101, 102)
+left-shifted by (32 - bit_depth) = 16 bits, since `decode_inner` always shifts the final i32
+samples up to fill the full 32-bit width when bit_depth < 32 (100 << 16 == 6553600, etc.). This
+confirms the correct 3 samples the CPE dictated were kept, and the SCE's own samples 103..107
+(indices 3..8), which were validly decoded into the buffer by `decode_sce_or_cpe`, were dropped
+by the trailing `self.buf.truncate(num_frames)` because `num_frames` had been overwritten by the
+CPE (the last-executed element) rather than reflecting the SCE's own decoded length.

@@ -1,0 +1,62 @@
+=== BEFORE (pristine main, commit 7516831426fb70f36d62c521c5477f6a7265b36a) ===
+$ cargo run --release
+   Compiling vello_common v0.2.0 (.../clone/sparse_strips/vello_common)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 6.57s
+     Running `target/release/repro`
+--- literal issue #1277 repro (now culled away, no crash) ---
+fill() returned successfully, produced 1 lines
+--- on-screen endpoints, extreme control points (the actual crash) ---
+memory allocation of 56504737824 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+[1]    <pid> abort (core dumped)  ./target/release/repro
+exit code: 134 (SIGABRT)
+
+Reproduced 3/3 runs, release build, deterministic (same 56504737824-byte allocation request every
+time):
+run 1 exit=134
+memory allocation of 56504737824 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+run 2 exit=134
+memory allocation of 56504737824 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+run 3 exit=134
+memory allocation of 56504737824 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+Also reproduces identically in a debug build (`cargo test -p vello_common --lib`, debug and
+release profiles both abort with the same message).
+
+Note: the literal point values from issue #1277, run unmodified through the current `fill()`
+public API (which since PRs #1341/#1519/#1559 also takes a `cull_bbox: RectU16` parameter that
+did not exist when #1277 was filed), no longer reach the vulnerable code at all - every point in
+that exact curve has a y-coordinate several orders of magnitude below any u16-representable
+cull-bbox top, so the whole curve is discarded by flatten()'s "fully outside the cull bbox" cull
+check before `flatten_cubic_simd` is ever called. This is incidental (the cull check was added for
+performance, not as a fix for #1277) and doesn't hold for curves that are only partially/nowhere
+near being fully outside the cull bbox - see `on_screen_extreme_control_points()` in repro/src/main.rs,
+which reproduces the exact same crash through the exact same public entry point.
+
+=== AFTER (patch.diff applied to the same commit) ===
+$ cargo run --release
+   Compiling vello_common v0.2.0 (.../clone/sparse_strips/vello_common)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 4.00s
+     Running `target/release/repro`
+--- literal issue #1277 repro (now culled away, no crash) ---
+fill() returned successfully, produced 1 lines
+--- on-screen endpoints, extreme control points (the actual crash) ---
+fill() returned successfully, produced 65537 lines
+Done: no crash.
+exit code: 0
+
+Reproduced (i.e. confirmed fixed) 3/3 runs, release build:
+run 1 exit=0 ... "Done: no crash."
+run 2 exit=0 ... "Done: no crash."
+run 3 exit=0 ... "Done: no crash."
+
+=== vello_common project test suite ===
+Before (pristine):  cargo test -p vello_common --lib  -> 159 passed; 0 failed; 1 ignored
+After  (patched):    cargo test -p vello_common --lib  -> 159 passed; 0 failed; 1 ignored
+Before (pristine):  cargo test -p vello_cpu --lib      -> 81 passed; 0 failed
+After  (patched):    cargo test -p vello_cpu --lib      -> 81 passed; 0 failed

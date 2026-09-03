@@ -1,0 +1,90 @@
+Repro: repro/ (real end-to-end trigger path: symphonia_bundle_flac::FlacReader::try_new, the
+public FLAC demuxer entry point, fed a minimal real FLAC file - "fLaC" marker + a valid STREAMINFO
+block + a VORBIS_COMMENT block containing a crafted CHAPTER001=00:00:00.000...01 comment with a
+20-digit fractional-seconds field).
+
+=== BEFORE (unpatched symphonia-metadata/src/embedded/vorbis.rs, commit ee35874) ===
+
+$ RUST_BACKTRACE=full cargo run --quiet -- 20
+
+Opening crafted FLAC file with CHAPTER timestamp frac_s_digits=20 ...
+
+thread 'main' (17218) panicked at /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:1319:5:
+attempt to exponentiate with overflow
+stack backtrace:
+   0:     0x609ee2c47961 - std::backtrace_rs::backtrace::libunwind::trace
+   ...
+  16:     0x609ee2c5a129 - core::num::imp::overflow_panic::pow
+                               at .../library/core/src/num/imp/overflow_panic.rs:50:5
+  17:     0x609ee2bc8990 - <u64>::strict_pow
+                               at .../library/core/src/num/uint_macros.rs:2436:25
+  18:     0x609ee2bc8990 - <u64>::pow
+                               at .../library/core/src/num/uint_macros.rs:3596:22
+  19:     0x609ee2bbfaec - symphonia_metadata::embedded::vorbis::parse_chapter_timestamp
+                               at .../symphonia-metadata/src/embedded/vorbis.rs:249:64
+  20:     0x609ee2ba6fdf - symphonia_metadata::embedded::vorbis::read_vorbis_comment::<...>::{closure#0}
+                               at .../symphonia-metadata/src/embedded/vorbis.rs:428:36
+  ...
+  30:     0x609ee2ba63b3 - symphonia_metadata::embedded::vorbis::read_vorbis_comment::<...>
+                               at .../symphonia-metadata/src/embedded/vorbis.rs:462:14
+  31:     0x609ee2bb3882 - symphonia_metadata::embedded::flac::read_flac_comment_block::<...>
+                               at .../symphonia-metadata/src/embedded/flac.rs:58:5
+  32:     0x609ee2ba3760 - <symphonia_bundle_flac::demuxer::FlacReader>::init_with_metadata
+                               at .../symphonia-bundle-flac/src/demuxer.rs:124:21
+  33:     0x609ee2ba568f - <symphonia_bundle_flac::demuxer::FlacReader>::try_new
+                               at .../symphonia-bundle-flac/src/demuxer.rs:67:20
+  34:     0x609ee2b9ff8c - repro::try_open
+                               at .../repro/src/main.rs:72:11
+  35:     0x609ee2b9fca3 - repro::main
+                               at .../repro/src/main.rs:81:5
+  ... (full backtrace confirms path: real caller code -> FlacReader::try_new -> init_with_metadata
+       -> read_flac_comment_block -> vorbis::read_vorbis_comment -> parse_chapter_timestamp
+       -> u64::pow overflow)
+
+Repeat runs (3/3), all identical, deterministic (pure integer arithmetic, no randomness/timing
+involved):
+  $ for i in 1 2 3; do cargo run --quiet -- 20 2>&1 | grep -E "panicked|attempt to exponentiate"; done
+  thread 'main' (15539) panicked at .../core/src/num/mod.rs:1319:5:
+  attempt to exponentiate with overflow
+  thread 'main' (15653) panicked at .../core/src/num/mod.rs:1319:5:
+  attempt to exponentiate with overflow
+  thread 'main' (15833) panicked at .../core/src/num/mod.rs:1319:5:
+  attempt to exponentiate with overflow
+
+Boundary check (frac_s_digits=19, one below the overflow threshold - does NOT panic):
+  $ cargo run --quiet -- 19
+  Opening crafted FLAC file with CHAPTER timestamp frac_s_digits=19 ...
+    -> returned Err (no panic, no crash): unexpected end of file
+  (The "unexpected end of file" here, and for every non-overflowing digit count 1..=19, comes
+  from FlacReader trying to resync to the first audio frame after metadata parsing succeeds - our
+  minimal synthetic file intentionally has no audio frame data. It is unrelated to the bug and
+  occurs identically for any frac_s_digits that doesn't overflow; the panic for frac_s_digits=20
+  happens strictly earlier, during metadata/comment parsing, before resync is ever attempted.)
+
+=== AFTER (patched symphonia-metadata/src/embedded/vorbis.rs, checked_pow fix applied) ===
+
+$ cargo run --quiet -- 20
+Opening crafted FLAC file with CHAPTER timestamp frac_s_digits=20 ...
+  -> returned Err (no panic, no crash): unexpected end of file
+
+$ cargo run --quiet -- 1000
+Opening crafted FLAC file with CHAPTER timestamp frac_s_digits=1000 ...
+  -> returned Err (no panic, no crash): unexpected end of file
+
+No panic for frac_s_digits=20 (the original trigger) or frac_s_digits=1000 (a much larger
+boundary value) - both now fail identically to every other non-overflowing digit count, with the
+same benign "unexpected end of file" from the (deliberately audio-frame-less) synthetic file.
+
+=== Project test suite ===
+
+Before (baseline symphonia-metadata, --features vorbis):
+  test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+After (patched symphonia-metadata, --features vorbis):
+  test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+Before (full workspace, --workspace --all-features):
+  106 passed; 0 failed (summed across all per-crate `test result:` lines)
+
+After (full workspace, --workspace --all-features):
+  106 passed; 0 failed (summed across all per-crate `test result:` lines, identical to before)

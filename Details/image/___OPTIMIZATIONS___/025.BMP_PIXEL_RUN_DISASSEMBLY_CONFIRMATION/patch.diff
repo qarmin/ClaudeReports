@@ -1,0 +1,65 @@
+diff --git a/src/codecs/bmp/decoder.rs b/src/codecs/bmp/decoder.rs
+index cba61aed..633f5b48 100644
+--- a/src/codecs/bmp/decoder.rs
++++ b/src/codecs/bmp/decoder.rs
+@@ -821,7 +821,7 @@ where
+ 
+ fn set_8bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+     pixel_iter: &mut ChunksExactMut<u8>,
+-    palette: &[[u8; 3]],
++    palette: &[[u8; 3]; 256],
+     indices: T,
+     n_pixels: usize,
+ ) -> bool {
+@@ -840,7 +840,7 @@ fn set_8bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+ 
+ fn set_4bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+     pixel_iter: &mut ChunksExactMut<u8>,
+-    palette: &[[u8; 3]],
++    palette: &[[u8; 3]; 256],
+     indices: T,
+     mut n_pixels: usize,
+ ) -> bool {
+@@ -870,7 +870,7 @@ fn set_4bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+ #[rustfmt::skip]
+ fn set_2bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+     pixel_iter: &mut ChunksExactMut<u8>,
+-    palette: &[[u8; 3]],
++    palette: &[[u8; 3]; 256],
+     indices: T,
+     mut n_pixels: usize,
+ ) -> bool {
+@@ -901,7 +901,7 @@ fn set_2bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+ 
+ fn set_1bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+     pixel_iter: &mut ChunksExactMut<u8>,
+-    palette: &[[u8; 3]],
++    palette: &[[u8; 3]; 256],
+     indices: T,
+ ) {
+     for idx in indices {
+@@ -1846,7 +1846,11 @@ impl<R: BufRead + Seek> BmpDecoder<R> {
+         let num_channels = self.num_channels();
+         let row_byte_length = ((i32::from(self.bit_count) * self.width + 31) / 32 * 4) as usize;
+         let mut indices = vec![0; row_byte_length];
+-        let palette = self.palette.as_ref().unwrap();
++        // Palette is always exactly 256 entries (see `read_palette`); binding it as a
++        // fixed-size array lets the compiler prove the (masked, for sub-8-bit depths) index is
++        // always in bounds and elide the bounds check in `set_8bit_pixel_run`/`set_4bit_pixel_run`/
++        // `set_2bit_pixel_run`/`set_1bit_pixel_run`.
++        let palette: &[[u8; 3]; 256] = self.palette.as_ref().unwrap().as_slice().try_into().unwrap();
+         let bit_count = self.bit_count;
+         let width = self.width as usize;
+         let skip_palette = self.indexed_color;
+@@ -2130,8 +2134,9 @@ impl<R: BufRead + Seek> BmpDecoder<R> {
+         self.reader.seek(SeekFrom::Start(start_pos))?;
+ 
+         let num_channels = self.num_channels();
+-        let p = if image_type != ImageType::RLE24 {
+-            Some(self.palette.as_ref().unwrap())
++        // See the equivalent comment in `read_palettized_pixel_data`.
++        let p: Option<&[[u8; 3]; 256]> = if image_type != ImageType::RLE24 {
++            Some(self.palette.as_ref().unwrap().as_slice().try_into().unwrap())
+         } else {
+             None
+         };

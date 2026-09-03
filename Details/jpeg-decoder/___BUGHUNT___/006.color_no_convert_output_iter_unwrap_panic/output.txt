@@ -1,0 +1,56 @@
+Repro: repro/src/main.rs, run via `cargo run --release` with jpeg-decoder pointed first at the
+pristine tree (base_commit eb2d7c0), then at the same tree with patch.diff applied.
+Input: repro/subsampled_420.jpg (16x16, 3 components, sampling factors 2x2/1x1/1x1 - standard
+4:2:0 chroma subsampling; a verbatim copy of this project's own
+tests/reftest/images/extraneous-data.jpg fixture), decoded with
+decoder.set_color_transform(jpeg_decoder::ColorTransform::None).
+
+=== BEFORE (pristine src/decoder.rs, base_commit eb2d7c0) - 3/3 runs ===
+
+Run 1:
+thread '<unnamed>' panicked at src/decoder.rs:1481:34:
+called `Option::unwrap()` on a `None` value
+[... same panic repeated across further rayon worker threads for the remaining rows ...]
+REPRODUCED - decode() panicked: called `Option::unwrap()` on a `None` value
+(process exit code 1, from the repro's own catch_unwind + std::process::exit(1))
+
+Run 2:
+thread '<unnamed>' panicked at src/decoder.rs:1481:34:
+called `Option::unwrap()` on a `None` value
+[... repeated ...]
+REPRODUCED - decode() panicked: called `Option::unwrap()` on a `None` value
+
+Run 3:
+thread '<unnamed>' panicked at src/decoder.rs:1481:34:
+called `Option::unwrap()` on a `None` value
+[... repeated ...]
+REPRODUCED - decode() panicked: called `Option::unwrap()` on a `None` value
+
+Also independently confirmed with --no-default-features (rayon disabled, single-threaded
+"immediate" worker, no catch_unwind needed since there's only one thread):
+
+thread 'main' panicked at src/decoder.rs:1481:34:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+(3/3 runs, same panic site)
+
+=== AFTER (patch.diff applied on top of the same base_commit) - 3/3 runs ===
+
+Run 1:
+did not reproduce - decode() completed normally, 768 bytes
+
+Run 2:
+did not reproduce - decode() completed normally, 768 bytes
+
+Run 3:
+did not reproduce - decode() completed normally, 768 bytes
+
+(768 = 16 * 16 * 3, i.e. output_width * output_height * component_count - the correct buffer size
+for a 16x16 3-component image, confirming the fix writes exactly the expected number of bytes
+rather than silently truncating/leaving zeros.)
+
+=== Project test suite (cargo test --release, full workspace, default features) ===
+
+Before patch: 23 passed; 0 failed (5 unit + 12 lib + 1 rayon.rs + 1 rayon-0.rs + 1 rayon-1.rs +
+1 rayon-2.rs + 2 doc-tests)
+After patch:  23 passed; 0 failed (identical breakdown)

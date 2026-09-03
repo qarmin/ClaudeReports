@@ -1,0 +1,37 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# NOTE on this candidate's shape: the confirmed bug is in storescu/src/main.rs's private
+# `store_req_command` function, in a binary-only crate with no library target - repro/ can't
+# call the vulnerable code path directly. Instead, repro/ replicates the exact vulnerable value
+# directly against the public dicom-object API, comparing it against storescu's own sibling
+# tools' (findscu, movescu) value for the identical situation. `reproduce-after` confirms the
+# patched storescu crate builds cleanly and its own regression test passes.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should panic (non-zero exit:
+# bug reproduced).
+reproduce-before:
+    cd repro && cargo run; test "$?" -ne 0 && echo "(non-zero exit expected here: bug reproduced)"; true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Confirm the patched storescu crate builds cleanly and its own regression test passes.
+reproduce-after:
+    cd clone && cargo build -p dicom-storescu
+    cd clone && cargo test -p dicom-storescu
+
+clean:
+    rm -rf clone

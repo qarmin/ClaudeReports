@@ -1,0 +1,48 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# repo_url/base_commit were read via `git remote get-url origin` / `git rev-parse HEAD` in the
+# main project at the moment patch.diff was captured.
+#
+# This candidate reuses the project's own existing benchmark
+# (`sparse_strips/vello_bench`, `fine_rounded_blurred_rect` criterion group) - no standalone
+# bench crate was needed.
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone at the pinned commit, build+run a BASELINE bench, apply the patch, build+run
+# a PATCHED bench, print both so the reader doesn't have to reproduce the comparison by hand.
+test: clone bench-baseline apply bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+bench-baseline:
+    @echo "=== baseline (before patch) ==="
+    cd clone && cargo bench -p vello_bench --features extended --bench main -- rounded_blurred_rect
+
+bench-patched:
+    @echo "=== patched (after patch) ==="
+    cd clone && cargo bench -p vello_bench --features extended --bench main -- rounded_blurred_rect
+
+# Runs the project's own test suite for the two crates this patch touches, before and after -
+# `cargo test --release -p vello_cpu -p vello_common` reused as-is (part of `just test-full`,
+# not `just test`, since it roughly doubles the total run time and isn't needed to see the
+# performance delta).
+test-correctness: clone
+    @echo "=== baseline test suite ==="
+    cd clone && cargo test --release -p vello_cpu -p vello_common
+    just apply
+    @echo "=== patched test suite ==="
+    cd clone && cargo test --release -p vello_cpu -p vello_common
+
+clean:
+    rm -rf clone

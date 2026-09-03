@@ -1,0 +1,190 @@
+diff --git a/parser/src/stateful/decode.rs b/parser/src/stateful/decode.rs
+index 39e8e856..d933c911 100644
+--- a/parser/src/stateful/decode.rs
++++ b/parser/src/stateful/decode.rs
+@@ -433,11 +433,46 @@ where
+             })
+     }
+ 
++    /// After reading `len / elem_size` whole elements of a fixed-width-VR
++    /// value, discard any trailing slack bytes left over from a declared
++    /// `len` that isn't an exact multiple of `elem_size` (logging a
++    /// warning) instead of leaving them unconsumed in the stream - which
++    /// would otherwise desynchronize this decoder's own position
++    /// bookkeeping from the real reader position and corrupt the parse of
++    /// whatever follows. PS3.5 never allows a misaligned length, but
++    /// real-world files exist that violate it and other readers (dcmtk,
++    /// dcmjs) already tolerate it this way - see Enet4/dicom-rs#698.
++    fn skip_misaligned_remainder(
++        &mut self,
++        header: &DataElementHeader,
++        len: usize,
++        elem_size: usize,
++    ) -> Result<()> {
++        let remainder = len % elem_size;
++        if remainder != 0 {
++            tracing::warn!(
++                tag = %header.tag,
++                declared_length = len,
++                elem_size,
++                remainder,
++                "Value length is not a multiple of the element size; skipping trailing byte(s) to keep the stream in sync",
++            );
++            std::io::copy(
++                &mut self.from.by_ref().take(remainder as u64),
++                &mut std::io::sink(),
++            )
++            .context(ReadValueDataSnafu {
++                position: self.position,
++            })?;
++        }
++        Ok(())
++    }
++
+     fn read_value_tag(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
+         let len = self.require_known_length(header)?;
+ 
+         // tags
+-        let ntags = len >> 2;
++        let ntags = len / 4;
+         let parts: Result<_> = n_times(ntags)
+             .map(|_| {
+                 self.basic
+@@ -447,6 +482,7 @@ where
+                     })
+             })
+             .collect();
++        self.skip_misaligned_remainder(header, len, 4)?;
+         self.position += len as u64;
+         Ok(PrimitiveValue::Tags(parts?))
+     }
+@@ -531,7 +567,7 @@ where
+         // sequence of 16-bit signed integers
+         let len = self.require_known_length(header)?;
+ 
+-        let n = len >> 1;
++        let n = len / 2;
+         let mut vec = smallvec![0; n];
+         self.basic
+             .decode_ss_into(&mut self.from, &mut vec[..])
+@@ -539,6 +575,7 @@ where
+                 position: self.position,
+             })?;
+ 
++        self.skip_misaligned_remainder(header, len, 2)?;
+         self.position += len as u64;
+         Ok(PrimitiveValue::I16(vec))
+     }
+@@ -546,13 +583,14 @@ where
+     fn read_value_fl(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
+         let len = self.require_known_length(header)?;
+         // sequence of 32-bit floats
+-        let n = len >> 2;
++        let n = len / 4;
+         let mut vec = smallvec![0.; n];
+         self.basic
+             .decode_fl_into(&mut self.from, &mut vec[..])
+             .context(ReadValueDataSnafu {
+                 position: self.position,
+             })?;
++        self.skip_misaligned_remainder(header, len, 4)?;
+         self.position += len as u64;
+         Ok(PrimitiveValue::F32(vec))
+     }
+@@ -739,13 +777,14 @@ where
+     fn read_value_od(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
+         let len = self.require_known_length(header)?;
+         // sequence of 64-bit floats
+-        let n = len >> 3;
++        let n = len / 8;
+         let mut vec = smallvec![0.; n];
+         self.basic
+             .decode_fd_into(&mut self.from, &mut vec[..])
+             .context(ReadValueDataSnafu {
+                 position: self.position,
+             })?;
++        self.skip_misaligned_remainder(header, len, 8)?;
+         self.position += len as u64;
+         Ok(PrimitiveValue::F64(vec))
+     }
+@@ -754,13 +793,14 @@ where
+         let len = self.require_known_length(header)?;
+         // sequence of 32-bit unsigned integers
+ 
+-        let n = len >> 2;
++        let n = len / 4;
+         let mut vec = smallvec![0u32; n];
+         self.basic
+             .decode_ul_into(&mut self.from, &mut vec[..])
+             .context(ReadValueDataSnafu {
+                 position: self.position,
+             })?;
++        self.skip_misaligned_remainder(header, len, 4)?;
+         self.position += len as u64;
+         Ok(PrimitiveValue::U32(vec))
+     }
+@@ -782,7 +822,7 @@ where
+         let len = self.require_known_length(header)?;
+         // sequence of 16-bit unsigned integers
+ 
+-        let n = len >> 1;
++        let n = len / 2;
+         let mut vec = smallvec![0; n];
+         self.basic
+             .decode_us_into(&mut self.from, &mut vec[..])
+@@ -790,6 +830,7 @@ where
+                 position: self.position,
+             })?;
+ 
++        self.skip_misaligned_remainder(header, len, 2)?;
+         self.position += len as u64;
+ 
+         if header.tag == Tag(0x0028, 0x0103) {
+@@ -804,13 +845,14 @@ where
+         let len = self.require_known_length(header)?;
+         // sequence of 64-bit unsigned integers
+ 
+-        let n = len >> 3;
++        let n = len / 8;
+         let mut vec = smallvec![0; n];
+         self.basic
+             .decode_uv_into(&mut self.from, &mut vec[..])
+             .context(ReadValueDataSnafu {
+                 position: self.position,
+             })?;
++        self.skip_misaligned_remainder(header, len, 8)?;
+         self.position += len as u64;
+         Ok(PrimitiveValue::U64(vec))
+     }
+@@ -819,13 +861,14 @@ where
+         let len = self.require_known_length(header)?;
+         // sequence of 32-bit signed integers
+ 
+-        let n = len >> 2;
++        let n = len / 4;
+         let mut vec = smallvec![0; n];
+         self.basic
+             .decode_sl_into(&mut self.from, &mut vec[..])
+             .context(ReadValueDataSnafu {
+                 position: self.position,
+             })?;
++        self.skip_misaligned_remainder(header, len, 4)?;
+         self.position += len as u64;
+         Ok(PrimitiveValue::I32(vec))
+     }
+@@ -834,13 +877,14 @@ where
+         let len = self.require_known_length(header)?;
+         // sequence of 64-bit signed integers
+ 
+-        let n = len >> 3;
++        let n = len / 8;
+         let mut vec = smallvec![0; n];
+         self.basic
+             .decode_sv_into(&mut self.from, &mut vec[..])
+             .context(ReadValueDataSnafu {
+                 position: self.position,
+             })?;
++        self.skip_misaligned_remainder(header, len, 8)?;
+         self.position += len as u64;
+         Ok(PrimitiveValue::I64(vec))
+     }

@@ -1,0 +1,40 @@
+# Self-contained reproduction for candidate 021 (Use::init_get is a safe fn that hands out
+# aliased &mut references to a caller using only safe code - UseVec/UseFold/UseSlice all
+# implement it this way).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/orxfun/orx-parallel.git"
+base_commit := "b9214fbeb714e4bb8f8858676a818cef2f21b097"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone.
+# Expected: prints "r1 = 222, r2 = 222" / "REPRODUCED: ..." and exits 1 - two `&mut i32`
+# obtained from two calls to the crate's own public, safe-looking `Use::init_get(0)` alias the
+# same memory, using no `unsafe` anywhere in repro/src/main.rs. Also try
+# `rustup run nightly cargo miri run` from inside `repro/` for the formal Stacked-Borrows UB
+# diagnostic (not run by this recipe so `just test` doesn't require a nightly+miri toolchain).
+reproduce-before:
+    cd repro && cargo run --release
+
+# NOTE: the fix marks `Use::init_get` (and every impl of it) as `unsafe fn`. Since this repro's
+# whole point is calling it twice with no `unsafe` block to demonstrate the pre-patch soundness
+# hole, `cargo run` here is expected to FAIL TO COMPILE (E0133: call to unsafe function is
+# unsafe and requires an unsafe block) - that compile-time rejection *is* the fix working, not a
+# broken repro. It is not expected to run to completion and print anything.
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

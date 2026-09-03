@@ -1,0 +1,37 @@
+=== standalone repro/ (real vello public API, real wgpu GPU compute pipeline) ===
+$ just clone && just reproduce-before
+(clone at base_commit 7516831426fb70f36d62c521c5477f6a7265b36a via https://github.com/linebender/vello.git)
+
+wgpu adapter: AdapterInfo { name: "llvmpipe (LLVM 21.1.8, 256 bits)", vendor: 65541, device: 0, device_type: Cpu, device_pci_bus_id: "", driver: "", driver_info: "4.5 (Core Profile) Mesa 26.0.8-1ubuntu0.3", backend: Gl, subgroup_min_size: 4, subgroup_max_size: 128, transient_saves_memory: false }
+bounding box of affected (non-green) pixels: x=[16,47] y=[16,47]
+expected (true rect, no oversizing): x=[20,39] y=[20,39]
+REPRODUCED: cleared region is 32x32 instead of the true 20x20 rect - oversized/offset, consistent with rounding out to the 16px tile grid.
+exit code: 1
+
+Repeated 3/3 runs of repro/target/release/repro: bit-for-bit identical bounding box
+x=[16,47] y=[16,47] every time (deterministic GPU compute pipeline, no timing/seed dependence).
+
+=== project's own smoke test (vello_tests/tests/known_issues.rs::test_layer_size), 3/3 runs ===
+$ cargo test -p vello_tests --test known_issues test_layer_size -- --nocapture --include-ignored
+
+running 1 test
+Wrote result for failing test layer_size to ".../vello_tests/current/gpu/smoke/layer_size.png"
+Use `VELLO_TEST_UPDATE=all` to update
+
+thread 'test_layer_size' panicked at vello_tests/src/snapshot.rs:73:18:
+called `Result::unwrap()` on an `Err` value: Expected mean to be less than 0.001, got 0.38971454
+test test_layer_size - should panic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.69s
+
+(run 2/3: got 0.38971454 - identical; run 3/3: got 0.38971454 - identical. The test itself is
+`#[should_panic]`, so `cargo test` reports "ok" - the panic message is the actual signal that the
+bug is present: the rendered image differs from the reference snapshot by a mean of 0.39, driven
+entirely by the oversized/offset cleared rect.)
+
+Pixel analysis of the written debug PNG (vello_tests/current/gpu/smoke/layer_size.png, 60x60,
+Rgba8, decoded with Pillow):
+  bbox of non-green pixels (inclusive): x=[16,47] y=[16,47] -> size 32x32
+  only color found in that bbox: (0, 0, 0, 0) (fully transparent) - 1024 pixels, i.e. every pixel
+  in the 32x32 block, not just an antialiased fringe. No partial-alpha transition pixels anywhere.
+  Expected: bbox x=[20,39] y=[20,39] (20x20, matching the encoded Rect(20,20)-(40,40)).

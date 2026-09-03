@@ -1,0 +1,62 @@
+# Self-contained reproduction for candidate 017: `llvm.x86.sse.cmp.ss` / `llvm.x86.sse2.cmp.sd`
+# have no lowering in cg_clif, so every `_mm_cmpXX_ss` / `_mm_cmpXX_sd` (SSE/SSE2 baseline) and
+# every `_mm_cmp_ss::<IMM>` / `_mm_cmp_sd::<IMM>` (AVX) builds with only a warning and then aborts
+# the process at run time.
+#
+# Nothing here reaches outside this folder: `just clone` fetches cg_clif into ./clone (gitignored)
+# and builds it, then repro/ is compiled twice from the same source - once with plain rustc
+# (LLVM = the oracle) and once with the clone's dist/cargo-clif - and the run-time output diffed.
+#
+# `just test` is the full cycle: clone, build cg_clif, capture LLVM's answer, show the run-time
+# abort, apply patch.diff, rebuild, show the abort is gone and the output now matches LLVM exactly.
+#
+# To point the reproduce recipes at an existing cg_clif checkout instead of ./clone:
+#   CLIF_ROOT=/path/to/rustc_codegen_cranelift just llvm clif
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+clif := env_var_or_default("CLIF_ROOT", justfile_directory() / "clone")
+bin := "sse_cmp_ss_sd_unimplemented"
+
+test:
+    @test -z "${CLIF_ROOT:-}" || { echo "run 'just test' without CLIF_ROOT set - it builds ./clone"; exit 2; }
+    just clone
+    just build-clif
+    @echo "=== LLVM (the oracle) ==="
+    just llvm
+    @echo "=== cg_clif BEFORE the patch (expected: abort on llvm.x86.sse.cmp.ss, exit 134) ==="
+    -just clif
+    just apply
+    just build-clif
+    @echo "=== cg_clif AFTER the patch (expected: byte-identical to LLVM, exit 0) ==="
+    just clif
+    @echo "=== diff of the two run outputs (expected: empty) ==="
+    just compare
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-clif:
+    cd {{clif}} && ./y.sh prepare
+    cd {{clif}} && ./y.sh build
+
+# The oracle: plain rustc/LLVM on the same source. Output is also saved for `just compare`.
+llvm:
+    ulimit -c 0 && cd repro && CARGO_TARGET_DIR=target-llvm cargo run --quiet --bin {{bin}} | tee llvm.out
+
+# The same source through cg_clif. Fresh target dir each time so a stale object file from the
+# other backend/patch state can never be reused.
+clif:
+    ulimit -c 0 && cd repro && rm -rf target-clif && CARGO_TARGET_DIR=target-clif {{clif}}/dist/cargo-clif run --quiet --bin {{bin}} | tee clif.out
+
+compare:
+    diff repro/llvm.out repro/clif.out && echo "IDENTICAL"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+clean:
+    rm -rf clone repro/target-llvm repro/target-clif repro/llvm.out repro/clif.out

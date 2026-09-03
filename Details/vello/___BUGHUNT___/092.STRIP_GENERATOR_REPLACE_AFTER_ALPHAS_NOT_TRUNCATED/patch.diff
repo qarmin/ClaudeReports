@@ -1,0 +1,25 @@
+diff --git a/sparse_strips/vello_common/src/strip_generator.rs b/sparse_strips/vello_common/src/strip_generator.rs
+index f06b15ca..1ed3a3ff 100644
+--- a/sparse_strips/vello_common/src/strip_generator.rs
++++ b/sparse_strips/vello_common/src/strip_generator.rs
+@@ -263,7 +263,19 @@ fn render_with_clip(
+     match strip_storage.generation_mode {
+         GenerationMode::Replace => strip_storage.strips.clear(),
+         GenerationMode::Append => {}
+-        GenerationMode::ReplaceAfter(n) => strip_storage.strips.truncate(n),
++        GenerationMode::ReplaceAfter(n) => {
++            // Each strip's `alpha_idx` records the offset into `alphas` at which its own
++            // coverage data starts, and strips are generated (and their alpha data appended)
++            // in increasing index order, so `strips[n].alpha_idx()` is exactly the number of
++            // alpha bytes still referenced by the retained `strips[0..n]`. Without this,
++            // `alphas` from the discarded `strips[n..]` region is never reclaimed and grows
++            // unboundedly across repeated `ReplaceAfter` calls.
++            if let Some(strip) = strip_storage.strips.get(n) {
++                let alpha_idx = strip.alpha_idx() as usize;
++                strip_storage.strips.truncate(n);
++                strip_storage.alphas.truncate(alpha_idx);
++            }
++        }
+     }
+ 
+     if let Some(clip_path) = clip_path {

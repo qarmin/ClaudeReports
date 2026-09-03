@@ -1,0 +1,87 @@
+=== BEFORE (pristine tree, commit ac975f5d) ===
+
+--- repro/ (release build), RUST_BACKTRACE=1, run against repro/data/crafted.NEF via the real
+    public entry point rawler::get_decoder + Decoder::raw_metadata ---
+
+$ cargo run --release
+    Finished `release` profile [optimized] target(s) in 0.10s
+     Running `target/release/repro`
+
+thread 'main' (56959) panicked at /tmp/dnglab-worktree-011/rawler/src/decoders/nef/lensdata.rs:98:12:
+not yet implemented: Lensdata version: 0x900 not implemented
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: rawler::decoders::nef::lensdata::from_makernote
+   3: <rawler::decoders::nef::NefDecoder as rawler::decoders::Decoder>::raw_metadata
+   4: repro::main
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+REPRODUCED - decoder.raw_metadata() panicked: not yet implemented: Lensdata version: 0x900 not implemented
+
+Repeated 3/3 debug runs and 3/3 release runs, all identical panic location/message.
+
+--- real end-to-end via the actual `dnglab` CLI binary (bin/dnglab), the same command a real user
+    who hit GitHub issue #583 would run ---
+
+$ ./target/release/dnglab convert /tmp/nef_repro_live/data/crafted.NEF /tmp/nef_cli_test/out.dng
+thread '<unnamed>' (65030) panicked at rawler/src/decoders/nef/lensdata.rs:98:12:
+not yet implemented: Lensdata version: 0x900 not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Rayon: detected unexpected panic; aborting
+$ echo $?
+134   (SIGABRT, core dumped - rayon's panic handler converts the unwind into a process abort)
+
+Reproduced 3/3 CLI runs, deterministic, identical panic + abort each time.
+
+--- second boundary value in the same class (version 0x999 instead of 0x900), confirming the bug
+    class is not narrow to one specific version value ---
+
+$ ./target/release/dnglab convert /tmp/nef_repro_live/data/crafted2.NEF /tmp/nef_cli_test/out_variant_before.dng
+thread '<unnamed>' (82452) panicked at rawler/src/decoders/nef/lensdata.rs:98:12:
+not yet implemented: Lensdata version: 0x999 not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Rayon: detected unexpected panic; aborting
+$ echo $?
+134
+
+=== AFTER (patch.diff applied) ===
+
+--- repro/ (release build), same crafted.NEF ---
+
+$ cargo run --release
+    Finished `release` profile [optimized] target(s) in 0.15s
+     Running `target/release/repro`
+did not reproduce - raw_metadata() completed normally
+
+Repeated 3/3 runs, no panic, no crash.
+
+--- real end-to-end via the `dnglab` CLI binary, same crafted.NEF ---
+
+$ RUST_LOG=warn ./target/release/dnglab convert /tmp/nef_repro_live/data/crafted.NEF /tmp/nef_cli_test/out_fixed.dng
+[WARN ][rawler::decoders::nef] Failed to read lens information: DecoderFailed("Lensdata version: 0x900 not implemented") (rawler/src/decoders/nef.rs:401)
+Writing DNG output file: /tmp/nef_cli_test/out_fixed.dng
+Converted 1/1 files
+Total time: 0.33s
+$ echo $?
+0
+
+Reproduced 3/3 runs, all successful (no panic/abort), each producing a valid DNG output file
+and logging a warning that lens metadata could not be read - the exact "relax errors" behavior
+the raw_metadata() Err-handling match arm (rawler/src/decoders/nef.rs:328-334) already implements
+for every other lens-data error, now also reached by this code path instead of being bypassed by
+a panic.
+
+--- second boundary value (version 0x999) against the patched tree ---
+
+$ ./target/release/dnglab convert /tmp/nef_repro_live/data/crafted2.NEF /tmp/nef_cli_test/out_variant_after.dng
+[WARN ][rawler::decoders::nef] Failed to read lens information: DecoderFailed("Lensdata version: 0x999 not implemented") (rawler/src/decoders/nef.rs:401)
+Writing DNG output file: /tmp/nef_cli_test/out_variant_after.dng
+Converted 1/1 files
+Total time: 0.08s
+$ echo $?
+0
+
+=== Test suite (cargo test -p rawler --lib) ===
+
+Before patch: 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+After patch:  66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out

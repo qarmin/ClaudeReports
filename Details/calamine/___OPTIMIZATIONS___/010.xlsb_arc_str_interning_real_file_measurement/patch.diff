@@ -1,0 +1,1824 @@
+diff --git a/examples/excel_to_csv.rs b/examples/excel_to_csv.rs
+index b2d41f4..7b1a2d5 100644
+--- a/examples/excel_to_csv.rs
++++ b/examples/excel_to_csv.rs
+@@ -65,7 +65,8 @@ fn write_to_csv<W: Write>(output_file: &mut W, range: &Range<Data>) -> std::io::
+                 Data::Error(e) => write!(output_file, "{e:?}"),
+                 Data::Float(f) => write!(output_file, "{f}"),
+                 Data::DateTime(d) => write!(output_file, "{}", d.as_f64()),
+-                Data::String(s) | Data::DateTimeIso(s) | Data::DurationIso(s) => {
++                Data::String(s) => write!(output_file, "{s}"),
++                Data::DateTimeIso(s) | Data::DurationIso(s) => {
+                     write!(output_file, "{s}")
+                 }
+             }?;
+diff --git a/src/auto.rs b/src/auto.rs
+index a380b26..2917247 100644
+--- a/src/auto.rs
++++ b/src/auto.rs
+@@ -181,10 +181,10 @@ impl<RS> ReaderRef<RS> for Sheets<RS>
+ where
+     RS: std::io::Read + std::io::Seek,
+ {
+-    fn worksheet_range_ref<'a>(
+-        &'a mut self,
++    fn worksheet_range_ref(
++        &mut self,
+         name: &str,
+-    ) -> Result<Range<DataRef<'a>>, Self::Error> {
++    ) -> Result<Range<DataRef>, Self::Error> {
+         match self {
+             Sheets::Xlsx(e) => e.worksheet_range_ref(name).map_err(Error::Xlsx),
+             Sheets::Xlsb(e) => e.worksheet_range_ref(name).map_err(Error::Xlsb),
+diff --git a/src/datatype.rs b/src/datatype.rs
+index 567b951..37eb96a 100644
+--- a/src/datatype.rs
++++ b/src/datatype.rs
+@@ -3,6 +3,7 @@
+ // Copyright 2016-2026, Johann Tuffe.
+ 
+ use std::fmt;
++use std::sync::Arc;
+ #[cfg(feature = "chrono")]
+ use std::sync::OnceLock;
+ 
+@@ -38,8 +39,10 @@ pub enum Data {
+     Int(i64),
+     /// Float
+     Float(f64),
+-    /// String
+-    String(String),
++    /// String. Reference-counted so that repeated shared-string-table values (the common case in
++    /// real spreadsheets - category/status columns, etc.) can share one heap allocation across
++    /// every cell that references the same string, instead of each cell paying for its own copy.
++    String(Arc<str>),
+     /// Boolean
+     Bool(bool),
+     /// Date or Time
+@@ -151,7 +154,7 @@ impl DataType for Data {
+         match self {
+             Data::Float(v) => Some(v.to_string()),
+             Data::Int(v) => Some(v.to_string()),
+-            Data::String(v) => Some(v.clone()),
++            Data::String(v) => Some(v.to_string()),
+             _ => None,
+         }
+     }
+@@ -171,7 +174,7 @@ impl DataType for Data {
+             Data::Int(v) => Some(*v as f64),
+             Data::Float(v) => Some(*v),
+             Data::Bool(v) => Some((*v as i32).into()),
+-            Data::String(v) => fast_float2::parse(v).ok(),
++            Data::String(v) => fast_float2::parse(v.as_bytes()).ok(),
+             _ => None,
+         }
+     }
+@@ -179,13 +182,13 @@ impl DataType for Data {
+ 
+ impl PartialEq<&str> for Data {
+     fn eq(&self, other: &&str) -> bool {
+-        matches!(self, Data::String(s) if s == other)
++        matches!(self, Data::String(s) if &**s == *other)
+     }
+ }
+ 
+ impl PartialEq<str> for Data {
+     fn eq(&self, other: &str) -> bool {
+-        matches!(self, Data::String(s) if s == other)
++        matches!(self, Data::String(s) if &**s == other)
+     }
+ }
+ 
+@@ -268,7 +271,7 @@ impl<'de> Deserialize<'de> for Data {
+ 
+             #[inline]
+             fn visit_string<E>(self, value: String) -> Result<Data, E> {
+-                Ok(Data::String(value))
++                Ok(Data::String(Arc::from(value)))
+             }
+ 
+             #[inline]
+@@ -306,13 +309,24 @@ macro_rules! define_from {
+ 
+ define_from!(Data::Int, i64);
+ define_from!(Data::Float, f64);
+-define_from!(Data::String, String);
+ define_from!(Data::Bool, bool);
+ define_from!(Data::Error, CellErrorType);
+ 
++impl From<String> for Data {
++    fn from(v: String) -> Self {
++        Data::String(Arc::from(v))
++    }
++}
++
++impl From<Arc<str>> for Data {
++    fn from(v: Arc<str>) -> Self {
++        Data::String(v)
++    }
++}
++
+ impl<'a> From<&'a str> for Data {
+     fn from(v: &'a str) -> Self {
+-        Data::String(String::from(v))
++        Data::String(Arc::from(v))
+     }
+ }
+ 
+@@ -336,8 +350,14 @@ where
+ 
+ /// An enum to represent all different data types that can appear as
+ /// a value in a worksheet cell
++///
++/// No longer carries a lifetime parameter: `SharedString` used to borrow directly into the
++/// reader's shared-strings table (`&'a str`); it now holds a cheaply-clonable `Arc<str>` into
++/// the same table instead, which lets [`Data::from`]/[`From<DataRef> for Data`] move that `Arc`
++/// straight into `Data::String` without allocating a fresh copy for every referencing cell (see
++/// `Data::String`'s own docs).
+ #[derive(Debug, Clone, PartialEq, Default)]
+-pub enum DataRef<'a> {
++pub enum DataRef {
+     /// Signed integer
+     Int(i64),
+     /// Float
+@@ -345,7 +365,7 @@ pub enum DataRef<'a> {
+     /// String
+     String(String),
+     /// Shared String
+-    SharedString(&'a str),
++    SharedString(Arc<str>),
+     /// Boolean
+     Bool(bool),
+     /// Date or Time
+@@ -361,7 +381,7 @@ pub enum DataRef<'a> {
+     Empty,
+ }
+ 
+-impl DataType for DataRef<'_> {
++impl DataType for DataRef {
+     fn is_empty(&self) -> bool {
+         *self == DataRef::Empty
+     }
+@@ -425,7 +445,7 @@ impl DataType for DataRef<'_> {
+     fn get_string(&self) -> Option<&str> {
+         match self {
+             DataRef::String(v) => Some(&**v),
+-            DataRef::SharedString(v) => Some(v),
++            DataRef::SharedString(v) => Some(&**v),
+             _ => None,
+         }
+     }
+@@ -484,38 +504,38 @@ impl DataType for DataRef<'_> {
+             DataRef::Int(v) => Some(*v as f64),
+             DataRef::Float(v) => Some(*v),
+             DataRef::Bool(v) => Some((*v as i32).into()),
+-            DataRef::String(v) => fast_float2::parse(v).ok(),
+-            DataRef::SharedString(v) => fast_float2::parse(v).ok(),
++            DataRef::String(v) => fast_float2::parse(v.as_bytes()).ok(),
++            DataRef::SharedString(v) => fast_float2::parse(v.as_bytes()).ok(),
+             _ => None,
+         }
+     }
+ }
+ 
+-impl PartialEq<&str> for DataRef<'_> {
++impl PartialEq<&str> for DataRef {
+     fn eq(&self, other: &&str) -> bool {
+         matches!(self, DataRef::String(s) if s == other)
+     }
+ }
+ 
+-impl PartialEq<str> for DataRef<'_> {
++impl PartialEq<str> for DataRef {
+     fn eq(&self, other: &str) -> bool {
+         matches!(self, DataRef::String(s) if s == other)
+     }
+ }
+ 
+-impl PartialEq<f64> for DataRef<'_> {
++impl PartialEq<f64> for DataRef {
+     fn eq(&self, other: &f64) -> bool {
+         matches!(self, DataRef::Float(s) if *s == *other)
+     }
+ }
+ 
+-impl PartialEq<bool> for DataRef<'_> {
++impl PartialEq<bool> for DataRef {
+     fn eq(&self, other: &bool) -> bool {
+         matches!(self, DataRef::Bool(s) if *s == *other)
+     }
+ }
+ 
+-impl PartialEq<i64> for DataRef<'_> {
++impl PartialEq<i64> for DataRef {
+     fn eq(&self, other: &i64) -> bool {
+         matches!(self, DataRef::Int(s) if *s == *other)
+     }
+@@ -658,13 +678,16 @@ pub trait DataType {
+     }
+ }
+ 
+-impl<'a> From<DataRef<'a>> for Data {
+-    fn from(value: DataRef<'a>) -> Self {
++impl From<DataRef> for Data {
++    fn from(value: DataRef) -> Self {
+         match value {
+             DataRef::Int(v) => Data::Int(v),
+             DataRef::Float(v) => Data::Float(v),
+-            DataRef::String(v) => Data::String(v),
+-            DataRef::SharedString(v) => Data::String(v.into()),
++            DataRef::String(v) => Data::String(Arc::from(v)),
++            // Just moves the Arc - no allocation, no copy. This is what lets every cell
++            // referencing the same shared-string-table entry end up pointing at the same
++            // heap allocation in the final `Data`, instead of each paying for its own copy.
++            DataRef::SharedString(v) => Data::String(v),
+             DataRef::Bool(v) => Data::Bool(v),
+             DataRef::DateTime(v) => Data::DateTime(v),
+             DataRef::DateTimeIso(v) => Data::DateTimeIso(v),
+@@ -1075,8 +1098,8 @@ mod tests {
+ 
+     #[test]
+     fn test_partial_eq() {
+-        assert_eq!(Data::String("value".to_string()), "value");
+-        assert_eq!(Data::String("value".to_string()), "value"[..]);
++        assert_eq!(Data::String("value".into()), "value");
++        assert_eq!(Data::String("value".into()), "value"[..]);
+         assert_eq!(Data::Float(100.0), 100.0f64);
+         assert_eq!(Data::Bool(true), true);
+         assert_eq!(Data::Int(100), 100i64);
+diff --git a/src/de.rs b/src/de.rs
+index 94bfd55..36f9a28 100644
+--- a/src/de.rs
++++ b/src/de.rs
+@@ -805,7 +805,7 @@ impl<'a, 'de> serde::Deserializer<'de> for DataDeserializer<'a> {
+         use serde::de::IntoDeserializer;
+ 
+         match self.data_type {
+-            Data::String(s) => visitor.visit_enum(s.as_str().into_deserializer()),
++            Data::String(s) => visitor.visit_enum(s.as_ref().into_deserializer()),
+             Data::Error(err) => Err(DeError::CellError {
+                 err: err.clone(),
+                 pos: self.pos,
+@@ -844,7 +844,7 @@ mod tests {
+ 
+         assert_eq!(
+             Content::deserialize(
+-                super::Data::String("Foo".to_string()).to_cell_deserializer((0, 0))
++                super::Data::String("Foo".into()).to_cell_deserializer((0, 0))
+             )
+             .unwrap(),
+             Content::Foo
+diff --git a/src/formats.rs b/src/formats.rs
+index a47db4e..320439b 100644
+--- a/src/formats.rs
++++ b/src/formats.rs
+@@ -113,7 +113,7 @@ pub fn format_excel_f64_ref(
+     value: f64,
+     format: Option<&CellFormat>,
+     is_1904: bool,
+-) -> DataRef<'static> {
++) -> DataRef {
+     match format {
+         Some(CellFormat::DateTime) => DataRef::DateTime(ExcelDateTime::new(
+             value,
+diff --git a/src/lib.rs b/src/lib.rs
+index e869c49..f8eb8a1 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -472,8 +472,8 @@ where
+     ///
+     /// This is implemented only for [`calamine::Xlsx`](crate::Xlsx) and [`calamine::Xlsb`](crate::Xlsb), as Xls and Ods formats
+     /// do not support lazy iteration.
+-    fn worksheet_range_ref<'a>(&'a mut self, name: &str)
+-        -> Result<Range<DataRef<'a>>, Self::Error>;
++    fn worksheet_range_ref(&mut self, name: &str)
++        -> Result<Range<DataRef>, Self::Error>;
+ 
+     /// Get the nth worksheet range where shared string values are only borrowed. Shortcut for getting the nth
+     /// worksheet name, then the corresponding worksheet.
+@@ -483,7 +483,7 @@ where
+     fn worksheet_range_at_ref(
+         &mut self,
+         n: usize,
+-    ) -> Option<Result<Range<DataRef<'_>>, Self::Error>> {
++    ) -> Option<Result<Range<DataRef>, Self::Error>> {
+         let name = self.sheet_names().get(n)?.to_string();
+         Some(self.worksheet_range_ref(&name))
+     }
+@@ -512,7 +512,7 @@ where
+ pub trait CellType: Default + Clone + PartialEq {}
+ 
+ impl CellType for Data {}
+-impl<'a> CellType for DataRef<'a> {}
++impl CellType for DataRef {}
+ impl CellType for String {}
+ impl CellType for usize {} // for tests
+ 
+@@ -1461,7 +1461,7 @@ impl<T: CellType + fmt::Display> Range<T> {
+     ///
+     /// // Create a range with some values.
+     /// let mut range = Range::new((0, 0), (5, 2));
+-    /// range.set_value((0, 0), Data::String(String::from("a")));
++    /// range.set_value((0, 0), Data::String(String::from("a").into()));
+     /// range.set_value((0, 1), Data::Int(1));
+     /// range.set_value((0, 2), Data::Bool(true));
+     ///
+@@ -2053,7 +2053,7 @@ impl<T> Table<T> {
+     ///     // positioning within the range returned by the `get()` method.
+     ///     assert_eq!(
+     ///         data_range.get((0, 1)),
+-    ///         Some(&Data::String("Apple".to_string()))
++    ///         Some(&Data::String("Apple".into()))
+     ///     );
+     ///
+     ///     Ok(())
+@@ -2094,7 +2094,7 @@ impl<T> Table<T> {
+ ///     // positioning within the range returned by the `get()` method.
+ ///     assert_eq!(
+ ///         data_range.get((0, 1)),
+-///         Some(&Data::String("Apple".to_string()))
++///         Some(&Data::String("Apple".into()))
+ ///     );
+ ///
+ ///     Ok(())
+diff --git a/src/ods.rs b/src/ods.rs
+index 05a2304..b982d6b 100644
+--- a/src/ods.rs
++++ b/src/ods.rs
+@@ -687,7 +687,7 @@ where
+                 val = match key {
+                     b"office:date-value" => Data::DateTimeIso(attr),
+                     b"office:time-value" => Data::DurationIso(attr),
+-                    _ => Data::String(attr),
++                    _ => Data::String(attr.into()),
+                 };
+                 is_value_set = true;
+             }
+@@ -721,7 +721,7 @@ where
+                     if e.name() == QName(b"table:table-cell")
+                         || e.name() == QName(b"table:covered-table-cell") =>
+                 {
+-                    return Ok((Data::String(s), formula, true));
++                    return Ok((Data::String(s.into()), formula, true));
+                 }
+                 Ok(Event::Start(e)) if e.name() == QName(b"office:annotation") => loop {
+                     match reader.read_event_into(buf) {
+diff --git a/src/xls.rs b/src/xls.rs
+index 50925c6..f1f8e76 100644
+--- a/src/xls.rs
++++ b/src/xls.rs
+@@ -6,6 +6,7 @@ use std::cmp::min;
+ use std::collections::BTreeMap;
+ use std::fmt::{self, Write};
+ use std::io::{Read, Seek, SeekFrom};
++use std::sync::Arc;
+ 
+ use log::debug;
+ 
+@@ -484,7 +485,7 @@ impl<RS: Read + Seek> Xls<RS> {
+         };
+ 
+         let mut sheet_names = Vec::new();
+-        let mut strings = Vec::new();
++        let mut strings: Vec<Arc<str>> = Vec::new();
+         let mut defined_names = Vec::new();
+         let mut xtis = Vec::new();
+         let mut formats = BTreeMap::new();
+@@ -545,7 +546,12 @@ impl<RS: Read + Seek> Xls<RS> {
+                     // ExternSheet (MS-XLS 2.4.106)
+                     0x0017 => xtis.extend(parse_extern_sheet(&r, biff)),
+                     // SST (MS-XLS 2.4.265)
+-                    0x00FC => strings = parse_sst(&mut r, &encoding)?,
++                    0x00FC => {
++                        strings = parse_sst(&mut r, &encoding)?
++                            .into_iter()
++                            .map(Arc::from)
++                            .collect()
++                    }
+                     #[cfg(feature = "picture")]
+                     // MsoDrawingGroup (MS-XLS 2.4.171)
+                     0x00EB => {
+@@ -646,7 +652,7 @@ impl<RS: Read + Seek> Xls<RS> {
+                     0x0205 => cells.push(parse_bool_err(r.data)?),               // 517: BoolErr
+                     0x0207 => {
+                         // 519 String (formula value)
+-                        let val = Data::String(parse_string(r.data, &encoding, biff)?);
++                        let val = Data::String(parse_string(r.data, &encoding, biff)?.into());
+                         cells.push(Cell::new(fmla_pos, val));
+                     }
+                     0x027E => cells.push(parse_rk(r.data, &self.formats, self.is_1904)?), // 638: Rk
+@@ -1058,11 +1064,11 @@ fn parse_label(r: &[u8], encoding: &XlsEncoding, biff: Biff) -> Result<Cell<Data
+     let _ixfe = read_u16(&r[4..]);
+     Ok(Cell::new(
+         (row as u32, col as u32),
+-        Data::String(parse_string(&r[6..], encoding, biff)?),
++        Data::String(parse_string(&r[6..], encoding, biff)?.into()),
+     ))
+ }
+ 
+-fn parse_label_sst(r: &[u8], strings: &[String]) -> Result<Option<Cell<Data>>, XlsError> {
++fn parse_label_sst(r: &[u8], strings: &[Arc<str>]) -> Result<Option<Cell<Data>>, XlsError> {
+     if r.len() < 10 {
+         return Err(XlsError::Len {
+             typ: "label sst",
+@@ -1853,7 +1859,7 @@ fn parse_formula_value(
+         [0x01, _, b, .., 0xFF, 0xFF] => Ok(Some(Data::Bool(b != 0))),
+         [0x02, _, e, .., 0xFF, 0xFF] => parse_err(e).map(Some),
+         // ignore, return blank string value
+-        [0x03, _, .., 0xFF, 0xFF] => Ok(Some(Data::String("".to_string()))),
++        [0x03, _, .., 0xFF, 0xFF] => Ok(Some(Data::String("".into()))),
+         [e, .., 0xFF, 0xFF] => Err(XlsError::Unrecognized {
+             typ: "error",
+             val: e,
+diff --git a/src/xlsb/cells_reader.rs b/src/xlsb/cells_reader.rs
+index f998c77..769cbf6 100644
+--- a/src/xlsb/cells_reader.rs
++++ b/src/xlsb/cells_reader.rs
+@@ -3,6 +3,7 @@
+ // Copyright 2016-2026, Johann Tuffe.
+ 
+ use std::io::{Read, Seek};
++use std::sync::Arc;
+ 
+ use crate::{
+     datatype::DataRef,
+@@ -20,7 +21,7 @@ where
+ {
+     iter: RecordIter<'a, RS>,
+     formats: &'a [CellFormat],
+-    strings: &'a [String],
++    strings: &'a [Arc<str>],
+     extern_sheets: &'a [String],
+     metadata_names: &'a [(String, String)],
+     typ: u16,
+@@ -37,7 +38,7 @@ where
+     pub(crate) fn new(
+         mut iter: RecordIter<'a, RS>,
+         formats: &'a [CellFormat],
+-        strings: &'a [String],
++        strings: &'a [Arc<str>],
+         extern_sheets: &'a [String],
+         metadata_names: &'a [(String, String)],
+         is_1904: bool,
+@@ -84,7 +85,7 @@ where
+         self.dimensions
+     }
+ 
+-    pub fn next_cell(&mut self) -> Result<Option<Cell<DataRef<'a>>>, XlsbError> {
++    pub fn next_cell(&mut self) -> Result<Option<Cell<DataRef>>, XlsbError> {
+         // loop until end of sheet
+         let value = loop {
+             self.typ = self.iter.read_type()?;
+@@ -141,7 +142,7 @@ where
+                 0x0007 => {
+                     // BrtCellIsst
+                     let isst = read_usize(&self.buf[8..12]);
+-                    DataRef::SharedString(&self.strings[isst])
++                    DataRef::SharedString(self.strings[isst].clone())
+                 }
+                 0x0000 => {
+                     // BrtRowHdr
+diff --git a/src/xlsb/mod.rs b/src/xlsb/mod.rs
+index cab7ab5..8b5d172 100644
+--- a/src/xlsb/mod.rs
++++ b/src/xlsb/mod.rs
+@@ -8,6 +8,7 @@ pub use cells_reader::XlsbCellsReader;
+ 
+ use std::borrow::Cow;
+ use std::collections::HashMap;
++use std::sync::Arc;
+ use std::io::{BufReader, Read, Seek};
+ 
+ use log::debug;
+@@ -155,7 +156,7 @@ pub struct Xlsb<RS> {
+     zip: ZipArchive<RS>,
+     extern_sheets: Vec<String>,
+     sheets: Vec<(String, String)>,
+-    strings: Vec<String>,
++    strings: Vec<Arc<str>>,
+     /// Cell (number) formats
+     formats: Vec<CellFormat>,
+     is_1904: bool,
+@@ -280,7 +281,7 @@ impl<RS: Read + Seek> Xlsb<RS> {
+                 ],
+                 &mut buf,
+             )?; // BrtSSTItem
+-            self.strings.push(wide_str(&buf[1..], &mut 0)?.into_owned());
++            self.strings.push(Arc::from(wide_str(&buf[1..], &mut 0)?.into_owned()));
+         }
+         Ok(())
+     }
+@@ -562,7 +563,7 @@ impl<RS: Read + Seek> Reader<RS> for Xlsb<RS> {
+ }
+ 
+ impl<RS: Read + Seek> ReaderRef<RS> for Xlsb<RS> {
+-    fn worksheet_range_ref<'a>(&'a mut self, name: &str) -> Result<Range<DataRef<'a>>, XlsbError> {
++    fn worksheet_range_ref(&mut self, name: &str) -> Result<Range<DataRef>, XlsbError> {
+         let header_row = self.options.header_row;
+         let mut cell_reader = self.worksheet_cells_reader(name)?;
+         let len = cell_reader.dimensions().len();
+diff --git a/src/xlsx/cells_reader.rs b/src/xlsx/cells_reader.rs
+index 8336acb..0b7a856 100644
+--- a/src/xlsx/cells_reader.rs
++++ b/src/xlsx/cells_reader.rs
+@@ -4,6 +4,7 @@
+ 
+ use quick_xml::events::{BytesStart, Event};
+ use std::io::{Read, Seek};
++use std::sync::Arc;
+ 
+ use super::{
+     expand_shared_formula, get_dimension, get_row, get_row_column, read_string_with_bufs,
+@@ -25,7 +26,7 @@ struct SharedFormula {
+ 
+ /// Workbook-level context used when reading cell values.
+ struct WorkbookContext<'a> {
+-    strings: &'a [String],
++    strings: &'a [Arc<str>],
+     formats: &'a [CellFormat],
+     is_1904: bool,
+ }
+@@ -141,11 +142,11 @@ impl FormulaMetadata {
+ 
+ /// A single XLSX cell structure containing both cached/literal value and expanded formula text.
+ #[derive(Clone, Debug, PartialEq)]
+-pub struct XlsxCellFormula<'a> {
++pub struct XlsxCellFormula {
+     /// Zero-based `(row, column)` cell position.
+     pub pos: (u32, u32),
+     /// Literal or cached value associated with the cell.
+-    pub value: DataRef<'a>,
++    pub value: DataRef,
+     /// Formula text, expanded for shared formulas when the shared-formula anchor
+     /// has already been observed in stream order.
+     pub formula: Option<String>,
+@@ -153,18 +154,18 @@ pub struct XlsxCellFormula<'a> {
+ 
+ /// A single XLSX cell record containing cached/literal value and formula metadata.
+ #[derive(Clone, Debug, PartialEq)]
+-pub struct XlsxCellFormulaMetadataRecord<'a> {
++pub struct XlsxCellFormulaMetadataRecord {
+     /// Zero-based `(row, column)` cell position.
+     pub pos: (u32, u32),
+     /// Literal or cached value associated with the cell.
+-    pub value: DataRef<'a>,
++    pub value: DataRef,
+     /// Formula metadata, when the cell contains a formula.
+     pub formula: Option<XlsxFormulaMetadata>,
+ }
+ 
+-struct XlsxCellFormulaMetadataRecordInternal<'a> {
++struct XlsxCellFormulaMetadataRecordInternal {
+     pos: (u32, u32),
+-    value: DataRef<'a>,
++    value: DataRef,
+     formula: Option<FormulaMetadata>,
+ }
+ 
+@@ -178,7 +179,7 @@ where
+     RS: Read + Seek,
+ {
+     xml: XlReader<'a, RS>,
+-    strings: &'a [String],
++    strings: &'a [Arc<str>],
+     formats: &'a [CellFormat],
+     is_1904: bool,
+     dimensions: Dimensions,
+@@ -197,7 +198,7 @@ where
+     /// Create a new XLSX cell reader over a worksheet XML stream.
+     pub fn new(
+         mut xml: XlReader<'a, RS>,
+-        strings: &'a [String],
++        strings: &'a [Arc<str>],
+         formats: &'a [CellFormat],
+         is_1904: bool,
+     ) -> Result<Self, XlsxError> {
+@@ -253,7 +254,7 @@ where
+     }
+ 
+     /// Return the next cell value in XML stream order.
+-    pub fn next_cell(&mut self) -> Result<Option<Cell<DataRef<'a>>>, XlsxError> {
++    pub fn next_cell(&mut self) -> Result<Option<Cell<DataRef>>, XlsxError> {
+         loop {
+             self.buf.clear();
+             match self.xml.read_event_into(&mut self.buf) {
+@@ -383,7 +384,7 @@ where
+     /// per-cell formula text. Shared-formula metadata is intentionally not
+     /// exposed through this compatibility-oriented one-pass API; use
+     /// [`Self::next_cell_with_formula_metadata`] when shared-formula metadata is needed.
+-    pub fn next_cell_with_formula(&mut self) -> Result<Option<XlsxCellFormula<'a>>, XlsxError> {
++    pub fn next_cell_with_formula(&mut self) -> Result<Option<XlsxCellFormula>, XlsxError> {
+         Ok(self
+             .next_cell_formula_record_impl(true)?
+             .map(|record| XlsxCellFormula {
+@@ -401,7 +402,7 @@ where
+     /// only their shared index, avoiding per-cell formula expansion/allocation.
+     pub fn next_cell_with_formula_metadata(
+         &mut self,
+-    ) -> Result<Option<XlsxCellFormulaMetadataRecord<'a>>, XlsxError> {
++    ) -> Result<Option<XlsxCellFormulaMetadataRecord>, XlsxError> {
+         Ok(self
+             .next_cell_formula_record_impl(false)?
+             .map(|record| XlsxCellFormulaMetadataRecord {
+@@ -414,7 +415,7 @@ where
+     fn next_cell_formula_record_impl(
+         &mut self,
+         expand_shared_derived: bool,
+-    ) -> Result<Option<XlsxCellFormulaMetadataRecordInternal<'a>>, XlsxError> {
++    ) -> Result<Option<XlsxCellFormulaMetadataRecordInternal>, XlsxError> {
+         loop {
+             self.buf.clear();
+             match self.xml.read_event_into(&mut self.buf) {
+@@ -558,7 +559,7 @@ fn read_value<'s, RS>(
+     style_attr: Option<&[u8]>,
+     type_attr: Option<&[u8]>,
+     bufs: &mut ValueBufs,
+-) -> Result<DataRef<'s>, XlsxError>
++) -> Result<DataRef, XlsxError>
+ where
+     RS: Read + Seek,
+ {
+@@ -627,7 +628,7 @@ fn read_v<'s>(
+     v: &[u8],
+     style_attr: Option<&[u8]>,
+     type_attr: Option<&[u8]>,
+-) -> Result<DataRef<'s>, XlsxError> {
++) -> Result<DataRef, XlsxError> {
+     let cell_format = match style_attr {
+         Some(style) => {
+             let id = atoi_simd::parse::<usize, true, false>(style).unwrap_or(0);
+@@ -643,7 +644,7 @@ fn read_v<'s>(
+             let idx = atoi_simd::parse::<usize, true, false>(v).unwrap_or(0);
+             ctx.strings
+                 .get(idx)
+-                .map(|s| DataRef::SharedString(s))
++                .map(|s| DataRef::SharedString(s.clone()))
+                 .ok_or(XlsxError::Unexpected(
+                     "Cell string index not found in shared strings table",
+                 ))
+diff --git a/src/xlsx/mod.rs b/src/xlsx/mod.rs
+index 9d12ede..d6ccd7f 100644
+--- a/src/xlsx/mod.rs
++++ b/src/xlsx/mod.rs
+@@ -7,6 +7,7 @@
+ mod cells_reader;
+ 
+ use std::collections::HashMap;
++use std::sync::Arc;
+ #[cfg(feature = "picture")]
+ use std::collections::HashSet;
+ use std::io::BufReader;
+@@ -254,7 +255,7 @@ pub struct Xlsx<RS> {
+     /// Path to directory containing workbook.xml within zip archive (commonly "xl/")
+     xl_path: String,
+     /// Shared strings
+-    strings: Vec<String>,
++    strings: Vec<Arc<str>>,
+     /// Sheets paths
+     sheets: Vec<(String, String)>,
+     /// Tables: Name, Sheet, Columns, Data dimensions
+@@ -371,7 +372,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
+                     if let Some(s) =
+                         read_string_with_bufs(&mut xml, e.name(), &mut str_buf, &mut str_val_buf)?
+                     {
+-                        self.strings.push(s);
++                        self.strings.push(Arc::from(s));
+                     }
+                 }
+                 Ok(Event::End(e)) if e.local_name().as_ref() == b"sst" => break,
+@@ -1673,7 +1674,7 @@ impl<RS: Read + Seek> Xlsx<RS> {
+     ///     // we will just check for a cell value.
+     ///     assert_eq!(
+     ///         data_range.get((0, 1)),
+-    ///         Some(&Data::String("Apple".to_string()))
++    ///         Some(&Data::String("Apple".into()))
+     ///     );
+     ///
+     ///     Ok(())
+@@ -1740,21 +1741,21 @@ impl<RS: Read + Seek> Xlsx<RS> {
+     ///     // Get the table by name.
+     ///     let table = workbook.table_by_name_ref("Inventory")?;
+     ///
+-    ///     // Get the data range of the table. The data type is `&Range<DataRef<'_>>`.
++    ///     // Get the data range of the table. The data type is `&Range<DataRef>`.
+     ///     let data_range = table.data();
+     ///
+     ///     // Do something with the data using the `Range` APIs. In this case
+     ///     // we will just check for a cell value.
+     ///     assert_eq!(
+     ///         data_range.get((0, 1)),
+-    ///         Some(&DataRef::SharedString("Apple"))
++    ///         Some(&DataRef::SharedString("Apple".into()))
+     ///     );
+     ///
+     ///     Ok(())
+     /// }
+     /// ```
+     ///
+-    pub fn table_by_name_ref(&mut self, table_name: &str) -> Result<Table<DataRef<'_>>, XlsxError> {
++    pub fn table_by_name_ref(&mut self, table_name: &str) -> Result<Table<DataRef>, XlsxError> {
+         let TableMetadata {
+             name,
+             sheet_name,
+@@ -2590,14 +2591,87 @@ impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
+         &self.metadata
+     }
+ 
++    // Deliberately does NOT delegate to `worksheet_range_ref()` + a whole-grid `.into_iter()
++    // .map(Into::into).collect()`: with `Data::String`/`DataRef::SharedString` both backed by
++    // `Arc<str>`, that conversion is now just a per-cell Arc move (no allocation), but going
++    // through the intermediate `Range<DataRef>` still means building - and then fully consuming
++    // - a second dense grid the same size as this one. Building `Cell<Data>` directly during
++    // parsing (converting `DataRef -> Data` per cell as it streams in, which is exactly as cheap
++    // as the deferred conversion since neither allocates for a shared string) skips that second
++    // grid entirely.
+     fn worksheet_range(&mut self, name: &str) -> Result<Range<Data>, XlsxError> {
+-        let rge = self.worksheet_range_ref(name)?;
+-        let inner = rge.inner.into_iter().map(|v| v.into()).collect();
+-        Ok(Range {
+-            start: rge.start,
+-            end: rge.end,
+-            inner,
+-        })
++        let header_row = self.options.header_row;
++        let mut cell_reader = match self.worksheet_cells_reader(name) {
++            Ok(reader) => reader,
++            Err(XlsxError::NotAWorksheet(typ)) => {
++                log::warn!("'{typ}' not a valid worksheet");
++                return Ok(Range::default());
++            }
++            Err(e) => return Err(e),
++        };
++        let len = cell_reader.dimensions().len();
++        let mut cells = Vec::new();
++        if len < 100_000 {
++            cells.reserve(len as usize);
++        }
++
++        match header_row {
++            HeaderRow::FirstNonEmptyRow => {
++                // the header row is the row of the first non-empty cell
++                loop {
++                    match cell_reader.next_cell() {
++                        Ok(Some(Cell {
++                            val: DataRef::Empty,
++                            ..
++                        })) => (),
++                        Ok(Some(cell)) => cells.push(Cell {
++                            pos: cell.pos,
++                            val: cell.val.into(),
++                        }),
++                        Ok(None) => break,
++                        Err(e) => return Err(e),
++                    }
++                }
++            }
++            HeaderRow::Row(header_row_idx) => {
++                // If `header_row` is a row index, we only add non-empty cells after this index.
++                loop {
++                    match cell_reader.next_cell() {
++                        Ok(Some(Cell {
++                            val: DataRef::Empty,
++                            ..
++                        })) => (),
++                        Ok(Some(cell)) => {
++                            if cell.pos.0 >= header_row_idx {
++                                cells.push(Cell {
++                                    pos: cell.pos,
++                                    val: cell.val.into(),
++                                });
++                            }
++                        }
++                        Ok(None) => break,
++                        Err(e) => return Err(e),
++                    }
++                }
++
++                // If `header_row` is set and the first non-empty cell is not at the `header_row`, we add
++                // an empty cell at the beginning with row `header_row` and same column as the first non-empty cell.
++                if cells.first().is_some_and(|c| c.pos.0 != header_row_idx) {
++                    cells.insert(
++                        0,
++                        Cell {
++                            pos: (
++                                header_row_idx,
++                                cells.first().expect("cells should not be empty").pos.1,
++                            ),
++                            val: Data::Empty,
++                        },
++                    );
++                }
++            }
++        }
++
++        Ok(Range::from_sparse(cells))
+     }
+ 
+     fn worksheet_formula(&mut self, name: &str) -> Result<Range<String>, XlsxError> {
+@@ -2653,7 +2727,7 @@ impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
+ }
+ 
+ impl<RS: Read + Seek> ReaderRef<RS> for Xlsx<RS> {
+-    fn worksheet_range_ref<'a>(&'a mut self, name: &str) -> Result<Range<DataRef<'a>>, XlsxError> {
++    fn worksheet_range_ref(&mut self, name: &str) -> Result<Range<DataRef>, XlsxError> {
+         let header_row = self.options.header_row;
+         let mut cell_reader = match self.worksheet_cells_reader(name) {
+             Ok(reader) => reader,
+@@ -3602,7 +3676,7 @@ fn parse_item(item: &(Tag, Value), decoder: &Decoder) -> Data {
+         Tag::M => Data::Empty,
+         Tag::S => {
+             if let Ok(val) = decoder.decode(val.as_ref()) {
+-                Data::String(val.to_string())
++                Data::String(val.to_string().into())
+             } else {
+                 Data::Error(CellErrorType::GettingData)
+             }
+@@ -3947,7 +4021,7 @@ impl<'a, RS: Read + Seek + 'a> Iterator for PivotCacheIter<'a, RS> {
+                     return Some(Ok(self
+                         .field_names
+                         .iter()
+-                        .map(|fields| Data::String(fields.to_string()))
++                        .map(|fields| Data::String(fields.to_string().into()))
+                         .collect()))
+                 }
+                 Ok(Event::Eof) => return None,
+@@ -4574,8 +4648,8 @@ mod tests {
+ 
+         assert!(xlsx.read_shared_strings().is_ok());
+         assert_eq!(3, xlsx.strings.len());
+-        assert_eq!("String 1", &xlsx.strings[0]);
+-        assert_eq!("String 2", &xlsx.strings[1]);
+-        assert_eq!("String 3", &xlsx.strings[2]);
++        assert_eq!("String 1", &*xlsx.strings[0]);
++        assert_eq!("String 2", &*xlsx.strings[1]);
++        assert_eq!("String 3", &*xlsx.strings[2]);
+     }
+ }
+diff --git a/tests/test.rs b/tests/test.rs
+index e222e03..238394a 100644
+--- a/tests/test.rs
++++ b/tests/test.rs
+@@ -53,9 +53,9 @@ fn issue_2() {
+     range_eq!(
+         range,
+         [
+-            [Float(1.), String("a".to_string())],
+-            [Float(2.), String("b".to_string())],
+-            [Float(3.), String("c".to_string())]
++            [Float(1.), String("a".into())],
++            [Float(2.), String("b".into())],
++            [Float(3.), String("c".into())]
+         ]
+     );
+ }
+@@ -65,7 +65,7 @@ fn issue_3() {
+     // test if sheet is resolved with only one row
+     let mut excel: Xlsx<_> = wb("issue3.xlsm");
+     let range = excel.worksheet_range("Sheet1").unwrap();
+-    range_eq!(range, [[Float(1.), String("a".to_string())]]);
++    range_eq!(range, [[Float(1.), String("a".into())]]);
+ }
+ 
+ #[test]
+@@ -84,7 +84,7 @@ fn issue_6() {
+         [
+             [Float(1.)],
+             [Float(2.)],
+-            [String("ab".to_string())],
++            [String("ab".into())],
+             [Bool(false)]
+         ]
+     );
+@@ -115,10 +115,10 @@ fn issue_9() {
+     range_eq!(
+         range,
+         [
+-            [String("test1".to_string())],
+-            [String("test2 other".to_string())],
+-            [String("test3 aaa".to_string())],
+-            [String("test4".to_string())]
++            [String("test1".into())],
++            [String("test2 other".into())],
++            [String("test3 aaa".into())],
++            [String("test4".into())]
+         ]
+     );
+ }
+@@ -141,9 +141,9 @@ fn xlsb() {
+     range_eq!(
+         range,
+         [
+-            [Float(1.), String("a".to_string())],
+-            [Float(2.), String("b".to_string())],
+-            [Float(3.), String("c".to_string())]
++            [Float(1.), String("a".into())],
++            [Float(2.), String("b".into())],
++            [Float(3.), String("c".into())]
+         ]
+     );
+ }
+@@ -155,9 +155,9 @@ fn xlsx() {
+     range_eq!(
+         range,
+         [
+-            [Float(1.), String("a".to_string())],
+-            [Float(2.), String("b".to_string())],
+-            [Float(3.), String("c".to_string())]
++            [Float(1.), String("a".into())],
++            [Float(2.), String("b".into())],
++            [Float(3.), String("c".into())]
+         ]
+     );
+ }
+@@ -169,9 +169,9 @@ fn xls() {
+     range_eq!(
+         range,
+         [
+-            [Float(1.), String("a".to_string())],
+-            [Float(2.), String("b".to_string())],
+-            [Float(3.), String("c".to_string())]
++            [Float(1.), String("a".into())],
++            [Float(2.), String("b".into())],
++            [Float(3.), String("c".into())]
+         ]
+     );
+     let vba = excel.vba_project().unwrap().unwrap();
+@@ -225,9 +225,9 @@ fn ods() {
+         [
+             [Float(1.)],
+             [Float(1.5)],
+-            [String("ab".to_string())],
++            [String("ab".into())],
+             [Bool(false)],
+-            [String("test".to_string())],
++            [String("test".into())],
+             [DateTimeIso("2016-10-20T00:00:00".to_string())]
+         ]
+     );
+@@ -236,9 +236,9 @@ fn ods() {
+     range_eq!(
+         range,
+         [
+-            [Float(1.), String("a".to_string())],
+-            [Float(2.), String("b".to_string())],
+-            [Float(3.), String("c".to_string())]
++            [Float(1.), String("a".into())],
++            [Float(2.), String("b".into())],
++            [Float(3.), String("c".into())]
+         ]
+     );
+ 
+@@ -253,9 +253,9 @@ fn ods_covered() {
+     range_eq!(
+         range,
+         [
+-            [String("a1".to_string())],
+-            [String("a2".to_string())],
+-            [String("a3".to_string())],
++            [String("a1".into())],
++            [String("a2".into())],
++            [String("a3".into())],
+         ]
+     );
+ }
+@@ -267,12 +267,12 @@ fn special_cells() {
+     range_eq!(
+         range,
+         [
+-            [String("Split\nLine".to_string())],
+-            [String("Value  With spaces".to_string())],
+-            [String("Value   With 3 spaces".to_string())],
+-            [String(" Value   With spaces before and after ".to_string())],
++            [String("Split\nLine".into())],
++            [String("Value  With spaces".into())],
++            [String("Value   With 3 spaces".into())],
++            [String(" Value   With spaces before and after ".into())],
+             [String(
+-                "  Value   With 2 spaces before and after  ".to_string()
++                "  Value   With 2 spaces before and after  ".into()
+             )],
+         ]
+     );
+@@ -285,14 +285,14 @@ fn special_chrs_xlsx() {
+     range_eq!(
+         range,
+         [
+-            [String("&".to_string())],
+-            [String("<".to_string())],
+-            [String(">".to_string())],
+-            [String("aaa ' aaa".to_string())],
+-            [String("\"".to_string())],
+-            [String("☺".to_string())],
+-            [String("֍".to_string())],
+-            [String("àâéêèçöïî«»".to_string())]
++            [String("&".into())],
++            [String("<".into())],
++            [String(">".into())],
++            [String("aaa ' aaa".into())],
++            [String("\"".into())],
++            [String("☺".into())],
++            [String("֍".into())],
++            [String("àâéêèçöïî«»".into())]
+         ]
+     );
+ }
+@@ -304,14 +304,14 @@ fn special_chrs_xlsb() {
+     range_eq!(
+         range,
+         [
+-            [String("&".to_string())],
+-            [String("<".to_string())],
+-            [String(">".to_string())],
+-            [String("aaa ' aaa".to_string())],
+-            [String("\"".to_string())],
+-            [String("☺".to_string())],
+-            [String("֍".to_string())],
+-            [String("àâéêèçöïî«»".to_string())]
++            [String("&".into())],
++            [String("<".into())],
++            [String(">".into())],
++            [String("aaa ' aaa".into())],
++            [String("\"".into())],
++            [String("☺".into())],
++            [String("֍".into())],
++            [String("àâéêèçöïî«»".into())]
+         ]
+     );
+ }
+@@ -323,14 +323,14 @@ fn special_chrs_ods() {
+     range_eq!(
+         range,
+         [
+-            [String("&".to_string())],
+-            [String("<".to_string())],
+-            [String(">".to_string())],
+-            [String("aaa ' aaa".to_string())],
+-            [String("\"".to_string())],
+-            [String("☺".to_string())],
+-            [String("֍".to_string())],
+-            [String("àâéêèçöïî«»".to_string())]
++            [String("&".into())],
++            [String("<".into())],
++            [String(">".into())],
++            [String("aaa ' aaa".into())],
++            [String("\"".into())],
++            [String("☺".into())],
++            [String("֍".into())],
++            [String("àâéêèçöïî«»".into())]
+         ]
+     );
+ }
+@@ -343,8 +343,8 @@ fn decode_xml_entities() {
+     let mut excel: Xlsx<_> = wb("encoded_entities.xlsx");
+     let range = excel.worksheet_range("Sheet1").unwrap();
+ 
+-    assert_eq!(range.get_value((0, 0)), Some(&String("&".to_string())));
+-    assert_eq!(range.get_value((1, 0)), Some(&String("".to_string())));
++    assert_eq!(range.get_value((0, 0)), Some(&String("&".into())));
++    assert_eq!(range.get_value((1, 0)), Some(&String("".into())));
+ }
+ 
+ // Test for unescaping Excel XML escapes in a cell string. Excel encodes a
+@@ -359,7 +359,7 @@ fn unescape_excel_xml() {
+ 
+     assert_eq!(
+         range.get_value((0, 0)),
+-        Some(&String("ABC\r\nDEF".to_string()))
++        Some(&String("ABC\r\nDEF".into()))
+     );
+ 
+     // Test a file with an inline string.
+@@ -368,7 +368,7 @@ fn unescape_excel_xml() {
+ 
+     assert_eq!(
+         range.get_value((0, 0)),
+-        Some(&String("ABC\r\nDEF".to_string()))
++        Some(&String("ABC\r\nDEF".into()))
+     );
+ }
+ 
+@@ -376,7 +376,7 @@ fn unescape_excel_xml() {
+ fn partial_richtext_ods() {
+     let mut excel: Ods<_> = wb("richtext_issue.ods");
+     let range = excel.worksheet_range("datatypes").unwrap();
+-    range_eq!(range, [[String("abc".to_string())]]);
++    range_eq!(range, [[String("abc".into())]]);
+ }
+ 
+ #[test]
+@@ -386,14 +386,14 @@ fn xlsx_richtext_namespaced() {
+     range_eq!(
+         range,
+         [[
+-            String("inline string\nLine 2\nLine 3".to_string()),
++            String("inline string\nLine 2\nLine 3".into()),
+             Empty,
+             Empty,
+             Empty,
+             Empty,
+             Empty,
+             Empty,
+-            String("shared string\nLine 2\nLine 3".to_string())
++            String("shared string\nLine 2\nLine 3".into())
+         ]]
+     );
+ }
+@@ -546,7 +546,7 @@ fn formula_vals_xlsb() {
+     let range = excel.worksheet_range("formula_vals").unwrap();
+     range_eq!(
+         range,
+-        [[Float(3.)], [String("Ab".to_string())], [Bool(false)]]
++        [[Float(3.)], [String("Ab".into())], [Bool(false)]]
+     );
+ }
+ 
+@@ -675,7 +675,7 @@ fn skip_phonetic_text() {
+     let range = xls.worksheet_range("Sheet1").unwrap();
+     assert_eq!(
+         range.get_value((0, 0)),
+-        Some(&String("課きく　毛こ".to_string()))
++        Some(&String("課きく　毛こ".into()))
+     );
+ }
+ 
+@@ -699,8 +699,8 @@ fn table() {
+     assert_eq!(table.columns()[0], "label");
+     assert_eq!(table.columns()[1], "value");
+     let data = table.data();
+-    assert_eq!(data.get((0, 0)), Some(&String("celsius".to_owned())));
+-    assert_eq!(data.get((1, 0)), Some(&String("fahrenheit".to_owned())));
++    assert_eq!(data.get((0, 0)), Some(&String("celsius".into())));
++    assert_eq!(data.get((1, 0)), Some(&String("fahrenheit".into())));
+     assert_eq!(data.get((0, 1)), Some(&Float(22.2222)));
+     assert_eq!(data.get((1, 1)), Some(&Float(72.0)));
+     // Check the second table
+@@ -711,8 +711,8 @@ fn table() {
+     assert_eq!(table.columns()[0], "label2");
+     assert_eq!(table.columns()[1], "value2");
+     let data = table.data();
+-    assert_eq!(data.get((0, 0)), Some(&String("something".to_owned())));
+-    assert_eq!(data.get((1, 0)), Some(&String("else".to_owned())));
++    assert_eq!(data.get((0, 0)), Some(&String("something".into())));
++    assert_eq!(data.get((1, 0)), Some(&String("else".into())));
+     assert_eq!(data.get((0, 1)), Some(&Float(12.5)));
+     assert_eq!(data.get((1, 1)), Some(&Float(64.0)));
+     xls.worksheet_range_at(0).unwrap().unwrap();
+@@ -722,9 +722,9 @@ fn table() {
+ 
+     assert_eq!(
+         owned_data.get((0, 0)),
+-        Some(&String("something".to_owned()))
++        Some(&String("something".into()))
+     );
+-    assert_eq!(owned_data.get((1, 0)), Some(&String("else".to_owned())));
++    assert_eq!(owned_data.get((1, 0)), Some(&String("else".into())));
+     assert_eq!(owned_data.get((0, 1)), Some(&Float(12.5)));
+     assert_eq!(owned_data.get((1, 1)), Some(&Float(64.0)));
+ }
+@@ -746,12 +746,12 @@ fn table_by_ref() {
+     assert_eq!(
+         data.get((0, 0))
+             .expect("Could not get data from table ref."),
+-        &DataRef::SharedString("celsius")
++        &DataRef::SharedString("celsius".into())
+     );
+     assert_eq!(
+         data.get((1, 0))
+             .expect("Could not get data from table ref."),
+-        &DataRef::SharedString("fahrenheit")
++        &DataRef::SharedString("fahrenheit".into())
+     );
+     assert_eq!(
+         data.get((0, 1))
+@@ -774,12 +774,12 @@ fn table_by_ref() {
+     assert_eq!(
+         data.get((0, 0))
+             .expect("Could not get data from table ref."),
+-        &DataRef::SharedString("something")
++        &DataRef::SharedString("something".into())
+     );
+     assert_eq!(
+         data.get((1, 0))
+             .expect("Could not get data from table ref."),
+-        &DataRef::SharedString("else")
++        &DataRef::SharedString("else".into())
+     );
+     assert_eq!(
+         data.get((0, 1))
+@@ -799,13 +799,13 @@ fn table_by_ref() {
+         owned_data
+             .get((0, 0))
+             .expect("Could not get data from table ref."),
+-        &DataRef::SharedString("something")
++        &DataRef::SharedString("something".into())
+     );
+     assert_eq!(
+         owned_data
+             .get((1, 0))
+             .expect("Could not get data from table ref."),
+-        &DataRef::SharedString("else")
++        &DataRef::SharedString("else".into())
+     );
+     assert_eq!(
+         owned_data
+@@ -1180,8 +1180,8 @@ fn issue_221() {
+     range_eq!(
+         range,
+         [
+-            [String("Cell_A1".to_string()), String("Cell_B1".to_string())],
+-            [String("Cell_A2".to_string()), String("Cell_B2".to_string())]
++            [String("Cell_A1".into()), String("Cell_B1".into())],
++            [String("Cell_A2".into()), String("Cell_B2".into())]
+         ]
+     );
+ }
+@@ -1761,16 +1761,16 @@ fn ods_merged_cells() {
+         range,
+         [
+             [
+-                String("A".to_string()),
+-                String("B".to_string()),
+-                String("C".to_string())
++                String("A".into()),
++                String("B".into()),
++                String("C".into())
+             ],
+             [
+-                String("A".to_string()),
+-                String("B".to_string()),
+-                String("C".to_string())
++                String("A".into()),
++                String("B".into()),
++                String("C".into())
+             ],
+-            [Empty, Empty, String("C".to_string())],
++            [Empty, Empty, String("C".into())],
+         ]
+     );
+ }
+@@ -1779,14 +1779,14 @@ fn ods_merged_cells() {
+ fn ods_number_rows_repeated() {
+     let mut ods: Ods<_> = wb("number_rows_repeated.ods");
+     let test_cropped_range = [
+-        [String("A".to_string()), String("B".to_string())],
+-        [String("C".to_string()), String("D".to_string())],
+-        [String("C".to_string()), String("D".to_string())],
++        [String("A".into()), String("B".into())],
++        [String("C".into()), String("D".into())],
++        [String("C".into()), String("D".into())],
+         [Empty, Empty],
+         [Empty, Empty],
+-        [String("C".to_string()), String("D".to_string())],
++        [String("C".into()), String("D".into())],
+         [Empty, Empty],
+-        [String("C".to_string()), String("D".to_string())],
++        [String("C".into()), String("D".into())],
+     ];
+ 
+     let range = ods.worksheet_range_at(0).unwrap().unwrap();
+@@ -1796,14 +1796,14 @@ fn ods_number_rows_repeated() {
+     range_eq!(
+         range,
+         [
+-            [String("A".to_string()), String("B".to_string())],
+-            [String("C".to_string()), String("D".to_string())],
+-            [String("C".to_string()), String("D".to_string())],
++            [String("A".into()), String("B".into())],
++            [String("C".into()), String("D".into())],
++            [String("C".into()), String("D".into())],
+             [Empty, Empty],
+             [Empty, Empty],
+-            [String("C".to_string()), String("D".to_string())],
++            [String("C".into()), String("D".into())],
+             [Empty, Empty],
+-            [String("C".to_string()), String("D".to_string())],
++            [String("C".into()), String("D".into())],
+         ]
+     );
+ 
+@@ -1815,14 +1815,14 @@ fn ods_number_rows_repeated() {
+         range,
+         [
+             [Empty, Empty],
+-            [String("A".to_string()), String("B".to_string())],
+-            [String("C".to_string()), String("D".to_string())],
+-            [String("C".to_string()), String("D".to_string())],
++            [String("A".into()), String("B".into())],
++            [String("C".into()), String("D".into())],
++            [String("C".into()), String("D".into())],
+             [Empty, Empty],
+             [Empty, Empty],
+-            [String("C".to_string()), String("D".to_string())],
++            [String("C".into()), String("D".into())],
+             [Empty, Empty],
+-            [String("C".to_string()), String("D".to_string())],
++            [String("C".into()), String("D".into())],
+         ]
+     );
+ 
+@@ -1836,14 +1836,14 @@ fn ods_number_rows_repeated() {
+         [
+             [Empty, Empty],
+             [Empty, Empty],
+-            [String("A".to_string()), String("B".to_string())],
+-            [String("C".to_string()), String("D".to_string())],
+-            [String("C".to_string()), String("D".to_string())],
++            [String("A".into()), String("B".into())],
++            [String("C".into()), String("D".into())],
++            [String("C".into()), String("D".into())],
+             [Empty, Empty],
+             [Empty, Empty],
+-            [String("C".to_string()), String("D".to_string())],
++            [String("C".into()), String("D".into())],
+             [Empty, Empty],
+-            [String("C".to_string()), String("D".to_string())],
++            [String("C".into()), String("D".into())],
+         ]
+     );
+ }
+@@ -2491,11 +2491,11 @@ fn issue_420_empty_s_attribute() {
+     range_eq!(
+         range,
+         [
+-            [String("Name".to_string()), String("Value".to_string())],
+-            [String("John".to_string()), Float(1.)],
+-            [String("Sophia".to_string()), Float(2.)],
+-            [String("Peter".to_string()), Float(3.)],
+-            [String("Sam".to_string()), Float(4.)],
++            [String("Name".into()), String("Value".into())],
++            [String("John".into()), Float(1.)],
++            [String("Sophia".into()), Float(2.)],
++            [String("Peter".into()), Float(3.)],
++            [String("Sam".into()), Float(4.)],
+         ]
+     );
+ }
+@@ -2596,12 +2596,12 @@ fn test_ref_xlsb() {
+ }
+ 
+ #[rstest]
+-#[case("header-row.xlsx", HeaderRow::FirstNonEmptyRow, (2, 0), (9, 3), &[Empty, Empty, String("Note 1".to_string()), Empty], 32)]
++#[case("header-row.xlsx", HeaderRow::FirstNonEmptyRow, (2, 0), (9, 3), &[Empty, Empty, String("Note 1".into()), Empty], 32)]
+ #[case("header-row.xlsx", HeaderRow::Row(0), (0, 0), (9, 3), &[Empty, Empty, Empty, Empty], 40)]
+-#[case("header-row.xlsx", HeaderRow::Row(8), (8, 0), (9, 3), &[String("Columns".to_string()), String("Column A".to_string()), String("Column B".to_string()), String("Column C".to_string())], 8)]
+-#[case("temperature.xlsx", HeaderRow::FirstNonEmptyRow, (0, 0), (2, 1), &[String("label".to_string()), String("value".to_string())], 6)]
+-#[case("temperature.xlsx", HeaderRow::Row(0), (0, 0), (2, 1), &[String("label".to_string()), String("value".to_string())], 6)]
+-#[case("temperature-in-middle.xlsx", HeaderRow::FirstNonEmptyRow, (3, 1), (5, 2), &[String("label".to_string()), String("value".to_string())], 6)]
++#[case("header-row.xlsx", HeaderRow::Row(8), (8, 0), (9, 3), &[String("Columns".into()), String("Column A".into()), String("Column B".into()), String("Column C".into())], 8)]
++#[case("temperature.xlsx", HeaderRow::FirstNonEmptyRow, (0, 0), (2, 1), &[String("label".into()), String("value".into())], 6)]
++#[case("temperature.xlsx", HeaderRow::Row(0), (0, 0), (2, 1), &[String("label".into()), String("value".into())], 6)]
++#[case("temperature-in-middle.xlsx", HeaderRow::FirstNonEmptyRow, (3, 1), (5, 2), &[String("label".into()), String("value".into())], 6)]
+ #[case("temperature-in-middle.xlsx", HeaderRow::Row(0), (0, 1), (5, 2), &[Empty, Empty], 12)]
+ fn test_header_row_xlsx(
+     #[case] fixture_path: &str,
+@@ -2771,11 +2771,11 @@ fn issue_repeated_empty(#[case] fixture_path: &str) {
+     range_eq!(
+         range,
+         [
+-            [String("StringCol".to_string())],
+-            [String("bbb".to_string())],
+-            [String("ccc".to_string())],
+-            [String("ddd".to_string())],
+-            [String("eee".to_string())],
++            [String("StringCol".into())],
++            [String("bbb".into())],
++            [String("ccc".into())],
++            [String("ddd".into())],
++            [String("eee".into())],
+             [Empty],
+             [Empty],
+             [Empty],
+@@ -2783,7 +2783,7 @@ fn issue_repeated_empty(#[case] fixture_path: &str) {
+             [Empty],
+             [Empty],
+             [Empty],
+-            [String("zzz".to_string())],
++            [String("zzz".into())],
+         ]
+     );
+ }
+@@ -2792,24 +2792,24 @@ fn issue_repeated_empty(#[case] fixture_path: &str) {
+ fn ods_with_annotations() {
+     let mut ods: Ods<_> = wb("with-annotation.ods");
+     let range = ods.worksheet_range("table1").unwrap();
+-    range_eq!(range, [[String("cell a.1".to_string())],]);
++    range_eq!(range, [[String("cell a.1".into())],]);
+ }
+ 
+ #[rstest]
+ #[case(HeaderRow::Row(0), &[
+     [Empty, Empty],
+     [Empty, Empty],
+-    [String("a".to_string()), Float(0.0)],
+-    [String("b".to_string()), Float(1.0)]
++    [String("a".into()), Float(0.0)],
++    [String("b".into()), Float(1.0)]
+ ])]
+ #[case(HeaderRow::Row(1), &[
+     [Empty, Empty],
+-    [String("a".to_string()), Float(0.0)],
+-    [String("b".to_string()), Float(1.0)]
++    [String("a".into()), Float(0.0)],
++    [String("b".into()), Float(1.0)]
+ ])]
+ #[case(HeaderRow::Row(2), &[
+-    [String("a".to_string()), Float(0.0)],
+-    [String("b".to_string()), Float(1.0)]
++    [String("a".into()), Float(0.0)],
++    [String("b".into()), Float(1.0)]
+ ])]
+ fn test_no_header(#[case] header_row: HeaderRow, #[case] expected: &[[Data; 2]]) {
+     let mut excel: Xlsx<_> = wb("no-header.xlsx");
+@@ -2825,8 +2825,8 @@ fn test_no_header(#[case] header_row: HeaderRow, #[case] expected: &[[Data; 2]])
+ fn test_string_ref() {
+     let mut xlsx: Xlsx<_> = wb("string-ref.xlsx");
+     let expected_range = [
+-        [String("col1".to_string())],
+-        [String("-8086931554011838357".to_string())],
++        [String("col1".into())],
++        [String("-8086931554011838357".into())],
+     ];
+     // first sheet
+     range_eq!(xlsx.worksheet_range_at(0).unwrap().unwrap(), expected_range);
+@@ -2897,7 +2897,7 @@ fn test_xlsx_case_insensitive_part_name() {
+     let mut xlsx: Xlsx<_> = wb("issue_419.xlsx");
+ 
+     let range = xlsx.worksheet_range("Sheet1").unwrap();
+-    let expected_range = [[String("Hello".to_string())]];
++    let expected_range = [[String("Hello".into())]];
+ 
+     range_eq!(range, expected_range);
+ }
+@@ -2908,7 +2908,7 @@ fn test_xlsb_case_insensitive_part_name() {
+     let mut xlsb: Xlsb<_> = wb("issue_419.xlsb");
+ 
+     let range = xlsb.worksheet_range("Sheet1").unwrap();
+-    let expected_range = [[String("Hello".to_string())]];
++    let expected_range = [[String("Hello".into())]];
+ 
+     range_eq!(range, expected_range);
+ }
+@@ -2930,7 +2930,7 @@ fn test_xlsx_empty_shared_string() {
+ 
+     range_eq!(
+         range,
+-        [[String("abc".to_string())], [String("".to_string())]]
++        [[String("abc".into())], [String("".into())]]
+     );
+ }
+ 
+@@ -2944,16 +2944,16 @@ fn test_xlsx_empty_shared_string_value() {
+         range,
+         [
+             [
+-                String("Name".to_string()),
+-                String("City".to_string()),
+-                String("Status".to_string())
++                String("Name".into()),
++                String("City".into()),
++                String("Status".into())
+             ],
+             [
+-                String("Alice".to_string()),
++                String("Alice".into()),
+                 Empty,
+-                String("Active".to_string())
++                String("Active".into())
+             ],
+-            [Empty, String("Berlin".to_string()), Empty,]
++            [Empty, String("Berlin".into()), Empty,]
+         ]
+     );
+ }
+@@ -3044,21 +3044,21 @@ fn test_pivot_cache_data_mapping() {
+     let mut wb: Xlsx<_> = wb("pivots.xlsx");
+     let expected = vec![
+         vec![
+-            String("Id".to_string()),
+-            String("Name".to_string()),
+-            String("Category".to_string()),
+-            String("Value".to_string()),
+-            String("Size".to_string()),
+-            String("Date".to_string()),
+-            String("Value / Size".to_string()),
+-            String("IsBlue".to_string()),
+-            String("Null".to_string()),
+-            String("Misc".to_string()),
++            String("Id".into()),
++            String("Name".into()),
++            String("Category".into()),
++            String("Value".into()),
++            String("Size".into()),
++            String("Date".into()),
++            String("Value / Size".into()),
++            String("IsBlue".into()),
++            String("Null".into()),
++            String("Misc".into()),
+         ],
+         vec![
+             Int(1),
+-            String("a".to_string()),
+-            String("blue".to_string()),
++            String("a".into()),
++            String("blue".into()),
+             Int(10),
+             Float(1.78),
+             DateTimeIso("2024-11-01T00:00:00".to_string()),
+@@ -3069,8 +3069,8 @@ fn test_pivot_cache_data_mapping() {
+         ],
+         vec![
+             Int(2),
+-            String("b".to_string()),
+-            String("blue".to_string()),
++            String("b".into()),
++            String("blue".into()),
+             Int(20),
+             Float(2.012),
+             DateTimeIso("2024-01-04T00:00:00".to_string()),
+@@ -3081,8 +3081,8 @@ fn test_pivot_cache_data_mapping() {
+         ],
+         vec![
+             Int(3),
+-            String("c".to_string()),
+-            String("blue".to_string()),
++            String("c".into()),
++            String("blue".into()),
+             Int(15),
+             Float(3.121),
+             DateTimeIso("2024-01-31T00:00:00".to_string()),
+@@ -3093,8 +3093,8 @@ fn test_pivot_cache_data_mapping() {
+         ],
+         vec![
+             Int(4),
+-            String("d".to_string()),
+-            String("blue".to_string()),
++            String("d".into()),
++            String("blue".into()),
+             Int(20),
+             Float(1.052),
+             DateTimeIso("2024-01-21T00:00:00".to_string()),
+@@ -3105,8 +3105,8 @@ fn test_pivot_cache_data_mapping() {
+         ],
+         vec![
+             Int(5),
+-            String("e".to_string()),
+-            String("blue".to_string()),
++            String("e".into()),
++            String("blue".into()),
+             Int(10),
+             Float(3.102),
+             DateTimeIso("2024-02-01T00:00:00".to_string()),
+@@ -3117,8 +3117,8 @@ fn test_pivot_cache_data_mapping() {
+         ],
+         vec![
+             Int(6),
+-            String("f".to_string()),
+-            String("yellow".to_string()),
++            String("f".into()),
++            String("yellow".into()),
+             Int(5),
+             Float(1.02),
+             DateTimeIso("2024-01-01T00:00:00".to_string()),
+@@ -3129,8 +3129,8 @@ fn test_pivot_cache_data_mapping() {
+         ],
+         vec![
+             Int(7),
+-            String("g".to_string()),
+-            String("yellow".to_string()),
++            String("g".into()),
++            String("yellow".into()),
+             Int(10),
+             Int(0),
+             DateTimeIso("2024-01-11T00:00:00".to_string()),
+@@ -3141,8 +3141,8 @@ fn test_pivot_cache_data_mapping() {
+         ],
+         vec![
+             Int(8),
+-            String("h".to_string()),
+-            String("yellow".to_string()),
++            String("h".into()),
++            String("yellow".into()),
+             Int(15),
+             Float(4.031),
+             DateTimeIso("1999-01-01T00:00:00".to_string()),
+@@ -3153,8 +3153,8 @@ fn test_pivot_cache_data_mapping() {
+         ],
+         vec![
+             Int(9),
+-            String("i".to_string()),
+-            String("yellow".to_string()),
++            String("i".into()),
++            String("yellow".into()),
+             Int(15),
+             Float(1.0421),
+             DateTimeIso("2024-12-01T00:00:00".to_string()),
+@@ -3165,15 +3165,15 @@ fn test_pivot_cache_data_mapping() {
+         ],
+         vec![
+             Int(10),
+-            String("j".to_string()),
+-            String("yellow".to_string()),
++            String("j".into()),
++            String("yellow".into()),
+             Int(5),
+             Float(1.20452),
+             DateTimeIso("2024-01-01T00:00:00".to_string()),
+             Float(4.151031116129246),
+             Bool(false),
+             Empty,
+-            String("blue".to_string()),
++            String("blue".into()),
+         ],
+     ];
+     let pivot_tables = wb.pivot_tables().unwrap();
+@@ -3274,7 +3274,7 @@ fn biff5_rich_text_string() {
+     assert_eq!(
+         range.get_value((0, 0)),
+         Some(&String(
+-            "ELECTORAL DIVISION OF SOMERSET EAST ; FIELD-CÓRNËTCY No. 5, ZWAGERSHÓÊN.".to_string()
++            "ELECTORAL DIVISION OF SOMERSET EAST ; FIELD-CÓRNËTCY No. 5, ZWAGERSHÓÊN.".into()
+         ))
+     );
+ }
+@@ -3304,12 +3304,12 @@ fn test_xlsx_inline_str_with_value() {
+     // extraneous v nodes should be ignored for inlineStr cells
+     let mut wb: Xlsx<_> = wb("inlineStr_with_value.xlsx");
+     let range = wb.worksheet_range_at(0).unwrap().unwrap();
+-    assert_eq!(range.get_value((0, 4)), Some(&String("ID".to_string())));
++    assert_eq!(range.get_value((0, 4)), Some(&String("ID".into())));
+     assert_eq!(
+         range.get_value((1, 4)),
+-        Some(&String("RQ11610".to_string()))
++        Some(&String("RQ11610".into()))
+     );
+-    assert_eq!(range.get_value((1, 3)), Some(&String("1.".to_string())));
++    assert_eq!(range.get_value((1, 3)), Some(&String("1.".into())));
+ }
+ 
+ // Test for issue #648 where a inlineStr string contains CDATA.
+@@ -3322,12 +3322,12 @@ fn test_xlsx_inline_str_cdata() {
+         range,
+         [
+             [
+-                String("Hello CDATA".to_string()),
+-                String("World".to_string()),
++                String("Hello CDATA".into()),
++                String("World".into()),
+             ],
+             [
+-                String("12345".to_string()),
+-                String("NormalText".to_string())
++                String("12345".into()),
++                String("NormalText".into())
+             ],
+         ]
+     );
+@@ -3364,7 +3364,7 @@ fn test_xlsx_richtext_after_plain() {
+     let range = wb.worksheet_range("Sheet1").unwrap();
+     assert_eq!(
+         range.get_value((1, 0)),
+-        Some(&String("tvalrval1rval2".to_string()))
++        Some(&String("tvalrval1rval2".into()))
+     );
+ }
+ 
+@@ -3377,7 +3377,7 @@ fn test_xlsx_nonstandard_ns_prefix() {
+     range_eq!(
+         range,
+         [
+-            [String("a".to_string()), String("b".to_string())],
++            [String("a".into()), String("b".into())],
+             [Float(1.), Float(3.)],
+             [Float(2.), Float(4.)]
+         ]
+@@ -3391,7 +3391,7 @@ fn test_xlsx_minimal_package() {
+     let range = wb.worksheet_range("Sheet1").unwrap();
+     assert_eq!(
+         range.get_value((2, 0)),
+-        Some(&String("BKG_NUM".to_string()))
++        Some(&String("BKG_NUM".into()))
+     );
+ }
+ 
+@@ -3506,31 +3506,31 @@ fn test_whitespace_trim_inline_str() {
+     // A1: raw "<t>  trimmed value  </t>" → trimmed
+     assert_eq!(
+         range.get_value((0, 0)),
+-        Some(&String("trimmed value".to_string()))
++        Some(&String("trimmed value".into()))
+     );
+     // B1: raw "<t>\n\tvalue with tabs\n</t>" → trimmed
+     assert_eq!(
+         range.get_value((0, 1)),
+-        Some(&String("value with tabs".to_string()))
++        Some(&String("value with tabs".into()))
+     );
+     // C1: raw "<t xml:space="preserve"> \t\n</t>" → preserved as-is
+-    assert_eq!(range.get_value((0, 2)), Some(&String(" \t\n".to_string())));
++    assert_eq!(range.get_value((0, 2)), Some(&String(" \t\n".into())));
+     // D1: raw "<t>clean text</t>" → no change
+     assert_eq!(
+         range.get_value((0, 3)),
+-        Some(&String("clean text".to_string()))
++        Some(&String("clean text".into()))
+     );
+ 
+     // Row 2: multi-line text
+     // A2: raw "<t>  line1\nline2  </t>" → trimmed (inner newline preserved)
+     assert_eq!(
+         range.get_value((1, 0)),
+-        Some(&String("line1\nline2".to_string()))
++        Some(&String("line1\nline2".into()))
+     );
+     // B2: raw "<t xml:space="preserve">  line1\nline2  </t>" → preserved as-is
+     assert_eq!(
+         range.get_value((1, 1)),
+-        Some(&String("  line1\nline2  ".to_string()))
++        Some(&String("  line1\nline2  ".into()))
+     );
+ 
+     // Row 3: internal literal space between two character references must be
+@@ -3538,7 +3538,7 @@ fn test_whitespace_trim_inline_str() {
+     // A3: raw "<t>&#26085;&#26399; &#26102;&#38388;</t>" → "日期 时间"
+     assert_eq!(
+         range.get_value((2, 0)),
+-        Some(&String("日期 时间".to_string()))
++        Some(&String("日期 时间".into()))
+     );
+ }
+ 
+@@ -3552,31 +3552,31 @@ fn test_whitespace_trim_shared_strings() {
+     // idx 0: raw "<t>  trimmed value</t>" → trimmed
+     assert_eq!(
+         range.get_value((0, 0)),
+-        Some(&String("trimmed value".to_string()))
++        Some(&String("trimmed value".into()))
+     );
+     // idx 1: raw "<t xml:space="preserve">  preserved value  </t>" → preserved as-is
+     assert_eq!(
+         range.get_value((0, 1)),
+-        Some(&String("  preserved value  ".to_string()))
++        Some(&String("  preserved value  ".into()))
+     );
+     // idx 2: raw "<t> \t\n</t>" → trimmed to empty string
+-    assert_eq!(range.get_value((0, 2)), Some(&String("".to_string())));
++    assert_eq!(range.get_value((0, 2)), Some(&String("".into())));
+     // idx 3: raw "<t>clean text</t>" → no change
+     assert_eq!(
+         range.get_value((0, 3)),
+-        Some(&String("clean text".to_string()))
++        Some(&String("clean text".into()))
+     );
+ 
+     // Row 2: multi-line text
+     // idx 4: raw "<t>  line1\nline2  </t>" → trimmed (inner newline preserved)
+     assert_eq!(
+         range.get_value((1, 0)),
+-        Some(&String("line1\nline2".to_string()))
++        Some(&String("line1\nline2".into()))
+     );
+     // idx 5: raw "<t xml:space="preserve">  line1\nline2  </t>" → preserved as-is
+     assert_eq!(
+         range.get_value((1, 1)),
+-        Some(&String("  line1\nline2  ".to_string()))
++        Some(&String("  line1\nline2  ".into()))
+     );
+ 
+     // Row 3: internal literal space between two character references must be
+@@ -3584,7 +3584,7 @@ fn test_whitespace_trim_shared_strings() {
+     // idx 6: raw "<t>&#26085;&#26399; &#26102;&#38388;</t>" → "日期 时间"
+     assert_eq!(
+         range.get_value((2, 0)),
+-        Some(&String("日期 时间".to_string()))
++        Some(&String("日期 时间".into()))
+     );
+ }
+ 
+@@ -3635,7 +3635,7 @@ fn xls_empty_string() {
+     // Empty strings should be retained, not converted to None. See issue #678
+     let mut wb: Xls<_> = wb("empty-string.xls");
+     let range = wb.worksheet_range("Sheet1").unwrap();
+-    assert_eq!(range.get_value((0, 0)), Some(&String("".to_string())));
++    assert_eq!(range.get_value((0, 0)), Some(&String("".into())));
+ }
+ 
+ #[test]
+@@ -3659,15 +3659,15 @@ fn xls_embedded_cross_sheet_chart_does_not_leak_cells() {
+ 
+     assert_eq!(
+         range.get((0, 0)),
+-        Some(&Data::String("HEADER TEXT A1".to_string())),
++        Some(&Data::String("HEADER TEXT A1".into())),
+         "A1 was overwritten by the embedded chart's cached series"
+     );
+     assert_eq!(
+         range.get((5, 0)),
+-        Some(&Data::String("LABEL A6".to_string()))
++        Some(&Data::String("LABEL A6".into()))
+     );
+     assert_eq!(
+         range.get((5, 2)),
+-        Some(&Data::String("VALUE C6".to_string()))
++        Some(&Data::String("VALUE C6".into()))
+     );
+ }

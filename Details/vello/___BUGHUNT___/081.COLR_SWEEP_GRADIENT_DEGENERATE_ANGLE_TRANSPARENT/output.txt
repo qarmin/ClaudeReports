@@ -1,0 +1,54 @@
+Real captured output of `repro/` (cargo run --release), against a pristine clone of base_commit
+7516831426fb70f36d62c521c5477f6a7265b36a (BEFORE), then again after `git apply patch.diff` to the
+clone (AFTER). 3 repeat runs each side - deterministic, identical output every run (software
+rasterizer paths: vello_cpu's own CPU rasterizer, and classic vello's real wgpu GPU render via
+whatever default adapter this environment resolves - no randomness in either path for this scene).
+
+=====================================================================
+BEFORE (pristine clone) - run 1/3
+=====================================================================
+degenerate sweep gradient (start_angle == end_angle, Extend::Pad), glyph 12: vello_cpu (reference) opaque pixels = 15552 / 40000, classic vello (GPU) opaque pixels = 0 / 40000
+REPRODUCED - classic vello's real GPU render of a degenerate COLRv1 sweep-gradient glyph (start_angle == end_angle, Extend::Pad) is almost entirely transparent (0 opaque pixels) while vello_cpu's real render of the exact same glyph is a large solid disc (15552 opaque pixels) - consistent with vello/src/scene.rs's conv_brush lacking glifo's degenerate-angle workaround, so the degenerate sweep gradient hits vello_encoding's t0==t1 fallback to fully-transparent instead of a visible color
+(exit code 1)
+
+BEFORE - run 2/3: identical output, exit code 1.
+BEFORE - run 3/3: identical output, exit code 1.
+
+=====================================================================
+AFTER (patch.diff applied to the clone) - run 1/3
+=====================================================================
+degenerate sweep gradient (start_angle == end_angle, Extend::Pad), glyph 12: vello_cpu (reference) opaque pixels = 15552 / 40000, classic vello (GPU) opaque pixels = 15552 / 40000
+did not reproduce - both renderers show a similar number of opaque pixels (reference=15552, classic vello (GPU)=15552)
+(exit code 0)
+
+AFTER - run 2/3: identical output, exit code 0.
+AFTER - run 3/3: identical output, exit code 0.
+
+=====================================================================
+Project test suite (vello_tests --test emoji, VELLO_SKIP_LFS_SNAPSHOTS=all - this environment has
+no git-lfs data pulled for the binary snapshot PNGs, so LFS-backed comparisons are skipped; this is
+an environment limitation unrelated to the patch, not a gap introduced by it)
+=====================================================================
+BEFORE (pristine vello/src/scene.rs):
+running 6 tests
+test little_bitmap ... ok
+test bitmap_undef ... ok
+test colr_undef ... ok
+test little_colr ... ok
+test big_bitmap ... ok
+test big_colr ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+AFTER (patch.diff applied to vello/src/scene.rs):
+running 6 tests
+test colr_undef ... ok
+test big_bitmap ... ok
+test little_colr ... ok
+test bitmap_undef ... ok
+test big_colr ... ok
+test little_bitmap ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+None of this project's existing emoji/COLR snapshot tests happen to cover a degenerate
+(start_angle == end_angle) sweep gradient, which is why this bug survived undetected - the fix
+introduces no regression in the cases they do cover.

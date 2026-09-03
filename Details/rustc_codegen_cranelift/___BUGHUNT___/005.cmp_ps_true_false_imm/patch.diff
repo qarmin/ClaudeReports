@@ -1,0 +1,70 @@
+diff --git a/src/intrinsics/llvm_x86.rs b/src/intrinsics/llvm_x86.rs
+index 136e9896..c05cc9a3 100644
+--- a/src/intrinsics/llvm_x86.rs
++++ b/src/intrinsics/llvm_x86.rs
+@@ -212,28 +212,36 @@ pub(super) fn codegen_x86_llvm_intrinsic_call<'tcx>(
+                 unreachable!("{kind:?}")
+             };
+ 
+-            let flt_cc = match kind
++            // Cranelift's FloatCC has no always-false/always-true predicate, so the
++            // _CMP_FALSE_* / _CMP_TRUE_* immediates cannot go through `fcmp` at all.
++            enum Predicate {
++                Cc(FloatCC),
++                Const(bool),
++            }
++            use Predicate::{Cc, Const};
++
++            let predicate = match kind
+                 .try_to_bits(Size::from_bytes(1))
+                 .unwrap_or_else(|| panic!("kind not scalar: {:?}", kind))
+                 .try_into()
+                 .unwrap()
+             {
+-                _CMP_EQ_OQ | _CMP_EQ_OS => FloatCC::Equal,
+-                _CMP_LT_OS | _CMP_LT_OQ => FloatCC::LessThan,
+-                _CMP_LE_OS | _CMP_LE_OQ => FloatCC::LessThanOrEqual,
+-                _CMP_UNORD_Q | _CMP_UNORD_S => FloatCC::Unordered,
+-                _CMP_NEQ_UQ | _CMP_NEQ_US => FloatCC::NotEqual,
+-                _CMP_NLT_US | _CMP_NLT_UQ => FloatCC::UnorderedOrGreaterThanOrEqual,
+-                _CMP_NLE_US | _CMP_NLE_UQ => FloatCC::UnorderedOrGreaterThan,
+-                _CMP_ORD_Q | _CMP_ORD_S => FloatCC::Ordered,
+-                _CMP_EQ_UQ | _CMP_EQ_US => FloatCC::UnorderedOrEqual,
+-                _CMP_NGE_US | _CMP_NGE_UQ => FloatCC::UnorderedOrLessThan,
+-                _CMP_NGT_US | _CMP_NGT_UQ => FloatCC::UnorderedOrLessThanOrEqual,
+-                _CMP_FALSE_OQ | _CMP_FALSE_OS => todo!(),
+-                _CMP_NEQ_OQ | _CMP_NEQ_OS => FloatCC::OrderedNotEqual,
+-                _CMP_GE_OS | _CMP_GE_OQ => FloatCC::GreaterThanOrEqual,
+-                _CMP_GT_OS | _CMP_GT_OQ => FloatCC::GreaterThan,
+-                _CMP_TRUE_UQ | _CMP_TRUE_US => todo!(),
++                _CMP_EQ_OQ | _CMP_EQ_OS => Cc(FloatCC::Equal),
++                _CMP_LT_OS | _CMP_LT_OQ => Cc(FloatCC::LessThan),
++                _CMP_LE_OS | _CMP_LE_OQ => Cc(FloatCC::LessThanOrEqual),
++                _CMP_UNORD_Q | _CMP_UNORD_S => Cc(FloatCC::Unordered),
++                _CMP_NEQ_UQ | _CMP_NEQ_US => Cc(FloatCC::NotEqual),
++                _CMP_NLT_US | _CMP_NLT_UQ => Cc(FloatCC::UnorderedOrGreaterThanOrEqual),
++                _CMP_NLE_US | _CMP_NLE_UQ => Cc(FloatCC::UnorderedOrGreaterThan),
++                _CMP_ORD_Q | _CMP_ORD_S => Cc(FloatCC::Ordered),
++                _CMP_EQ_UQ | _CMP_EQ_US => Cc(FloatCC::UnorderedOrEqual),
++                _CMP_NGE_US | _CMP_NGE_UQ => Cc(FloatCC::UnorderedOrLessThan),
++                _CMP_NGT_US | _CMP_NGT_UQ => Cc(FloatCC::UnorderedOrLessThanOrEqual),
++                _CMP_FALSE_OQ | _CMP_FALSE_OS => Const(false),
++                _CMP_NEQ_OQ | _CMP_NEQ_OS => Cc(FloatCC::OrderedNotEqual),
++                _CMP_GE_OS | _CMP_GE_OQ => Cc(FloatCC::GreaterThanOrEqual),
++                _CMP_GT_OS | _CMP_GT_OQ => Cc(FloatCC::GreaterThan),
++                _CMP_TRUE_UQ | _CMP_TRUE_US => Const(true),
+ 
+                 kind => unreachable!("kind {:?}", kind),
+             };
+@@ -306,7 +314,10 @@ pub(super) fn codegen_x86_llvm_intrinsic_call<'tcx>(
+ 
+             simd_pair_for_each_lane(fx, x, y, ret, &|fx, lane_ty, res_lane_ty, x_lane, y_lane| {
+                 let res_lane = match lane_ty.kind() {
+-                    ty::Float(_) => fx.bcx.ins().fcmp(flt_cc, x_lane, y_lane),
++                    ty::Float(_) => match predicate {
++                        Cc(flt_cc) => fx.bcx.ins().fcmp(flt_cc, x_lane, y_lane),
++                        Const(val) => fx.bcx.ins().iconst(types::I8, i64::from(val)),
++                    },
+                     _ => unreachable!("{:?}", lane_ty),
+                 };
+                 bool_to_zero_or_max_uint(fx, res_lane_ty, res_lane)

@@ -1,0 +1,50 @@
+=== reproduce-before (pristine clone at base_commit 7516831426fb70f36d62c521c5477f6a7265b36a) ===
+$ cd repro && cargo run --release
+   Compiling vello_common v0.2.0 (.../clone/sparse_strips/vello_common)
+   Compiling image v0.25.10
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 6.06s
+     Running `target/release/repro`
+Built a real PNG file, 355 bytes on disk/wire.
+Decoded real PNG via `image` crate: width=70000, height=1 (u16::MAX = 65535)
+Calling vello_common's public ImageSource::from_peniko_image_data(...)...
+
+thread 'main' (216055) panicked at .../clone/sparse_strips/vello_common/src/paint.rs:167:9:
+The image is too big. Its width and height can be no larger than 65535 pixels.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Exit code: 101
+
+(Re-run 4 more times, same build, same input: all 5/5 runs panicked identically, both in
+`--release` and in a plain debug `cargo run`. Deterministic - no seed/layout dependency.)
+
+=== apply patch.diff ===
+$ cd clone && git apply ../patch.diff
+(applied cleanly, no fuzz/reject)
+
+=== reproduce-after (patched clone) ===
+$ cd repro && cargo run --release --features fixed
+   Compiling vello_common v0.2.0 (.../clone/sparse_strips/vello_common)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 1.23s
+     Running `target/release/repro`
+Built a real PNG file, 355 bytes on disk/wire.
+Decoded real PNG via `image` crate: width=70000, height=1 (u16::MAX = 65535)
+Calling vello_common's public ImageSource::from_peniko_image_data(...)...
+Correctly rejected the oversized image: from_peniko_image_data returned None instead of panicking.
+Exit code: 0
+
+=== Project test suite, vello_common + vello_cpu + vello_hybrid, --all-features ===
+Before (pristine, unfixed):
+  vello_common:  test result: ok. 162 passed; 0 failed; 1 ignored
+  vello_cpu:     test result: ok. 87 passed; 0 failed; 0 ignored
+  vello_hybrid:  test result: ok. 122 passed; 0 failed; 0 ignored
+  (+ 0/1/0 passed doc-tests across the three crates, all ok)
+  Total: 372 passed, 0 failed
+
+After (patched):
+  vello_common:  test result: ok. 163 passed; 0 failed; 1 ignored   (+1: new
+                 from_peniko_image_data_rejects_oversized_dimensions test)
+  vello_cpu:     test result: ok. 87 passed; 0 failed; 0 ignored
+  vello_hybrid:  test result: ok. 122 passed; 0 failed; 0 ignored
+  (+ 0/1/0 passed doc-tests across the three crates, all ok)
+  Total: 373 passed, 0 failed

@@ -1,0 +1,51 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# Needs a real (possibly software) Vulkan adapter reachable by wgpu - set VK_ICD_FILENAMES to a
+# usable Vulkan ICD if there is no real GPU available (e.g. Google's SwiftShader CPU
+# implementation, bundled with some Playwright/Chromium installs at
+# .../chrome-linux64/vk_swiftshader_icd.json).
+#
+# NOTE: this repo's `.gitattributes` marks some test-asset files as `git-lfs`-tracked; the font
+# this repro depends on (`examples/assets/colr_test_glyphs/test_glyphs-glyf_colr_1.ttf`) is a
+# real (non-LFS) binary font file checked in directly, so a `git-lfs`-less clone is fine for this
+# specific repro (unlike the project's own PNG snapshot tests, which *are* LFS pointer stubs in a
+# `git-lfs`-less clone and are irrelevant here).
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+# reproduce-before is EXPECTED to panic (that's the bug) - `-` keeps the chain going past it so
+# apply/reproduce-after still run and print the fixed behavior in the same invocation.
+test: clone
+    -just reproduce-before
+    just apply
+    just reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - demonstrates the panic
+# ("Failed to render glyphs to atlas: IntermediateTexture(TooLarge { width: 52, height: 76,
+# max_width: 8, max_height: 8 })").
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - `Renderer::render` now returns a graceful
+# `Err` instead of panicking.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

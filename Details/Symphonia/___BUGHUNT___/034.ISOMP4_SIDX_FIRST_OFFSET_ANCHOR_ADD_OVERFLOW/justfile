@@ -1,0 +1,43 @@
+# Self-contained reproduction for candidate 034 (ISOMP4_SIDX_FIRST_OFFSET_ANCHOR_ADD_OVERFLOW).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into ./clone
+# (gitignored) - nothing here reaches outside the folder it lives in, so the whole folder can be
+# copied/posted standalone and `just test` still works.
+#
+# repro/assets/*.mp4 are three tiny crafted MP4 files (ftyp + a single zero-reference sidx atom),
+# checked in and regenerable with `just gen-assets` (repro/gen_mp4.py, no external tools needed).
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Should panic with "attempt to add with overflow" at atoms/sidx.rs:59 (case a) and :58 (case b).
+# Non-zero exit is the expected, demonstrated bug - the leading `-` stops `just test` from
+# stopping here before reaching apply/reproduce-after.
+reproduce-before:
+    -ulimit -c 0 && cd repro && cargo run --release -- ok
+    -ulimit -c 0 && cd repro && cargo run --release -- a
+    -ulimit -c 0 && cd repro && cargo run --release -- b
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Should now print an ordinary Err("isomp4 (sidx): first offset overflow") for both crafted files,
+# and the unchanged Err("isomp4: missing moov atom") for the control file - no panic.
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo run --release -- ok
+    ulimit -c 0 && cd repro && cargo run --release -- a
+    ulimit -c 0 && cd repro && cargo run --release -- b
+
+gen-assets:
+    cd repro && python3 gen_mp4.py assets
+
+clean:
+    rm -rf clone repro/target

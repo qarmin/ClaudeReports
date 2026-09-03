@@ -1,0 +1,82 @@
+=== `just test` run from a fresh clone (via /tmp/candidate013_scratch, base_commit 5a5f0e247c970df948505ee0bb36e2df2504bf86) ===
+
+--- reproduce-before (pristine tree, no cap at all) ---
+built PoC PDF: 1071 bytes (embedded JPEG2000 codestream: 386 bytes, declares 158000x7900 raw
+across 20 tiles of 7900x7900 each, 1 decomposition level, 4x4 code blocks, 1 quality layer with a
+real minimal non-empty packet stream per tile; placed as a 20x20 thumbnail via `cm 20 0 0 20 90
+90` on a 200x200 page)
+calling the real, public hayro::render() and timing it...
+render() returned after 4.334879421s (pixmap 200x200)
+peak RSS (VmHWM): 2413892 kB (~2357.32 MB)
+SLOW: took >= 500ms to render a 20x20 thumbnail placement - consistent with the suspected
+cross-tile summation of a per-tile cost cap (20 tiles, each individually staying under the
+per-tile estimate)
+
+--- apply patch.diff ---
+cd clone && git apply patch.diff  (applied cleanly)
+
+--- reproduce-after (patched tree) ---
+built PoC PDF: 1071 bytes (embedded JPEG2000 codestream: 386 bytes, declares 158000x7900 raw
+across 20 tiles of 7900x7900 each, 1 decomposition level, 4x4 code blocks, 1 quality layer with a
+real minimal non-empty packet stream per tile; placed as a 20x20 thumbnail via `cm 20 0 0 20 90
+90` on a 200x200 page)
+calling the real, public hayro::render() and timing it...
+render() returned after 482.091257ms (pixmap 200x200)
+peak RSS (VmHWM): 967264 kB (~944.59 MB)
+FAST: rendering completed quickly
+
+=== Repeat runs against the main checkout's own working tree (same repro/main.rs, run via a
+temporary Cargo.toml pointing directly at the main tree's crates instead of a fresh clone, to
+avoid re-cloning/re-downloading crates.io three times over; same code, same PoC bytes) ===
+
+--- pristine tree (no cap), 3 runs ---
+run 1: render() returned after 5.660098302s (pixmap 200x200), peak RSS ~2357.65 MB
+run 2: render() returned after 4.718025369s (pixmap 200x200), peak RSS ~2357.95 MB
+run 3: render() returned after 4.407570359s (pixmap 200x200), peak RSS ~2357.45 MB
+
+--- patched tree (this candidate's own patch.diff applied), 3 runs ---
+run 1: render() returned after 515.444349ms (pixmap 200x200), peak RSS ~944.11 MB
+run 2: render() returned after 508.119142ms (pixmap 200x200), peak RSS ~944.54 MB
+run 3: render() returned after 504.880899ms (pixmap 200x200), peak RSS ~945.09 MB
+
+=== Boundary sweep isolating the actual finding: does candidate 012's own (unmerged)
+`MAX_RAW_CODE_BLOCK_LAYER_ESTIMATE` per-tile/per-call cap, applied ALONE (i.e. without this
+candidate's own cross-tile-accumulation fix), actually stop the multi-tile PoC shape? ===
+
+Harness: standalone `hayro-jpeg2000` example harness calling the crate's real public
+`Image::new`/`.decode()` with `DecodeSettings{target_resolution: Some((20,20))}`, generated with
+`gen_multi_tile.py` (SOC/SIZ/COD/QCD, N real SOT/SOD tile-parts, each 7900x7900, 1 decomposition
+level, 4x4 code blocks, 1 quality layer, QCD exponent=8 so ScalarDerived quantization does not
+underflow and decode() actually succeeds end-to-end for every tile instead of erroring out after
+the first one).
+
+With ONLY candidate 012's own patch.diff applied (per-tile/per-call cap, reset every tile - NOT
+this candidate's fix; decode() succeeds for every case below, no rejection, because each
+individual tile's own estimate stays under the per-tile cap):
+  1  tile  (7900x7900,   xsiz=7900):    decode() succeeded, 536.118843ms, peak RSS ~926.52 MB
+  5  tiles (39500x7900,  xsiz=39500):   decode() succeeded, 1.345036982s, peak RSS ~1164.69 MB
+  20 tiles (158000x7900, xsiz=158000):  decode() succeeded, 3.563476703s, peak RSS ~2057.44 MB
+  40 tiles (316000x7900, xsiz=316000):  decode() succeeded, 6.909620465s, peak RSS ~3248.10 MB
+
+  -> Time and peak memory both scale ~linearly with tile count, confirming candidate 012's own
+     per-tile/per-call cap does NOT bound the cumulative cost across many tiles in one decode()
+     call - each individual tile passes its own check (~3.9M raw_code_block_layer_estimate, just
+     under the 4,000,000 cap), and the cap is re-checked (and re-satisfied) independently for
+     every tile.
+
+With THIS candidate's own patch.diff applied (cross-tile-accumulating cap, `storage.raw_code_block_layer_total`
+persisting across the whole `decode()` call, only reset once per call in `DecoderContext::reset`):
+  1  tile  (7900x7900):    decode() succeeded,        424.835222ms, peak RSS ~926.44 MB (unaffected - single tile alone was always fine)
+  5  tiles (39500x7900):   decode() Err(ImageTooLarge), 443.328112ms, peak RSS ~941.85 MB
+  20 tiles (158000x7900):  decode() Err(ImageTooLarge), 439.542741ms, peak RSS ~941.93 MB
+  40 tiles (316000x7900):  decode() Err(ImageTooLarge), 423.569654ms, peak RSS ~941.96 MB
+
+  -> Cost is now bounded to roughly "one tile's worth of work" (~424-443ms, ~940MB) regardless of
+     how many additional tiles the codestream declares - the multi-tile case is rejected as soon
+     as the cumulative total crosses the cap (after the 2nd tile's contribution pushes the running
+     total over 4,000,000), instead of being individually re-permitted for every tile.
+
+Control (realistic large image, realistic 64x64 code-block size, 32 layers, single tile) - both
+candidate 012's patch alone and this candidate's own patch accept it identically, confirming no
+new false-positive rejection of ordinary content:
+  20000x15000, cb=64x64, layers=32: decode() succeeded, 354.221515ms, peak RSS ~866.18 MB

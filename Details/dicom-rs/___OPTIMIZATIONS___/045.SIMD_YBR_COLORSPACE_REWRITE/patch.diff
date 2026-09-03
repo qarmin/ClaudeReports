@@ -1,0 +1,383 @@
+diff --git a/pixeldata/src/lib.rs b/pixeldata/src/lib.rs
+index 6ede5847..8b98988f 100644
+--- a/pixeldata/src/lib.rs
++++ b/pixeldata/src/lib.rs
+@@ -1985,34 +1985,178 @@ fn bytes_to_vec_u16(data: &[u8]) -> Vec<u16> {
+ 
+ // Convert u8 pixel array from YBR_FULL or YBR_FULL_422 to RGB
+ // Every pixel is replaced with an RGB value
++//
++// Fixed-point (Q16.16, i32) reimplementation of the matrix multiplication from
++// https://github.com/pydicom/pydicom/blob/f36517e10/pydicom/pixel_data_handlers/util.py#L576 -
++// coefficients below are the same constants rounded to the nearest 1/65536: 1.402,
++// (0.114*1.772/0.587), (-0.299*1.402/0.587), 1.772. `chunks_mut(3)`/`par_chunks_mut(3)` handing
++// one pixel per closure call blocks auto-vectorization (confirmed via disassembly in a prior
++// session), so this batches into large chunks for rayon and hand-vectorizes the arithmetic with
++// x86-64 SSE4.1 intrinsics processing 4 pixels/iteration, falling back to the scalar loop for the
++// tail and on non-x86_64/older CPUs.
++#[cfg(feature = "image")]
++const YBR_SHIFT: u32 = 16;
++#[cfg(feature = "image")]
++const YBR_C_CR_R: i32 = 91881;
++#[cfg(feature = "image")]
++const YBR_C_CG_B: i32 = 22553;
++#[cfg(feature = "image")]
++const YBR_C_CG_R: i32 = -46802;
++#[cfg(feature = "image")]
++const YBR_C_CB_B: i32 = 116130;
++#[cfg(feature = "image")]
++const YBR_HALF: i32 = 1 << (YBR_SHIFT - 1);
++
++#[cfg(feature = "image")]
++fn convert_colorspace_u8_scalar(i: &mut [u8]) {
++    for pixel in i.chunks_exact_mut(3) {
++        let y = pixel[0] as i32;
++        let b = pixel[1] as i32 - 128;
++        let r = pixel[2] as i32 - 128;
++
++        let cr = ((y << YBR_SHIFT) + YBR_C_CR_R * r + YBR_HALF) >> YBR_SHIFT;
++        let cg = ((y << YBR_SHIFT) + YBR_C_CG_B * b + YBR_C_CG_R * r + YBR_HALF) >> YBR_SHIFT;
++        let cb = ((y << YBR_SHIFT) + YBR_C_CB_B * b + YBR_HALF) >> YBR_SHIFT;
++
++        pixel[0] = cr.clamp(0, u8::MAX as i32) as u8;
++        pixel[1] = cg.clamp(0, u8::MAX as i32) as u8;
++        pixel[2] = cb.clamp(0, u8::MAX as i32) as u8;
++    }
++}
++
++/// Vectorized (SSE4.1) version of `convert_colorspace_u8_scalar`, processing 4 pixels (12 bytes)
++/// per iteration. Caller must have verified "sse4.1" and "ssse3" are available at runtime -
++/// this is what makes the function safe to invoke; it performs no unsafe operations that could
++/// go out of bounds by itself (the only unsafe primitives used are the intrinsics themselves and
++/// a bounds-checked-by-the-loop-condition unaligned load).
++#[cfg(all(feature = "image", target_arch = "x86_64"))]
++#[target_feature(enable = "sse4.1,ssse3")]
++unsafe fn convert_colorspace_u8_sse41(i: &mut [u8]) {
++    use std::arch::x86_64::*;
++
++    // Byte-gather + zero-extend-to-i32-lane shuffle masks: pixel k's Y/B/R byte lives at offset
++    // 3k/3k+1/3k+2; each output lane's other 3 bytes are zeroed by the 0x80-marked (-128i8) mask
++    // entries per _mm_shuffle_epi8's documented "MSB set => zero" behavior.
++    const MASK_Y: [i8; 16] = [
++        0, -128, -128, -128, 3, -128, -128, -128, 6, -128, -128, -128, 9, -128, -128, -128,
++    ];
++    const MASK_B: [i8; 16] = [
++        1, -128, -128, -128, 4, -128, -128, -128, 7, -128, -128, -128, 10, -128, -128, -128,
++    ];
++    const MASK_R: [i8; 16] = [
++        2, -128, -128, -128, 5, -128, -128, -128, 8, -128, -128, -128, 11, -128, -128, -128,
++    ];
++
++    // SAFETY: caller (convert_colorspace_u8_slice) has verified sse4.1+ssse3 at runtime before
++    // calling this function.
++    unsafe {
++        let mask_y = _mm_loadu_si128(MASK_Y.as_ptr() as *const __m128i);
++        let mask_b = _mm_loadu_si128(MASK_B.as_ptr() as *const __m128i);
++        let mask_r = _mm_loadu_si128(MASK_R.as_ptr() as *const __m128i);
++
++        let c_cr_r = _mm_set1_epi32(YBR_C_CR_R);
++        let c_cg_b = _mm_set1_epi32(YBR_C_CG_B);
++        let c_cg_r = _mm_set1_epi32(YBR_C_CG_R);
++        let c_cb_b = _mm_set1_epi32(YBR_C_CB_B);
++        let half = _mm_set1_epi32(YBR_HALF);
++        let v128 = _mm_set1_epi32(128);
++        let zero = _mm_setzero_si128();
++        let vmax = _mm_set1_epi32(u8::MAX as i32);
++
++        let mut off = 0usize;
++        // +16 (not +12): the trailing 4 bytes of the unaligned 16-byte load are read but
++        // discarded (never touched by the gather masks above) - requiring them to be in-bounds
++        // is what keeps this loadu safe without needing a separate masked/partial load.
++        while off + 16 <= i.len() {
++            let raw = _mm_loadu_si128(i.as_ptr().add(off) as *const __m128i);
++
++            let y = _mm_shuffle_epi8(raw, mask_y);
++            let b = _mm_sub_epi32(_mm_shuffle_epi8(raw, mask_b), v128);
++            let r = _mm_sub_epi32(_mm_shuffle_epi8(raw, mask_r), v128);
++
++            let y_shifted = _mm_slli_epi32::<{ YBR_SHIFT as i32 }>(y);
++
++            let cr = _mm_srai_epi32::<{ YBR_SHIFT as i32 }>(_mm_add_epi32(
++                _mm_add_epi32(y_shifted, _mm_mullo_epi32(c_cr_r, r)),
++                half,
++            ));
++            let cg = _mm_srai_epi32::<{ YBR_SHIFT as i32 }>(_mm_add_epi32(
++                _mm_add_epi32(
++                    _mm_add_epi32(y_shifted, _mm_mullo_epi32(c_cg_b, b)),
++                    _mm_mullo_epi32(c_cg_r, r),
++                ),
++                half,
++            ));
++            let cb = _mm_srai_epi32::<{ YBR_SHIFT as i32 }>(_mm_add_epi32(
++                _mm_add_epi32(y_shifted, _mm_mullo_epi32(c_cb_b, b)),
++                half,
++            ));
++
++            let cr = _mm_min_epi32(_mm_max_epi32(cr, zero), vmax);
++            let cg = _mm_min_epi32(_mm_max_epi32(cg, zero), vmax);
++            let cb = _mm_min_epi32(_mm_max_epi32(cb, zero), vmax);
++
++            let cr_arr = [
++                _mm_extract_epi32::<0>(cr),
++                _mm_extract_epi32::<1>(cr),
++                _mm_extract_epi32::<2>(cr),
++                _mm_extract_epi32::<3>(cr),
++            ];
++            let cg_arr = [
++                _mm_extract_epi32::<0>(cg),
++                _mm_extract_epi32::<1>(cg),
++                _mm_extract_epi32::<2>(cg),
++                _mm_extract_epi32::<3>(cg),
++            ];
++            let cb_arr = [
++                _mm_extract_epi32::<0>(cb),
++                _mm_extract_epi32::<1>(cb),
++                _mm_extract_epi32::<2>(cb),
++                _mm_extract_epi32::<3>(cb),
++            ];
++
++            for k in 0..4 {
++                let base = off + k * 3;
++                i[base] = cr_arr[k] as u8;
++                i[base + 1] = cg_arr[k] as u8;
++                i[base + 2] = cb_arr[k] as u8;
++            }
++
++            off += 12;
++        }
++
++        convert_colorspace_u8_scalar(&mut i[off..]);
++    }
++}
++
++#[cfg(feature = "image")]
++fn convert_colorspace_u8_slice(i: &mut [u8]) {
++    #[cfg(target_arch = "x86_64")]
++    {
++        if is_x86_feature_detected!("sse4.1") && is_x86_feature_detected!("ssse3") {
++            // SAFETY: feature availability just checked at runtime.
++            unsafe { convert_colorspace_u8_sse41(i) };
++            return;
++        }
++    }
++    convert_colorspace_u8_scalar(i);
++}
++
+ #[cfg(feature = "image")]
+ fn convert_colorspace_u8(i: &mut [u8]) {
++    // Large batches so each rayon task does real vectorizable work instead of one 3-byte pixel
++    // per call - per-pixel par_chunks_mut(3) dispatch would leave the SIMD loop above with only
++    // one pixel to work on per call, defeating the point of batching.
+     #[cfg(feature = "rayon")]
+-    let iter = i.par_chunks_mut(3);
++    {
++        const CHUNK_PIXELS: usize = 4096;
++        i.par_chunks_mut(3 * CHUNK_PIXELS)
++            .for_each(convert_colorspace_u8_slice);
++    }
+     #[cfg(not(feature = "rayon"))]
+-    let iter = i.chunks_mut(3);
+-
+-    // Matrix multiplication taken from
+-    // https://github.com/pydicom/pydicom/blob/f36517e10/pydicom/pixel_data_handlers/util.py#L576
+-    iter.for_each(|pixel| {
+-        let y = pixel[0] as f32;
+-        let b: f32 = pixel[1] as f32;
+-        let r: f32 = pixel[2] as f32;
+-        let b = b - 128.0;
+-        let r = r - 128.0;
+-
+-        let cr = (y + 1.402 * r) + 0.5;
+-        let cg = (y + (0.114 * 1.772 / 0.587) * b + (-0.299 * 1.402 / 0.587) * r) + 0.5;
+-        let cb = (y + 1.772 * b) + 0.5;
+-
+-        let cr = cr.floor().clamp(0.0, u8::MAX as f32) as u8;
+-        let cg = cg.floor().clamp(0.0, u8::MAX as f32) as u8;
+-        let cb = cb.floor().clamp(0.0, u8::MAX as f32) as u8;
+-
+-        pixel[0] = cr;
+-        pixel[1] = cg;
+-        pixel[2] = cb;
+-    });
++    {
++        convert_colorspace_u8_slice(i);
++    }
+ }
+ 
+ #[cfg(feature = "image")]
+@@ -2031,34 +2175,151 @@ fn interleave<T: Copy>(data: &[T]) -> Vec<T> {
+ 
+ // Convert u16 pixel array from YBR_FULL or YBR_FULL_422 to RGB
+ // Every pixel is replaced with an RGB value
++//
++// Same fixed-point reimplementation approach as convert_colorspace_u8 above, but i64 accumulator
++// (unlike u8's i32): y<<16 alone can reach ~4.3e9 for 16-bit samples, already over i32::MAX
++// before adding the other terms. The SSE4.1 kernel below processes 2 pixels/iteration (using
++// _mm_mul_epi32 as a strided 32x32->64 multiply, half the pixels/iteration of the u8 kernel's
++// 4, since it needs twice the accumulator width) and does the final shift+clamp in scalar code
++// after extracting the 64-bit accumulator - only the multiply-add portion is vectorized.
++#[cfg(feature = "image")]
++const YBR16_C_CR_R: i64 = 91881;
++#[cfg(feature = "image")]
++const YBR16_C_CG_B: i64 = 22553;
++#[cfg(feature = "image")]
++const YBR16_C_CG_R: i64 = -46802;
++#[cfg(feature = "image")]
++const YBR16_C_CB_B: i64 = 116130;
++#[cfg(feature = "image")]
++const YBR16_HALF: i64 = 1 << (YBR_SHIFT - 1);
++
++#[cfg(feature = "image")]
++fn convert_colorspace_u16_scalar(i: &mut [u16]) {
++    for pixel in i.chunks_exact_mut(3) {
++        let y = pixel[0] as i64;
++        let b = pixel[1] as i64 - 32768;
++        let r = pixel[2] as i64 - 32768;
++
++        let cr = ((y << YBR_SHIFT) + YBR16_C_CR_R * r + YBR16_HALF) >> YBR_SHIFT;
++        let cg = ((y << YBR_SHIFT) + YBR16_C_CG_B * b + YBR16_C_CG_R * r + YBR16_HALF) >> YBR_SHIFT;
++        let cb = ((y << YBR_SHIFT) + YBR16_C_CB_B * b + YBR16_HALF) >> YBR_SHIFT;
++
++        pixel[0] = cr.clamp(0, u16::MAX as i64) as u16;
++        pixel[1] = cg.clamp(0, u16::MAX as i64) as u16;
++        pixel[2] = cb.clamp(0, u16::MAX as i64) as u16;
++    }
++}
++
++/// Vectorized (SSE4.1) version of `convert_colorspace_u16_scalar`, processing 2 pixels
++/// (6 u16s / 12 bytes) per iteration. Caller must have verified "sse4.1" is available.
++#[cfg(all(feature = "image", target_arch = "x86_64"))]
++#[target_feature(enable = "sse4.1,ssse3")]
++unsafe fn convert_colorspace_u16_sse41(i: &mut [u16]) {
++    use std::arch::x86_64::*;
++
++    // Byte layout per 2 pixels (12 bytes = 6 u16): Y0 B0 R0 Y1 B1 R1. Each mask gathers one
++    // channel's 2 u16 values (as raw little-endian byte pairs) into 32-bit lanes 0 and 2 (the
++    // lanes _mm_mul_epi32 reads), zero-extending via the 0x80-marked bytes - safe since a DICOM
++    // u16 sample is always non-negative before the per-channel offset below.
++    const MASK_Y: [i8; 16] = [
++        0, 1, -128, -128, -128, -128, -128, -128, 6, 7, -128, -128, -128, -128, -128, -128,
++    ];
++    const MASK_B: [i8; 16] = [
++        2, 3, -128, -128, -128, -128, -128, -128, 8, 9, -128, -128, -128, -128, -128, -128,
++    ];
++    const MASK_R: [i8; 16] = [
++        4, 5, -128, -128, -128, -128, -128, -128, 10, 11, -128, -128, -128, -128, -128, -128,
++    ];
++
++    // Only a read-only byte view of `i` is needed (the widening shuffle loads raw bytes); all
++    // writes below go through `i` directly, as u16s - never materializing a second `&mut` view
++    // over the same memory, which would alias `i` and be unsound.
++    let byte_len = std::mem::size_of_val(i);
++
++    // SAFETY: caller (convert_colorspace_u16_slice) has verified sse4.1+ssse3 at runtime.
++    unsafe {
++        let mask_y = _mm_loadu_si128(MASK_Y.as_ptr() as *const __m128i);
++        let mask_b = _mm_loadu_si128(MASK_B.as_ptr() as *const __m128i);
++        let mask_r = _mm_loadu_si128(MASK_R.as_ptr() as *const __m128i);
++
++        let c_cr_r = _mm_set1_epi32(YBR16_C_CR_R as i32);
++        let c_cg_b = _mm_set1_epi32(YBR16_C_CG_B as i32);
++        let c_cg_r = _mm_set1_epi32(YBR16_C_CG_R as i32);
++        let c_cb_b = _mm_set1_epi32(YBR16_C_CB_B as i32);
++        let one = _mm_set1_epi32(1);
++        let v32768 = _mm_set1_epi32(32768);
++
++        let mut off = 0usize;
++        while off + 16 <= byte_len {
++            // SAFETY: off+16 <= byte_len == i.len()*2, so this reads entirely within i's
++            // allocation; the read-only byte pointer never aliases a second live &mut.
++            let raw = _mm_loadu_si128(i.as_ptr().cast::<u8>().add(off) as *const __m128i);
++
++            let y = _mm_shuffle_epi8(raw, mask_y);
++            let b = _mm_sub_epi32(_mm_shuffle_epi8(raw, mask_b), v32768);
++            let r = _mm_sub_epi32(_mm_shuffle_epi8(raw, mask_r), v32768);
++
++            // Widen y (currently in 32-bit lanes 0/2) to real 64-bit lanes via a x1 multiply -
++            // _mm_mul_epi32 reads lanes 0/2 of each input and produces the full 64-bit products
++            // in 64-bit lanes 0/1, which is also the exact lane arrangement mullo-of-b/r below
++            // need to be added against.
++            let y64 = _mm_mul_epi32(y, one);
++            let y64_shifted = _mm_slli_epi64::<{ YBR_SHIFT as i32 }>(y64);
++
++            let cr64 = _mm_add_epi64(y64_shifted, _mm_mul_epi32(c_cr_r, r));
++            let cg64 = _mm_add_epi64(
++                _mm_add_epi64(y64_shifted, _mm_mul_epi32(c_cg_b, b)),
++                _mm_mul_epi32(c_cg_r, r),
++            );
++            let cb64 = _mm_add_epi64(y64_shifted, _mm_mul_epi32(c_cb_b, b));
++
++            let cr_lanes = [_mm_extract_epi64::<0>(cr64), _mm_extract_epi64::<1>(cr64)];
++            let cg_lanes = [_mm_extract_epi64::<0>(cg64), _mm_extract_epi64::<1>(cg64)];
++            let cb_lanes = [_mm_extract_epi64::<0>(cb64), _mm_extract_epi64::<1>(cb64)];
++
++            for k in 0..2 {
++                let cr = ((cr_lanes[k] + YBR16_HALF) >> YBR_SHIFT).clamp(0, u16::MAX as i64) as u16;
++                let cg = ((cg_lanes[k] + YBR16_HALF) >> YBR_SHIFT).clamp(0, u16::MAX as i64) as u16;
++                let cb = ((cb_lanes[k] + YBR16_HALF) >> YBR_SHIFT).clamp(0, u16::MAX as i64) as u16;
++
++                let pixel_idx = off / 2 + k * 3;
++                i[pixel_idx] = cr;
++                i[pixel_idx + 1] = cg;
++                i[pixel_idx + 2] = cb;
++            }
++
++            off += 12;
++        }
++
++        convert_colorspace_u16_scalar(&mut i[off / 2..]);
++    }
++}
++
++#[cfg(feature = "image")]
++fn convert_colorspace_u16_slice(i: &mut [u16]) {
++    #[cfg(target_arch = "x86_64")]
++    {
++        if is_x86_feature_detected!("sse4.1") && is_x86_feature_detected!("ssse3") {
++            // SAFETY: feature availability just checked at runtime.
++            unsafe { convert_colorspace_u16_sse41(i) };
++            return;
++        }
++    }
++    convert_colorspace_u16_scalar(i);
++}
++
+ #[cfg(feature = "image")]
+ fn convert_colorspace_u16(i: &mut [u16]) {
+     #[cfg(feature = "rayon")]
+-    let iter = i.par_chunks_mut(3);
++    {
++        const CHUNK_PIXELS: usize = 4096;
++        i.par_chunks_mut(3 * CHUNK_PIXELS)
++            .for_each(convert_colorspace_u16_slice);
++    }
+     #[cfg(not(feature = "rayon"))]
+-    let iter = i.chunks_mut(3);
+-
+-    // Matrix multiplication taken from
+-    // https://github.com/pydicom/pydicom/blob/f36517e10/pydicom/pixel_data_handlers/util.py#L576
+-    iter.for_each(|pixel| {
+-        let y = pixel[0] as f32;
+-        let b: f32 = pixel[1] as f32;
+-        let r: f32 = pixel[2] as f32;
+-        let b = b - 32768.0;
+-        let r = r - 32768.0;
+-
+-        let cr = (y + 1.402 * r) + 0.5;
+-        let cg = (y + (0.114 * 1.772 / 0.587) * b + (-0.299 * 1.402 / 0.587) * r) + 0.5;
+-        let cb = (y + 1.772 * b) + 0.5;
+-
+-        let cr = cr.floor().clamp(0.0, u16::MAX as f32) as u16;
+-        let cg = cg.floor().clamp(0.0, u16::MAX as f32) as u16;
+-        let cb = cb.floor().clamp(0.0, u16::MAX as f32) as u16;
+-
+-        pixel[0] = cr;
+-        pixel[1] = cg;
+-        pixel[2] = cb;
+-    });
++    {
++        convert_colorspace_u16_slice(i);
++    }
+ }
+ 
+ /// Convert the i16 vector by shifting it up,

@@ -1,0 +1,37 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff applies candidate 002's deinterleave-based SIMD rewrite of the horizontal IDWT
+# filter, candidate 014's restructuring of it into 5 smaller functions, AND this candidate's
+# own `#[inline(never)]` on each of those 5 functions - 002's rewrite was never applied to real
+# source (it regressed 8.6x, see 002's own RESULT.md), so it has to be re-applied here for the
+# functions under test to exist at all. See ../002.../RESULT.md, ../013.../RESULT.md, and
+# ../014.../RESULT.md for that background; see evidence/own_change_vs_candidate_014.diff in this
+# folder for just this candidate's own 5-line incremental change on top of 014.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Real JPX decode of an embedded 1241x1752 codestream, hash-checked every iteration.
+# Compare against a build with only candidates 002+014 applied (no `#[inline(never)]`) to
+# reproduce the baseline this candidate compares against - see RESULT.md for how that
+# comparison was done this session.
+bench:
+    cd bench/idwt && cargo build --release
+    ./bench/idwt/target/release/bench_idwt 300
+
+clean:
+    rm -rf clone bench/idwt/target

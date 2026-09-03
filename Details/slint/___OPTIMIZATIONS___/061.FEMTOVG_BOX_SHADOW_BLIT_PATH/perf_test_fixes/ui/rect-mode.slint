@@ -1,0 +1,111 @@
+import { Palette } from "std-widgets.slint";
+
+// A grid of rounded, bordered rectangles: the shape a real UI is mostly made of, all of it
+// visible at once. Used to measure per-primitive renderer cost (candidate 06).
+export component RectModePage inherits Rectangle {
+    in property <int> count;
+    // Gradient fills take a different renderer path than solid colors (candidate 09).
+    in property <bool> gradient;
+    // Per-item animation: every rectangle reads `animation-tick()`, so every frame invalidates
+    // and re-evaluates one binding per item. What an animated UI actually does, and what no
+    // other scene here measures - the rest move the whole grid with a single scroll property.
+    // Per-item opacity and rotation. Both can force the renderer to render a subtree into an
+    // offscreen buffer instead of straight to the target; nothing here measured that.
+    in property <float> item-opacity: 1.0;
+    // Rounded corners and borders take different rasterization paths from a plain fill.
+    in property <length> item-radius: 3px;
+    in property <length> item-border: 1px;
+    // Toggled per frame by `--toggle-visibility`: an `if` destroys and re-creates its subtree, so
+    // this measures component instantiation churn - what a tab switch, an expander or a dialog
+    // does. Nothing else here creates or destroys components after startup.
+    in property <bool> show-extra;
+    in property <int> extra-count;
+    in property <bool> animate;
+    // How many of the `count` rectangles animate; the rest are static. Lets the per-animated-item
+    // cost be separated from the per-item cost.
+    in property <int> animate-count: 1000000;
+    // Animate the fill instead of the position. Same clock, same number of bindings re-evaluated
+    // per frame - but the geometry never changes, so the dirty-region pass takes its cheap path.
+    // The difference between the two isolates what *moving* an item costs from what animating
+    // one costs.
+    in property <bool> animate-color;
+    // Explicit fill alpha, bypassing the palette. Negative means "use the palette colours".
+    // Fluent's `control-background` is #FFFFFF0F / #FFFFFFB3 - translucent - so half of this
+    // scene takes the renderer's blending path by default; this knob is how that gets measured
+    // against the same colour at alpha 1.
+    in property <float> item-alpha: -1.0;
+    // Draw a `Path` instead of a `Rectangle`. The software renderer has a whole tessellation and
+    // scanline-fill path for these (`software/path.rs`) that nothing here had ever reached.
+    in property <bool> use-path;
+    // A drop shadow behind every rectangle: femtovg's `draw_box_shadow` builds a blurred offscreen
+    // texture (cached per item) plus a `femtovg::Path` blit rect drawn fresh every frame regardless
+    // of the cache (candidate FEMTOVG_BOX_SHADOW_BLIT_PATH).
+    in property <bool> item-shadow;
+    in-out property <length> scroll-y;
+
+    property <length> cell-width: 34px;
+    property <length> cell-height: 26px;
+    property <int> columns: max(1, floor(self.width / self.cell-width));
+
+    clip: true;
+
+    if root.show-extra: Rectangle {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        for index in root.extra-count: Rectangle {
+            x: mod(index, root.columns) * root.cell-width;
+            y: floor(index / root.columns) * root.cell-height;
+            width: root.cell-width - 4px;
+            height: root.cell-height - 4px;
+            background: Palette.accent-background.transparentize(0.7);
+        }
+    }
+
+    for index in root.count: Path {
+        visible: root.use-path;
+        x: mod(index, root.columns) * root.cell-width;
+        y: floor(index / root.columns) * root.cell-height + mod(root.scroll-y, root.cell-height);
+        width: root.cell-width - 4px;
+        height: root.cell-height - 4px;
+        fill: mod(index, 2) == 0 ? Palette.alternate-background : Palette.control-background;
+        stroke: Palette.border;
+        stroke-width: 1px;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        // A fan of triangles: `path-segments` controls how many, so segment count is a knob.
+        commands: root.use-path ? "M 50 50 L 100 0 L 100 100 Z M 50 50 L 0 0 L 0 100 Z" : "";
+    }
+
+    for index in root.count: Rectangle {
+        visible: !root.use-path;
+        opacity: root.item-opacity;
+        property <bool> animated: root.animate && index < root.animate-count;
+        // One binding per item on the animation clock. Kept to an offset so the item's geometry
+        // changes (a color-only animation would exercise a different renderer path).
+        property <float> phase: self.animated
+            ? sin(360deg * (animation-tick() / 1s) + index * 1deg)
+            : 0.0;
+        property <length> wobble: root.animate-color ? 0px : 3px * self.phase;
+        x: mod(index, root.columns) * root.cell-width + self.wobble;
+        // The benchmark moves scroll-y every frame, so every rectangle really is re-rendered.
+        y: floor(index / root.columns) * root.cell-height + mod(root.scroll-y, root.cell-height);
+        width: root.cell-width - 4px;
+        height: root.cell-height - 4px;
+        border-radius: root.item-radius;
+        border-width: root.item-border;
+        border-color: Palette.border;
+        drop-shadow-blur: root.item-shadow ? 6px : 0px;
+        drop-shadow-offset-x: root.item-shadow ? 2px : 0px;
+        drop-shadow-offset-y: root.item-shadow ? 2px : 0px;
+        drop-shadow-color: root.item-shadow ? #000000a0 : transparent;
+        background: root.item-alpha >= 0
+            ? Colors.rgba(90, 100, 120, root.item-alpha)
+            : root.gradient
+            ? @linear-gradient(45deg, Palette.accent-background 0%, Palette.alternate-background 60%, Palette.control-background 100%)
+            : (root.animate-color
+                // Mix two opaque colors rather than transparentize: an alpha < 1 would send the
+                // fill down the blending path and measure that instead of the animation.
+                ? (mod(index, 2) == 0 ? Palette.alternate-background : Palette.control-background)
+                    .mix(Palette.accent-background, 0.5 + 0.4 * self.phase)
+                : (mod(index, 2) == 0 ? Palette.alternate-background : Palette.control-background));
+    }
+}

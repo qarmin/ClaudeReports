@@ -1,0 +1,51 @@
+=== BEFORE (pristine tree, base_commit ac975f5d) - debug build ===
+wrote 5 bytes to "/tmp/bughunt_003_x3f_truncated.x3f"
+
+thread 'main' (34454) panicked at /home/rafal/Projekty/Obce/dnglab/rawler/src/decoders/x3f.rs:43:20:
+range start index 174216783 out of range for slice of length 5
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:80:14
+   2: core::slice::index::slice_index_fail
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panic.rs:177:9
+   3: <core::ops::range::RangeFrom<usize> as core::slice::index::SliceIndex<[u8]>>::index
+             at /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/index.rs:545:13
+   4: <[u8] as core::ops::index::Index<core::ops::range::RangeFrom<usize>>>::index
+             at /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/index.rs:19:15
+   5: <alloc::vec::Vec<u8> as core::ops::index::Index<core::ops::range::RangeFrom<usize>>>::index
+             at /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3879:9
+   6: <rawler::decoders::x3f::X3fFile>::new
+             at /home/rafal/Projekty/Obce/dnglab/rawler/src/decoders/x3f.rs:43:20
+   7: <rawler::decoders::x3f::X3fDecoder>::new
+             at /home/rafal/Projekty/Obce/dnglab/rawler/src/decoders/x3f.rs:98:15
+   8: <rawler::decoders::RawLoader>::get_decoder
+             at /home/rafal/Projekty/Obce/dnglab/rawler/src/decoders/mod.rs:955:26
+   9: rawler::get_decoder
+             at /home/rafal/Projekty/Obce/dnglab/rawler/src/lib.rs:242:10
+  10: repro::main
+             at ./src/main.rs:25:11
+exit code: 101
+
+=== BEFORE, release build (same input) ===
+thread 'main' (37234) panicked at /home/rafal/Projekty/Obce/dnglab/rawler/src/decoders/x3f.rs:43:20:
+range start index 174216783 out of range for slice of length 5
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit code: 101
+(not gated by overflow-checks/build profile - a plain out-of-range slice index, reproduces
+identically in debug and release)
+
+=== AFTER (patch.diff applied) - same 5-byte input ===
+wrote 5 bytes to "/tmp/bughunt_003_x3f_truncated.x3f"
+get_decoder returned an error, no panic (bug not present): Failed to decode image, possibly
+corrupt image: X3F: directory offset 174216783 out of range for file of length 5
+
+=== Boundary-value sweep after the fix (5 variants, see RESULT.md "What was tried") ===
+4byte_magic_only: Err(... X3F: directory offset 1649823558 out of range for file of length 4) - no panic
+5byte: Err(... X3F: directory offset 174216783 out of range for file of length 5) - no panic
+8byte_zero_offset: Err(... X3F: Directory version too old 0) - no panic (offset=0 was in-range,
+  reached the pre-existing version check correctly - confirms the fix didn't break the in-range case)
+huge_offset_12byte: Err(... X3F: directory offset 4294967295 out of range for file of length 12) - no panic
+empty (0 bytes): Err(Error: No decoder found, ...) - no panic (rejected earlier by is_x3f's own
+  4-byte magic check, never reaches X3fFile::new at all)

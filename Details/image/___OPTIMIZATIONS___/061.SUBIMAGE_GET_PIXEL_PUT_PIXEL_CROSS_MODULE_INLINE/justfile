@@ -1,0 +1,56 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff bundles a harness-only hunk (new "sub image overlay" criterion case in
+# benches/imageops.rs) with the actual change under test (src/images/sub_image.rs:
+# #[inline(always)] on SubImageInner::get_pixel and put_pixel). apply-harness applies just
+# the former so the same benchmark exists in both the baseline and patched build;
+# apply-fix applies the latter on top, for the patched build only - otherwise bin_baseline
+# wouldn't even have the "sub image overlay" bench case to run.
+#
+# This candidate's own measured result is "no consistent timing difference" (see RESULT.md) -
+# `just test` reproduces the same comparison, it does not reproduce a win.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+test: clone apply-harness build-baseline apply-fix build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-harness:
+    cd clone && git apply --exclude='src/images/sub_image.rs' "{{justfile_directory()}}/patch.diff"
+
+apply-fix:
+    cd clone && git apply --include='src/images/sub_image.rs' "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone && cargo bench --bench imageops --no-run
+    cp "$(ls -t clone/target/release/deps/imageops-* | grep -v '\.d$' | head -1)" ./bin_baseline
+
+build-patched:
+    cd clone && cargo bench --bench imageops --no-run
+    cp "$(ls -t clone/target/release/deps/imageops-* | grep -v '\.d$' | head -1)" ./bin_patched
+
+bench:
+    @echo "=== baseline (before patch), single-core ==="
+    taskset -c 0 ./bin_baseline --bench "sub image overlay" --exact --warm-up-time 1 --measurement-time 2
+    @echo "=== patched (after patch), single-core ==="
+    taskset -c 0 ./bin_patched --bench "sub image overlay" --exact --warm-up-time 1 --measurement-time 2
+    @echo "=== baseline (before patch), multi-core (unpinned) ==="
+    ./bin_baseline --bench "sub image overlay" --exact --warm-up-time 1 --measurement-time 2
+    @echo "=== patched (after patch), multi-core (unpinned) ==="
+    ./bin_patched --bench "sub image overlay" --exact --warm-up-time 1 --measurement-time 2
+    @echo "For a rigorous paired comparison instead of one-shot criterion runs (recommended -"
+    @echo "a single one-shot run can look like a win that a repeat run doesn't reproduce, see"
+    @echo "RESULT.md), use this folder's own paired_overlay.sh (copied from candidate 060):"
+    @echo "  bash paired_overlay.sh ./bin_baseline ./bin_patched \"sub image overlay\" single 10"
+    @echo "  bash paired_overlay.sh ./bin_baseline ./bin_patched \"sub image overlay\" multi 10"
+
+clean:
+    rm -rf clone bin_baseline bin_patched

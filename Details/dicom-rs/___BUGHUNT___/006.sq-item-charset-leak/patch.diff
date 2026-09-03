@@ -1,0 +1,254 @@
+diff --git a/parser/src/dataset/read.rs b/parser/src/dataset/read.rs
+index d9f6c727..097d0fe1 100644
+--- a/parser/src/dataset/read.rs
++++ b/parser/src/dataset/read.rs
+@@ -87,7 +87,7 @@ pub enum Error {
+ pub type Result<T> = std::result::Result<T, Error>;
+ 
+ /// A reader-specific token representing a sequence or item start.
+-#[derive(Debug, Copy, Clone, PartialEq)]
++#[derive(Debug, Clone, PartialEq)]
+ struct SeqToken {
+     /// Whether it is the start of a sequence or the start of an item.
+     typ: SeqTokenType,
+@@ -99,6 +99,11 @@ struct SeqToken {
+     /// The number of bytes the parser has read until it reached the
+     /// beginning of the sequence or item value data.
+     base_offset: u64,
++    /// The character set that was active right before entering this token's scope - restored
++    /// when the token is popped (only meaningful for `SeqTokenType::Item`: a
++    /// `SpecificCharacterSet` declared inside an item is only in scope for that item, per PS3.5
++    /// 6.1.2.5, and must not leak into whatever comes after it).
++    saved_charset: SpecificCharacterSet,
+ }
+ 
+ /// The value reading strategy for the data set reader.
+@@ -399,7 +404,7 @@ where
+                             }
+                             SequenceItemHeader::ItemDelimiter => {
+                                 // closed an item
+-                                self.seq_delimiters.pop();
++                                self.pop_seq_delimiter();
+                                 self.in_sequence = true;
+                                 // sequences can end after an item delimiter
+                                 self.delimiter_check_pending = true;
+@@ -407,7 +412,7 @@ where
+                             }
+                             SequenceItemHeader::SequenceDelimiter => {
+                                 // closed a sequence
+-                                self.seq_delimiters.pop();
++                                self.pop_seq_delimiter();
+                                 self.in_sequence = false;
+                                 // items can end after a nested sequence ends
+                                 self.delimiter_check_pending = true;
+@@ -419,7 +424,7 @@ where
+                         source: dicom_encoding::decode::Error::ReadItemHeader { source, .. },
+                         ..
+                     }) if source.kind() == std::io::ErrorKind::UnexpectedEof
+-                        && self.seq_delimiters.pop().is_some_and(|t| t.pixel_data) =>
++                        && self.pop_seq_delimiter().is_some_and(|t| t.pixel_data) =>
+                     {
+                         // Note: if `UnexpectedEof` was reached while inside a
+                         // PixelData Sequence, then we assume that
+@@ -509,7 +514,7 @@ where
+                             }
+                             SequenceItemHeader::SequenceDelimiter => {
+                                 // empty pixel data
+-                                self.seq_delimiters.pop();
++                                self.pop_seq_delimiter();
+                                 self.in_sequence = false;
+                                 Some(Ok(DataToken::SequenceEnd))
+                             }
+@@ -591,7 +596,7 @@ where
+                     }) => {
+                         self.in_sequence = true;
+                         // pop item delimiter
+-                        self.seq_delimiters.pop();
++                        self.pop_seq_delimiter();
+                         // sequences can end after this token
+                         self.delimiter_check_pending = true;
+                         Some(Ok(DataToken::ItemEnd))
+@@ -697,7 +702,7 @@ where
+                                 DataToken::ItemEnd
+                             }
+                         };
+-                        self.seq_delimiters.pop();
++                        self.pop_seq_delimiter();
+                         return Ok(Some(token));
+                     }
+                     Ordering::Less => {
+@@ -722,9 +727,23 @@ where
+             pixel_data,
+             len,
+             base_offset: self.parser.position(),
++            saved_charset: self.parser.active_character_set(),
+         })
+     }
+ 
++    /// Pop the innermost sequence/item token, restoring the character set that was active
++    /// before entering it if it was an item (see `SeqToken::saved_charset`). Every call site
++    /// that used to pop `seq_delimiters` directly must go through this instead, so a
++    /// `SpecificCharacterSet` declared inside an item never leaks past that item's boundary.
++    #[inline]
++    fn pop_seq_delimiter(&mut self) -> Option<SeqToken> {
++        let token = self.seq_delimiters.pop()?;
++        if token.typ == SeqTokenType::Item {
++            self.parser.set_active_character_set(token.saved_charset.clone());
++        }
++        Some(token)
++    }
++
+     fn read_value(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
+         match self.options.value_read {
+             ValueReadStrategy::Interpreted => self.parser.read_value(header),
+diff --git a/parser/src/dataset/write.rs b/parser/src/dataset/write.rs
+index 751e8a06..7b199307 100644
+--- a/parser/src/dataset/write.rs
++++ b/parser/src/dataset/write.rs
+@@ -85,6 +85,12 @@ struct SeqToken {
+     /// The length of the value, as indicated by the starting element,
+     /// can be unknown.
+     len: Length,
++    /// The character set that was active right before entering this token's scope - restored
++    /// when the token is popped (only meaningful for `SeqTokenType::Item`: a
++    /// `SpecificCharacterSet` declared inside an item is only in scope for that item, per PS3.5
++    /// 6.1.2.5, and must not leak into whatever comes after it - mirrors the equivalent
++    /// mechanism on the decoding side, `dataset::read::SeqToken`).
++    saved_charset: SpecificCharacterSet,
+ }
+ 
+ /// A strategy for writing data set sequences and items
+@@ -284,6 +290,7 @@ where
+                         self.seq_tokens.push(SeqToken {
+                             typ: SeqTokenType::Sequence,
+                             len: Length::UNDEFINED,
++                            saved_charset: self.printer.active_character_set(),
+                         });
+                         self.write_impl(&DataToken::SequenceStart {
+                             tag,
+@@ -294,6 +301,7 @@ where
+                         self.seq_tokens.push(SeqToken {
+                             typ: SeqTokenType::Sequence,
+                             len,
++                            saved_charset: self.printer.active_character_set(),
+                         });
+                         self.write_impl(&token)?;
+                     }
+@@ -317,6 +325,7 @@ where
+                         self.seq_tokens.push(SeqToken {
+                             typ: SeqTokenType::Item,
+                             len,
++                            saved_charset: self.printer.active_character_set(),
+                         });
+                         self.write_impl(&DataToken::ItemStart { len })?;
+                     }
+@@ -324,6 +333,7 @@ where
+                         self.seq_tokens.push(SeqToken {
+                             typ: SeqTokenType::Item,
+                             len,
++                            saved_charset: self.printer.active_character_set(),
+                         });
+                         self.write_impl(&token)?;
+                     }
+@@ -333,8 +343,11 @@ where
+             DataToken::ItemEnd => {
+                 // only write if it's an unknown length item
+                 if let Some(seq_start) = self.seq_tokens.pop() {
+-                    if seq_start.typ == SeqTokenType::Item && seq_start.len.is_undefined() {
+-                        self.write_impl(&token)?;
++                    if seq_start.typ == SeqTokenType::Item {
++                        self.printer.set_active_character_set(seq_start.saved_charset.clone());
++                        if seq_start.len.is_undefined() {
++                            self.write_impl(&token)?;
++                        }
+                     }
+                 }
+                 Ok(())
+@@ -367,6 +380,7 @@ where
+                 self.seq_tokens.push(SeqToken {
+                     typ: SeqTokenType::Sequence,
+                     len: Length::UNDEFINED,
++                    saved_charset: self.printer.active_character_set(),
+                 });
+                 self.write_impl(&token)
+             }
+diff --git a/parser/src/stateful/decode.rs b/parser/src/stateful/decode.rs
+index 39e8e856..4c54e06e 100644
+--- a/parser/src/stateful/decode.rs
++++ b/parser/src/stateful/decode.rs
+@@ -206,6 +206,16 @@ pub trait StatefulDecode {
+     /// If the stateful decoder was constructed at the beginning of the reader,
+     /// this equals to the number of bytes read so far.
+     fn position(&self) -> u64;
++
++    /// Retrieve the character set currently used for decoding charset-affected text.
++    ///
++    /// Used by dataset-level readers to save and restore the active character set around the
++    /// boundaries of a sequence item, since a `SpecificCharacterSet` declared inside an item is
++    /// only in scope for that item (see [`set_active_character_set`](Self::set_active_character_set)).
++    fn active_character_set(&self) -> SpecificCharacterSet;
++
++    /// Set the character set currently used for decoding charset-affected text.
++    fn set_active_character_set(&mut self, charset: SpecificCharacterSet);
+ }
+ 
+ /// Alias for a dynamically resolved DICOM stateful decoder. Although the data
+@@ -937,6 +947,14 @@ where
+         (**self).position()
+     }
+ 
++    fn active_character_set(&self) -> SpecificCharacterSet {
++        (**self).active_character_set()
++    }
++
++    fn set_active_character_set(&mut self, charset: SpecificCharacterSet) {
++        (**self).set_active_character_set(charset)
++    }
++
+     fn seek(&mut self, position: u64) -> Result<()>
+     where
+         Self::Reader: Seek,
+@@ -1083,6 +1101,14 @@ where
+         self.position
+     }
+ 
++    fn active_character_set(&self) -> SpecificCharacterSet {
++        self.text.clone()
++    }
++
++    fn set_active_character_set(&mut self, charset: SpecificCharacterSet) {
++        self.text = charset;
++    }
++
+     fn read_to_vec(&mut self, length: u32, vec: &mut Vec<u8>) -> Result<()> {
+         self.read_to(length, vec)
+     }
+diff --git a/parser/src/stateful/encode.rs b/parser/src/stateful/encode.rs
+index addfea46..9e7e796a 100644
+--- a/parser/src/stateful/encode.rs
++++ b/parser/src/stateful/encode.rs
+@@ -76,6 +76,24 @@ impl<W, E, T> StatefulEncoder<W, E, T> {
+             buffer: Vec::with_capacity(128),
+         }
+     }
++
++    /// Retrieve the character set currently used for encoding charset-affected text.
++    ///
++    /// Used by the dataset writer to save and restore the active character set around the
++    /// boundaries of a sequence item, mirroring the equivalent mechanism on the decoding side
++    /// (`StatefulDecode::active_character_set`) - a `SpecificCharacterSet` declared inside an
++    /// item is only in scope for that item.
++    pub fn active_character_set(&self) -> T
++    where
++        T: Clone,
++    {
++        self.text.clone()
++    }
++
++    /// Set the character set currently used for encoding charset-affected text.
++    pub fn set_active_character_set(&mut self, charset: T) {
++        self.text = charset;
++    }
+ }
+ 
+ impl<'s> DynStatefulEncoder<'s> {

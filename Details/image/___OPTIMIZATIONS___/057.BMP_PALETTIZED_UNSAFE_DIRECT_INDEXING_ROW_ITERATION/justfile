@@ -1,0 +1,61 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# repo_url/base_commit read via `git remote get-url origin` / `git rev-parse HEAD` in the main
+# project, at the moment patch.diff was captured - patch.diff is a diff against that exact commit
+# and may stop applying cleanly once the main branch moves on.
+#
+# This candidate's patch.diff bundles two things (same convention as candidate 056's own
+# patch.diff): (1) re-adding candidate 020's `pal2_large.bmp` bench fixture (a 700x700 2-bit
+# indexed BMP + reference PNG + one new `benches/decode.rs` BENCH_DEFS entry) - needed because
+# candidate 020's own bench-corpus addition, like every candidate's, was reverted at the end of
+# its own session, and this candidate measures all four bit depths (1/2/4/8) in one session; and
+# (2) the real decoder fix - an `unsafe`, `get_unchecked_mut`-based direct-offset-indexing rewrite
+# of the plain (non-RLE) palettized row path's `set_1bit/2bit/4bit/8bit_pixel_run`, replacing
+# `ChunksExactMut`+`Option`-returning `.next()` entirely (no bounds check at all on the per-pixel
+# store, unlike candidate 051/056's still-checked `get_mut` variant).
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Baseline = bench fixture only, no decoder patch - built from a partial apply of patch.diff
+# (only the benches/decode.rs + testdata hunks), so the comparison isolates the decoder change.
+build-baseline:
+    cd clone && git apply --include='benches/decode.rs' --include='tests/images/bmp/images/pal2_large.bmp' --include='tests/reference/bmp/images/pal2_large.bmp.png' "{{justfile_directory()}}/patch.diff"
+    cd clone && cargo bench --bench decode --no-run
+    cp $(ls -t clone/target/release/deps/decode-* | grep -v '\.d$' | head -1) ./bin_baseline
+
+# Only the decoder half - the bench-fixture half was already applied by build-baseline above,
+# applying the full patch.diff again here would conflict on those already-applied hunks/files.
+apply:
+    cd clone && git apply --include='src/codecs/bmp/decoder.rs' "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone && cargo bench --bench decode --no-run
+    cp $(ls -t clone/target/release/deps/decode-* | grep -v '\.d$' | head -1) ./bin_patched
+
+# The bench binary loads test images via a path relative to the crate root (tests/images/...),
+# so it must be run with `clone/` as the working directory, not this folder. Runs all four bit
+# depths this patch touches.
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone
+    for bench in "load-Bmp/Core_1_Bit.bmp" "load-Bmp/pal2_large.bmp" "load-Bmp/Core_4_Bit.bmp" "load-Bmp/Core_8_Bit.bmp"; do
+        name=$(echo "$bench" | tr '/. ' '___')
+        echo "=== $bench ==="
+        "{{justfile_directory()}}/bin_baseline" --bench "$bench" --save-baseline "b057_${name}"
+        "{{justfile_directory()}}/bin_patched" --bench "$bench" --baseline "b057_${name}"
+    done
+
+clean:
+    rm -rf clone bin_baseline bin_patched target/criterion

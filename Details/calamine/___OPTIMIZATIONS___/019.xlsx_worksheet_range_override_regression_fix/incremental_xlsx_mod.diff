@@ -1,0 +1,117 @@
+--- src/xlsx/mod.rs	2026-09-01 18:06:36.707239299 +0000
++++ /home/rafal/Projekty/Obce/calamine/src/xlsx/mod.rs	2026-09-01 18:05:14.487731980 +0000
+@@ -32,7 +32,7 @@
+ #[cfg(feature = "picture")]
+ use crate::Picture;
+ use crate::{
+-    Cell, CellErrorType, Data, Dimensions, HeaderRow, Metadata, Range, Reader, ReaderRef, Sheet,
++    CellErrorType, Data, Dimensions, HeaderRow, Metadata, Range, Reader, ReaderRef, Sheet,
+     SheetType, SheetVisible, Table, MAX_DENSE_RANGE_CELLS,
+ };
+ pub use cells_reader::{
+@@ -2591,87 +2591,25 @@
+         &self.metadata
+     }
+ 
+-    // Deliberately does NOT delegate to `worksheet_range_ref()` + a whole-grid `.into_iter()
+-    // .map(Into::into).collect()`: with `Data::String`/`DataRef::SharedString` both backed by
+-    // `Arc<str>`, that conversion is now just a per-cell Arc move (no allocation), but going
+-    // through the intermediate `Range<DataRef>` still means building - and then fully consuming
+-    // - a second dense grid the same size as this one. Building `Cell<Data>` directly during
+-    // parsing (converting `DataRef -> Data` per cell as it streams in, which is exactly as cheap
+-    // as the deferred conversion since neither allocates for a shared string) skips that second
+-    // grid entirely.
++    // Delegates to `worksheet_range_ref()` + a whole-grid `.into_iter().map(Into::into)
++    // .collect()`. Since `worksheet_range_ref()` already writes straight into a single
++    // pre-sized dense buffer (`Range::from_sparse_dense_hint()`, no intermediate sparse
++    // `Vec<Cell>`), and `DataRef -> Data` is a same-size/same-align conversion (both 24 bytes,
++    // 8-aligned, as of candidates 006/008's `Arc<str>`/`Box<str>` changes), `Vec::from_iter`'s
++    // in-place-collect specialization reuses the same backing allocation here - there is no
++    // second dense grid to avoid by hand-rolling this loop (confirmed by candidate 012's
++    // allocator-level measurement). A prior hand-rolled version of this function (duplicating
++    // `worksheet_range_ref()`'s cell-reading loop) predated `from_sparse_dense_hint()` and
++    // silently bypassed it, regressing peak RSS back to the pre-restructuring baseline - see
++    // candidate 018/019 in `___OPTIMIZATIONS___/`.
+     fn worksheet_range(&mut self, name: &str) -> Result<Range<Data>, XlsxError> {
+-        let header_row = self.options.header_row;
+-        let mut cell_reader = match self.worksheet_cells_reader(name) {
+-            Ok(reader) => reader,
+-            Err(XlsxError::NotAWorksheet(typ)) => {
+-                log::warn!("'{typ}' not a valid worksheet");
+-                return Ok(Range::default());
+-            }
+-            Err(e) => return Err(e),
+-        };
+-        let len = cell_reader.dimensions().len();
+-        let mut cells = Vec::new();
+-        if len < 100_000 {
+-            cells.reserve(len as usize);
+-        }
+-
+-        match header_row {
+-            HeaderRow::FirstNonEmptyRow => {
+-                // the header row is the row of the first non-empty cell
+-                loop {
+-                    match cell_reader.next_cell() {
+-                        Ok(Some(Cell {
+-                            val: DataRef::Empty,
+-                            ..
+-                        })) => (),
+-                        Ok(Some(cell)) => cells.push(Cell {
+-                            pos: cell.pos,
+-                            val: cell.val.into(),
+-                        }),
+-                        Ok(None) => break,
+-                        Err(e) => return Err(e),
+-                    }
+-                }
+-            }
+-            HeaderRow::Row(header_row_idx) => {
+-                // If `header_row` is a row index, we only add non-empty cells after this index.
+-                loop {
+-                    match cell_reader.next_cell() {
+-                        Ok(Some(Cell {
+-                            val: DataRef::Empty,
+-                            ..
+-                        })) => (),
+-                        Ok(Some(cell)) => {
+-                            if cell.pos.0 >= header_row_idx {
+-                                cells.push(Cell {
+-                                    pos: cell.pos,
+-                                    val: cell.val.into(),
+-                                });
+-                            }
+-                        }
+-                        Ok(None) => break,
+-                        Err(e) => return Err(e),
+-                    }
+-                }
+-
+-                // If `header_row` is set and the first non-empty cell is not at the `header_row`, we add
+-                // an empty cell at the beginning with row `header_row` and same column as the first non-empty cell.
+-                if cells.first().is_some_and(|c| c.pos.0 != header_row_idx) {
+-                    cells.insert(
+-                        0,
+-                        Cell {
+-                            pos: (
+-                                header_row_idx,
+-                                cells.first().expect("cells should not be empty").pos.1,
+-                            ),
+-                            val: Data::Empty,
+-                        },
+-                    );
+-                }
+-            }
+-        }
+-
+-        Ok(Range::from_sparse(cells))
++        let rge = self.worksheet_range_ref(name)?;
++        let inner = rge.inner.into_iter().map(|v| v.into()).collect();
++        Ok(Range {
++            start: rge.start,
++            end: rge.end,
++            inner,
++        })
+     }
+ 
+     fn worksheet_formula(&mut self, name: &str) -> Result<Range<String>, XlsxError> {

@@ -1,0 +1,32 @@
+diff --git a/symphonia-core/src/audio/util.rs b/symphonia-core/src/audio/util.rs
+index 47d9478..d9a6f48 100644
+--- a/symphonia-core/src/audio/util.rs
++++ b/symphonia-core/src/audio/util.rs
+@@ -136,6 +136,27 @@ pub fn copy_to_slice_interleaved<Sin, Sout, Src, Dst>(
+         "destination slice does not match number of samples"
+     );
+ 
++    // Stereo (2 channels) is, by far, the most common case (essentially all consumer music/audio
++    // content). When the interleave stride (`num_planes`) is a compile-time constant of 2, the
++    // destination-write pattern (`d[0] = ...; d[1] = ...;` on 2-element chunks) is dense enough for
++    // the auto-vectorizer to pack tightly; when `num_planes` is a runtime-only value (the generic
++    // path below, used for the general N-channel case), the compiler cannot assume anything about
++    // the chunk stride and this same code is emitted much more conservatively (confirmed via
++    // `perf annotate`: near-scalar single-lane inserts/extracts, not batched moves). Special-casing
++    // the 2-channel case as its own monomorphized loop with `num_planes` baked in as a literal `2`
++    // lets the compiler see the fixed stride and vectorize the interleaved write properly.
++    if num_planes == 2 {
++        let src0 = &src[0].as_ref()[bound.clone()];
++        let src1 = &src[1].as_ref()[bound.clone()];
++
++        for ((&s0, &s1), d) in src0.iter().zip(src1).zip(dst.chunks_exact_mut(2)) {
++            d[0] = s0.into_sample();
++            d[1] = s1.into_sample();
++        }
++
++        return;
++    }
++
+     let mut i = 0;
+ 
+     // The pattern below may be extended to copy planes in triplets to further improve performance.

@@ -1,0 +1,37 @@
+Captured output of `cd repro && cargo run --release`, run twice against the pristine clone at
+base_commit 83c4801428c436678d7c6b6bea74af800924a469 - byte-for-byte identical both times (pure
+deterministic function, no randomness, no threads).
+
+=== BEFORE the fix (against pristine clone, exit code 1) ===
+bartlett_hann(0) = -0.0015999972820281982
+max |bartlett_hann(x) - reference_bartlett_hann(x)| over x in [-2,2] = 1.0015999972820282e0 at x = 0
+min value over x in [0,2] = -0.4848000109195709 at x = 2, monotonic non-increasing = false
+max |w(x) - w(-x)| over x in [0,2] = 0e0
+REPRODUCED - 4 check(s) failed:
+  - wrong value at centre: bartlett_hann(0) = -0.0015999972820281982, want 1.0 (peak weight)
+  - does not match textbook Bartlett-Hann window: max abs err 1.0015999972820282e0 at x=0 (tolerance 1e-6)
+  - negative tap(s) found, most negative = -0.4848000109195709 at x=2 (a Bartlett-Hann window must stay >= 0)
+  - not monotonically non-increasing away from the centre
+
+Run twice, identical both times (confirmed via `diff` of the two captured outputs).
+
+=== AFTER `git apply patch.diff` to the clone (exit code 0) ===
+bartlett_hann(0) = 1
+max |bartlett_hann(x) - reference_bartlett_hann(x)| over x in [-2,2] = 1.4901161193847656e-8 at x = -2
+min value over x in [0,2] = 0.000000014901161193847656 at x = 2, monotonic non-increasing = true
+max |w(x) - w(-x)| over x in [0,2] = 0e0
+did not reproduce - bartlett_hann() matches the textbook Bartlett-Hann window shape
+
+Run twice, identical program output both times (only build-timing lines in the raw cargo log
+differed, e.g. "Finished ... in 0.11s" vs "in 0.00s" for a cached rebuild).
+
+The residual ~1.5e-8 gap after the fix is float32-precision rounding, expected because the fixed
+`bartlett_hann` still routes its literals through `f32.as_()` before the generic cast to `V=f64` -
+well within the 1e-6 tolerance used for the differential check.
+
+=== Boundary observation matching the original suspicion ===
+The candidate description suspected "large negative weights near the support edge" from the
+`0.4832` constant and a flipped sign. Confirmed directly: the most negative tap on the pristine
+kernel is at x=2 (the edge of the declared support, `min_kernel_size == 2.0`), value
+-0.4848000109195709 - i.e. a weight of roughly -48% of the peak, at exactly the support edge, as
+suspected.

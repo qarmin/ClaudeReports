@@ -1,0 +1,214 @@
+diff --git a/internal/core/graphics/brush.rs b/internal/core/graphics/brush.rs
+index a093ccdf3..7666657a8 100644
+--- a/internal/core/graphics/brush.rs
++++ b/internal/core/graphics/brush.rs
+@@ -321,6 +321,15 @@ fn stops_slice(&self) -> &[GradientStop] {
+         self.0.as_slice().get(Self::HEADER..).unwrap_or_default()
+     }
+ 
++    /// Returns a cheap (refcount-only) clone of the backing storage, header stops included,
++    /// together with the number of leading header entries to skip to reach the color stops.
++    /// Lets callers that don't need to alter the stops (e.g. no per-draw alpha premultiply)
++    /// avoid re-collecting them into a fresh allocation.
++    #[doc(hidden)]
++    pub fn raw_stops_with_header_len(&self) -> (SharedVector<GradientStop>, usize) {
++        (self.0.clone(), Self::HEADER)
++    }
++
+     /// Sets an explicit center, returning `self` for chaining. `cx` and `cy` are in the
+     /// element's local logical coordinate space.
+     pub fn with_center(mut self, cx: f32, cy: f32) -> Self {
+@@ -635,6 +644,15 @@ fn stops_slice(&self) -> &[GradientStop] {
+         self.0.as_slice().get(Self::HEADER..).unwrap_or_default()
+     }
+ 
++    /// Returns a cheap (refcount-only) clone of the backing storage, header stops included,
++    /// together with the number of leading header entries to skip to reach the color stops.
++    /// Lets callers that don't need to alter the stops (e.g. no per-draw alpha premultiply)
++    /// avoid re-collecting them into a fresh allocation.
++    #[doc(hidden)]
++    pub fn raw_stops_with_header_len(&self) -> (SharedVector<GradientStop>, usize) {
++        (self.0.clone(), Self::HEADER)
++    }
++
+     /// Sets an explicit center, returning `self` for chaining. `cx` and `cy` are in the
+     /// element's local logical coordinate space.
+     pub fn with_center(mut self, cx: f32, cy: f32) -> Self {
+diff --git a/internal/renderers/software/draw_functions.rs b/internal/renderers/software/draw_functions.rs
+index cf09efdb0..ec031114c 100644
+--- a/internal/renderers/software/draw_functions.rs
++++ b/internal/renderers/software/draw_functions.rs
+@@ -665,7 +665,7 @@ pub(super) fn draw_radial_gradient(
+     extra_left_clip: i16,
+     _extra_right_clip: i16,
+ ) {
+-    if g.stops.is_empty() {
++    if g.stops().is_empty() {
+         return;
+     }
+ 
+@@ -689,9 +689,9 @@ pub(super) fn draw_radial_gradient(
+         let position = (distance / max_radius).clamp(0.0, 1.0);
+ 
+         // Find the two gradient stops to interpolate between
+-        let mut color = g.stops.first().map(|s| s.color).unwrap_or_default();
++        let mut color = g.stops().first().map(|s| s.color).unwrap_or_default();
+ 
+-        for window in g.stops.windows(2) {
++        for window in g.stops().windows(2) {
+             let stop1 = &window[0];
+             let stop2 = &window[1];
+ 
+@@ -731,7 +731,7 @@ pub(super) fn draw_conic_gradient(
+     extra_left_clip: i16,
+     _extra_right_clip: i16,
+ ) {
+-    if g.stops.is_empty() {
++    if g.stops().is_empty() {
+         return;
+     }
+ 
+@@ -764,9 +764,9 @@ pub(super) fn draw_conic_gradient(
+         let position = angle / (2.0 * core::f32::consts::PI);
+ 
+         // Find the two gradient stops to interpolate between
+-        let mut color = g.stops.first().map(|s| s.color).unwrap_or_default();
++        let mut color = g.stops().first().map(|s| s.color).unwrap_or_default();
+ 
+-        for window in g.stops.windows(2) {
++        for window in g.stops().windows(2) {
+             let stop1 = &window[0];
+             let stop2 = &window[1];
+ 
+diff --git a/internal/renderers/software/lib.rs b/internal/renderers/software/lib.rs
+index 17f31b231..4265b1919 100644
+--- a/internal/renderers/software/lib.rs
++++ b/internal/renderers/software/lib.rs
+@@ -1692,38 +1692,49 @@ fn process_rectangle_impl(
+         let (center_x, center_y) = to_clipped_center(cx, cy);
+         let radius = g.radius_or_default_scaled(geom_w, geom_h, scale_factor.get());
+ 
+-        let radial_grad = RadialGradientCommand {
+-            stops: g
+-                .stops()
+-                .map(|s| {
+-                    let mut stop = *s;
+-                    stop.color = alpha_color(stop.color, args.alpha);
+-                    stop
+-                })
+-                .collect(),
+-            center_x,
+-            center_y,
+-            radius,
++        // Fully opaque is the common case: alpha_color() is a no-op then, so the stops don't
++        // need to be touched at all - reuse the brush's own backing storage (a refcount bump)
++        // instead of collecting a fresh copy.
++        let (stops, stops_offset) = if args.alpha == 255 {
++            g.raw_stops_with_header_len()
++        } else {
++            (
++                g.stops()
++                    .map(|s| {
++                        let mut stop = *s;
++                        stop.color = alpha_color(stop.color, args.alpha);
++                        stop
++                    })
++                    .collect(),
++                0,
++            )
+         };
+ 
++        let radial_grad = RadialGradientCommand { stops, stops_offset, center_x, center_y, radius };
++
+         processor.process_radial_gradient(clipped.cast(), radial_grad);
+         Color::default()
+     } else if let Brush::ConicGradient(g) = &args.background {
+         let (cx, cy) = g.center_or_default_scaled(geom_w, geom_h, scale_factor.get());
+         let (center_x, center_y) = to_clipped_center(cx, cy);
+-        let conic_grad = ConicGradientCommand {
+-            stops: g
+-                .stops()
+-                .map(|s| {
+-                    let mut stop = *s;
+-                    stop.color = alpha_color(stop.color, args.alpha);
+-                    stop
+-                })
+-                .collect(),
+-            center_x,
+-            center_y,
++
++        let (stops, stops_offset) = if args.alpha == 255 {
++            g.raw_stops_with_header_len()
++        } else {
++            (
++                g.stops()
++                    .map(|s| {
++                        let mut stop = *s;
++                        stop.color = alpha_color(stop.color, args.alpha);
++                        stop
++                    })
++                    .collect(),
++                0,
++            )
+         };
+ 
++        let conic_grad = ConicGradientCommand { stops, stops_offset, center_x, center_y };
++
+         processor.process_conic_gradient(clipped.cast(), conic_grad);
+         Color::default()
+     } else {
+diff --git a/internal/renderers/software/scene.rs b/internal/renderers/software/scene.rs
+index 5520a95cf..8b5efe3f5 100644
+--- a/internal/renderers/software/scene.rs
++++ b/internal/renderers/software/scene.rs
+@@ -556,8 +556,13 @@ pub struct LinearGradientCommand {
+ /// The gradient is naturally clipped by the rectangle bounds during rendering.
+ #[derive(Debug)]
+ pub struct RadialGradientCommand {
+-    /// The gradient stops (colors and positions)
++    /// The gradient stops (colors and positions). May carry leading header entries inherited
++    /// from the brush's own backing storage - see `stops_offset` and `stops()`.
+     pub stops: i_slint_core::SharedVector<i_slint_core::graphics::GradientStop>,
++    /// Number of leading entries in `stops` to skip to reach the actual color stops. Non-zero
++    /// when `stops` is a cheap clone of the brush's raw storage (no per-draw alpha to apply),
++    /// zero when `stops` was freshly collected (and thus already header-free).
++    pub stops_offset: usize,
+     /// Center in physical pixels, relative to the clipped rect's top-left corner.
+     /// Stored as f32 to avoid i16 saturation for off-bbox centers at high scale factors.
+     pub center_x: f32,
+@@ -566,6 +571,12 @@ pub struct RadialGradientCommand {
+     pub radius: f32,
+ }
+ 
++impl RadialGradientCommand {
++    pub fn stops(&self) -> &[i_slint_core::graphics::GradientStop] {
++        &self.stops[self.stops_offset..]
++    }
++}
++
+ /// Conic gradient that interpolates colors around a center point
+ ///
+ /// The gradient creates a color transition that rotates around the center of the
+@@ -575,10 +586,21 @@ pub struct RadialGradientCommand {
+ #[derive(Debug)]
+ pub struct ConicGradientCommand {
+     /// The gradient stops (colors and normalized angle positions)
+-    /// Position 0 = 0 degrees (north), 1 = 360 degrees
++    /// Position 0 = 0 degrees (north), 1 = 360 degrees. May carry leading header entries
++    /// inherited from the brush's own backing storage - see `stops_offset` and `stops()`.
+     pub stops: i_slint_core::SharedVector<i_slint_core::graphics::GradientStop>,
++    /// Number of leading entries in `stops` to skip to reach the actual color stops. Non-zero
++    /// when `stops` is a cheap clone of the brush's raw storage (no per-draw alpha to apply),
++    /// zero when `stops` was freshly collected (and thus already header-free).
++    pub stops_offset: usize,
+     /// Center in physical pixels, relative to the clipped rect's top-left corner.
+     /// Stored as f32 to avoid i16 saturation for off-bbox centers at high scale factors.
+     pub center_x: f32,
+     pub center_y: f32,
+ }
++
++impl ConicGradientCommand {
++    pub fn stops(&self) -> &[i_slint_core::graphics::GradientStop] {
++        &self.stops[self.stops_offset..]
++    }
++}

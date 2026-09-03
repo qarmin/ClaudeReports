@@ -1,0 +1,61 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# This candidate is a measurement/reconciliation, not a performance fix: patch.diff reapplies
+# candidate 002's deinterleave-based SIMD rewrite (needed so the function under investigation
+# exists) plus candidate 013's temporary `#[cfg(test)] mod suspect_investigation` diagnostic
+# module, identical to candidate 013's own patch. It was reverted from the real working tree
+# before this folder was written.
+#
+# Purpose: reconcile candidate 013's originally-reported 92 real `__fearless_simd_kernel` calls
+# in `irreversible_filter_97i_horizontal_simd::<Avx512>` against candidate 014's same-session
+# re-measurement of the identical unsplit function, which found only 28. This justfile
+# reproduces candidate 013's own two build methods (in-workspace `cargo test --lib`, and
+# candidate 002's original standalone `bench/idwt/` crate) against whatever toolchain is active
+# when `just test` is run - see RESULT.md for what each gave on this session's toolchain.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone at the pinned commit, apply the patch, count real calls both ways.
+test: clone apply count-via-cargo-test count-via-bench-crate
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Method 1: in-workspace test binary (candidate 013's own methodology #1).
+count-via-cargo-test:
+    cd clone && cargo clean -p hayro-jpeg2000 --release
+    cd clone && cargo test -p hayro-jpeg2000 --release --lib --no-run -- --ignored
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bin=$(find clone/target/release/deps -maxdepth 1 -type f -name 'hayro_jpeg2000-*' ! -name '*.d')
+    echo "test binary: $bin"
+    objdump -d --demangle -M intel "$bin" \
+      | awk '/<hayro_jpeg2000::j2c::idwt::irreversible_filter_97i_horizontal_simd::<fearless_simd::generated::avx512::Avx512>>:/{flag=1} flag{print} flag && /^$/{exit}' \
+      | grep -c 'call.*__fearless_simd_kernel'
+
+# Method 2: candidate 002's original external bench/idwt crate, path-pointed at the clone
+# (candidate 013's *stated* source for its 92-call figure).
+count-via-bench-crate:
+    rm -rf bench
+    mkdir -p bench/idwt/src bench/idwt/testdata
+    printf '[workspace]\n\n[package]\nname = "bench_idwt"\nversion = "0.1.0"\nedition = "2024"\npublish = false\n\n[dependencies]\nhayro-jpeg2000 = { path = "../../clone/hayro-jpeg2000" }\n\n[profile.release]\ndebug = 1\n' > bench/idwt/Cargo.toml
+    printf 'fn main() {}\n' > bench/idwt/src/main.rs
+    cd bench/idwt && cargo build --release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bin=bench/idwt/target/release/bench_idwt
+    objdump -d --demangle -M intel "$bin" \
+      | awk '/<hayro_jpeg2000::j2c::idwt::irreversible_filter_97i_horizontal_simd::<fearless_simd::generated::avx512::Avx512>>:/{flag=1} flag{print} flag && /^$/{exit}' \
+      | grep -c 'call.*__fearless_simd_kernel'
+
+clean:
+    rm -rf clone bench

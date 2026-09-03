@@ -1,0 +1,33 @@
+# Self-contained reproduction for candidate 007 (sext_missing_extend_int_fix).
+#
+# Not reproducible - no patch.diff, so only `reproduce-before` exists (per candidate_justfile's
+# own template note). This still builds and runs the real end-to-end path (a real rustc
+# compilation through the real codegen backend), it just demonstrates the suspected bug does NOT
+# occur - see RESULT.md.
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+test: clone build reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r repro clone/repro
+
+# One-time setup: downloads a prebuilt libgccjit.so and builds the sysroot (core/alloc/std).
+# ~2-3 minutes on a modern multi-core machine, per this workspace's own README.md.
+build:
+    echo 'download-gccjit = true' > clone/config.toml
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Compile+run the repro against the real backend - expected to print "ALL CHECKS PASSED" and
+# exit 0 (that's the point: the hypothesized sign-extension bug does not reproduce).
+reproduce-before:
+    cd clone && CHANNEL=release ./y.sh rustc repro/sext_check.rs -O -o /tmp/sext_check_gcc
+    /tmp/sext_check_gcc
+
+clean:
+    rm -rf clone

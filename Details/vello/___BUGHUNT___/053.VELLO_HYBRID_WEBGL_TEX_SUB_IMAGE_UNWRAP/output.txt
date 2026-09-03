@@ -1,0 +1,85 @@
+Real headless-Chromium probes of the browser/WebGL API surface that
+`upload_rgba32ui_rows`'s `gl.tex_sub_image_2d_with_i32_and_i32_and_u32_and_type_and_opt_array_buffer_view(...).unwrap()`
+(sparse_strips/vello_hybrid/src/render/webgl/mod.rs:3720-3731) depends on: can a real browser's
+`texSubImage2D` ever throw a JS exception (-> `Err(JsValue)` -> `.unwrap()` panic) for a genuine
+WebGL-level failure, as opposed to only setting a GL error retrievable via `gl.getError()` (which
+never surfaces through this Result at all)?
+
+Browser: Google Chrome for Testing 151.0.7922.34 (chrome-headless-shell), software WebGL2 via
+ANGLE/SwiftShader (--use-angle=swiftshader --use-gl=angle --enable-unsafe-swiftshader).
+Driven via Node.js 22.23.2 + puppeteer, real page.evaluate() JS running against a real
+WebGL2RenderingContext obtained from a real <canvas> - not a mocked/stubbed WebGL object.
+
+=== probe_context_loss.js: 3 runs (all identical) ===
+
+Run 1:
+{
+  "isContextLostBefore": false,
+  "baselineCallThrew": false,
+  "glErrorAfterBaseline": 0,
+  "hasLoseContextExt": true,
+  "isContextLostAfterLose": true,
+  "lostContextCallThrew": false,
+  "glErrorAfterLostCall": 37442
+}
+
+Run 2:
+{
+  "isContextLostBefore": false,
+  "baselineCallThrew": false,
+  "glErrorAfterBaseline": 0,
+  "hasLoseContextExt": true,
+  "isContextLostAfterLose": true,
+  "lostContextCallThrew": false,
+  "glErrorAfterLostCall": 37442
+}
+
+Run 3:
+{
+  "isContextLostBefore": false,
+  "baselineCallThrew": false,
+  "glErrorAfterBaseline": 0,
+  "hasLoseContextExt": true,
+  "isContextLostAfterLose": true,
+  "lostContextCallThrew": false,
+  "glErrorAfterLostCall": 37442
+}
+
+Interpretation: after genuinely losing the context via the real `WEBGL_lose_context` extension's
+`loseContext()` (confirmed lost: `isContextLostAfterLose: true`), calling the exact same
+`texSubImage2D` operation `upload_rgba32ui_rows` performs did NOT throw a JS exception
+(`lostContextCallThrew: false` all 3/3 runs). `gl.getError()` afterward returns `37442` = `0x9242`
+= `CONTEXT_LOST_WEBGL`, i.e. the failure surfaces only as a GL error code retrievable via
+`getError()`, never as a thrown JS exception - so web-sys's `#[wasm_bindgen(catch)]` binding (which
+only converts an actual thrown JS exception into `Err(JsValue)`) would see this call return `Ok(())`
+even though the context is lost. `.unwrap()` never observes an `Err` here.
+
+=== probe_error_conditions.js: 2 runs (all identical) ===
+
+Run 1:
+{
+  "tooSmallThrew": false,
+  "glErrorAfterTooSmall": 1282,
+  "negWidthThrew": false,
+  "glErrorAfterNegWidth": 1281,
+  "oobThrew": false,
+  "glErrorAfterOob": 1281,
+  "deletedTexThrew": false,
+  "glErrorAfterDeletedTex": 1282
+}
+
+Run 2: (byte-for-byte identical to Run 1)
+
+Interpretation: none of undersized source buffer (Case A: 1282 = INVALID_OPERATION), negative
+width (Case B: 1281 = INVALID_VALUE), an out-of-bounds sub-rectangle (Case C: 1281 =
+INVALID_VALUE), or a deleted-but-still-bound texture object (Case D: 1282 = INVALID_OPERATION)
+caused `texSubImage2D` to throw a JS exception in this real browser either - every one of these
+genuine WebGL-level failure conditions surfaces only via `gl.getError()`, consistent with the
+WebGL specification's general error-handling model ("generates an ... error", not "throws").
+
+=== WebGL 1.0 spec text corroboration (registry.khronos.org) ===
+
+grep of the rendered spec text shows the standard error-reporting phrasing used throughout
+("generates an INVALID_ENUM/INVALID_OPERATION/INVALID_VALUE error") rather than any language about
+throwing an exception for ordinary validation/state failures - consistent with what was observed
+empirically above.

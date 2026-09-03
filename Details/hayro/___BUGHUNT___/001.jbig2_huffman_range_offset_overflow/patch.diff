@@ -1,0 +1,91 @@
+diff --git a/hayro-jbig2/src/huffman_table.rs b/hayro-jbig2/src/huffman_table.rs
+index 2183c8ee..c08e05bc 100644
+--- a/hayro-jbig2/src/huffman_table.rs
++++ b/hayro-jbig2/src/huffman_table.rs
+@@ -449,10 +449,17 @@ impl HuffmanNode {
+                     //    table, then set: HTVAL = RANGELOW[I] − HTOFFSET"
+                     // 5) "Otherwise, set: HTVAL = RANGELOW[I] + HTOFFSET"
+                     // `HTVAL`
++                    // `range_offset` comes from `read_bits`, which can return any 32-bit pattern
++                    // for a table line with `range_length == 32` - so this must not assume the
++                    // result fits back into an `i32` alongside `range_low`.
+                     let value = if leaf.is_lower {
+-                        leaf.range_low - range_offset
++                        leaf.range_low
++                            .checked_sub(range_offset)
++                            .ok_or(HuffmanError::InvalidCode)?
+                     } else {
+-                        leaf.range_low + range_offset
++                        leaf.range_low
++                            .checked_add(range_offset)
++                            .ok_or(HuffmanError::InvalidCode)?
+                     };
+ 
+                     return Ok(Some(value));
+@@ -465,6 +472,66 @@ impl HuffmanNode {
+     }
+ }
+ 
++#[cfg(test)]
++mod overflow_boundary_tests {
++    use super::*;
++
++    fn single_leaf_decode(
++        range_low: i32,
++        range_length: u8,
++        is_lower: bool,
++        offset_bytes: &[u8],
++    ) -> Result<Option<i32>> {
++        let nodes = [HuffmanNode::Leaf(LeafData {
++            range_low,
++            range_length,
++            is_lower,
++            is_out_of_band: false,
++        })];
++        let mut reader = Reader::new(offset_bytes);
++        HuffmanNode::decode_from(&nodes, 0, &mut reader)
++    }
++
++    // Same shape as the 17 stale fuzz crashes: an "upper" leaf line (`is_lower: false`,
++    // `range_length: 32`, as every standard table's final line is) with HTOFFSET near i32::MAX.
++    #[test]
++    fn add_overflow_is_a_decode_error_not_a_panic() {
++        let result = single_leaf_decode(65808, 32, false, &[0x7F, 0xFF, 0xFF, 0xFF]);
++        assert_eq!(
++            result,
++            Err(crate::error::DecodeError::Huffman(
++                HuffmanError::InvalidCode
++            ))
++        );
++    }
++
++    // Same class, other branch: an `is_lower: true` leaf line with HTOFFSET near i32::MAX so
++    // `range_low - range_offset` underflows below i32::MIN.
++    #[test]
++    fn sub_overflow_is_a_decode_error_not_a_panic() {
++        let result = single_leaf_decode(-257, 32, true, &[0x7F, 0xFF, 0xFF, 0xFF]);
++        assert_eq!(
++            result,
++            Err(crate::error::DecodeError::Huffman(
++                HuffmanError::InvalidCode
++            ))
++        );
++    }
++
++    // Sanity: an in-range offset on the same leaf shapes still decodes normally.
++    #[test]
++    fn small_offset_still_decodes_normally() {
++        assert_eq!(
++            single_leaf_decode(65808, 32, false, &[0x00, 0x00, 0x00, 0x05]),
++            Ok(Some(65813))
++        );
++        assert_eq!(
++            single_leaf_decode(-257, 32, true, &[0x00, 0x00, 0x00, 0x05]),
++            Ok(Some(-262))
++        );
++    }
++}
++
+ /// Information stored at a leaf node of the Huffman tree.
+ #[derive(Debug, Clone, Copy)]
+ struct LeafData {

@@ -1,0 +1,42 @@
+Captured output of `repro/` (release build), run against a pristine clone of image-rs/image at
+commit 44ce9226c541dd2b11897b9ef07156a28871cdb7 (main, unmodified). Deterministic - identical
+output across 3/3 runs.
+
+$ cargo run --release
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.04s
+     Running `target/release/repro`
+geometry: 2x2 -> 50x50, filter=Lanczos3
+true source color (u16): [31500, 11500, 51000]
+u16 fixed-point path: max color deviation among fully-opaque output pixels = 14242 / 65535 (21.73%), at Some((49, 0, 40296, 14711, 65242, 65535))
+f32 path (oracle, same geometry/filter): max color deviation among fully-opaque output pixels = 0.00000011920929 (0.000012% of full range)
+REPRODUCED: u16 path deviates by 14242/65535 at a fully-opaque pixel (threshold 100), while the f32 oracle on the identical case deviates by only 0.00000011920929
+exit=1
+
+---
+
+Additional evidence gathered during investigation (not part of the standalone repro/, captured
+here for the record):
+
+1. Same effect on RGBA8 (smaller magnitude, same mechanism), varying filter/geometry, all via
+   `DynamicImage::resize_exact` on a spatially-constant-RGB / varying-alpha source:
+
+filter=Triangle   src=(20x20) dst=(7x7)   max_dev=9/255  at alpha=16  (non-negative-lobe filter: small, expected low-alpha quantization noise)
+filter=CatmullRom src=(100x4) dst=(30x4)  max_dev=15/255 at alpha=11
+filter=Lanczos3   src=(2x2)   dst=(50x50) max_dev=12/255 at alpha=9
+(u8's smaller output range means the saturating-clamp desync is less visually dramatic than u16's,
+but the same mechanism is present - see root cause.)
+
+2. The same test run through the crate's f32 (`Rgba32F`) path shows near-machine-epsilon deviation
+   (~1e-7) in every case tried (5 geometries x 4 filters), proving the "recover exact source color"
+   invariant genuinely holds for a correct implementation and isn't "expected ringing" being
+   misread as a bug.
+
+3. Attempted fix (rejected - see RESULT.md "The fix"): routing the fixed-point RGBA8/RGBA16/
+   LumaA8/LumaA16 premultiply-alpha resize through pic-scale-safe's f32 functions instead
+   eliminates the deviation in this repro's synthetic case entirely (max_dev drops to 0 on both u8
+   and u16, all filters/geometries tried), but regresses the project's own pre-existing
+   `tests/regression.rs::resizing_with_catmul` reference-image test from 13/8580 differing RGBA8
+   channels (max off-by-1) to 2081/8580 differing channels (max off-by-255) on a real photographic
+   image with actual near-zero (not exactly zero) alpha regions - full test-suite pass/fail counts
+   are unchanged (that test was already failing pre-existing, per candidate 021), but the
+   regression in magnitude on realistic content means this specific fix is not safe to ship as-is.

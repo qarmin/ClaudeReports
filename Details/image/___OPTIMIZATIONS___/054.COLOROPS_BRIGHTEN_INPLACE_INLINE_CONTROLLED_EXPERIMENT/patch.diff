@@ -1,0 +1,94 @@
+diff --git a/benches/imageops.rs b/benches/imageops.rs
+index d1b33ebe..55bcaed7 100644
+--- a/benches/imageops.rs
++++ b/benches/imageops.rs
+@@ -1,6 +1,6 @@
+ use std::{hint::black_box, time::Duration};
+ 
+-use criterion::{criterion_group, criterion_main, Criterion};
++use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+ use image::{
+     imageops::{self, FilterType},
+     math::Rect,
+@@ -23,10 +23,30 @@ pub fn bench_imageops(c: &mut Criterion) {
+     c.bench_function("brighten", |b| {
+         b.iter(|| imageops::brighten(&src, 100));
+     });
++    c.bench_function("brighten_in_place", |b| {
++        b.iter_batched(
++            || src.clone(),
++            |mut img| {
++                imageops::brighten_in_place(&mut img, 100);
++                img
++            },
++            BatchSize::LargeInput,
++        );
++    });
+ 
+     c.bench_function("contrast", |b| {
+         b.iter(|| imageops::contrast(&src, 5.0));
+     });
++    c.bench_function("contrast_in_place", |b| {
++        b.iter_batched(
++            || src.clone(),
++            |mut img| {
++                imageops::contrast_in_place(&mut img, 5.0);
++                img
++            },
++            BatchSize::LargeInput,
++        );
++    });
+ 
+     c.bench_function("dither", |b| {
+         let luma: GrayImage = src.convert();
+diff --git a/src/imageops/colorops.rs b/src/imageops/colorops.rs
+index 08b1651b..78f84450 100644
+--- a/src/imageops/colorops.rs
++++ b/src/imageops/colorops.rs
+@@ -185,6 +185,7 @@ where
+ /// Negative values decrease the brightness and positive values increase it.
+ ///
+ /// *[See also `brighten`.][brighten]*
++#[inline(always)]
+ pub fn brighten_in_place<I>(image: &mut I, value: i32)
+ where
+     I: GenericImage,
+@@ -194,7 +195,37 @@ where
+     let max = <I::Pixel as Pixel>::Subpixel::DEFAULT_MAX_VALUE;
+     let max: i32 = NumCast::from(max).unwrap(); // TODO what does this do for f32? clamp at 1??
+ 
+-    // TODO find a way to use pixels?
++    // Fast path: if the image exposes a canonical, fully packed sample buffer (true for the
++    // common `ImageBuffer<P, Vec<S>>` case), brighten every pixel via a flat slice pass instead
++    // of one bounds-checked get_pixel/put_pixel round trip per pixel. brighten_in_place() doesn't
++    // depend on pixel position, so a flattened iteration order is safe here.
++    //
++    // #[inline(always)] above matters as much as this fast path itself: in the unpatched
++    // baseline, this function's small get_pixel/put_pixel loop was fully inlined into its call
++    // site by LLVM's normal heuristics (confirmed via `nm` - no standalone symbol). This fast
++    // path's larger prologue (the `to_pixel_view_mut` validation) no longer clears the inlining
++    // cost threshold on its own, which cost more than the fast path itself gained - forcing
++    // inlining back with this annotation is what turns the fast path into a measured win instead
++    // of a regression (see this candidate's RESULT.md).
++    let pix_stride = <I::Pixel as Pixel>::CHANNEL_COUNT as usize;
++    if let Some(mut view) = image.to_pixel_view_mut() {
++        let (_, w, h) = view.flat().strides_cwh();
++        if w == pix_stride && h == width as usize * pix_stride {
++            for p in <I::Pixel as Pixel>::pixels_from_channels_mut(view.image_mut_slice()) {
++                p.apply_with_alpha(
++                    |b| {
++                        let c: i32 = NumCast::from(b).unwrap();
++                        let d = clamp(c + value, 0, max);
++
++                        NumCast::from(d).unwrap()
++                    },
++                    |alpha| alpha,
++                );
++            }
++            return;
++        }
++    }
++
+     for y in 0..height {
+         for x in 0..width {
+             let e = image.get_pixel(x, y).map_with_alpha(

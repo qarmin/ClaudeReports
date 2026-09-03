@@ -1,0 +1,18 @@
+diff --git a/src/xlsx/mod.rs b/src/xlsx/mod.rs
+index 4fe2658..9fab5e3 100644
+--- a/src/xlsx/mod.rs
++++ b/src/xlsx/mod.rs
+@@ -373,7 +373,12 @@ impl<RS: Read + Seek> Xlsx<RS> {
+                 Ok(Event::Start(e)) if e.local_name().as_ref() == b"sst" => {
+                     if let Some(count) = e.raw_attr(b"uniqueCount")? {
+                         if let Ok(n) = atoi_simd::parse::<usize, true, false>(count) {
+-                            self.strings.reserve(n);
++                            // `uniqueCount` is attacker-controlled and otherwise unvalidated -
++                            // reserving it directly lets a single XML attribute request an
++                            // arbitrarily large allocation (e.g. `uniqueCount="4000000000"` asks
++                            // for ~96 GB at size_of::<String>()=24 bytes) before a single real
++                            // string has been read. Cap it the same way as the dense-grid builds.
++                            self.strings.reserve(n.min(MAX_DENSE_RANGE_CELLS));
+                         }
+                     }
+                     break;

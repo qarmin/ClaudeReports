@@ -1,0 +1,62 @@
+diff --git a/internal/renderers/skia/lib.rs b/internal/renderers/skia/lib.rs
+index 667c89fd2..2c5413cc4 100644
+--- a/internal/renderers/skia/lib.rs
++++ b/internal/renderers/skia/lib.rs
+@@ -673,15 +673,6 @@ fn render_components_to_canvas(
+                     buffer_dirty_region,
+                 );
+ 
+-                let mut clip_path_builder = skia_safe::PathBuilder::new();
+-
+-                for dirty_rect in partial_renderer.dirty_region.iter() {
+-                    let physical_rect = (dirty_rect * scale_factor).to_rect().round_out();
+-                    clip_path_builder.add_rect(to_skia_rect(&physical_rect), None, None);
+-                }
+-
+-                let clip_path = clip_path_builder.detach();
+-
+                 if matches!(self.dirty_region_debug_mode, DirtyRegionDebugMode::Log) {
+                     let area_to_repaint: f32 =
+                         partial_renderer.dirty_region.iter().map(|b| b.area()).sum();
+@@ -696,10 +687,38 @@ fn render_components_to_canvas(
+                 dirty_region_history.rotate_right(1);
+                 dirty_region_history[0] = dirty_region_for_this_frame;
+ 
+-                skia_canvas.clip_path(&clip_path, None, false);
++                let visualize =
++                    matches!(self.dirty_region_debug_mode, DirtyRegionDebugMode::Visualize);
++
++                // Most frames have exactly one dirty rect; clip_rect() avoids building a Path
++                // just to describe a single rectangle. The visualize debug mode still needs a
++                // Path to draw an outline, so it always takes the general path below.
++                let single_rect = {
++                    let mut rect_iter = partial_renderer.dirty_region.iter();
++                    match (rect_iter.next(), rect_iter.next()) {
++                        (Some(rect), None) if !visualize => Some(rect),
++                        _ => None,
++                    }
++                };
++
++                if let Some(rect) = single_rect {
++                    let physical_rect = (rect * scale_factor).to_rect().round_out();
++                    skia_canvas.clip_rect(to_skia_rect(&physical_rect), None, false);
++                } else {
++                    let mut clip_path_builder = skia_safe::PathBuilder::new();
++
++                    for dirty_rect in partial_renderer.dirty_region.iter() {
++                        let physical_rect = (dirty_rect * scale_factor).to_rect().round_out();
++                        clip_path_builder.add_rect(to_skia_rect(&physical_rect), None, None);
++                    }
++
++                    let clip_path = clip_path_builder.detach();
++
++                    skia_canvas.clip_path(&clip_path, None, false);
+ 
+-                if matches!(self.dirty_region_debug_mode, DirtyRegionDebugMode::Visualize) {
+-                    dirty_region_to_visualize = Some(clip_path);
++                    if visualize {
++                        dirty_region_to_visualize = Some(clip_path);
++                    }
+                 }
+ 
+                 item_renderer = &mut partial_renderer;

@@ -1,0 +1,48 @@
+diff --git a/pixeldata/src/overlay.rs b/pixeldata/src/overlay.rs
+index 94c09871..08a597fd 100644
+--- a/pixeldata/src/overlay.rs
++++ b/pixeldata/src/overlay.rs
+@@ -231,6 +231,23 @@ impl OverlayPlane {
+     }
+ }
+ 
++/// Lookup table mapping each possible packed byte to its 8 unpacked bits (LSB first),
++/// so `unpack_overlay_bits` can process a whole byte at a time via table lookup + a single
++/// `extend_from_slice` instead of one bounds-checked shift-and-mask per bit.
++const UNPACK_BITS_TABLE: [[u8; 8]; 256] = {
++    let mut table = [[0u8; 8]; 256];
++    let mut byte = 0usize;
++    while byte < 256 {
++        let mut bit = 0usize;
++        while bit < 8 {
++            table[byte][bit] = ((byte >> bit) & 1) as u8;
++            bit += 1;
++        }
++        byte += 1;
++    }
++    table
++};
++
+ /// Unpack a 1-bit packed overlay bitmap
+ /// into one byte (0 or 1) per pixel.
+ ///
+@@ -238,9 +255,16 @@ impl OverlayPlane {
+ /// least significant bit first within each byte,
+ /// with all frames in sequence without padding in between.
+ fn unpack_overlay_bits(packed: &[u8], num_pixels: usize) -> Vec<u8> {
+-    (0..num_pixels)
+-        .map(|i| (packed[i >> 3] >> (i & 0x7)) & 1)
+-        .collect()
++    let mut out = Vec::with_capacity(num_pixels);
++    let full_bytes = num_pixels / 8;
++    for &byte in &packed[..full_bytes] {
++        out.extend_from_slice(&UNPACK_BITS_TABLE[byte as usize]);
++    }
++    let remainder = num_pixels - full_bytes * 8;
++    if remainder > 0 {
++        out.extend_from_slice(&UNPACK_BITS_TABLE[packed[full_bytes] as usize][..remainder]);
++    }
++    out
+ }
+ 
+ /// Decode all overlay planes present in the object,

@@ -1,0 +1,56 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+# patch.diff bundles the harness hunk (Cargo.toml's `benches/imageops.rs` addition of
+# `bench_resize_dynamic`, reused verbatim from candidates 002/031-038/040/044/048/049/053) together
+# with the actual fix (Cargo.toml's `[patch.crates-io]` hunk, plus the entire vendored+patched
+# `vendor/pic-scale-safe/` tree - this is a FULL combined diff carrying 048's vertical AVX2 tier,
+# 049's horizontal+floating-point AVX2 tiers, 052/053's vertical AVX-512 tier, AND this candidate's
+# own AVX-512 tier added to 049's five horizontal/floating-point functions, since each of these
+# candidates was built directly on top of the previous one's own combined patch). apply-harness
+# applies just the bench addition so it exists for both the baseline (S) and the patched build (E);
+# apply-fix applies the Cargo.toml + vendor/ + lib.rs hunks on top, for the patched build only.
+# Both S and E are built with default RUSTFLAGS (no `-C target-feature=...`) - the whole point of
+# this candidate is that the speedup shows up on a normal `cargo build --release` via runtime
+# detection, not a special build flag. Requires an AVX-512 (avx512f+avx512bw+avx512vl) host to
+# actually exercise the new dispatch tier; on a non-AVX-512 host both S and E fall back to
+# identical AVX2 codegen for these five functions and no measurable difference is expected.
+test: clone apply-harness bench-baseline apply-fix bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-harness:
+    cd clone && git apply --exclude='Cargo.toml' --exclude='vendor/*' "{{justfile_directory()}}/patch.diff"
+
+apply-fix:
+    cd clone && git apply --include='Cargo.toml' --include='vendor/*' "{{justfile_directory()}}/patch.diff"
+
+# S: registry pic-scale-safe (whatever version Cargo.lock resolves today), completely unmodified -
+# default RUSTFLAGS, no multiversioning at all. This is a plain baseline, not 053's own
+# AVX2+vertical-AVX-512 dispatched build - see RESULT.md for the S-vs-E numbers this candidate
+# actually measured against (053's own dispatch, not the plain registry crate), which required
+# building 053's patch and this candidate's patch into two separate CARGO_TARGET_DIRs by hand.
+bench-baseline:
+    @echo "=== S: registry pic-scale-safe (unmodified), default RUSTFLAGS - Lanczos3 4032x3024->400x300 ==="
+    cd clone && cargo bench --bench imageops -- "dynamic_resize/DynamicImage::resize_exact 4032x3024->400x300 Lanczos3"
+
+# E: 048+049+052+053's own AVX2/vertical-AVX-512 runtime multiversioning plus this candidate's
+# AVX-512 tier on the horizontal-convolution and floating-point-vertical functions, default
+# RUSTFLAGS (relies on is_x86_feature_detected! at runtime, not a build-time target-feature flag).
+bench-patched:
+    @echo "=== E: 048+049+052+053+this candidate (vendored pic-scale-safe, AVX-512 tier added to horizontal/floating-point dispatch too), default RUSTFLAGS - Lanczos3 4032x3024->400x300 ==="
+    cd clone && cargo bench --bench imageops -- "dynamic_resize/DynamicImage::resize_exact 4032x3024->400x300 Lanczos3"
+
+clean:
+    rm -rf clone

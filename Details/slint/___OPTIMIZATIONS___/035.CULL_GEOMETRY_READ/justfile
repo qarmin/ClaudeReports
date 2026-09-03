@@ -1,0 +1,46 @@
+# Self-contained reproduction for this candidate, given the whole ___OPTIMIZATIONS___ folder is
+# kept together - see ../README.md's "Reproducing a candidate standalone" section: `perf_test` is
+# untracked in the main repo, so `clone:` copies it in from ../harness/perf_test.
+#
+# patch.diff here is a fresh re-derivation (2026-08-25) of this candidate's fix, not the original
+# session's bytes - see RESULT.md's note on why the original patch was never saved. It changes
+# `PartialRenderer::filter_item` (internal/core/partial_renderer.rs) to serve a culled item's
+# origin from its already-fresh cache entry instead of reading the item's full geometry.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone, build a BASELINE binary before touching anything, apply the patch, build a
+# PATCHED binary, then run both and print both results.
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+build-baseline:
+    cd clone/perf_test && cargo build --profile rdebug --bin perf_test
+    cp clone/target/rdebug/perf_test ./perf_test_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/perf_test && cargo build --profile rdebug --bin perf_test
+    cp clone/target/rdebug/perf_test ./perf_test_patched
+
+# RESULT.md's headline: -12% on `scroll` 100000 `bare` rows (culled items dominate this scene).
+bench:
+    @echo "=== baseline (filter_item always reads the full geometry) ==="
+    ./perf_test_baseline --bench --mode scroll --count 100000 --row-style bare --frames 10
+    @echo "=== patched (culled items reuse the cached offset) ==="
+    ./perf_test_patched --bench --mode scroll --count 100000 --row-style bare --frames 10
+
+clean:
+    rm -rf clone perf_test_baseline perf_test_patched

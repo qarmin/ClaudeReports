@@ -1,0 +1,48 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# repo_url/base_commit read via `git remote get-url origin` / `git rev-parse HEAD` in the main
+# project at the moment patch.diff was captured (same commit as candidates 021/022 - no upstream
+# changes to hayro-interpret/src/interpret/mod.rs since).
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone at the pinned commit, profile baseline (no resolved_font_cache at all,
+# identical to candidates 021/022's baseline), apply this candidate's raw_entry_mut patch,
+# profile again.
+test: clone profile-baseline apply profile-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build:
+    cd bench && cargo build --release
+
+# valgrind needs a sane open-file-descriptor limit in this sandbox - the default
+# (2147483584, unlimited-ish) makes valgrind's private-file-creation check fail outright.
+profile-baseline: build
+    cd bench && bash -c 'ulimit -n 4096; valgrind --tool=callgrind --callgrind-out-file=callgrind.baseline.out ./target/release/callgrind_probe 5'
+    cd bench && callgrind_annotate --auto=no callgrind.baseline.out | head -5
+
+profile-patched: build
+    cd bench && bash -c 'ulimit -n 4096; valgrind --tool=callgrind --callgrind-out-file=callgrind.patched.out ./target/release/callgrind_probe 5'
+    cd bench && callgrind_annotate --auto=no callgrind.patched.out | head -5
+
+# Full annotated per-line breakdown of hayro-interpret's interpret() against a given .out file,
+# e.g. `just annotate bench/callgrind.patched.out`
+annotate out_file:
+    callgrind_annotate --auto=yes {{out_file}} clone/hayro-interpret/src/interpret/mod.rs | less
+
+# Regenerate testdata/worst_case_cache.pdf (already committed; only needed if N_TF changes).
+gen-testdata:
+    python3 testdata/gen_worst_case_pdf.py testdata/worst_case_cache.pdf 326
+
+clean:
+    rm -rf clone bench/target bench/callgrind.baseline.out bench/callgrind.patched.out

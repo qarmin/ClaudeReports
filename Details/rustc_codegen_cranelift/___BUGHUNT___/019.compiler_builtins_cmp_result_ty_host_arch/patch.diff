@@ -1,0 +1,96 @@
+diff --git a/src/codegen_f16_f128.rs b/src/codegen_f16_f128.rs
+index 3dbd59c2..c3efa86b 100644
+--- a/src/codegen_f16_f128.rs
++++ b/src/codegen_f16_f128.rs
+@@ -1,6 +1,6 @@
+ use rustc_target::spec::Arch;
+ 
+-use crate::compiler_builtins::CMP_RESULT_TY;
++use crate::compiler_builtins::cmp_result_ty;
+ use crate::prelude::*;
+ 
+ pub(crate) fn f16_to_f32(fx: &mut FunctionCx<'_, '_, '_>, value: Value) -> Value {
+@@ -112,13 +112,14 @@ pub(crate) fn fcmp(fx: &mut FunctionCx<'_, '_, '_>, cc: FloatCC, lhs: Value, rhs
+                 FloatCC::GreaterThanOrEqual => ("__getf2", IntCC::SignedGreaterThanOrEqual),
+                 _ => unreachable!("not currently used in rustc_codegen_cranelift: {cc:?}"),
+             };
++            let cmp_result_ty = cmp_result_ty(fx.tcx.sess);
+             let res = fx.lib_call(
+                 name,
+                 vec![AbiParam::new(types::F128), AbiParam::new(types::F128)],
+-                vec![AbiParam::new(CMP_RESULT_TY)],
++                vec![AbiParam::new(cmp_result_ty)],
+                 &[lhs, rhs],
+             )[0];
+-            let zero = fx.bcx.ins().iconst(CMP_RESULT_TY, 0);
++            let zero = fx.bcx.ins().iconst(cmp_result_ty, 0);
+             fx.bcx.ins().icmp(int_cc, res, zero)
+         }
+         _ => unreachable!("{ty:?}"),
+diff --git a/src/compiler_builtins.rs b/src/compiler_builtins.rs
+index ca9157da..3fe0c2cf 100644
+--- a/src/compiler_builtins.rs
++++ b/src/compiler_builtins.rs
+@@ -4,6 +4,8 @@
+ use std::ffi::c_void;
+ 
+ use cranelift_codegen::ir::{Type, types};
++use rustc_session::Session;
++use rustc_target::spec::Arch;
+ 
+ // FIXME replace with core::ffi::c_size_t once stabilized
+ #[allow(non_camel_case_types)]
+@@ -12,24 +14,45 @@
+ 
+ // Needs to stay in sync with compiler-builtins
+ 
++// The `cfg`s here are for the *host*, which is correct only because the JIT can only ever run
++// code for the host. `cmp_result_ty` below is the equivalent for AOT compilation and has to look
++// at the target instead.
++
+ // Aarch64 uses `int` rather than a pointer-sized value.
+ #[cfg(any(target_arch = "aarch64", target_arch = "arm64ec"))]
+ #[cfg(feature = "jit")]
+ type CmpResult = i32;
+-#[cfg(any(target_arch = "aarch64", target_arch = "arm64ec"))]
+-pub(crate) const CMP_RESULT_TY: Type = types::I32;
+ 
+ // In compiler-rt, LLP64 ABIs use `long long` and everything else uses `long`. In effect,
+ // this means the return value is always pointer-sized.
+ #[cfg(not(any(target_arch = "aarch64", target_arch = "arm64ec")))]
+ #[cfg(feature = "jit")]
+ type CmpResult = isize;
+-#[cfg(not(any(target_arch = "aarch64", target_arch = "arm64ec")))]
+-#[cfg(target_pointer_width = "32")]
+-pub(crate) const CMP_RESULT_TY: Type = types::I32;
+-#[cfg(not(any(target_arch = "aarch64", target_arch = "arm64ec")))]
+-#[cfg(target_pointer_width = "64")]
+-pub(crate) const CMP_RESULT_TY: Type = types::I64;
++
++/// Return type of the `__{eq,ne,lt,le,gt,ge}tf2` soft-float comparison libcalls.
++///
++/// Needs to stay in sync with compiler-builtins' `CmpResult`
++/// (`library/compiler-builtins/compiler-builtins/src/float/cmp.rs`), which in turn follows LLVM's
++/// `getCmpLibcallReturnType`. It depends on the target being compiled for, not on the host.
++pub(crate) fn cmp_result_ty(sess: &Session) -> Type {
++    match sess.target.arch {
++        // Aarch64 uses `int` rather than a pointer-sized value. LLVM's
++        // `getCmpLibcallReturnType` is i32 for wasm too.
++        Arch::AArch64 | Arch::Arm64EC | Arch::Wasm32 | Arch::Wasm64 => types::I32,
++        // AVR uses a single byte.
++        Arch::Avr => types::I8,
++        // In compiler-rt, LLP64 ABIs use `long long` and everything else uses `long`. In effect,
++        // this means the return value is always pointer-sized.
++        _ => match sess.target.pointer_width {
++            16 => types::I16,
++            32 => types::I32,
++            64 => types::I64,
++            pointer_width => {
++                sess.dcx().fatal(format!("unsupported pointer width {pointer_width}"))
++            }
++        },
++    }
++}
+ 
+ macro_rules! builtin_functions {
+     (

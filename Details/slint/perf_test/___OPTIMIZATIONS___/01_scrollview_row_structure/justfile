@@ -1,0 +1,32 @@
+# Numbers for this candidate. `just run` builds the harness and prints the table.
+bin := justfile_directory() + "/../../../target/rdebug/perf_test"
+harness := justfile_directory() + "/../.."
+
+build:
+    cd {{ harness }} && cargo build --profile rdebug --bin perf_test
+
+# The table in RESULT.md (software renderer, no display needed). ~1 minute.
+run: build
+    @echo "--- ListView 100k (virtualized reference) ---"
+    {{ bin }} --bench --mode list --count 100000 --frames 6 | tail -6
+    @echo "--- ScrollView 100k, row with a layout (baseline) ---"
+    {{ bin }} --bench --mode scroll --count 100000 --frames 6 | tail -6
+    @echo "--- ScrollView 100k, flat row (the win) ---"
+    {{ bin }} --bench --mode scroll --count 100000 --frames 6 --flat-rows | tail -6
+
+# Apply the one-line clip patch from clip_rows.diff, measure, revert.
+run-clip-variant:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{ harness }}
+    cp ui/shared.slint /tmp/shared.slint.bak
+    trap 'cp /tmp/shared.slint.bak ui/shared.slint; cargo build --profile rdebug --bin perf_test' EXIT
+    python3 - <<'EOF'
+    import pathlib
+    p = pathlib.Path("ui/shared.slint")
+    s = p.read_text()
+    p.write_text(s.replace("    height: 34px;\n    border-radius: 3px;",
+                           "    height: 34px;\n    clip: true;\n    border-radius: 3px;"))
+    EOF
+    cargo build --profile rdebug --bin perf_test
+    ../../target/rdebug/perf_test --bench --mode scroll --count 100000 --frames 6 | tail -6

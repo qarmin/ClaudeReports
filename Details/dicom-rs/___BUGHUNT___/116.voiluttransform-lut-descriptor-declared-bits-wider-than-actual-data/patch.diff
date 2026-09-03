@@ -1,0 +1,60 @@
+diff --git a/pixeldata/src/transform.rs b/pixeldata/src/transform.rs
+index 88225e00..1db9c03d 100644
+--- a/pixeldata/src/transform.rs
++++ b/pixeldata/src/transform.rs
+@@ -200,13 +200,34 @@ pub struct VoiLutTransform<'a> {
+     shift: u32,
+ }
+ 
++/// Determine the number of bits that the entries of `lut` actually span,
++/// which is not always the depth that its _LUT Descriptor_ declares.
++///
++/// Devices have been observed declaring a wider bit depth than their LUT data
++/// actually uses (e.g. 16 bits declared for data that only ever spans 12) -
++/// taking the declared depth at face value under-scales such a LUT into a
++/// small fraction of the output range. The declared depth still wins when the
++/// data exceeds it (so entries are never shifted out of range), and when the
++/// data is all zeroes (which says nothing about the real depth).
++fn effective_bits_stored(lut: &VoiLut) -> u16 {
++    let declared = lut.bits_stored as u16;
++    let max = lut.data.iter().copied().max().unwrap_or(0);
++    let used = (u16::BITS - max.leading_zeros()) as u16;
++
++    if used == 0 || used > declared {
++        declared
++    } else {
++        used
++    }
++}
++
+ impl<'a> VoiLutTransform<'a> {
+     /// Create a new LUT transformation.
+     ///
+     /// # Panics
+     ///
+     /// Panics if `lut.data` is empty, or if `bits_stored` is smaller than
+-    /// `lut.bits_stored`.
++    /// the number of bits that the LUT entries actually span.
+     pub fn new(lut: &'a VoiLut, bits_stored: u16) -> Self {
+         if lut.data.is_empty() {
+             // we'll do unchecked accesses to the first and last items in apply()
+@@ -214,15 +235,16 @@ impl<'a> VoiLutTransform<'a> {
+         }
+ 
+         let next_pow_bits = bits_stored.next_power_of_two();
++        let lut_bits = effective_bits_stored(lut);
+ 
+-        if next_pow_bits < (lut.bits_stored as u16) {
++        if next_pow_bits < lut_bits {
+             panic!(
+                 "LUT with BitsStored {} cannot be used for an image with BitsStored {}",
+-                lut.bits_stored, bits_stored
++                lut_bits, bits_stored
+             );
+         }
+ 
+-        let shift = (next_pow_bits - (lut.bits_stored as u16)) as u32;
++        let shift = (next_pow_bits - lut_bits) as u32;
+ 
+         VoiLutTransform { lut, shift }
+     }

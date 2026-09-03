@@ -1,0 +1,59 @@
+# Self-contained reproduction for this candidate.
+# harness note (added by a bulk fix - see ../README.md's "Reproducing a candidate
+# standalone" section): perf_test is untracked in the main repo, so `clone:` below now
+# copies it in from ../harness/perf_test automatically - no manual copy step needed.
+# femtovg is cloned fresh too (perf_test's Cargo.toml unconditionally patches it).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+#
+# Note: fully reproducing the bench additionally needs `perf_test/` copied in manually next
+# to `clone/` - it is untracked in the main slint repo's git history, so `just clone` alone
+# will not fetch it. Unlike candidate 056, no `perf_test` source fixes were needed for this
+# candidate - `--gradient-kind linear|radial|conic` on the `rects` scene (added for candidate
+# 063) was reused unmodified.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+femtovg_repo_url := "https://github.com/femtovg/femtovg"
+femtovg_base_commit := "df54a3c880863582f4338afa26a44fea3398b880"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git clone {{femtovg_repo_url}} clone/femtovg
+    cd clone/femtovg && git checkout {{femtovg_base_commit}}
+    cp -r "{{justfile_directory()}}/../harness/perf_test" clone/perf_test
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Reproduce the headline numbers from RESULT.md. Needs perf_test/'s source copied into
+# ./clone/perf_test (its Cargo.toml uses paths like "../api/rs/slint" relative to its own
+# directory, so it must sit inside the checkout it is meant to build against). Needs a display
+# or Xvfb (`LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -s "-screen 0 1280x900x24"`), since Skia needs a
+# real GL/GPU context - unlike the other renderers' `--bench` mode, there is no headless path
+# for Skia in this harness.
+bench:
+    cd clone/perf_test && RENDERER=skia cargo build --profile rdebug --bin perf_test --features skia
+    @echo "Steady-state frame time + allocations/frame, linear gradient, 3000 rects:"
+    LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1280x900x24" taskset -c 3 \
+        ./clone/target/rdebug/perf_test --renderer skia --mode rects \
+        --count 3000 --gradient-kind linear --frames 10
+    @echo "For the paired before/after comparison in RESULT.md: build once per patch.diff"
+    @echo "applied/unapplied into two separate clones, then (from the main project's"
+    @echo "___OPTIMIZATIONS___/tools/, not this folder):"
+    @echo "  RUNS=9 TASKSET=3 paired_skia_later_frames.sh <base-bin> <patched-bin> \\"
+    @echo "      --mode rects --count 3000 --gradient-kind linear --frames 20"
+    @echo "  RUNS=9 paired_skia_later_frames.sh <base-bin> <patched-bin> \\"
+    @echo "      --mode rects --count 3000 --gradient-kind linear --frames 20   # unpinned"
+
+clean:
+    rm -rf clone

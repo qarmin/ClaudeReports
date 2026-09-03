@@ -1,0 +1,36 @@
+# Self-contained reproduction for this candidate.
+#
+# Status: Not reproducible - there is no bug to demonstrate. This justfile clones the project at
+# base_commit and runs every repro/ program tried this session, all of which pass (print "ok" /
+# print the correct saturating value) on that commit. Keeping this justfile lets a future session
+# re-run the exact same negative checks against a newer commit with one command, instead of
+# re-deriving them from scratch.
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+test: clone build reproduce
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# One-time full build: downloads the pinned libgccjit and builds the sysroot. Slow (a few
+# minutes); only needs to run once per clone.
+build:
+    cd clone && ./y.sh prepare
+    cd clone && CHANNEL=release ./y.sh build --sysroot --release
+
+# Runs every repro program against the freshly built backend. All are expected to print "ok" or
+# the correct saturating value (u128::MAX/i128::MAX/etc.) - none of them currently reproduce
+# issue #690's reported wrong "0".
+reproduce:
+    cd clone && CHANNEL=release ./y.sh rustc -O "{{justfile_directory()}}/repro/original_issue_690.rs" -o /tmp/bh009_690 && /tmp/bh009_690
+    cd clone && CHANNEL=release ./y.sh rustc -O "{{justfile_directory()}}/repro/boundary_sweep.rs" -o /tmp/bh009_sweep && /tmp/bh009_sweep
+    cd clone && CHANNEL=release ./y.sh rustc -O "{{justfile_directory()}}/repro/assert_eq_black_box_consecutive_u128.rs" -o /tmp/bh009_c1 && /tmp/bh009_c1
+    cd clone && CHANNEL=release ./y.sh rustc -O "{{justfile_directory()}}/repro/assert_eq_black_box_boundary_i128.rs" -o /tmp/bh009_c2 && /tmp/bh009_c2
+    cd clone && CHANNEL=release ./y.sh rustc -O "{{justfile_directory()}}/repro/assert_eq_black_box_all_int_types.rs" -o /tmp/bh009_c3 && /tmp/bh009_c3
+
+clean:
+    rm -rf clone

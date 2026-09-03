@@ -1,0 +1,67 @@
+diff --git a/src/decoder.rs b/src/decoder.rs
+index b8eb531..e7aeaef 100644
+--- a/src/decoder.rs
++++ b/src/decoder.rs
+@@ -478,6 +478,15 @@ impl<R: Read> Decoder<R> {
+                     }
+ 
+                     scans_processed += 1;
++
++                    if pending_marker.is_none() {
++                        // The entropy-coded data ran out before a terminating marker (EOI or
++                        // the next SOS) could be found - a truncated file. Treat this the same
++                        // as an explicit EOI so the data decoded so far is still returned,
++                        // rather than looping back to read_marker() and hitting a hard I/O
++                        // error on the same already-exhausted reader.
++                        break;
++                    }
+                 }
+ 
+                 // Table-specification and miscellaneous markers
+diff --git a/src/huffman.rs b/src/huffman.rs
+index fca57c1..6a5d943 100644
+--- a/src/huffman.rs
++++ b/src/huffman.rs
+@@ -15,6 +15,7 @@ pub struct HuffmanDecoder {
+     bits: u64,
+     num_bits: u8,
+     marker: Option<Marker>,
++    eof: bool,
+ }
+ 
+ impl HuffmanDecoder {
+@@ -23,6 +24,7 @@ impl HuffmanDecoder {
+             bits: 0,
+             num_bits: 0,
+             marker: None,
++            eof: false,
+         }
+     }
+ 
+@@ -122,10 +124,22 @@ impl HuffmanDecoder {
+ 
+     fn read_bits<R: Read>(&mut self, reader: &mut R) -> Result<()> {
+         while self.num_bits <= 56 {
+-            // Fill with zero bits if we have reached the end.
+-            let byte = match self.marker {
+-                Some(_) => 0,
+-                None => read_u8(reader)?,
++            // Fill with zero bits if we have reached the end of the entropy-coded data (either a
++            // marker was found, or the underlying reader ran out of data prematurely). Truncated
++            // scan data is common in JPEGs found in the wild; other decoders (libjpeg et al.)
++            // likewise treat premature EOF as an implicit end of the entropy-coded segment and
++            // keep decoding the remaining coefficients as zero rather than aborting outright.
++            let byte = if self.marker.is_some() || self.eof {
++                0
++            } else {
++                match read_u8(reader) {
++                    Ok(byte) => byte,
++                    Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
++                        self.eof = true;
++                        0
++                    }
++                    Err(err) => return Err(err.into()),
++                }
+             };
+ 
+             if byte == 0xFF {

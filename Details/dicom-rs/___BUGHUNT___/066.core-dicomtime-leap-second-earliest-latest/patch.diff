@@ -1,0 +1,53 @@
+diff --git a/core/src/value/range.rs b/core/src/value/range.rs
+index 057c1a17..0c2f5266 100644
+--- a/core/src/value/range.rs
++++ b/core/src/value/range.rs
+@@ -282,11 +282,14 @@ impl AsRange for DicomTime {
+             },
+         );
+ 
+-        NaiveTime::from_hms_micro_opt((*h).into(), (*m).into(), (*s).into(), f).context(
++        // chrono encodes leap seconds as second=59, microsecond in 1_000_000..2_000_000
++        let (s, f) = if *s == 60 { (59u8, f + 1_000_000) } else { (*s, f) };
++
++        NaiveTime::from_hms_micro_opt((*h).into(), (*m).into(), s.into(), f).context(
+             InvalidTimeMicroSnafu {
+                 h: *h as u32,
+                 m: *m as u32,
+-                s: *s as u32,
++                s: s as u32,
+                 f,
+             },
+         )
+@@ -303,11 +306,14 @@ impl AsRange for DicomTime {
+                 }
+             },
+         );
+-        NaiveTime::from_hms_micro_opt((*h).into(), (*m).into(), (*s).into(), f).context(
++        // chrono encodes leap seconds as second=59, microsecond in 1_000_000..2_000_000
++        let (s, f) = if *s == 60 { (59u8, f + 1_000_000) } else { (*s, f) };
++
++        NaiveTime::from_hms_micro_opt((*h).into(), (*m).into(), s.into(), f).context(
+             InvalidTimeMicroSnafu {
+                 h: *h as u32,
+                 m: *m as u32,
+-                s: *s as u32,
++                s: s as u32,
+                 f,
+             },
+         )
+@@ -1190,6 +1196,14 @@ pub fn parse_datetime_range_impl<T: AmbiguousDtRangeParser>(buf: &[u8]) -> Resul
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn leap_second_earliest_latest_repro() {
++        use crate::value::DicomTime;
++        let t = DicomTime::from_hms(23, 59, 60).unwrap();
++        t.earliest().unwrap();
++        t.latest().unwrap();
++    }
++
+     #[test]
+     fn test_date_range() {
+         assert_eq!(

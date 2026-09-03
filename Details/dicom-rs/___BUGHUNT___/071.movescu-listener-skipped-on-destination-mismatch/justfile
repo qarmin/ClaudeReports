@@ -1,0 +1,40 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# NOTE on this candidate's shape: this is a live-behavior bug (a CLI arg combination that
+# silently skips starting a network listener), not a crash/panic - the reproduction is a small
+# Python script (repro/check_listener.py, requires python3) that runs the real movescu binary
+# against a fake "MOVE SCP" and checks whether movescu's own C-STORE-receiving listener port
+# actually opens.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone build-before reproduce-before apply build-after reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-before:
+    cd clone && cargo build -p dicom-movescu
+
+# Should print "NOT open" and exit non-zero (bug reproduced: listener skipped).
+reproduce-before:
+    python3 repro/check_listener.py clone/target/debug/dicom-movescu; test "$?" -ne 0 && echo "(non-zero exit expected here: bug reproduced)"; true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-after:
+    cd clone && cargo build -p dicom-movescu
+
+# Should print "IS OPEN" and exit zero (fix confirmed: listener starts).
+reproduce-after:
+    python3 repro/check_listener.py clone/target/debug/dicom-movescu
+
+clean:
+    rm -rf clone

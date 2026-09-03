@@ -1,0 +1,41 @@
+# Self-contained reproduction for candidate 074 (`vello_common::util::unpremultiply::scalar`/
+# `simd`, sparse_strips/vello_common/src/util.rs:450, only sound if `component <= alpha` holds for
+# every premultiplied pixel reached via the public `Pixmap::take_unpremultiplied`). Status: Not
+# reproducible via the real end-to-end rendering path - see RESULT.md. No bounded fix was
+# attempted (there is nothing to fix without a live, real trigger), so there is no `patch.diff` and
+# this justfile only has a `reproduce-before` step, per the template's own instructions for that
+# case.
+#
+# `repo_url`/`base_commit` were read via `git remote get-url origin` / `git rev-parse HEAD` in the
+# main project at investigation time.
+#
+# Note: this environment's git-lfs binary may be missing, which makes a plain `git clone`/`git
+# checkout` of this repo fail on its LFS-tracked PNG test snapshots. The repro below never touches
+# those files, so the clone step disables the LFS filter outright (`-c filter.lfs.*`) to stay
+# robust regardless of whether git-lfs is installed on the machine running this.
+
+# https (not the ssh form `git remote get-url origin` actually returns) so `just clone` works
+# without an ssh key/agent configured.
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false clone {{repo_url}} clone
+    cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false checkout {{base_commit}}
+
+# Builds+runs the standalone repro against the pristine clone. Part 1 demonstrates, in isolation,
+# that the unpremultiply arithmetic silently produces a drastically wrong result IF its
+# `component <= alpha` precondition is ever violated. Part 2 then drives `vello_cpu::RenderContext`'s
+# real public API (2,000,000 randomized scenes: random Mix/Compose blend modes, random layer
+# nesting via push_layer/pop_layer, anti-aliased fractional-coverage rects, both RenderMode
+# pipelines) and inspects the raw premultiplied Pixmap buffer for any pixel that actually violates
+# the precondition - none were found in this session's search (see RESULT.md for the full
+# methodology, including a supplementary debug-assertions run).
+reproduce-before:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

@@ -1,0 +1,61 @@
+All output captured directly from `repro/` (`cargo run --release`), built against the actual
+`pic-scale-safe` working tree at commit 83c4801428c436678d7c6b6bea74af800924a469 (Cargo.toml's
+`path` dependency pointed at the live checkout during this session; the delivered `repro/Cargo.toml`
+points at `../clone`, produced by this candidate's own `justfile`).
+
+=== BEFORE (pristine tree, jinc_f64/jinc_f32/lanczos_jinc all special-case x==0 -> 0.0) ===
+Run 1 and run 2 are byte-for-byte identical (diff / found no difference); exit code 1 both times.
+
+    Compiling pic-scale-safe v0.1.11 (/home/rafal/test/pic-scale-safe)
+    Compiling jinc-zero-repro v0.1.0 (.../008.JINC_ZERO_LIMIT/repro)
+    Finished `release` profile [optimized] target(s) in 1.56s
+     Running `target/release/jinc-zero-repro`
+HaasnSoft (scale=3): dst[4] = 0  (full: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+Ginseng (scale=3): dst[4] = 0  (full: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+Lanczos3Jinc (scale=3): dst[4] = 0  (full: [0.0, 0.0, -0.013403806, 0.057075724, 0.0, 0.057075724, -0.013403805, 0.0, 0.0])
+Lanczos2Jinc (scale=5): dst[4] = 0  (full: [0.0, 0.0, 0.0, 0.025201138, 0.0, 0.025201138, 0.0, 0.0, 0.0])
+Lanczos4Jinc (scale=5): dst[4] = 0  (full: [0.0, 0.0030708788, -0.009278836, 0.03140851, 0.0, 0.03140851, -0.009278834, 0.0030708783, 0.0])
+Lanczos6Jinc (scale=5): dst[4] = 0  (full: [-0.0030146025, 0.004896571, -0.011151988, 0.032487027, 0.0, 0.032487024, -0.011151987, 0.0048965705, -0.003014602])
+REPRODUCED - 6 check(s) failed:
+  - HaasnSoft (scale=3): centre tap dst[4] = 0 (expected a clearly nonzero peak, not silently zeroed)
+  - Ginseng (scale=3): centre tap dst[4] = 0 (expected a clearly nonzero peak, not silently zeroed)
+  - Lanczos3Jinc (scale=3): centre tap dst[4] = 0 (expected a clearly nonzero peak, not silently zeroed)
+  - Lanczos2Jinc (scale=5): centre tap dst[4] = 0 (expected a clearly nonzero peak, not silently zeroed)
+  - Lanczos4Jinc (scale=5): centre tap dst[4] = 0 (expected a clearly nonzero peak, not silently zeroed)
+  - Lanczos6Jinc (scale=5): centre tap dst[4] = 0 (expected a clearly nonzero peak, not silently zeroed)
+exit code: 1
+
+=== Separate internal probe (not part of repro/, requires `pub(crate)` access; ran directly in
+    the main checkout via a temporary #[cfg(test)] block, reverted afterwards) - shows jinc_f64's
+    own discontinuity at x==0 against the well-known limit J1(x)/x -> 0.5: ===
+
+running 1 test
+jinc_f64(1e-2) = 0.4999937500260417
+jinc_f64(1e-4) = 0.499999999375
+jinc_f64(1e-6) = 0.49999999999993755
+jinc_f64(1e-8) = 0.5
+jinc_f64(0e0) = 0
+test math::bessel_order_one::bughunt_probe_tests::probe_jinc_limit_at_zero ... ok
+
+=== AFTER (patched tree: jinc_f64/jinc_f32 return 0.5 at x==0; lanczos_jinc's separate x==0
+    special case removed so it falls through to the normal jinc(d)*jinc(d*scale_a) formula) ===
+Run 1 and run 2 are byte-for-byte identical (aside from cargo's own build-timing log lines); exit
+code 0 both times.
+
+    Compiling pic-scale-safe v0.1.11 (/home/rafal/test/pic-scale-safe)
+    Compiling jinc-zero-repro v0.1.0 (.../008.JINC_ZERO_LIMIT/repro)
+    Finished `release` profile [optimized] target(s) in 0.99s
+     Running `target/release/jinc-zero-repro`
+HaasnSoft (scale=3): dst[4] = 0.95462406  (full: [0.0, 0.0, 0.0, 0.0, 0.95462406, 0.0, 0.0, 0.0, 0.0])
+Ginseng (scale=3): dst[4] = 0.26331908  (full: [0.0, 0.0, 0.0, 0.0, 0.26331908, 0.0, 0.0, 0.0, 0.0])
+Lanczos3Jinc (scale=3): dst[4] = 0.26603845  (full: [0.0, 0.0, -0.009819741, 0.041891385, 0.26603845, 0.041891385, -0.009819741, 0.0, 0.0])
+Lanczos2Jinc (scale=5): dst[4] = 0.16157919  (full: [0.0, 0.0, 0.0, 0.02112916, 0.16157919, 0.02112916, 0.0, 0.0, 0.0])
+Lanczos4Jinc (scale=5): dst[4] = 0.15833378  (full: [0.0, 0.002597426, -0.007796157, 0.026450848, 0.15833378, 0.026450848, -0.007796157, 0.0025974258, 0.0])
+Lanczos6Jinc (scale=5): dst[4] = 0.15852466  (full: [-0.0024596197, 0.0041464185, -0.009372838, 0.027401706, 0.15852466, 0.027401704, -0.009372837, 0.004146418, -0.0024596194])
+did not reproduce - every kernel's centre tap stayed nonzero
+exit code: 0
+
+=== Project test suite (cargo test --release, workspace root) ===
+Before fix: "running 0 tests ... 0 passed; 0 failed" (lib), "running 0 tests ... 0 passed; 0 failed" (doc-tests).
+After fix:  identical - "running 0 tests ... 0 passed; 0 failed" (lib), "running 0 tests ... 0 passed; 0 failed" (doc-tests).
+No tests exist in this package either way (N/A).

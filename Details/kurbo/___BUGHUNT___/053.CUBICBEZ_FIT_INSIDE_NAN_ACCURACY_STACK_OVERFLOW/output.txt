@@ -1,0 +1,40 @@
+=== `just clone && just reproduce-before` (pristine tree, base_commit ca273499e3e48bd2de6f02aa8e99a148984e45f3) ===
+$ cd repro && cargo run --release
+   Compiling kurbo v0.13.1 (/tmp/053_justtest/clone/kurbo)
+   Compiling kurbo053repro v0.1.0 (/tmp/053_justtest/repro)
+    Finished `release` profile [optimized] target(s) in 1.07s
+     Running `target/release/kurbo053repro`
+
+thread 'main' (371399) has overflowed its stack
+fatal runtime error: stack overflow, aborting
+Aborted (core dumped)
+error: Recipe `reproduce-before` failed on line 24 with exit code 134
+
+(also observed identically, 3/3 runs, in a `cargo run --example nan_repro` debug build directly
+against the working-tree copy before this was packaged as a standalone repro/ - process names
+differed (357942, 359179, 359191) but the message and abort were identical every time; also
+reproduces in a `--release` build, exit code 134/SIGABRT via "core dumped" every time)
+
+=== `just apply && just reproduce-after` (patched tree) ===
+$ cd clone && git apply ".../patch.diff"
+$ cd repro && cargo run --release
+   Compiling kurbo v0.13.1 (/tmp/053_justtest/clone/kurbo)
+   Compiling kurbo053repro v0.1.0 (/tmp/053_justtest/repro)
+    Finished `release` profile [optimized] target(s) in 0.73s
+     Running `target/release/kurbo053repro`
+did not reproduce - approx_spline(NaN) returned: None
+
+=== additional boundary-value check (same bug class, different curve + additional NaN call site) ===
+Ran directly against the patched working-tree copy (not part of the packaged repro/, kept here as
+supplementary evidence):
+
+    let c = CubicBez::new((5.0,5.0),(5.0,5.0),(20.0,-30.0),(50.0,50.0));
+    println!("{:?}", c.approx_spline(f64::NAN));                  // -> None (was: stack overflow)
+    let c2 = CubicBez::new((0.0,0.0),(1.0,1.0),(2.0,1.0),(3.0,0.0));
+    println!("{:?}", c2.approx_spline(f64::NAN));                 // -> None (was: stack overflow)
+    println!("{:?}", c2.approx_spline(1.0));                      // -> Some(QuadSpline([(0.0, 0.0), (1.5, 1.5), (3.0, 0.0)])) (sanity: normal input unaffected)
+
+=== project test suite, workspace worktree, before vs after the patch ===
+`cargo test --workspace --all-features`:
+  before (pristine ca273499e3e48bd2de6f02aa8e99a148984e45f3): 187 passed, 10 passed, 55 passed, 1 ignored doctest; 0 failed (total 252 passed)
+  after (patched):                                            187 passed, 10 passed, 55 passed, 1 ignored doctest; 0 failed (total 252 passed)

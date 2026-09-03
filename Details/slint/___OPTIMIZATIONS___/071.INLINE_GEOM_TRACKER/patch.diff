@@ -1,0 +1,215 @@
+diff --git a/internal/core/partial_renderer.rs b/internal/core/partial_renderer.rs
+index 9de941ab7..32d6e46e5 100644
+--- a/internal/core/partial_renderer.rs
++++ b/internal/core/partial_renderer.rs
+@@ -195,13 +195,34 @@ struct PartialRenderingCachedData {
+     pub data: CachedItemBoundingBoxAndTransform,
+     /// The property tracker that should be used to evaluate whether the item needs to be re-rendered
+     pub tracker: Option<core::pin::Pin<Box<PropertyTracker>>>,
++    /// Tracks the properties read while computing `data` (geometry, clips_children,
++    /// children_transform, and whatever the item's own `bounding_rect()` reads). While this
++    /// stays clean, `compute_dirty_regions` can skip recomputing `data` for this item and its
++    /// dependency registration entirely, reusing the previous value instead.
++    ///
++    /// Candidate 071 (`INLINE_GEOM_TRACKER`): stored inline (not `Pin<Box<..>>`) to test whether
++    /// candidate 065's regression came from the extra heap indirection. `PropertyTracker` is
++    /// `!Unpin` and self-referential (other bindings store raw pointers back into its own
++    /// `BindingHolder`), so this is only sound if the entry never moves in memory for as long as
++    /// any such pointer exists - `PartialRendererCache::slab` is a `slab::Slab`, backed by a
++    /// growable `Vec`, which *can* reallocate (moving every existing entry) when new entries are
++    /// inserted. `pin_geom_tracker` below uses `Pin::new_unchecked` to paper over this at the
++    /// type level; it does not make it actually safe. See RESULT.md.
++    pub geom_tracker: PropertyTracker,
+ }
+ impl PartialRenderingCachedData {
+-    fn new(data: CachedItemBoundingBoxAndTransform) -> Self {
+-        Self { data, tracker: None }
++    fn new(data: CachedItemBoundingBoxAndTransform, geom_tracker: PropertyTracker) -> Self {
++        Self { data, tracker: None, geom_tracker }
+     }
+ }
+ 
++/// Safety: see `PartialRenderingCachedData::geom_tracker`'s doc comment - not actually sound if
++/// `tracker`'s slab entry moves after this pin is taken and dependencies have been registered.
++#[allow(unsafe_code)]
++fn pin_geom_tracker(tracker: &PropertyTracker) -> core::pin::Pin<&PropertyTracker> {
++    unsafe { core::pin::Pin::new_unchecked(tracker) }
++}
++
+ /// The cache that needs to be held by the Window for the partial rendering
+ struct PartialRendererCache {
+     slab: slab::Slab<PartialRenderingCachedData>,
+@@ -210,7 +231,13 @@ struct PartialRendererCache {
+ 
+ impl Default for PartialRendererCache {
+     fn default() -> Self {
+-        Self { slab: Default::default(), generation: 1 }
++        // DIAGNOSTIC ONLY, not part of the candidate patch: pre-reserving avoids the slab's Vec
++        // ever reallocating during a perf_test run, which sidesteps (does not fix) the crash
++        // documented in RESULT.md, purely so the isolated wall-time question can be measured.
++        // Never do this in real code: it doesn't bound memory and a long-lived window can still
++        // exceed it.
++        let slab = slab::Slab::with_capacity(600_000);
++        Self { slab, generation: 1 }
+     }
+ }
+ 
+@@ -463,16 +490,10 @@ fn adjust_transforms_for_child(
+                 };
+                 new_state.depth = state.depth + 1;
+ 
+-                let new_geom = CachedItemBoundingBoxAndTransform::new::<T>(
+-                    &item_rc,
+-                    &self.window_adapter,
+-                    my_sibling_index,
+-                );
+-
+                 let rendering_data = item.cached_rendering_data_offset();
+                 let mut cache = self.cache.borrow_mut();
+                 match rendering_data.get_entry(&mut cache) {
+-                    Some(PartialRenderingCachedData { data: cached_geom, tracker }) => {
++                    Some(PartialRenderingCachedData { data: cached_geom, tracker, geom_tracker }) => {
+                         let rendering_dirty = tracker.as_ref().is_some_and(|tr| tr.is_dirty());
+ 
+                         // Only repaint when the rank decreased. When two items swap it is
+@@ -485,6 +506,84 @@ fn adjust_transforms_for_child(
+                             my_sibling_index == u16::MAX || my_sibling_index < old_sibling_index;
+                         new_state.must_refresh_children |= sibling_index_changed;
+ 
++                        // Nothing this reads (geometry, clips_children, children_transform, and
++                        // whatever the item's own bounding_rect() reads) changed since the last
++                        // time it was dirty, so reuse `cached_geom` unchanged: `None` here takes
++                        // exactly the same path as `geometry_changed == false` below, without
++                        // having re-read or re-registered any of those properties this frame.
++                        // `register_as_dependency_to_current_binding` (called internally by
++                        // `evaluate_if_dirty` in both cases) is what keeps a future change to any
++                        // of them scheduling a redraw even while this item stays culled.
++                        let recomputed = pin_geom_tracker(geom_tracker).evaluate_if_dirty(|| {
++                            CachedItemBoundingBoxAndTransform::new::<T>(
++                                &item_rc,
++                                &self.window_adapter,
++                                my_sibling_index,
++                            )
++                        });
++                        let Some(new_geom) = recomputed else {
++                            new_state.adjust_transforms_for_child(
++                                &cached_geom.transform(),
++                                &cached_geom.transform(),
++                            );
++
++                            let moved = state.must_refresh_children
++                                || sibling_index_changed
++                                || new_state.transform_to_screen != new_state.old_transform_to_screen;
++
++                            if rendering_dirty {
++                                self.mark_dirty_rect(
++                                    cached_geom.bounding_rect(),
++                                    state.transform_to_screen,
++                                    &state.clipped,
++                                );
++                                if moved {
++                                    self.mark_dirty_rect(
++                                        cached_geom.bounding_rect(),
++                                        state.old_transform_to_screen,
++                                        &state.clipped,
++                                    );
++                                }
++                            } else if moved {
++                                self.mark_dirty_rect(
++                                    cached_geom.bounding_rect(),
++                                    state.old_transform_to_screen,
++                                    &state.clipped,
++                                );
++                                self.mark_dirty_rect(
++                                    cached_geom.bounding_rect(),
++                                    state.transform_to_screen,
++                                    &state.clipped,
++                                );
++                            } else if let Some(tr) = &tracker {
++                                tr.as_ref().register_as_dependency_to_current_binding();
++                            }
++
++                            if let CachedItemBoundingBoxAndTransform::ClipItem { geometry, .. } =
++                                &cached_geom
++                            {
++                                new_state.clipped = new_state
++                                    .clipped
++                                    .intersection(
++                                        &state
++                                            .transform_to_screen
++                                            .outer_transformed_rect(&geometry.cast())
++                                            .cast()
++                                            .union(
++                                                &state
++                                                    .old_transform_to_screen
++                                                    .outer_transformed_rect(&geometry.cast())
++                                                    .cast(),
++                                            ),
++                                    )
++                                    .unwrap_or_default();
++                                if new_state.clipped.is_empty() {
++                                    return ItemVisitorResult::SkipChildren;
++                                }
++                            }
++                            return ItemVisitorResult::Continue(new_state);
++                        };
++
+                         let geometry_changed = !cached_geom.same_geometry(&new_geom);
+                         if ItemRef::downcast_pin::<Clip>(item).is_some()
+                             || ItemRef::downcast_pin::<Opacity>(item).is_some()
+@@ -587,9 +686,42 @@ fn adjust_transforms_for_child(
+                         }
+                     }
+                     None => {
+-                        let cache_entry = PartialRenderingCachedData::new(new_geom.clone());
+-                        rendering_data.cache_index.set(cache.insert(cache_entry));
++                        // DIAGNOSTIC-ONLY reordering (not part of the candidate patch, see
++                        // RESULT.md "additional finding"): evaluating `evaluate_if_dirty` before
++                        // the tracker reaches its final slab-resident address (as the candidate
++                        // patch above does) registers dependencies against a stack address that
++                        // is unconditionally moved away from moments later - crashes on the very
++                        // first evaluation of every newly created item, independent of slab
++                        // growth. Insert a placeholder first, then evaluate through a `&mut`
++                        // reference into the slab so the tracker's address is already final -
++                        // this still relies on the slab's backing `Vec` never reallocating
++                        // afterward (see the `with_capacity` workaround on
++                        // `PartialRendererCache::default`), which is the *other*, still-present
++                        // unsoundness this reordering does not address.
++                        let placeholder = crate::properties::evaluate_no_tracking(|| {
++                            CachedItemBoundingBoxAndTransform::new::<T>(
++                                &item_rc,
++                                &self.window_adapter,
++                                my_sibling_index,
++                            )
++                        });
++                        let index = cache.insert(PartialRenderingCachedData::new(
++                            placeholder,
++                            PropertyTracker::default(),
++                        ));
++                        rendering_data.cache_index.set(index);
+                         rendering_data.cache_generation.set(cache.generation());
++                        let entry = cache.get_mut(index).expect("just inserted");
++                        let new_geom = pin_geom_tracker(&entry.geom_tracker)
++                            .evaluate_if_dirty(|| {
++                                CachedItemBoundingBoxAndTransform::new::<T>(
++                                    &item_rc,
++                                    &self.window_adapter,
++                                    my_sibling_index,
++                                )
++                            })
++                            .expect("a freshly created PropertyTracker is always dirty");
++                        entry.data = new_geom.clone();
+ 
+                         new_state.adjust_transforms_for_child(
+                             &new_geom.transform(),
+@@ -722,7 +854,9 @@ fn filter_item(
+         let rendering_data = item.cached_rendering_data_offset();
+         let mut cache = self.cache.borrow_mut();
+         let item_bounding_rect = match rendering_data.get_entry(&mut cache) {
+-            Some(PartialRenderingCachedData { data, tracker: _ }) => *data.bounding_rect(),
++            Some(PartialRenderingCachedData { data, tracker: _, geom_tracker: _ }) => {
++                *data.bounding_rect()
++            }
+             None => {
+                 // This item was created between the computation of the dirty region and the actual rendering.
+                 item_rc.bounding_rect(&item_geometry, window_adapter)

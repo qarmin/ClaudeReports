@@ -1,0 +1,46 @@
+# Self-contained reproduction for this candidate.
+#
+# This is a re-measurement of candidate 003 (../003.raise_lut_bits/) on a different workload
+# image (benches/tower_progressive.jpg) - it reuses 003's own patch.diff verbatim rather than
+# duplicating it. See 003.raise_lut_bits/patch.diff for the one-line change applied here.
+#
+# Self-contained given the whole ___OPTIMIZATIONS___ folder kept together (shape 3 from
+# templates/candidate_justfile): the project's own bench harness (bench_decode) is untracked in
+# the main jpeg-decoder repo, so it's copied in from ../harness/bench_decode/ below, and the
+# patch applied is read from ../003.raise_lut_bits/patch.diff, not duplicated into this folder.
+
+repo_url := "https://github.com/image-rs/jpeg-decoder.git"
+base_commit := "eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c"
+harness_dir := "../harness/bench_decode"
+patch_path := "../003.raise_lut_bits/patch.diff"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/bench_decode
+    sed -i 's#path = "\.\./\.\./\.\."#path = ".."#' clone/bench_decode/Cargo.toml
+
+build-baseline:
+    cd clone/bench_decode && cargo +stable build --release
+    cp clone/bench_decode/target/release/bench_decode ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/{{patch_path}}"
+
+build-patched:
+    cd clone/bench_decode && cargo +stable build --release
+    cp clone/bench_decode/target/release/bench_decode ./bin_patched
+
+bench:
+    @echo "=== baseline (LUT_BITS=8, before patch) ==="
+    ./bin_baseline clone/benches/tower_progressive.jpg 30
+    @echo "=== patched (LUT_BITS=10, after patch) ==="
+    ./bin_patched clone/benches/tower_progressive.jpg 30
+    @echo "=== paired comparison (RUNS=9) ==="
+    RUNS=9 "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- clone/benches/tower_progressive.jpg 30
+
+clean:
+    rm -rf clone bin_baseline bin_patched

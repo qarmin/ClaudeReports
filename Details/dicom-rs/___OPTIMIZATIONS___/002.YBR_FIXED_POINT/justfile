@@ -1,0 +1,51 @@
+# Self-contained reproduction for candidate 002.YBR_FIXED_POINT.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo, built by this
+# ___OPTIMIZATIONS___ workspace - see SKILL.md's "shape 3" pattern). Self-contained given the
+# WHOLE ___OPTIMIZATIONS___ folder kept together, not as a fully isolated single subfolder.
+#
+# `just test` clones dicom-rs at base_commit, builds baseline + patched binaries (both with
+# --no-default-features --features image,native, so neither links rayon - see RESULT.md for why
+# a plain default build isn't a valid single-core comparison), and runs a paired comparison via
+# tools/paired.sh against the checked-in testdata/ybr_random.dcm fixture.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+    sed -i 's/dicom-pixeldata = { path = "..\/..\/..\/pixeldata", features = \["image", "native"\] }/dicom-pixeldata = { path = "..\/..\/..\/pixeldata", default-features = false, features = ["image", "native"] }/' \
+        clone/___OPTIMIZATIONS___/harness/bench_pipeline/Cargo.toml
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cp "{{justfile_directory()}}/testdata/ybr_random.dcm" clone/ybr_random.dcm
+    echo "=== bit-exactness check ==="
+    ./bin_baseline dump-image clone/ybr_random.dcm > /tmp/candidate002_baseline.raw
+    ./bin_patched dump-image clone/ybr_random.dcm > /tmp/candidate002_patched.raw
+    cmp /tmp/candidate002_baseline.raw /tmp/candidate002_patched.raw && echo "bit-exact" || echo "differs (expected - see RESULT.md, ~0.027% of bytes off by 1 LSB on random content)"
+    echo "=== paired colorspace comparison (RUNS=${RUNS:-9}), taskset -c 0 for a valid single-core number ==="
+    taskset -c 0 env RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- colorspace clone/ybr_random.dcm 60
+
+clean:
+    rm -rf clone bin_baseline bin_patched

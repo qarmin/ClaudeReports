@@ -1,0 +1,69 @@
+# Self-contained reproduction for candidate 003 (simd_funnel_shl / simd_funnel_shr missing ->
+# hard span_err).
+#
+# Everything this needs is either already in this folder or fetched by `just clone` into ./clone
+# (gitignored) - nothing here reaches outside the folder it lives in, so the folder can be copied
+# or posted standalone and `just test` still works.
+#
+#   just test    # clone -> build backend -> show the bug -> apply patch -> rebuild -> show it gone
+#
+# Timing note: `just build-backend` builds rustc_codegen_cranelift plus a sysroot from scratch
+# (a few minutes, and ~2 GB in ./clone). It runs twice over a full `just test` (before and after
+# the patch); the second one is incremental.
+
+# If ssh to github isn't set up, override on the command line:
+#   just repo_url=https://github.com/rust-lang/rustc_codegen_cranelift.git test
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it is gone.
+# `rebuild-backend` is a separate recipe from `build-backend` on purpose: just runs a recipe at
+# most once per invocation, so listing `build-backend` twice would silently leave the *unpatched*
+# backend in place for reproduce-after.
+test: clone build-backend reproduce-before apply rebuild-backend reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# rustc_codegen_cranelift itself: ./y.sh prepare downloads the test fixtures + stdlib sources,
+# ./y.sh build produces clone/dist/{rustc-clif,cargo-clif} and a prebuilt sysroot.
+build-backend:
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build
+
+# Same thing after patch.diff has been applied; ./y.sh prepare is already done by then.
+rebuild-backend:
+    cd clone && ./y.sh build
+
+# The LLVM oracle: plain rustc, debug (opt-level 0), must build and print "failures: 0".
+llvm:
+    ulimit -c 0 && cd repro && cargo run --target-dir target-llvm
+
+# The same crate through cg_clif. On the pristine clone this FAILS TO COMPILE with
+# "error: Unknown SIMD intrinsic simd_funnel_shl" - that is the bug.
+clif:
+    ulimit -c 0 && cd repro && RUSTFLAGS="-Ctarget-cpu=native" ../clone/dist/cargo-clif run --target-dir target-clif
+
+reproduce-before:
+    @echo "=== BEFORE: LLVM (oracle) ==="
+    just llvm
+    @echo ""
+    @echo "=== BEFORE: cg_clif - expected to fail with 'Unknown SIMD intrinsic simd_funnel_shl' ==="
+    @if just clif; then echo "UNEXPECTED: cg_clif built and ran - the bug did not reproduce"; exit 1; else echo "(cg_clif refused to compile the crate - bug reproduced)"; fi
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+reproduce-after:
+    @echo "=== AFTER: cg_clif with patch.diff applied - must build and print 'failures: 0' ==="
+    just clif
+    @echo ""
+    @echo "=== AFTER: diffing cg_clif output against the LLVM oracle ==="
+    ulimit -c 0 && cd repro && cargo run --target-dir target-llvm > /tmp/funnel_llvm.txt 2>/dev/null
+    ulimit -c 0 && cd repro && RUSTFLAGS="-Ctarget-cpu=native" ../clone/dist/cargo-clif run --target-dir target-clif > /tmp/funnel_clif.txt 2>/dev/null
+    diff /tmp/funnel_llvm.txt /tmp/funnel_clif.txt && echo "IDENTICAL to LLVM"
+
+clean:
+    rm -rf clone repro/target-llvm repro/target-clif

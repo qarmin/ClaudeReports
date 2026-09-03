@@ -1,0 +1,79 @@
+diff --git a/pixeldata/src/lut.rs b/pixeldata/src/lut.rs
+index cb39801d..8c1697b6 100644
+--- a/pixeldata/src/lut.rs
++++ b/pixeldata/src/lut.rs
+@@ -15,6 +15,27 @@ use snafu::{OptionExt, Snafu};
+ 
+ use crate::{Rescale, WindowLevelTransform, transform::VoiLutTransform};
+ 
++// Below this many table entries, rayon's own per-call dispatch overhead costs more than the
++// sequential per-entry work (a rescale/VOI float calculation plus a NumCast conversion) it would
++// save - an 8-bit LUT (256 entries) is always below this; a 16-bit LUT (65,536 entries) is always
++// above it, so this only changes behavior for unusually small `bits_stored` values.
++#[cfg(feature = "rayon")]
++const LUT_RAYON_SIZE_THRESHOLD: usize = 16_384;
++
++// Caches whether this process has more than one available core - on a single-core (or
++// affinity-restricted to one core) host, dispatching to rayon can never pay for its own
++// overhead regardless of input size.
++#[cfg(feature = "rayon")]
++fn rayon_worth_it() -> bool {
++    use std::sync::OnceLock;
++    static WORTH_IT: OnceLock<bool> = OnceLock::new();
++    *WORTH_IT.get_or_init(|| {
++        std::thread::available_parallelism()
++            .map(|n| n.get() > 1)
++            .unwrap_or(false)
++    })
++}
++
+ /// The LUT could not be created:
+ /// entry #{index} was mapped to {y_value},
+ /// which could not be cast to the target type.
+@@ -114,26 +135,28 @@ where
+         let size = (1 << bits_stored as u32) as usize;
+         debug_assert!(size.is_power_of_two());
+ 
++        let map_entry = |i: usize| {
++            // account for signedness to determine input pixel value
++            let x = if signed && i >= size / 2 {
++                i as f64 - size as f64
++            } else {
++                i as f64
++            };
++            let value = f(x);
++            T::from(value).context(CreateLutSnafu {
++                index: i,
++                y_value: value,
++            })
++        };
++
+         #[cfg(feature = "rayon")]
+-        let iter = (0..size).into_par_iter();
++        let table: Result<Vec<_>, _> = if rayon_worth_it() && size >= LUT_RAYON_SIZE_THRESHOLD {
++            (0..size).into_par_iter().map(map_entry).collect()
++        } else {
++            (0..size).map(map_entry).collect()
++        };
+         #[cfg(not(feature = "rayon"))]
+-        let iter = (0..size).into_iter();
+-
+-        let table: Result<Vec<_>, _> = iter
+-            .map(|i| {
+-                // account for signedness to determine input pixel value
+-                let x = if signed && i >= size / 2 {
+-                    i as f64 - size as f64
+-                } else {
+-                    i as f64
+-                };
+-                let value = f(x);
+-                T::from(value).context(CreateLutSnafu {
+-                    index: i,
+-                    y_value: value,
+-                })
+-            })
+-            .collect();
++        let table: Result<Vec<_>, _> = (0..size).map(map_entry).collect();
+ 
+         let table = table?;
+         let sample_mask = table.len() as u32 - 1;

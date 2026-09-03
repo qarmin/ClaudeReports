@@ -1,0 +1,73 @@
+diff --git a/benches/imageops.rs b/benches/imageops.rs
+index d1b33ebe..6afa0a03 100644
+--- a/benches/imageops.rs
++++ b/benches/imageops.rs
+@@ -1,6 +1,6 @@
+ use std::{hint::black_box, time::Duration};
+ 
+-use criterion::{criterion_group, criterion_main, Criterion};
++use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+ use image::{
+     imageops::{self, FilterType},
+     math::Rect,
+@@ -27,6 +27,16 @@ pub fn bench_imageops(c: &mut Criterion) {
+     c.bench_function("contrast", |b| {
+         b.iter(|| imageops::contrast(&src, 5.0));
+     });
++    c.bench_function("contrast_in_place", |b| {
++        b.iter_batched(
++            || src.clone(),
++            |mut img| {
++                imageops::contrast_in_place(&mut img, 5.0);
++                img
++            },
++            BatchSize::LargeInput,
++        );
++    });
+ 
+     c.bench_function("dither", |b| {
+         let luma: GrayImage = src.convert();
+diff --git a/src/imageops/colorops.rs b/src/imageops/colorops.rs
+index 08b1651b..83eaa372 100644
+--- a/src/imageops/colorops.rs
++++ b/src/imageops/colorops.rs
+@@ -120,6 +120,7 @@ where
+ /// Negative values decrease the contrast and positive values increase the contrast.
+ ///
+ /// *[See also `contrast`.][contrast]*
++#[inline(always)]
+ pub fn contrast_in_place<I>(image: &mut I, contrast: f32)
+ where
+     I: GenericImage,
+@@ -131,7 +132,30 @@ where
+ 
+     let percent = ((100.0 + contrast) / 100.0).powi(2);
+ 
+-    // TODO find a way to use pixels?
++    // Fast path: see `invert`'s fast path (candidate 003) for the packed-buffer invariant this
++    // relies on. #[inline(always)] above forces this call site to inline (candidate 054's
++    // isolating control found contrast_in_place's baseline was NEVER inlined here to begin with,
++    // unlike brighten_in_place/invert/huerotate_in_place, so this annotation is not restoring a
++    // lost baseline optimization the way it did for brighten_in_place - it did not fix the
++    // regression when measured; see candidate 055's RESULT.md).
++    let pix_stride = <I::Pixel as Pixel>::CHANNEL_COUNT as usize;
++    if let Some(mut view) = image.to_pixel_view_mut() {
++        let (_, w, h) = view.flat().strides_cwh();
++        if w == pix_stride && h == width as usize * pix_stride {
++            for p in <I::Pixel as Pixel>::pixels_from_channels_mut(view.image_mut_slice()) {
++                p.apply(|b| {
++                    let c: f32 = NumCast::from(b).unwrap();
++
++                    let d = ((c / max - 0.5) * percent + 0.5) * max;
++                    let e = clamp(d, 0.0, max);
++
++                    NumCast::from(e).unwrap()
++                });
++            }
++            return;
++        }
++    }
++
+     for y in 0..height {
+         for x in 0..width {
+             let f = image.get_pixel(x, y).map(|b| {

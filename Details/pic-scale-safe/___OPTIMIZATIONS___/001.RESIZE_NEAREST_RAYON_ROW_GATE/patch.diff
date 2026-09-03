@@ -1,0 +1,50 @@
+diff --git a/src/resize_nearest.rs b/src/resize_nearest.rs
+index 65ca914..7681e6a 100644
+--- a/src/resize_nearest.rs
++++ b/src/resize_nearest.rs
+@@ -49,17 +49,7 @@ pub(crate) fn resize_nearest<T: Copy + Send + Sync, const CHANNELS: usize>(
+     let dst_stride = dst_width * CHANNELS;
+     let src_stride = src_width * CHANNELS;
+ 
+-    let iter;
+-    #[cfg(not(feature = "rayon"))]
+-    {
+-        iter = dst.chunks_exact_mut(dst_stride);
+-    }
+-    #[cfg(feature = "rayon")]
+-    {
+-        iter = dst.par_chunks_exact_mut(dst_stride);
+-    }
+-
+-    iter.enumerate().for_each(|(y, dst_row)| {
++    let process_row = |y: usize, dst_row: &mut [T]| {
+         let src_y = ((y as u64 * k_y + k_y_half) >> SHIFT) as usize;
+         let src_offset_y = src_y * src_stride;
+ 
+@@ -78,5 +68,25 @@ pub(crate) fn resize_nearest<T: Copy + Send + Sync, const CHANNELS: usize>(
+ 
+             src_x_fixed += k_x;
+         }
+-    });
++    };
++
++    // Below this many output rows, `par_chunks_exact_mut`'s own dispatch/join overhead
++    // (measured ~9-26us fixed cost on a 24-thread machine) dwarfs the ~1us of actual
++    // nearest-neighbor work, regardless of which/how-large a rayon pool absorbs it - see
++    // image-rs candidates 019-032 (`___OPTIMIZATIONS___/032.NEAREST_FILTER_SKIP_POOL_BELOW_THRESHOLD`)
++    // and this candidate (033) for the measurements that motivated this gate.
++    #[cfg(feature = "rayon")]
++    const MIN_ROWS_FOR_RAYON: usize = 32;
++
++    #[cfg(feature = "rayon")]
++    if dst_height >= MIN_ROWS_FOR_RAYON {
++        dst.par_chunks_exact_mut(dst_stride)
++            .enumerate()
++            .for_each(|(y, dst_row)| process_row(y, dst_row));
++        return;
++    }
++
++    dst.chunks_exact_mut(dst_stride)
++        .enumerate()
++        .for_each(|(y, dst_row)| process_row(y, dst_row));
+ }

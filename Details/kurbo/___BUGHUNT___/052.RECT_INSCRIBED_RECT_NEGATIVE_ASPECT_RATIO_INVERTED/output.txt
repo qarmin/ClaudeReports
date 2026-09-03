@@ -1,0 +1,81 @@
+=== BEFORE (pristine clone at ca273499e3e48bd2de6f02aa8e99a148984e45f3, `just clone && just reproduce-before`) ===
+cd repro && cargo run --release
+   Updating crates.io index
+     Locking 7 packages to latest compatible versions
+   Compiling arrayvec v0.7.8
+   Compiling smallvec v1.16.0
+   Compiling polycool v0.4.0 (/tmp/just052test/clone/polycool)
+   Compiling kurbo v0.13.1 (/tmp/just052test/clone/kurbo)
+   Compiling kurbo052repro v0.1.0 (/tmp/just052test/repro)
+    Finished `release` profile [optimized] target(s) in 1.06s
+     Running `target/release/kurbo052repro`
+outer = Rect { x0: 0.0, y0: 0.0, x1: 10.0, y1: 10.0 }, aspect_ratio = -1
+inner = Rect { x0: 10.0, y0: 0.0, x1: 0.0, y1: 10.0 }  width=-10 height=10
+
+thread 'main' (356665) panicked at src/main.rs:16:5:
+BUG: inner rect has x0 > x1 (inverted width): Rect { x0: 10.0, y0: 0.0, x1: 0.0, y1: 10.0 }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: Recipe `reproduce-before` failed on line 23 with exit code 101
+
+=== AFTER (`just apply && just reproduce-after`, patch.diff applied to the same clone) ===
+cd clone && git apply "/tmp/just052test/patch.diff"
+cd repro && cargo run --release
+   Compiling kurbo v0.13.1 (/tmp/just052test/clone/kurbo)
+   Compiling kurbo052repro v0.1.0 (/tmp/just052test/repro)
+    Finished `release` profile [optimized] target(s) in 0.73s
+     Running `target/release/kurbo052repro`
+outer = Rect { x0: 0.0, y0: 0.0, x1: 10.0, y1: 10.0 }, aspect_ratio = -1
+inner = Rect { x0: 0.0, y0: 0.0, x1: 10.0, y1: 10.0 }  width=10 height=10
+outer = Rect { x0: 0.0, y0: 0.0, x1: 20.0, y1: 10.0 }, aspect_ratio = -0.5
+inner = Rect { x0: 7.5, y0: 0.0, x1: 12.5, y1: 10.0 }  width=5 height=10
+outer = Rect { x0: 0.0, y0: 0.0, x1: 10.0, y1: 20.0 }, aspect_ratio = -4
+inner = Rect { x0: 0.0, y0: 8.75, x1: 10.0, y1: 11.25 }  width=10 height=2.5
+outer = Rect { x0: 0.0, y0: 0.0, x1: 10.0, y1: 20.0 }, aspect_ratio = 1
+inner = Rect { x0: 0.0, y0: 5.0, x1: 10.0, y1: 15.0 }  width=10 height=10
+All checks passed.
+
+=== Repeat runs (release build, `cargo run --release`, 3x each) confirming determinism ===
+--- pristine, run 1/3 ---
+outer = Rect { x0: 0.0, y0: 0.0, x1: 10.0, y1: 10.0 }, aspect_ratio = -1
+inner = Rect { x0: 10.0, y0: 0.0, x1: 0.0, y1: 10.0 }  width=-10 height=10
+thread 'main' (352207) panicked at src/main.rs:12:5:
+BUG: inner rect has x0 > x1 (inverted width): Rect { x0: 10.0, y0: 0.0, x1: 0.0, y1: 10.0 }
+--- pristine, run 2/3 ---
+outer = Rect { x0: 0.0, y0: 0.0, x1: 10.0, y1: 10.0 }, aspect_ratio = -1
+inner = Rect { x0: 10.0, y0: 0.0, x1: 0.0, y1: 10.0 }  width=-10 height=10
+thread 'main' (352219) panicked at src/main.rs:12:5:
+BUG: inner rect has x0 > x1 (inverted width): Rect { x0: 10.0, y0: 0.0, x1: 0.0, y1: 10.0 }
+--- pristine, run 3/3 ---
+outer = Rect { x0: 0.0, y0: 0.0, x1: 10.0, y1: 10.0 }, aspect_ratio = -1
+inner = Rect { x0: 10.0, y0: 0.0, x1: 0.0, y1: 10.0 }  width=-10 height=10
+thread 'main' (352231) panicked at src/main.rs:12:5:
+BUG: inner rect has x0 > x1 (inverted width): Rect { x0: 10.0, y0: 0.0, x1: 0.0, y1: 10.0 }
+--- pristine, debug build ---
+outer = Rect { x0: 0.0, y0: 0.0, x1: 10.0, y1: 10.0 }, aspect_ratio = -1
+inner = Rect { x0: 10.0, y0: 0.0, x1: 0.0, y1: 10.0 }  width=-10 height=10
+thread 'main' (352243) panicked at src/main.rs:12:5:
+BUG: inner rect has x0 > x1 (inverted width): Rect { x0: 10.0, y0: 0.0, x1: 0.0, y1: 10.0 }
+
+=== Existing project test suite, before the fix (`cargo test -p kurbo --lib`, ca273499e3e48bd2de6f02aa8e99a148984e45f3) ===
+test result: ok. 187 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+=== Existing project test suite, patch.diff applied WITHOUT updating the two "negative aspect
+ratio" test cases (shows those 2 pre-existing cases hard-coded the buggy/inverted output as
+"expected") ===
+thread 'rect::tests::contained_rect_with_aspect_ratio' (354626) panicked at kurbo/src/rect.rs:905:9:
+assertion `left == right` failed
+  left: Rect { x0: 0.0, y0: 5.0, x1: 10.0, y1: 15.0 }
+ right: Rect { x0: 0.0, y0: 15.0, x1: 10.0, y1: 5.0 }
+thread 'rect::tests::inscribed_rect_with_aspect_ratio' (354632) panicked at kurbo/src/rect.rs:944:9:
+assertion `left == right` failed
+  left: Rect { x0: 0.0, y0: 5.0, x1: 10.0, y1: 15.0 }
+ right: Rect { x0: 0.0, y0: 15.0, x1: 10.0, y1: 5.0 }
+test result: FAILED. 185 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+=== Existing project test suite, after the fix AND updating those same 2 test cases to the
+corrected (non-inverted) expected values (part of patch.diff) ===
+test result: ok. 187 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+=== Full workspace test suite (`cargo test --workspace`, includes doctests), after the fix ===
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+all doctests ran in 0.32s; merged doctests compilation took 0.31s

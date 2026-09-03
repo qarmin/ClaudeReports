@@ -1,0 +1,38 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+# patch.diff bundles a harness-only hunk (a new `thumbnail 4032x3024 -> 200x150` criterion case
+# in benches/imageops.rs) with the actual fix (src/imageops/sample.rs). apply-harness applies
+# just the former so the same benchmark exists in both the baseline and patched build; apply-fix
+# applies the latter on top, for the patched build only.
+test: clone apply-harness bench-baseline apply-fix bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-harness:
+    cd clone && git apply --exclude='src/imageops/sample.rs' "{{justfile_directory()}}/patch.diff"
+
+apply-fix:
+    cd clone && git apply --include='src/imageops/sample.rs' "{{justfile_directory()}}/patch.diff"
+
+bench-baseline:
+    @echo "=== baseline (before patch) ==="
+    cd clone && cargo bench --bench imageops -- --exact "thumbnail 4032x3024 -> 200x150"
+
+bench-patched:
+    @echo "=== patched (after patch) ==="
+    cd clone && cargo bench --bench imageops -- --exact "thumbnail 4032x3024 -> 200x150"
+
+clean:
+    rm -rf clone

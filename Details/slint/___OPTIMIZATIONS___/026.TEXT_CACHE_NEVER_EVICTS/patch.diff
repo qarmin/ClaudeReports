@@ -1,0 +1,143 @@
+diff --git a/internal/core/item_rendering.rs b/internal/core/item_rendering.rs
+index 7d181113c..df6acf8ec 100644
+--- a/internal/core/item_rendering.rs
++++ b/internal/core/item_rendering.rs
+@@ -144,6 +144,25 @@ pub fn is_empty(&self) -> bool {
+         self.map.borrow().is_empty()
+     }
+ 
++    /// Calls `f` with every entry's data. For a cache implementation that needs to inspect its
++    /// whole population (e.g. to decide what to evict), not for per-item lookups.
++    pub fn for_each(&self, mut f: impl FnMut(&T)) {
++        for per_component in self.map.borrow().values() {
++            for entry in per_component.values() {
++                f(&entry.data);
++            }
++        }
++    }
++
++    /// Keeps only the entries for which `f` returns true, dropping the rest (and dropping any
++    /// component whose every entry was removed, so an emptied-out component doesn't linger).
++    pub fn retain(&self, mut f: impl FnMut(&T) -> bool) {
++        self.map.borrow_mut().retain(|_, per_component| {
++            per_component.retain(|_, entry| f(&entry.data));
++            !per_component.is_empty()
++        });
++    }
++
+     /// Returns a [`RefMut`](std::cell::RefMut) referencing the cached value associated with
+     /// `item_rc`, updating the cache entry first if necessary using `update_fn`.
+     ///
+diff --git a/internal/core/textlayout/sharedparley/cache.rs b/internal/core/textlayout/sharedparley/cache.rs
+index 33a486cd0..da6d61213 100644
+--- a/internal/core/textlayout/sharedparley/cache.rs
++++ b/internal/core/textlayout/sharedparley/cache.rs
+@@ -33,13 +33,31 @@ struct CachedParagraphs {
+     /// them back when it drops. Finding `None` here therefore means the previous caller returned
+     /// without handing them back, and the entry has to be reshaped rather than served empty.
+     paragraphs: Option<Vec<TextParagraph>>,
++    /// Monotonic stamp set every time this entry is served (hit or miss) - what the eviction
++    /// sweep in [`TextLayoutCache::sweep`] ranks entries by.
++    last_used: u64,
+ }
+ 
+ type InnerTextLayoutCache = crate::item_rendering::ItemCache<CachedParagraphs>;
+ 
++/// Above this many entries, [`TextLayoutCache::sweep`] drops the oldest half. Chosen so the
++/// bound (~4.7 KB/entry, see `___OPTIMIZATIONS___/026.TEXT_CACHE_NEVER_EVICTS`) caps retained
++/// shaped text at a few MB regardless of how many `Text`/`TextInput` items a scene has, while
++/// still comfortably covering a `ListView`-sized visible set (tens of entries).
++const ENTRY_LIMIT: usize = 1024;
++
+ /// Cache for shaped text paragraphs (before line breaking), keyed by ItemRc.
+ pub struct TextLayoutCache {
+     inner: InnerTextLayoutCache,
++    /// Ticks on every entry served; not wall-clock, just a total order for "which entries are
++    /// oldest".
++    clock: std::cell::Cell<u64>,
++    /// Grows by one on every newly-inserted entry, reset to the post-sweep count by `sweep`.
++    /// Called an "estimate" because it doesn't shrink when an entry is dropped by anything other
++    /// than a sweep (a stale-wrap release, a scale-factor change, component destruction) - none
++    /// of those need to be exact, only "have we probably grown past ENTRY_LIMIT" does, and a
++    /// stale-high estimate just triggers one extra sweep that finds fewer entries than expected.
++    entry_count_estimate: std::cell::Cell<usize>,
+     #[cfg(feature = "testing")]
+     cache_miss_count: std::cell::Cell<u64>,
+     #[cfg(feature = "testing")]
+@@ -51,6 +69,8 @@ impl Default for TextLayoutCache {
+     fn default() -> Self {
+         Self {
+             inner: Default::default(),
++            clock: Default::default(),
++            entry_count_estimate: Default::default(),
+             #[cfg(feature = "testing")]
+             cache_miss_count: std::cell::Cell::new(0),
+             #[cfg(feature = "testing")]
+@@ -73,6 +93,40 @@ pub fn component_destroyed(&self, component: crate::item_tree::ItemTreeRef) {
+     pub fn clear_all(&self) {
+         self.inner.clear_all();
+     }
++
++    fn next_stamp(&self) -> u64 {
++        let stamp = self.clock.get().wrapping_add(1);
++        self.clock.set(stamp);
++        stamp
++    }
++
++    /// Drops every entry whose `last_used` stamp isn't among the `keep` newest, leaving `keep`
++    /// entries behind. Runs in O(entries): one pass to collect stamps, one to filter - amortized,
++    /// since the next sweep is `keep` insertions away (an evicted entry only reshapes on next
++    /// use, the same path an invalidated entry already takes - see `cached_paragraphs`).
++    fn sweep(&self) {
++        let mut stamps: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
++        self.inner.for_each(|entry| stamps.push(entry.last_used));
++        if let Some(cutoff) = eviction_cutoff(&mut stamps, ENTRY_LIMIT / 2) {
++            self.inner.retain(|entry| entry.last_used >= cutoff);
++            self.entry_count_estimate.set(ENTRY_LIMIT / 2);
++        } else {
++            self.entry_count_estimate.set(stamps.len());
++        }
++    }
++}
++
++/// The stamp such that retaining every entry with `last_used >= cutoff` keeps exactly the `keep`
++/// newest of `stamps` (ties broken arbitrarily - `last_used` values are unique in practice since
++/// they come from one monotonic counter, so ties don't arise). `None` if `stamps` doesn't even
++/// have `keep` entries, i.e. nothing needs evicting. Factored out of `TextLayoutCache::sweep` so
++/// the cutoff math is testable without a live item tree/cache.
++fn eviction_cutoff(stamps: &mut [u64], keep: usize) -> Option<u64> {
++    if keep == 0 || stamps.len() <= keep {
++        return None;
++    }
++    stamps.sort_unstable_by(|a, b| b.cmp(a));
++    Some(stamps[keep - 1])
+ }
+ 
+ #[cfg(feature = "testing")]
+@@ -179,11 +233,25 @@ pub(super) fn cached_paragraphs<'a>(
+         cache.inner.release(item_rc);
+     }
+ 
++    // Run before checking this item's own entry out: the sweep needs `retain`'s mutable access
++    // to the whole cache, which a checked-out entry's `RefMut` (held for the rest of this
++    // function, and by the guard after it returns) would make unavailable.
++    if cache.entry_count_estimate.get() > ENTRY_LIMIT {
++        cache.sweep();
++    }
++
+     let mut entry = cache.inner.get_or_update_cache_entry_ref(item_rc, || {
+         #[cfg(feature = "testing")]
+         cache.cache_miss_count.set(cache.cache_miss_count.get() + 1);
+-        CachedParagraphs { wrap, paragraphs: Some(shape(font_context)), line_breaking: None }
++        cache.entry_count_estimate.set(cache.entry_count_estimate.get() + 1);
++        CachedParagraphs {
++            wrap,
++            paragraphs: Some(shape(font_context)),
++            line_breaking: None,
++            last_used: 0, // stamped unconditionally right below, for both a hit and this miss
++        }
+     });
++    entry.last_used = cache.next_stamp();
+     let paragraphs = entry.paragraphs.take().unwrap_or_default();
+     CachedParagraphsGuard {
+         paragraphs: Some(paragraphs),

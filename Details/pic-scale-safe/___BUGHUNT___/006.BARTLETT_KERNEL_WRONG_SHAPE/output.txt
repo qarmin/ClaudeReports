@@ -1,0 +1,54 @@
+Captured output of `cd repro && cargo run --release`, run twice against the pristine clone at
+base_commit 83c4801428c436678d7c6b6bea74af800924a469 - byte-for-byte identical both times (pure
+deterministic function, no randomness, no threads).
+
+=== BEFORE the fix (against pristine clone, exit code 1) ===
+bartlett(0) = 0
+max |bartlett(x) - reference_triangle(x)| over x in [0,2] = 2e0 at x = 2
+min value over x in [0,2] = -2, monotonic non-increasing = false
+bartlett(1-eps) = 1.999998, bartlett(1+eps) = -0.0000019999999998354667
+REPRODUCED - 5 check(s) failed:
+  - wrong value at centre: bartlett(0) = 0, want 1.0 (peak weight)
+  - does not match textbook triangular window: max abs err 2e0 at x=2 (tolerance 1e-9)
+  - negative tap(s) found, most negative = -2 (a triangular window must stay >= 0)
+  - not monotonically non-increasing away from the centre
+  - discontinuous at x=1: left=1.999998, right=-0.0000019999999998354667, jump=1.9999999999999998
+
+=== AFTER `git apply patch.diff` to the clone (exit code 0) ===
+bartlett(0) = 1
+max |bartlett(x) - reference_triangle(x)| over x in [0,2] = 0e0 at x = 0
+min value over x in [0,2] = 0, monotonic non-increasing = true
+bartlett(1-eps) = 0.5000005000000001, bartlett(1+eps) = 0.49999950000000004
+did not reproduce - bartlett() matches the textbook triangular window shape
+
+=== Supplementary: public-API observation (not part of repro/, done ad hoc during triage) ===
+Upsampling a single 1.0 spike among zeros (`resize_plane_f32`, width 21 -> 168, height 1,
+`ResamplingFunction::Bartlett`) via the crate's public API:
+
+Before the fix: output ranges from -7.5 to +8.5 (should stay within the source's [0, 1] range for
+a non-negative-weight smoothing filter):
+  76: -7.5
+  77: -2.1666667
+  78: -1.1
+  79: -0.6428572
+  84: -0.5
+  85: -0.5
+  86: -0.5
+  87: -0.5
+  92: 0.5
+  93: 0.5
+  94: 0.5
+  95: 0.5
+  100: 8.5
+  101: 3.1666667
+  102: 2.1000001
+  103: 1.6428572
+
+After the fix: output stays within [0, ~0.5] and is a smooth, symmetric, monotonically decreasing
+ramp around the spike's mapped location (index ~84):
+  min=0 max=0.49206352
+  72: 0.140625
+  ...
+  84: 0.49206352
+  ...
+  99: 0.015625

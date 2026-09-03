@@ -1,0 +1,57 @@
+diff --git a/benches/imageops.rs b/benches/imageops.rs
+index d1b33ebe..e6f20938 100644
+--- a/benches/imageops.rs
++++ b/benches/imageops.rs
+@@ -4,7 +4,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
+ use image::{
+     imageops::{self, FilterType},
+     math::Rect,
+-    DynamicImage, GrayImage, ImageBuffer, Rgb,
++    DynamicImage, GrayImage, ImageBuffer, Rgb, Rgba,
+ };
+ 
+ pub fn bench_imageops(c: &mut Criterion) {
+@@ -90,6 +90,23 @@ pub fn bench_imageops(c: &mut Criterion) {
+         let palette = &[(1, 2, 3); 256];
+         b.iter(|| src_gray.expand_palette(black_box(palette), black_box(None)));
+     });
++
++    // SubImage-backed overlay: exercises SubImageInner::get_pixel/put_pixel from
++    // imageops::overlay's per-pixel loop, a different module than sub_image.rs.
++    let top = ImageBuffer::from_fn(300, 300, |x, y| {
++        Rgba([x as u8, (y / 8) as u8, ((x * 13 + y) % 256) as u8, 180u8])
++    });
++    c.bench_function("sub image overlay", |b| {
++        b.iter_batched(
++            || src.clone().convert::<Rgba<u8>>(),
++            |mut bottom| {
++                let mut sub = imageops::crop_mut(&mut bottom, Rect { x: 0, y: 0, width: 1920, height: 1080 });
++                imageops::overlay(&mut *sub, black_box(&top), black_box(100), black_box(60));
++                bottom
++            },
++            criterion::BatchSize::LargeInput,
++        );
++    });
+ }
+ 
+ pub fn bench_resize(c: &mut Criterion) {
+diff --git a/src/images/sub_image.rs b/src/images/sub_image.rs
+index a66ab905..c6b3a2c6 100644
+--- a/src/images/sub_image.rs
++++ b/src/images/sub_image.rs
+@@ -202,6 +202,7 @@ where
+         (self.xstride, self.ystride)
+     }
+ 
++    #[inline(always)]
+     fn get_pixel(&self, x: u32, y: u32) -> Self::Pixel {
+         self.image.get_pixel(x + self.xoffset, y + self.yoffset)
+     }
+@@ -238,6 +239,7 @@ where
+     I: DerefMut,
+     I::Target: GenericImage + Sized,
+ {
++    #[inline(always)]
+     fn put_pixel(&mut self, x: u32, y: u32, pixel: Self::Pixel) {
+         self.image
+             .put_pixel(x + self.xoffset, y + self.yoffset, pixel);

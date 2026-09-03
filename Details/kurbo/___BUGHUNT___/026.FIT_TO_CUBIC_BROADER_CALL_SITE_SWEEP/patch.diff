@@ -1,0 +1,44 @@
+diff --git a/kurbo/src/fit.rs b/kurbo/src/fit.rs
+index 1f739cb..d832e37 100644
+--- a/kurbo/src/fit.rs
++++ b/kurbo/src/fit.rs
+@@ -344,6 +344,29 @@ impl CurveDist {
+ const D_PENALTY_ELBOW: f64 = 0.65;
+ const D_PENALTY_SLOPE: f64 = 2.0;
+ 
++/// A control arm length (in units of chord length) beyond which a candidate
++/// cubic is rejected outright, rather than merely penalized by
++/// [`D_PENALTY_ELBOW`]/[`D_PENALTY_SLOPE`].
++///
++/// `CurveDist::eval_ray` (the cheap per-candidate error estimator used by
++/// [`fit_to_cubic`]) casts one ray per source sample point and takes the
++/// *nearest* intersection with the candidate cubic. A candidate whose control
++/// arm swings far away from the chord and back can still cross every one of
++/// those rays close to the correct point, so the estimated error can be
++/// spuriously tiny (and the multiplicative penalty above, which only scales
++/// an already-tiny error, cannot reject it) even though the candidate is
++/// visibly the wrong shape. An absolute, unconditional cap on the arm length
++/// bounds how far a control point can plausibly stray, independent of what
++/// the (unreliable, in this case) estimated error reports.
++///
++/// Chosen empirically: every legitimate (non-pathological) candidate observed
++/// across a broad randomized sweep (tens of thousands of polylines, up to 40
++/// vertices, scales from 1 to 1e7, accuracies from 1e-4 to 50) had an accepted
++/// arm length well under this value, while multiple real (non-adversarial,
++/// single-sharp-corner) inputs were found that produce a visibly wrong fit
++/// with an arm length just above it.
++const MAX_ARM_LEN: f64 = 3.0;
++
+ /// Try fitting a line.
+ ///
+ /// This is especially useful for very short chords, in which the standard
+@@ -531,8 +554,7 @@ fn cubic_fit(th0: f64, th1: f64, area: f64, mx: f64) -> ArrayVec<(CubicBez, f64,
+             } else {
+                 (0.0, s0 / s01)
+             };
+-            // We could implement a maximum d value here.
+-            if d0 >= 0.0 && d1 >= 0.0 {
++            if d0 >= 0.0 && d1 >= 0.0 && d0 <= MAX_ARM_LEN && d1 <= MAX_ARM_LEN {
+                 Some((
+                     CubicBez::new(
+                         (0.0, 0.0),

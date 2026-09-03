@@ -1,0 +1,140 @@
+diff --git a/sparse_strips/vello_hybrid/src/gradient_cache.rs b/sparse_strips/vello_hybrid/src/gradient_cache.rs
+index ceba6339..b24b957e 100644
+--- a/sparse_strips/vello_hybrid/src/gradient_cache.rs
++++ b/sparse_strips/vello_hybrid/src/gradient_cache.rs
+@@ -530,6 +530,135 @@ mod tests {
+         assert!(cache.cache.contains_key(&encoded_gradient3.cache_key));
+     }
+ 
++    /// Minimal xorshift64* PRNG, deterministic and dependency-free, for the randomized
++    /// stress test below.
++    struct Xorshift(u64);
++
++    impl Xorshift {
++        fn next_u64(&mut self) -> u64 {
++            let mut x = self.0;
++            x ^= x << 13;
++            x ^= x >> 7;
++            x ^= x << 17;
++            self.0 = x;
++            x
++        }
++
++        fn next_range(&mut self, n: u64) -> u64 {
++            self.next_u64() % n
++        }
++    }
++
++    /// Builds a gradient with `n_stops` stops (`n_stops >= 2`), evenly spaced except the
++    /// stops before `tight_idx` (if `Some`) are squeezed into a tiny range to trigger a
++    /// larger-than-default LUT resolution (see `determine_lut_size`).
++    fn create_gradient_varied(n_stops: usize, tight: bool, seed: u64) -> Gradient {
++        assert!(n_stops >= 2);
++        let mut offsets: Vec<f32> = (0..n_stops)
++            .map(|i| i as f32 / (n_stops - 1) as f32)
++            .collect();
++        if tight {
++            // Squeeze the second stop very close to the first one to force a bigger LUT.
++            offsets[1] = 0.0005;
++        }
++        let stops: Vec<ColorStop> = offsets
++            .iter()
++            .enumerate()
++            .map(|(i, offset)| ColorStop {
++                offset: *offset,
++                color: DynamicColor::from_alpha_color(Color::from_rgb8(
++                    ((seed + i as u64) % 256) as u8,
++                    ((seed * 3 + i as u64 * 7) % 256) as u8,
++                    ((seed * 5 + i as u64 * 11) % 256) as u8,
++                )),
++            })
++            .collect();
++
++        Gradient {
++            kind: LinearGradientPosition {
++                start: Point::new(0.0, 0.0),
++                end: Point::new(100.0, 0.0),
++            }
++            .into(),
++            stops: ColorStops(stops.into()),
++            interpolation_cs: ColorSpaceTag::Srgb,
++            hue_direction: HueDirection::Shorter,
++            ..Default::default()
++        }
++    }
++
++    /// Verifies the packed-LUT invariant `compact_luts` relies on: all remaining cache
++    /// entries' `[lut_start, lut_start + width)` ranges (in texels) exactly and
++    /// contiguously partition `[0, luts.len() / BYTES_PER_TEXEL)`, sorted by `lut_start`,
++    /// with no gaps or overlaps.
++    fn check_invariants(cache: &GradientRampCache) {
++        let mut ranges: Vec<(u32, u32)> = cache
++            .cache
++            .values()
++            .map(|(ramp, _)| (ramp.lut_start, ramp.width))
++            .collect();
++        ranges.sort_unstable();
++
++        let mut expected_start = 0_u32;
++        for &(start, width) in &ranges {
++            assert_eq!(
++                start, expected_start,
++                "gap/overlap detected in packed LUT layout: ranges={ranges:?}"
++            );
++            expected_start += width;
++        }
++        assert_eq!(
++            (expected_start * BYTES_PER_TEXEL) as usize,
++            cache.luts.len(),
++            "packed luts length does not match sum of remaining widths: ranges={ranges:?}"
++        );
++    }
++
++    #[test]
++    fn fuzz_compact_luts_invariants() {
++        for seed in 0..40_u64 {
++            let mut rng = Xorshift((seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)) | 1);
++            let retained_count = 1 + rng.next_range(6) as u32;
++            let mut cache = GradientRampCache::new(retained_count, Level::baseline());
++
++            for step in 0..300_u64 {
++                let n_stops = 2 + rng.next_range(5) as usize;
++                let tight = rng.next_range(4) == 0;
++                let gradient = create_gradient_varied(n_stops, tight, seed * 1000 + step);
++                insert_entry(&mut cache, gradient);
++
++                if rng.next_range(3) == 0 {
++                    cache.maintain();
++                    check_invariants(&cache);
++                }
++            }
++            cache.maintain();
++            check_invariants(&cache);
++        }
++    }
++
++    /// Steady eviction churn: `maintain()` runs after *every* insertion (so `evict(1)` fires
++    /// almost every step once the cache is full), with `retained_count == 0` (evicts down to
++    /// empty every time) and `retained_count == 1` as the tightest possible boundary cases.
++    #[test]
++    fn fuzz_compact_luts_steady_churn() {
++        for retained_count in [0_u32, 1, 2] {
++            for seed in 0..10_u64 {
++                let mut rng = Xorshift((seed.wrapping_mul(0x2545_F491_4F6C_DD1D)) | 1);
++                let mut cache = GradientRampCache::new(retained_count, Level::baseline());
++
++                for step in 0..300_u64 {
++                    let n_stops = 2 + rng.next_range(5) as usize;
++                    let tight = rng.next_range(4) == 0;
++                    let gradient = create_gradient_varied(n_stops, tight, seed * 1000 + step);
++                    insert_entry(&mut cache, gradient);
++                    cache.maintain();
++                    check_invariants(&cache);
++                }
++            }
++        }
++    }
++
+     #[test]
+     fn test_lut_start_invalidation() {
+         let mut cache = GradientRampCache::new(2, Level::baseline());

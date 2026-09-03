@@ -1,0 +1,21 @@
+=== Part 1: isolated arithmetic demonstration (not calling the crate's private API) ===
+hypothetical premultiplied pixel: component=153, alpha=152 (violates the component<=alpha precondition by 1)
+  reciprocal(alpha=152) = 429
+  product = component * reciprocal = 101
+  (product + 128) >> 8 = 0  <-- correct answer should be near 255 (white)
+  ... but `as u8` truncation/wraparound yields: 0  <-- collapses to near-BLACK
+Confirms: IF this precondition is ever violated by a real caller, the isolated arithmetic silently produces a drastically wrong (near-black instead of near-white) result. Part 2 below checks whether real rendering can ever actually violate it.
+
+=== Part 2: real end-to-end search via vello_cpu::RenderContext's public API (RenderMode::OptimizeQuality and OptimizeSpeed alternating, random Mix/Compose blend modes, random layer nesting, anti-aliased fractional coverage) ===
+running 2000000 randomized scenes on an 8x8 canvas (128000000 pixel checks)...
+
+tried 2000000 real-rendered scenes, found 0 real invariant violations
+did NOT reproduce via the real end-to-end rendering path - real rendering never produced a `component > alpha` premultiplied pixel in this search.
+
+=== Supplementary run: same search, debug-assertions build (`cargo build`, no `--release`), 500,000 iterations ===
+(Confirms no panic anywhere in the real render pipeline either - including inside any accidental
+reachable path into the overflow-prone `+` in `Div256Ext::div_256`, which is not `wrapping_add` and
+would panic under debug-assertions if it were ever actually invoked with a violating component.)
+tried 500000 real-rendered scenes, found 0 real invariant violations
+did NOT reproduce via the real end-to-end rendering path - real rendering never produced a `component > alpha` premultiplied pixel in this search.
+(wall-clock: 1m25s for 500,000 iterations, debug build - about 20x slower per iteration than the release build above, as expected)

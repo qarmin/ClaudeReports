@@ -1,0 +1,59 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+# This candidate makes no new source-level change (see RESULT.md's "Does it change
+# behavior/output?"): it re-measures candidate 036's already-fixed vendored dispatch (this
+# folder's own patch.diff is byte-identical to 036's in every vendored-source hunk) at a new,
+# genuinely small destination size (400x300->8x6, below the 8-row floor) that candidate 036's own
+# benchmark never covered. `patch.diff` bundles that mechanism (candidate 036's) together with the
+# new bench addon so this folder still builds standalone. `test` reproduces "E vs H" from
+# RESULT.md by building candidate 035's own patch (E, no floor) and this candidate's patch.diff
+# (H, 036's floor) side by side, both with the same bench addon applied, then bench-comparing them
+# at the new 8x6 scenario for all 5 filters.
+test: clone bench-e apply-h bench-h
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# "E" = candidate 035's own fix (always-dispatch per-filter pool, no row floor) - fetched from
+# this workspace's sibling candidate folder, since candidate 038 only ever measures against it,
+# never re-derives it. Falls back to a clear error if that folder isn't present alongside this one
+# (see the header comment on why this folder assumes the whole ___OPTIMIZATIONS___ tree, same
+# relaxation candidates 034-037 already use for the vendored crate).
+apply-e:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    e_patch="{{justfile_directory()}}/../035.VENDORED_DISPATCH_PER_FILTER_THREAD_CAP/patch.diff"
+    if [ ! -f "$e_patch" ]; then
+        echo "error: expected sibling candidate folder 035.VENDORED_DISPATCH_PER_FILTER_THREAD_CAP/patch.diff not found - this candidate compares against it, see RESULT.md" >&2
+        exit 1
+    fi
+    cd clone
+    git apply "$e_patch"
+    git apply "{{justfile_directory()}}/bench_dst6_addon.diff"
+
+bench-e: apply-e
+    @echo "=== E: candidate 035's always-dispatch pool, no floor - 8x6 (dst_height=6, below H's floor) ==="
+    cd clone && cargo bench --bench imageops --features rayon -- "dynamic_resize/DynamicImage::resize_exact 400x300->8x6 (Triangle|CatmullRom|Gaussian|Lanczos3|Nearest)"
+
+# Reset clone back to pristine before applying H, since apply-e already patched it.
+apply-h:
+    cd clone && git checkout -- Cargo.toml benches/imageops.rs && rm -rf vendor
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+bench-h: apply-h
+    @echo "=== H: this candidate's fix (== candidate 036's 8-row floor) - 8x6 (dst_height=6, below the floor) ==="
+    cd clone && cargo bench --bench imageops --features rayon -- "dynamic_resize/DynamicImage::resize_exact 400x300->8x6 (Triangle|CatmullRom|Gaussian|Lanczos3|Nearest)"
+
+clean:
+    rm -rf clone

@@ -1,0 +1,95 @@
+# Self-contained reproduction for candidate 019.BORROWED_WRITE_DATASET.
+#
+# Uses dicom-rs's own bench_pipeline harness (untracked in the main repo - see SKILL.md's
+# "shape 3" pattern). Self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+# The harness's own `write-dataset-only`/`write-dataset-peak-mem`/`dump-dataset`/
+# `verify-borrowed-edge-cases` modes, and their `*-consuming` counterparts for the comparison
+# against the issue's own originally-proposed consuming-`self` API (see patch.diff's fenced
+# "BEGIN/END comparison-only code" block and RESULT.md's comparison section), are part of the
+# harness copy below, not something this justfile adds itself.
+#
+# Unlike other candidates in this workspace, the benchmark fixture is NOT shipped in testdata/ -
+# a representative fixture for this fix (large NATIVE, non-encapsulated pixel data, the exact
+# shape of issue #641's "1 GB object") is ~500 MB, too large to keep in this folder. `bench`
+# regenerates it on the fly with the harness's own `gen-mono` mode from a small pydicom fixture
+# (CT_small.dcm, fetched automatically by the dicom-test-files crate on first use).
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    # --features comparison-ts2 enables the harness's *-consuming modes, which call
+    # write_dataset_with_ts2 - only exists once patch.diff's comparison-only block is applied
+    # (build-baseline deliberately does NOT use this feature, since that method doesn't exist yet)
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --features comparison-ts2
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="$(pwd)"
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline
+    echo "=== generating a ~490 MB native-pixel-data fixture (issue #641's scenario) ==="
+    # must run the binary from inside its own target/release/ (not the copied bin_baseline) -
+    # dicom-test-files locates its download cache by walking up from `current_exe()` looking for
+    # a literal "target" ancestor directory, so a copy elsewhere panics with "Cannot find target
+    # directory"
+    ./target/release/bench gen-mono pydicom/CT_small.dcm testdata/ct_huge.dcm 15000
+    cd "$root"
+
+    echo "=== bit-exactness check (dump-dataset: write_dataset_with_ts directly) ==="
+    ./bin_baseline dump-dataset clone/___OPTIMIZATIONS___/harness/bench_pipeline/testdata/ct_huge.dcm > /tmp/candidate019_baseline_dump.bin
+    ./bin_patched dump-dataset clone/___OPTIMIZATIONS___/harness/bench_pipeline/testdata/ct_huge.dcm > /tmp/candidate019_patched_dump.bin
+    cmp /tmp/candidate019_baseline_dump.bin /tmp/candidate019_patched_dump.bin && echo "bit-exact" || echo "DIFFERS (unexpected)"
+
+    echo "=== edge cases: charset_changed, nested SQ, mixed empty/non-empty fragments ==="
+    diff <(./bin_baseline verify-borrowed-edge-cases) <(./bin_patched verify-borrowed-edge-cases) \
+        && echo "edge cases: bit-exact" || echo "edge cases: DIFFER (unexpected)"
+
+    echo "=== write_dataset_with_ts on ~490 MB native pixel data - expect a ~40% win ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- write-dataset-only clone/___OPTIMIZATIONS___/harness/bench_pipeline/testdata/ct_huge.dcm 5
+
+    echo ""
+    echo "=== comparison: borrowed (this fix) vs consuming (issue's own proposal) - patched binary only ==="
+    echo "bit-exact against each other?"
+    ./bin_patched dump-dataset clone/___OPTIMIZATIONS___/harness/bench_pipeline/testdata/ct_huge.dcm > /tmp/candidate019_borrowed_dump.bin
+    ./bin_patched dump-dataset-consuming clone/___OPTIMIZATIONS___/harness/bench_pipeline/testdata/ct_huge.dcm > /tmp/candidate019_consuming_dump.bin
+    cmp /tmp/candidate019_borrowed_dump.bin /tmp/candidate019_consuming_dump.bin && echo "bit-exact" || echo "DIFFERS (unexpected)"
+    echo "peak RSS (expect near-identical, both ~468MB below the original cloning baseline):"
+    ./bin_patched write-dataset-peak-mem clone/___OPTIMIZATIONS___/harness/bench_pipeline/testdata/ct_huge.dcm
+    ./bin_patched write-dataset-peak-mem-consuming clone/___OPTIMIZATIONS___/harness/bench_pipeline/testdata/ct_huge.dcm
+    echo "wall-clock, same binary two modes (expect consuming ~11% SLOWER than borrowed, see RESULT.md):"
+    fixture="clone/___OPTIMIZATIONS___/harness/bench_pipeline/testdata/ct_huge.dcm"
+    extract_p50_ms() {
+        ./bin_patched "$1" "$fixture" 5 2>/dev/null | grep -oE 'p50=[0-9.]+(us|ms)' | head -1 \
+            | awk '{line=$0; sub(/^p50=/,"",line); if (line ~ /us$/) {sub(/us$/,"",line); print line/1000} else {sub(/ms$/,"",line); print line+0}}'
+    }
+    a_wins=0
+    for _ in $(seq 1 "${RUNS:-9}"); do
+        a="$(extract_p50_ms write-dataset-only)"
+        b="$(extract_p50_ms write-dataset-only-consuming)"
+        echo "  borrowed=${a}ms  consuming=${b}ms"
+        awk -v a="$a" -v b="$b" 'BEGIN{exit !(b>a)}' && a_wins=$((a_wins+1))
+    done
+    echo "borrowed faster than consuming in $a_wins of ${RUNS:-9} pairs"
+
+clean:
+    rm -rf clone bin_baseline bin_patched

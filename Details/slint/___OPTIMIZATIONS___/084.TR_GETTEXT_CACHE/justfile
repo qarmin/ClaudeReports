@@ -1,0 +1,35 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench (baseline then patched).
+test: clone bench-baseline apply bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Standalone bench crate in ./bench, depending on `{ path = "../clone/internal/core" }`.
+# It calls `i_slint_core::translations::translate()` directly - no Slint window/component
+# needed, since the gettext-rs branch this candidate touches doesn't read GLOBAL_CONTEXT.
+bench-baseline:
+    cd bench && cargo build --release
+    TR_BENCH_TESTDATA="{{justfile_directory()}}/testdata" ./bench/target/release/tr_bench 300000 with-context
+
+bench-patched:
+    cd bench && cargo build --release
+    TR_BENCH_TESTDATA="{{justfile_directory()}}/testdata" ./bench/target/release/tr_bench 300000 with-context
+
+clean:
+    rm -rf clone bench/target

@@ -1,0 +1,726 @@
+diff --git a/internal/core/textlayout/sharedparley/draw.rs b/internal/core/textlayout/sharedparley/draw.rs
+index 9f214f8de..9f126dedc 100644
+--- a/internal/core/textlayout/sharedparley/draw.rs
++++ b/internal/core/textlayout/sharedparley/draw.rs
+@@ -86,13 +86,28 @@ pub(super) fn visible_band(item_renderer: &impl GlyphRenderer) -> Range<Physical
+     top..(top + clip.height_length() * scale_factor)
+ }
+ 
++/// The horizontal counterpart of [`visible_band`].
++///
++/// Lines are culled vertically but glyph *runs* were never culled horizontally, so a `no-wrap` line
++/// wider than the viewport submitted every glyph on it to the renderer. That is not only wasted
++/// work: the software renderer casts a glyph's device rect to `i16`, and `euclid`'s `cast()`
++/// unwraps, so a run far enough to the right **panics** - reachable with a ~5 000 character line at
++/// a 13 px font. Skipping runs that cannot reach the clip fixes both.
++pub(super) fn visible_columns(item_renderer: &impl GlyphRenderer) -> Range<PhysicalLength> {
++    let scale_factor = item_renderer.scale_factor();
++    let clip = item_renderer.get_current_clip();
++    let left = clip.origin.x_length() * scale_factor;
++    left..(left + clip.width_length() * scale_factor)
++}
++
+ impl TextParagraph {
+     fn draw<R: GlyphRenderer>(
+         &self,
+-        layout: &Layout,
++        layout: &Layout<'_>,
+         paragraph_index: usize,
+         visible_extent: Option<ElisionCut>,
+         visible_band: &Range<PhysicalLength>,
++        visible_columns: Option<&Range<PhysicalLength>>,
+         item_renderer: &mut R,
+         default_fill_brush: &<R as GlyphRenderer>::PlatformBrush,
+         default_stroke_brush: &Option<<R as GlyphRenderer>::PlatformBrush>,
+@@ -101,7 +116,13 @@ fn draw<R: GlyphRenderer>(
+     ) {
+         let para_y = layout.y_offset + self.y;
+ 
+-        let line_count = self.layout.lines().len();
++        // The one place a drawn paragraph's glyphs are asked for; a large document only keeps the
++        // ones a draw like this reached for (see `Layout::glyphs`).
++        let Some(glyphs) = layout.glyphs(paragraph_index) else {
++            return;
++        };
++
++        let line_count = glyphs.lines().len();
+ 
+         // For `overflow: elide` with a height limit (`overflow: clip` applies a hard pixel clip
+         // instead) and for `max-lines`, `visible_extent` decides -- across all paragraphs -- the
+@@ -123,9 +144,15 @@ fn draw<R: GlyphRenderer>(
+             _ => (line_count.saturating_sub(1), false),
+         };
+ 
+-        self.draw_inline_code_backgrounds(item_renderer, para_y, default_text_color, last_drawn);
++        self.draw_inline_code_backgrounds(
++            &glyphs,
++            item_renderer,
++            para_y,
++            default_text_color,
++            last_drawn,
++        );
+ 
+-        for (index, line) in self.layout.lines().enumerate() {
++        for (index, line) in glyphs.lines().enumerate() {
+             // Stop once we are past the last kept line of the last kept paragraph.
+             if index > last_drawn {
+                 break;
+@@ -170,6 +197,21 @@ fn draw<R: GlyphRenderer>(
+             for item in line.items() {
+                 match item {
+                     parley::PositionedLayoutItem::GlyphRun(glyph_run) => {
++                        // Runs that cannot reach the clip horizontally. Padded by one line height
++                        // for ink that overhangs the run's advance (italics, swashes), the same
++                        // slack the vertical cull uses. Skipped only when nothing is being elided:
++                        // the ellipsis is placed from the run that overflows, so dropping runs
++                        // under `overflow: elide` could lose it.
++                        if let Some(columns) = visible_columns {
++                            let run_start = PhysicalLength::new(glyph_run.offset());
++                            let run_end =
++                                PhysicalLength::new(glyph_run.offset() + glyph_run.advance());
++                            if run_end + line_height < columns.start
++                                || run_start - line_height > columns.end
++                            {
++                                continue;
++                            }
++                        }
+                         let ellipsis = if last_line {
+                             let (truncated_glyphs, ellipsis) = layout.glyphs_with_elision(
+                                 &glyph_run,
+@@ -183,6 +225,7 @@ fn draw<R: GlyphRenderer>(
+                                 default_fill_brush,
+                                 default_stroke_brush,
+                                 para_y,
++                                visible_columns,
+                                 &mut truncated_glyphs.into_iter(),
+                                 selection.map(|selection| &selection.foreground),
+                                 line_spans.unwrap_or_default(),
+@@ -195,6 +238,7 @@ fn draw<R: GlyphRenderer>(
+                                 default_fill_brush,
+                                 default_stroke_brush,
+                                 para_y,
++                                visible_columns,
+                                 &mut glyph_run.positioned_glyphs(),
+                                 selection.map(|selection| &selection.foreground),
+                                 line_spans.unwrap_or_default(),
+@@ -227,6 +271,7 @@ fn draw<R: GlyphRenderer>(
+     /// without any user-facing styling property.
+     fn draw_inline_code_backgrounds<R: GlyphRenderer>(
+         &self,
++        glyphs: &parley::Layout<Brush>,
+         item_renderer: &mut R,
+         para_y: PhysicalLength,
+         default_text_color: Color,
+@@ -265,7 +310,7 @@ fn draw_inline_code_backgrounds<R: GlyphRenderer>(
+ 
+         // Capsules only under lines that are drawn: lines past the visible-extent cut
+         // (`overflow: elide` height limit or `max-lines`) don't render their glyphs either.
+-        for line in self.layout.lines().take(last_drawn + 1) {
++        for line in glyphs.lines().take(last_drawn + 1) {
+             for item in line.items() {
+                 let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                     continue;
+@@ -347,6 +392,11 @@ fn draw_glyph_run_with_selection<R: GlyphRenderer>(
+         default_fill_brush: &<R as GlyphRenderer>::PlatformBrush,
+         default_stroke_brush: &Option<<R as GlyphRenderer>::PlatformBrush>,
+         para_y: PhysicalLength,
++        // Glyphs outside this horizontal band are dropped. A `no-wrap` line of uniform style is a
++        // *single* glyph run spanning the whole line, so culling runs is not enough - the glyphs
++        // themselves have to be filtered, or a 5 000 character line hands the software renderer a
++        // device rect it cannot cast to `i16` and it panics. `None` when eliding.
++        visible_columns: Option<&Range<PhysicalLength>>,
+         glyphs_it: &mut dyn Iterator<Item = parley::layout::Glyph>,
+         // The selection foreground, and the spans it covers on this run's line. Both empty when
+         // there is no selection, which `run_coverage` reports as `Unselected`.
+@@ -355,6 +405,17 @@ fn draw_glyph_run_with_selection<R: GlyphRenderer>(
+     ) {
+         let run_x = glyph_run.offset()..glyph_run.offset() + glyph_run.advance();
+ 
++        // Bidi reorders glyphs within a run, so this filters rather than truncating.
++        let columns = visible_columns.cloned();
++        let mut glyphs_it = glyphs_it.filter(move |glyph| {
++            columns.as_ref().is_none_or(|columns| {
++                let start = PhysicalLength::new(glyph.x);
++                let end = PhysicalLength::new(glyph.x + glyph.advance);
++                end >= columns.start && start <= columns.end
++            })
++        });
++        let glyphs_it: &mut dyn Iterator<Item = parley::layout::Glyph> = &mut glyphs_it;
++
+         match run_coverage(&run_x, line_spans) {
+             RunCoverage::Unselected => Self::draw_glyph_run(
+                 glyph_run,
+@@ -612,7 +673,7 @@ fn draw_glyph_run<R: GlyphRenderer>(
+     }
+ }
+ 
+-impl Layout {
++impl Layout<'_> {
+     pub(super) fn draw<R: GlyphRenderer>(
+         &self,
+         item_renderer: &mut R,
+@@ -631,6 +692,8 @@ pub(super) fn draw<R: GlyphRenderer>(
+         // skipping what lies outside it safe under any transform. The band only filters what is
+         // *drawn*; it never influences elision or `max-lines` accounting.
+         let visible_band = visible_band(item_renderer);
++        // Only when nothing is elided; see the run cull in `TextParagraph::draw`.
++        let visible_columns = (!self.is_eliding()).then(|| visible_columns(item_renderer));
+ 
+         // Paragraphs are stacked in order, so binary-search the first one whose box reaches the
+         // band. Start one paragraph earlier and stop one past the band: glyph ink may overhang
+@@ -639,7 +702,7 @@ pub(super) fn draw<R: GlyphRenderer>(
+         let first = self
+             .paragraphs
+             .partition_point(|p| {
+-                self.y_offset + p.y + PhysicalLength::new(p.layout.height()) < visible_band.start
++                self.y_offset + p.y + PhysicalLength::new(p.metrics.height) < visible_band.start
+             })
+             .saturating_sub(1);
+         let mut past_band = false;
+@@ -653,6 +716,7 @@ pub(super) fn draw<R: GlyphRenderer>(
+                 paragraph_index,
+                 visible_extent,
+                 &visible_band,
++                visible_columns.as_ref(),
+                 item_renderer,
+                 &default_fill_brush,
+                 &default_stroke_brush,
+diff --git a/internal/core/textlayout/sharedparley/layout.rs b/internal/core/textlayout/sharedparley/layout.rs
+index 539d160a4..a6c903b29 100644
+--- a/internal/core/textlayout/sharedparley/layout.rs
++++ b/internal/core/textlayout/sharedparley/layout.rs
+@@ -4,8 +4,17 @@
+ //! From shaped paragraphs to a [`Layout`]: line breaking, alignment, and the elision and
+ //! `max-lines` cuts, plus the queries the entry points ask of the result.
+ 
+-use super::shaping::{Brush, TextParagraph};
++use super::shaping::{
++    Brush, ParagraphMetrics, PlainParagraphSource, RETAINED_PARAGRAPHS, TextParagraph,
++};
+ use super::*;
++use core::cell::{Cell, Ref};
++
++/// How many paragraphs either side of the ones something asked for keep their glyphs when the
++/// document is shaped lazily. Wide enough that scrolling back over what was just read costs no
++/// re-shaping, small enough that the retained glyphs stay a rounding error next to the document
++/// (a paragraph's `parley::Layout` is a few KB, so this window is under a megabyte).
++const RETENTION_MARGIN: usize = 64;
+ 
+ #[derive(Default)]
+ pub(super) struct LayoutOptions {
+@@ -50,6 +59,18 @@ struct LineBreakingInputs {
+ }
+ 
+ impl LineBreakingInputs {
++    /// Whether these inputs agree with `other` on everything except the width the lines were
++    /// broken for.
++    ///
++    /// Only meaningful together with [`RetainedLineBreaking::metrics_reusable_at_any_width`]: parley
++    /// derives a line's advance, height and break positions without the width, and only uses it as
++    /// the alignment container (`inline_max_coord`). So under `no-wrap` the *metrics* of a pass are
++    /// the same for any width, while the *glyph positions* are not -- which is why the caller that
++    /// reuses metrics across a width change has to drop the glyphs it kept.
++    fn matches_except_width(&self, other: &Self) -> bool {
++        Self { max_physical_width: other.max_physical_width, ..*self } == *other
++    }
++
+     fn new(options: &LayoutOptions, max_physical_width: Option<PhysicalLength>) -> Self {
+         Self {
+             max_physical_width,
+@@ -78,6 +99,20 @@ pub(super) struct RetainedLineBreaking {
+     max_width: PhysicalLength,
+     height: PhysicalLength,
+     elision_info: Option<ElisionInfo>,
++    /// The width the paragraphs still holding glyphs were aligned against, which is not
++    /// necessarily the width of the last pass: a measuring call changes the width without ever
++    /// asking for a glyph. `Layout::glyphs` compares against it and re-shapes the window when they
++    /// have drifted apart, so alternating measure and draw passes don't throw the window away.
++    glyph_width: Option<PhysicalLength>,
++    /// Half-open index range that contains every paragraph still holding glyphs. Not exact - it is
++    /// only ever widened by shaping and narrowed by dropping - but it bounds the scans that have to
++    /// find shaped paragraphs, which would otherwise be O(document) on every frame.
++    shaped: (usize, usize),
++    /// Set when the pass that produced these ran under `no-wrap` (so nothing retained here depends
++    /// on the width) *and* was free to drop glyphs (so the ones aligned against the old width can
++    /// be produced again). A call that differs only in the width then reuses these instead of
++    /// re-shaping the document; see [`LineBreakingInputs::matches_except_width`].
++    metrics_reusable_at_any_width: bool,
+ }
+ 
+ /// Where vertical alignment puts the text within the box. Per call, not retained: it depends on
+@@ -94,21 +129,51 @@ fn vertical_offset(
+     }
+ }
+ 
+-pub(super) fn layout(
++pub(super) fn layout<'a>(
+     layout_builder: &LayoutWithoutLineBreaksBuilder,
+     font_context: &mut parley::FontContext,
+     mut paragraphs: Vec<TextParagraph>,
+     scale_factor: ScaleFactor,
+     options: LayoutOptions,
+     line_breaking: Option<RetainedLineBreaking>,
+-) -> Layout {
++    source: Option<&'a PlainParagraphSource<'a>>,
++) -> Layout<'a> {
+     let max_physical_width = options.max_width.map(|max_width| max_width * scale_factor);
+     let max_physical_height = options.max_height.map(|max_height| max_height * scale_factor);
+ 
++    // Which paragraphs keep their glyphs.
++    //
++    // Anything whose retained values depend on the width has to keep them all, because a width
++    // change would otherwise re-shape the whole document to recompute them - and a width change is
++    // what a window resize is, once per frame of the drag. Measured on an 11 MB document: 96 ms
++    // per resize step with the glyphs kept, 1.79 s without. That rules out both wrapping modes
++    // (where the line breaking itself depends on the width), `max-lines` and `overflow: elide`
++    // (whose cut is computed across the whole document from per-line metrics, which don't survive
++    // dropping the glyphs). Under `no-wrap` nothing retained here depends on the width - see
++    // `width_independent_metrics` - so that is where the glyphs can go.
++    //
++    // Computed the same way on both paths below so that the retention doesn't depend on whether
++    // the breaking was reused.
++    let width_independent_metrics = layout_builder.text_wrap == TextWrap::NoWrap
++        && options.max_lines.is_none()
++        && !(options.text_overflow == TextOverflow::Elide && max_physical_width.is_some());
++    let retain_all =
++        source.is_none() || paragraphs.len() <= RETAINED_PARAGRAPHS || !width_independent_metrics;
++
++    // Reusing metrics across a width change is only safe when the glyphs can be produced again on
++    // demand: `Layout::glyphs` drops the ones aligned against the old width, and a document that
++    // retains everything has no way to get them back.
++    let metrics_reusable_at_any_width = width_independent_metrics && !retain_all;
++
+     let inputs = LineBreakingInputs::new(&options, max_physical_width);
+-    if let Some(line_breaking) =
+-        line_breaking.filter(|line_breaking| line_breaking.inputs == inputs)
+-    {
++    if let Some(line_breaking) = line_breaking.filter(|line_breaking| {
++        line_breaking.inputs == inputs
++            || (line_breaking.metrics_reusable_at_any_width
++                && metrics_reusable_at_any_width
++                && line_breaking.inputs.matches_except_width(&inputs))
++    }) {
++        let glyph_width = line_breaking.glyph_width;
++        let shaped = line_breaking.shaped;
+         return Layout {
+             y_offset: vertical_offset(
+                 max_physical_height,
+@@ -123,6 +188,12 @@ pub(super) fn layout(
+             line_limit_cut: line_breaking.line_limit_cut,
+             line_breaking_inputs: inputs,
+             broke_lines: false,
++            source,
++            retain_all,
++            metrics_reusable_at_any_width,
++            glyph_width: Cell::new(glyph_width),
++            shaped: Cell::new(shaped),
++            touched: Cell::new(None),
+         };
+     }
+ 
+@@ -150,15 +221,42 @@ pub(super) fn layout(
+         None
+     };
+ 
++    // The one pass over the whole document: shape what isn't shaped yet, break it, record the
++    // metrics every other path needs, and -- unless everything is retained -- drop the glyphs
++    // again right away, so a large document never has more than a window of them resident at once.
+     let mut para_y = 0.0;
+     for para in paragraphs.iter_mut() {
+-        para.layout.break_all_lines(max_physical_width.map(|width| width.get()));
+-        para.layout.align(inputs.alignment, parley::AlignmentOptions::default());
++        if !para.is_shaped()
++            && let Some(glyphs) =
++                source.and_then(|source| source.shape_with(font_context, para.range.clone()))
++        {
++            #[cfg(feature = "testing")]
++            cache::count_paragraph_shape();
++            para.set_glyphs(glyphs);
++        }
++
++        para.metrics = match para.glyphs_mut() {
++            Some(glyphs) => {
++                glyphs.break_all_lines(max_physical_width.map(|width| width.get()));
++                glyphs.align(inputs.alignment, parley::AlignmentOptions::default());
++                ParagraphMetrics {
++                    width: glyphs.full_width(),
++                    height: glyphs.height(),
++                    line_count: glyphs.lines().len(),
++                }
++            }
++            None => ParagraphMetrics::default(),
++        };
+ 
+         para.y = PhysicalLength::new(para_y);
+-        para_y += para.layout.height();
++        para_y += para.metrics.height;
++
++        if !retain_all {
++            para.drop_glyphs();
++        }
+     }
+ 
++    let paragraph_count = paragraphs.len();
+     let line_limit_cut =
+         options.max_lines.and_then(|max_lines| line_limit_cut(&paragraphs, max_lines));
+     let visible_paragraph_count =
+@@ -173,20 +271,24 @@ pub(super) fn layout(
+             // for that, but we can't at the glyph run level, so the glyph runs always *do* include whitespace glyphs,
+             // and as such we must also accept the full width here including trailing whitespace, otherwise text with
+             // trailing whitespace will assigned a smaller width for rendering and thus the ellipsis will be placed.
+-            match line_limit_cut {
++            match (line_limit_cut, p.glyphs()) {
+                 // In the paragraph where the line limit lands, only the kept lines count towards
+                 // the width; `full_width()` would also span the dropped lines below the cut. Per
+                 // line, mirror parley's `full_width` formula (Slint doesn't use indentation).
+-                Some((last_paragraph, last_line)) if paragraph_index == last_paragraph => p
+-                    .layout
+-                    .lines()
+-                    .take(last_line + 1)
+-                    .map(|line| {
+-                        let metrics = line.metrics();
+-                        PhysicalLength::new(metrics.inline_min_coord + metrics.advance)
+-                    })
+-                    .fold(PhysicalLength::zero(), PhysicalLength::max),
+-                _ => PhysicalLength::new(p.layout.full_width()),
++                // An active line limit implies `retain_all`, so the glyphs are always there.
++                (Some((last_paragraph, last_line)), Some(glyphs))
++                    if paragraph_index == last_paragraph =>
++                {
++                    glyphs
++                        .lines()
++                        .take(last_line + 1)
++                        .map(|line| {
++                            let metrics = line.metrics();
++                            PhysicalLength::new(metrics.inline_min_coord + metrics.advance)
++                        })
++                        .fold(PhysicalLength::zero(), PhysicalLength::max)
++                }
++                _ => PhysicalLength::new(p.metrics.width),
+             }
+         })
+         .fold(PhysicalLength::zero(), PhysicalLength::max);
+@@ -195,16 +297,15 @@ pub(super) fn layout(
+     let height = match line_limit_cut {
+         Some((last_paragraph, last_line)) => {
+             let para = &paragraphs[last_paragraph];
+-            let line = para
+-                .layout
+-                .lines()
+-                .nth(last_line)
+-                .expect("line_limit_cut returns an existing line index");
+-            para.y + PhysicalLength::new(line.metrics().block_max_coord)
++            let block_max_coord = para
++                .glyphs()
++                .and_then(|glyphs| Some(glyphs.lines().nth(last_line)?.metrics().block_max_coord))
++                .unwrap_or(para.metrics.height);
++            para.y + PhysicalLength::new(block_max_coord)
+         }
+         None => paragraphs
+             .last()
+-            .map_or(PhysicalLength::zero(), |p| p.y + PhysicalLength::new(p.layout.height())),
++            .map_or(PhysicalLength::zero(), |p| p.y + PhysicalLength::new(p.metrics.height)),
+     };
+ 
+     let y_offset = vertical_offset(max_physical_height, options.vertical_align, height);
+@@ -219,6 +320,13 @@ pub(super) fn layout(
+         line_limit_cut,
+         line_breaking_inputs: inputs,
+         broke_lines: true,
++        source,
++        retain_all,
++        metrics_reusable_at_any_width,
++        glyph_width: Cell::new(max_physical_width),
++        // The pass above either kept every paragraph's glyphs or dropped every one of them.
++        shaped: Cell::new(if retain_all { (0, paragraph_count) } else { (0, 0) }),
++        touched: Cell::new(None),
+     }
+ }
+ 
+@@ -226,14 +334,14 @@ pub(super) fn layout(
+ /// paragraph) of the last kept line. Returns `None` when all lines fit the limit, so an active
+ /// cut always means that at least one line was dropped.
+ fn line_limit_cut(paragraphs: &[TextParagraph], max_lines: usize) -> Option<(usize, usize)> {
+-    let total_lines: usize = paragraphs.iter().map(|p| p.layout.lines().len()).sum();
++    let total_lines: usize = paragraphs.iter().map(|p| p.metrics.line_count).sum();
+     if total_lines <= max_lines {
+         return None;
+     }
+ 
+     let mut seen_lines = 0;
+     for (paragraph_index, para) in paragraphs.iter().enumerate() {
+-        let line_count = para.layout.lines().len();
++        let line_count = para.metrics.line_count;
+         // seen_lines < max_lines holds on entry, so the cut line index can't underflow and
+         // lands within this paragraph's lines.
+         if seen_lines + line_count >= max_lines {
+@@ -268,7 +376,7 @@ pub(super) struct ElisionCut {
+     pub(super) needs_ellipsis: bool,
+ }
+ 
+-pub(super) struct Layout {
++pub(super) struct Layout<'a> {
+     pub(super) paragraphs: Vec<TextParagraph>,
+     pub(super) y_offset: PhysicalLength,
+     pub(super) max_width: PhysicalLength,
+@@ -283,13 +391,50 @@ pub(super) struct Layout {
+     /// Whether this layout ran the full breaking pass rather than reusing a [`RetainedLineBreaking`].
+     /// Read by the `layout_miss_count` test counter.
+     pub(super) broke_lines: bool,
++    /// Re-shapes a paragraph whose glyphs were dropped. `None` when every paragraph keeps them.
++    source: Option<&'a PlainParagraphSource<'a>>,
++    /// Whether every paragraph keeps its glyphs, in which case [`Self::dismantle`] drops none.
++    retain_all: bool,
++    /// Travels into [`RetainedLineBreaking::metrics_reusable_at_any_width`].
++    metrics_reusable_at_any_width: bool,
++    /// See [`RetainedLineBreaking::glyph_width`].
++    glyph_width: Cell<Option<PhysicalLength>>,
++    /// See [`RetainedLineBreaking::shaped`].
++    shaped: Cell<(usize, usize)>,
++    /// The lowest and highest paragraph index [`Self::glyphs`] was asked for, which is what
++    /// [`Self::dismantle`] keeps a window around. `None` means nothing asked -- a pure measuring
++    /// call -- and then the window from the previous call stands.
++    touched: Cell<Option<(usize, usize)>>,
+ }
+ 
+-impl Layout {
++impl Layout<'_> {
+     /// Takes the layout apart into what the cache entry retains: the paragraphs (holding their
+     /// broken lines and y positions) and the [`RetainedLineBreaking`] that lets the next [`layout`] call
+     /// with equal inputs skip the breaking.
++    ///
++    /// This is also where the glyph retention window is applied: whatever asked for glyphs during
++    /// this call keeps them, plus [`RETENTION_MARGIN`] paragraphs either side so that scrolling
++    /// back over what was just drawn doesn't re-shape.
+     pub(super) fn dismantle(self) -> (Vec<TextParagraph>, RetainedLineBreaking) {
++        let mut shaped = self.shaped.get();
++        if let (false, Some((first, last))) = (self.retain_all, self.touched.get()) {
++            let keep = first.saturating_sub(RETENTION_MARGIN)
++                ..(last + 1).saturating_add(RETENTION_MARGIN).min(self.paragraphs.len());
++            // Only what could be holding glyphs is walked. Walking the document instead costs
++            // O(paragraphs) *per frame* -- two `with_text_layout` calls each scanning 100 000
++            // `RefCell`s measured as +1.0 ms/frame on a GPU, four times the cost of the shaping
++            // this candidate actually added.
++            for index in shaped.0..shaped.1 {
++                if !keep.contains(&index) {
++                    self.paragraphs[index].drop_glyphs();
++                }
++            }
++            shaped = (shaped.0.max(keep.start), shaped.1.min(keep.end));
++            if shaped.0 >= shaped.1 {
++                shaped = (0, 0);
++            }
++        }
++
+         (
+             self.paragraphs,
+             RetainedLineBreaking {
+@@ -298,12 +443,74 @@ pub(super) fn dismantle(self) -> (Vec<TextParagraph>, RetainedLineBreaking) {
+                 max_width: self.max_width,
+                 height: self.height,
+                 elision_info: self.elision_info,
++                glyph_width: self.glyph_width.get(),
++                metrics_reusable_at_any_width: self.metrics_reusable_at_any_width,
++                shaped,
+             },
+         )
+     }
++
++    /// The shaped glyphs of paragraph `index`, re-shaping and re-breaking it if they were dropped.
++    ///
++    /// Every consumer that needs glyphs rather than [`ParagraphMetrics`] goes through here, so that
++    /// the "is it still resident?" question is answered in exactly one place. `None` only for an
++    /// out-of-range index or when the paragraph cannot be shaped at all (a styled document never
++    /// drops its glyphs, so that case doesn't arise for one).
++    pub(super) fn glyphs(&self, index: usize) -> Option<Ref<'_, parley::Layout<Brush>>> {
++        let paragraph = self.paragraphs.get(index)?;
++        let source = self.source;
++
++        // The retained glyphs were aligned against a width that is no longer the one in force --
++        // typically because a measuring pass (no width) ran in between. The metrics survive that
++        // (see `width_independent_metrics`), the glyph positions don't. Only dropped when they can
++        // be produced again: a document that has no source keeps whatever it has, because the
++        // alternative is rendering nothing at all.
++        if source.is_some()
++            && self.glyph_width.get() != self.line_breaking_inputs.max_physical_width
++        {
++            let shaped = self.shaped.get();
++            for index in shaped.0..shaped.1 {
++                self.paragraphs[index].drop_glyphs();
++            }
++            self.shaped.set((0, 0));
++            self.glyph_width.set(self.line_breaking_inputs.max_physical_width);
++        }
++
++        if !paragraph.is_shaped() {
++            let mut glyphs = source?.shape(paragraph.range.clone())?;
++            #[cfg(feature = "testing")]
++            cache::count_paragraph_shape();
++            // Break it exactly as the metrics pass did, so a re-shaped paragraph is
++            // indistinguishable from one that was never dropped.
++            glyphs.break_all_lines(
++                self.line_breaking_inputs.max_physical_width.map(|width| width.get()),
++            );
++            glyphs.align(self.line_breaking_inputs.alignment, parley::AlignmentOptions::default());
++            paragraph.set_glyphs(glyphs);
++            let shaped = self.shaped.get();
++            self.shaped.set(if shaped.0 >= shaped.1 {
++                (index, index + 1)
++            } else {
++                (shaped.0.min(index), shaped.1.max(index + 1))
++            });
++        }
++
++        self.touched.set(Some(match self.touched.get() {
++            Some((first, last)) => (first.min(index), last.max(index)),
++            None => (index, index),
++        }));
++
++        paragraph.glyphs()
++    }
+ }
+ 
+-impl Layout {
++impl Layout<'_> {
++    /// Whether an ellipsis may be placed. The draw path skips its horizontal glyph-run cull then,
++    /// because the ellipsis is positioned from the run that overflows the width.
++    pub(super) fn is_eliding(&self) -> bool {
++        self.elision_info.is_some()
++    }
++
+     /// The paragraphs that have at least one line to show. Only differs from `paragraphs` when a
+     /// `max-lines` limit drops lines: paragraphs entirely below the cut don't take part in
+     /// hit-testing or selection.
+@@ -351,9 +558,11 @@ pub(super) fn first_line_exceeds_height(&self) -> bool {
+         let Some(max_physical_height) = self.max_physical_height else {
+             return false;
+         };
+-        self.paragraphs.first().and_then(|paragraph| paragraph.layout.lines().next()).is_some_and(
+-            |line| !line_fits_height(line.metrics().block_max_coord, max_physical_height),
+-        )
++        self.glyphs(0)
++            .and_then(|glyphs| Some(glyphs.lines().next()?.metrics().block_max_coord))
++            .is_some_and(|block_max_coord| {
++                !line_fits_height(block_max_coord, max_physical_height)
++            })
+     }
+ 
+     /// Whether a line of `paragraph` (with the metrics block range `block_min`..`block_max` in the
+@@ -391,8 +600,9 @@ fn elision_extent(&self) -> Option<ElisionCut> {
+         // The deepest line still within the box, scanning paragraphs and their lines from the
+         // bottom up. Bottom/center alignment clips lines off the top, so the visible block can
+         // start partway down, but its last line is always the lowest one that fits.
+-        let last_within_box = self.paragraphs.iter().enumerate().rev().find_map(|(pi, para)| {
+-            para.layout
++        let last_within_box = (0..self.paragraphs.len()).rev().find_map(|pi| {
++            let para = &self.paragraphs[pi];
++            self.glyphs(pi)?
+                 .lines()
+                 .enumerate()
+                 .rev()
+@@ -410,7 +620,7 @@ fn elision_extent(&self) -> Option<ElisionCut> {
+             .iter()
+             .enumerate()
+             .rev()
+-            .find_map(|(pi, para)| para.layout.lines().len().checked_sub(1).map(|li| (pi, li)));
++            .find_map(|(pi, para)| para.metrics.line_count.checked_sub(1).map(|li| (pi, li)));
+ 
+         let (last_paragraph, last_line) = last_within_box.unwrap_or((0, 0));
+         let needs_ellipsis =
+@@ -421,11 +631,17 @@ fn elision_extent(&self) -> Option<ElisionCut> {
+     /// Returns the last paragraph starting at or before the given byte offset. An offset in the
+     /// gap between two paragraph ranges (between a '\r' and its '\n') thus maps to the preceding
+     /// paragraph; callers have to clamp their local offset to the paragraph's range.
+-    fn paragraph_by_byte_offset(&self, byte_offset: usize) -> Option<&TextParagraph> {
+-        self.visible_paragraphs().iter().take_while(|p| p.range.start <= byte_offset).last()
++    fn paragraph_by_byte_offset(&self, byte_offset: usize) -> Option<usize> {
++        self.visible_paragraphs()
++            .iter()
++            .enumerate()
++            .take_while(|(_, p)| p.range.start <= byte_offset)
++            .last()
++            .map(|(index, _)| index)
+     }
+ 
+-    pub(super) fn paragraph_by_y(&self, y: PhysicalLength) -> Option<&TextParagraph> {
++    /// Index into `paragraphs` of the paragraph covering `y` (in item coordinates).
++    pub(super) fn paragraph_by_y(&self, y: PhysicalLength) -> Option<usize> {
+         // Positions on lines dropped by `max-lines` (within the cut paragraph, when the item is
+         // taller than the visible text) don't hit-test: nothing is rendered there.
+         if self.below_line_limit(y) {
+@@ -435,32 +651,40 @@ pub(super) fn paragraph_by_y(&self, y: PhysicalLength) -> Option<&TextParagraph>
+         // Adjust for vertical alignment
+         let y = y - self.y_offset;
+ 
++        let visible = self.visible_paragraphs();
++        if visible.is_empty() {
++            return None;
++        }
+         if y < PhysicalLength::zero() {
+-            return self.visible_paragraphs().first();
++            return Some(0);
+         }
+ 
+-        let idx = self.visible_paragraphs().binary_search_by(|paragraph| {
++        let idx = visible.binary_search_by(|paragraph| {
+             if y < paragraph.y {
+                 core::cmp::Ordering::Greater
+-            } else if y >= paragraph.y + PhysicalLength::new(paragraph.layout.height()) {
++            } else if y >= paragraph.y + PhysicalLength::new(paragraph.metrics.height) {
+                 core::cmp::Ordering::Less
+             } else {
+                 core::cmp::Ordering::Equal
+             }
+         });
+ 
+-        match idx {
+-            Ok(i) => self.visible_paragraphs().get(i),
+-            Err(_) => self.visible_paragraphs().last(),
+-        }
++        Some(match idx {
++            Ok(i) if i < visible.len() => i,
++            _ => visible.len() - 1,
++        })
+     }
+ 
+     pub(super) fn byte_offset_from_point(&self, pos: PhysicalPoint) -> usize {
+-        let Some(paragraph) = self.paragraph_by_y(pos.y_length()) else {
++        let Some(index) = self.paragraph_by_y(pos.y_length()) else {
+             return 0;
+         };
++        let paragraph = &self.paragraphs[index];
++        let Some(glyphs) = self.glyphs(index) else {
++            return paragraph.range.start;
++        };
+         let cursor = parley::editing::Cursor::from_point(
+-            &paragraph.layout,
++            &glyphs,
+             pos.x,
+             (pos.y_length() - self.y_offset - paragraph.y).get(),
+         );
+@@ -472,17 +696,18 @@ pub(super) fn cursor_rect_for_byte_offset(
+         byte_offset: usize,
+         cursor_width: PhysicalLength,
+     ) -> PhysicalRect {
+-        let Some(paragraph) = self.paragraph_by_byte_offset(byte_offset) else {
++        let Some(index) = self.paragraph_by_byte_offset(byte_offset) else {
++            return PhysicalRect::new(PhysicalPoint::default(), PhysicalSize::new(1.0, 1.0));
++        };
++        let paragraph = &self.paragraphs[index];
++        let Some(glyphs) = self.glyphs(index) else {
+             return PhysicalRect::new(PhysicalPoint::default(), PhysicalSize::new(1.0, 1.0));
+         };
+ 
+         let local_offset = (byte_offset - paragraph.range.start).min(paragraph.range.len());
+-        let cursor = parley::editing::Cursor::from_byte_index(
+-            &paragraph.layout,
+-            local_offset,
+-            Default::default(),
+-        );
+-        let rect = cursor.geometry(&paragraph.layout, cursor_width.get());
++        let cursor =
++            parley::editing::Cursor::from_byte_index(&glyphs, local_offset, Default::default());
++        let rect = cursor.geometry(&glyphs, cursor_width.get());
+ 
+         PhysicalRect::new(
+             PhysicalPoint::from_lengths(

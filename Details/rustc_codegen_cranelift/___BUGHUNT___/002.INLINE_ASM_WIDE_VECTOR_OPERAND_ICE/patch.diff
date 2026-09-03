@@ -1,0 +1,796 @@
+diff --git a/src/inline_asm.rs b/src/inline_asm.rs
+index d4d64cb3..4c29ab00 100644
+--- a/src/inline_asm.rs
++++ b/src/inline_asm.rs
+@@ -15,10 +15,25 @@
+ 
+ use crate::prelude::*;
+ 
++/// The value of an `in`/`inout` inline asm operand. Cranelift has no SSA type wider than 128 bits,
++/// so an operand in a `ymm_reg`/`zmm_reg`-style register class can only be handed to the asm
++/// wrapper through memory, never through an SSA value.
++#[derive(Copy, Clone, Debug)]
++pub(crate) enum AsmValue {
++    Val(Value),
++    ByRef(Pointer, Size),
++}
++
++impl From<Value> for AsmValue {
++    fn from(value: Value) -> Self {
++        AsmValue::Val(value)
++    }
++}
++
+ pub(crate) enum CInlineAsmOperand<'tcx> {
+     In {
+         reg: InlineAsmRegOrRegClass,
+-        value: Value,
++        value: AsmValue,
+     },
+     Out {
+         reg: InlineAsmRegOrRegClass,
+@@ -28,7 +43,7 @@ pub(crate) enum CInlineAsmOperand<'tcx> {
+     InOut {
+         reg: InlineAsmRegOrRegClass,
+         _late: bool,
+-        in_value: Value,
++        in_value: AsmValue,
+         out_place: Option<CPlace<'tcx>>,
+     },
+     Const {
+@@ -78,10 +93,10 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
+     let operands = operands
+         .iter()
+         .map(|operand| match *operand {
+-            InlineAsmOperand::In { reg, ref value } => CInlineAsmOperand::In {
+-                reg,
+-                value: crate::base::codegen_operand(fx, value).load_scalar(fx),
+-            },
++            InlineAsmOperand::In { reg, ref value } => {
++                let value = crate::base::codegen_operand(fx, value);
++                CInlineAsmOperand::In { reg, value: asm_input_value(fx, value) }
++            }
+             InlineAsmOperand::Out { reg, late, ref place } => CInlineAsmOperand::Out {
+                 reg,
+                 late,
+@@ -91,7 +106,10 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
+                 CInlineAsmOperand::InOut {
+                     reg,
+                     _late: late,
+-                    in_value: crate::base::codegen_operand(fx, in_value).load_scalar(fx),
++                    in_value: {
++                        let in_value = crate::base::codegen_operand(fx, in_value);
++                        asm_input_value(fx, in_value)
++                    },
+                     out_place: out_place.map(|place| crate::base::codegen_place(fx, place)),
+                 }
+             }
+@@ -880,7 +898,7 @@ fn call_inline_asm<'tcx>(
+     fx: &mut FunctionCx<'_, '_, 'tcx>,
+     asm_name: &str,
+     slot_size: Size,
+-    inputs: Vec<(Size, Value)>,
++    inputs: Vec<(Size, AsmValue)>,
+     outputs: Vec<(Size, CPlace<'tcx>)>,
+ ) {
+     let stack_slot =
+@@ -904,11 +922,11 @@ fn call_inline_asm<'tcx>(
+     }
+ 
+     for (offset, value) in inputs {
+-        stack_slot.offset(fx, i32::try_from(offset.bytes()).unwrap().into()).store(
+-            fx,
+-            value,
+-            MemFlagsData::trusted(),
+-        );
++        let slot = stack_slot.offset(fx, i32::try_from(offset.bytes()).unwrap().into());
++        match value {
++            AsmValue::Val(value) => slot.store(fx, value, MemFlagsData::trusted()),
++            AsmValue::ByRef(src, size) => copy_asm_operand(fx, slot, src, size),
++        }
+     }
+ 
+     let stack_slot_addr = stack_slot.get_addr(fx);
+@@ -916,21 +934,55 @@ fn call_inline_asm<'tcx>(
+     fx.bcx.ins().call(inline_asm_func, &[stack_slot_addr]);
+ 
+     for (offset, place) in outputs {
++        let slot = stack_slot.offset(fx, i32::try_from(offset.bytes()).unwrap().into());
++        if place.layout().size.bytes() > MAX_ASM_SSA_VALUE_SIZE {
++            // No Cranelift SSA type is this wide, so hand the result back through memory.
++            place.write_cvalue(fx, CValue::by_ref(slot, place.layout()));
++            continue;
++        }
+         let ty = if place.layout().ty.is_simd() {
+             let (lane_count, lane_type) = place.layout().ty.simd_size_and_type(fx.tcx);
+             asm_clif_type(fx, lane_type).unwrap().by(lane_count.try_into().unwrap()).unwrap()
+         } else {
+             asm_clif_type(fx, place.layout().ty).unwrap()
+         };
+-        let value = stack_slot.offset(fx, i32::try_from(offset.bytes()).unwrap().into()).load(
+-            fx,
+-            ty,
+-            MemFlagsData::trusted(),
+-        );
++        let value = slot.load(fx, ty, MemFlagsData::trusted());
+         place.write_cvalue(fx, CValue::by_val(value, place.layout()));
+     }
+ }
+ 
++/// Widest value Cranelift has an SSA type for (`i128`/`i8x16`); anything above this can only be
++/// moved through memory.
++const MAX_ASM_SSA_VALUE_SIZE: u64 = 16;
++
++fn asm_input_value<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, value: CValue<'tcx>) -> AsmValue {
++    let size = value.layout().size;
++    if size.bytes() > MAX_ASM_SSA_VALUE_SIZE {
++        let (ptr, meta) = value.force_stack(fx);
++        assert!(meta.is_none());
++        AsmValue::ByRef(ptr, size)
++    } else {
++        AsmValue::Val(value.load_scalar(fx))
++    }
++}
++
++fn copy_asm_operand(fx: &mut FunctionCx<'_, '_, '_>, dst: Pointer, src: Pointer, size: Size) {
++    let dst_addr = dst.get_addr(fx);
++    let src_addr = src.get_addr(fx);
++    // The asm wrapper's stack slot is only 16-byte aligned, and nothing is known about the
++    // alignment of the operand's own storage either, so claim the minimum for both.
++    fx.bcx.emit_small_memory_copy(
++        fx.target_config,
++        dst_addr,
++        src_addr,
++        size.bytes(),
++        1,
++        1,
++        true,
++        MemFlagsData::new().with_notrap(),
++    );
++}
++
+ fn asm_clif_type<'tcx>(fx: &FunctionCx<'_, '_, 'tcx>, ty: Ty<'tcx>) -> Option<types::Type> {
+     match ty.kind() {
+         // Adapted from https://github.com/rust-lang/rust/blob/df44a57fd29fca899ce473f85ed64efd0708dd7c/compiler/rustc_hir_typeck/src/inline_asm.rs#L180-L183
+diff --git a/src/intrinsics/llvm_aarch64.rs b/src/intrinsics/llvm_aarch64.rs
+index b046bf1e..90cbffc8 100644
+--- a/src/intrinsics/llvm_aarch64.rs
++++ b/src/intrinsics/llvm_aarch64.rs
+@@ -75,13 +75,13 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::x0,
+                         )),
+-                        value: a_ptr,
++                        value: a_ptr.into(),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::x1,
+                         )),
+-                        value: res_ptr,
++                        value: res_ptr.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK,
+@@ -110,13 +110,13 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::x0,
+                         )),
+-                        value: a_ptr,
++                        value: a_ptr.into(),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::x1,
+                         )),
+-                        value: res_ptr,
++                        value: res_ptr.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK,
+@@ -147,19 +147,19 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::x0,
+                         )),
+-                        value: a_ptr,
++                        value: a_ptr.into(),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::x1,
+                         )),
+-                        value: b_ptr,
++                        value: b_ptr.into(),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::x2,
+                         )),
+-                        value: res_ptr,
++                        value: res_ptr.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK,
+@@ -530,14 +530,14 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                             AArch64InlineAsmReg::x0,
+                         )),
+                         _late: true,
+-                        in_value: crc,
++                        in_value: crc.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::x1,
+                         )),
+-                        value: v,
++                        value: v.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -565,14 +565,14 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                             AArch64InlineAsmReg::v0,
+                         )),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::v1,
+                         )),
+-                        value: b,
++                        value: b.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -598,7 +598,7 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                         AArch64InlineAsmReg::v0,
+                     )),
+                     _late: true,
+-                    in_value: a,
++                    in_value: a.into(),
+                     out_place: Some(ret),
+                 }],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -637,20 +637,20 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                             AArch64InlineAsmReg::v0,
+                         )),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::x1,
+                         )),
+-                        value: b,
++                        value: b.into(),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::v1,
+                         )),
+-                        value: c,
++                        value: c.into(),
+                     },
+                     CInlineAsmOperand::Out {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+@@ -683,7 +683,7 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                             AArch64InlineAsmReg::x0,
+                         )),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::Out {
+@@ -714,20 +714,20 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                             AArch64InlineAsmReg::v0,
+                         )),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::v1,
+                         )),
+-                        value: b,
++                        value: b.into(),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::v2,
+                         )),
+-                        value: c,
++                        value: c.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -749,14 +749,14 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                             AArch64InlineAsmReg::v0,
+                         )),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::v1,
+                         )),
+-                        value: b,
++                        value: b.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -785,20 +785,20 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                             AArch64InlineAsmReg::v0,
+                         )),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::v1,
+                         )),
+-                        value: b,
++                        value: b.into(),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::v2,
+                         )),
+-                        value: c,
++                        value: c.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -820,14 +820,14 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                             AArch64InlineAsmReg::v0,
+                         )),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::v1,
+                         )),
+-                        value: b,
++                        value: b.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -850,20 +850,20 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                             AArch64InlineAsmReg::v0,
+                         )),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::v1,
+                         )),
+-                        value: b,
++                        value: b.into(),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::v2,
+                         )),
+-                        value: c,
++                        value: c.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -892,20 +892,20 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                             AArch64InlineAsmReg::v0,
+                         )),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::v1,
+                         )),
+-                        value: b,
++                        value: b.into(),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::v2,
+                         )),
+-                        value: c,
++                        value: c.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -927,14 +927,14 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                             AArch64InlineAsmReg::v0,
+                         )),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::v1,
+                         )),
+-                        value: b,
++                        value: b.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -957,20 +957,20 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                             AArch64InlineAsmReg::v0,
+                         )),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::v1,
+                         )),
+-                        value: b,
++                        value: b.into(),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::v2,
+                         )),
+-                        value: c,
++                        value: c.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -1085,13 +1085,13 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::x0,
+                         )),
+-                        value: a,
++                        value: a.into(),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::x1,
+                         )),
+-                        value: b,
++                        value: b.into(),
+                     },
+                     CInlineAsmOperand::Out {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+@@ -1120,14 +1120,14 @@ pub(super) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
+                             AArch64InlineAsmReg::v0,
+                         )),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::AArch64(
+                             AArch64InlineAsmReg::v1,
+                         )),
+-                        value: b,
++                        value: b.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+diff --git a/src/intrinsics/llvm_x86.rs b/src/intrinsics/llvm_x86.rs
+index 136e9896..54148c6b 100644
+--- a/src/intrinsics/llvm_x86.rs
++++ b/src/intrinsics/llvm_x86.rs
+@@ -45,7 +45,7 @@ pub(super) fn codegen_x86_llvm_intrinsic_call<'tcx>(
+                 &[
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::cx)),
+-                        value: xcr_no,
++                        value: xcr_no.into(),
+                     },
+                     CInlineAsmOperand::Out {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::ax)),
+@@ -447,7 +447,7 @@ fn select4(
+                 &[CInlineAsmOperand::InOut {
+                     reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm0)),
+                     _late: true,
+-                    in_value: a,
++                    in_value: a.into(),
+                     out_place: Some(ret),
+                 }],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -741,12 +741,12 @@ fn select4(
+                     CInlineAsmOperand::InOut {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::ax)),
+                         _late: true,
+-                        in_value: crc,
++                        in_value: crc.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::dx)),
+-                        value: v,
++                        value: v.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -779,21 +779,21 @@ fn select4(
+                 &[
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm0)),
+-                        value: a,
++                        value: a.into(),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm1)),
+-                        value: b,
++                        value: b.into(),
+                     },
+                     // Implicit argument to the pcmpestri intrinsic
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::ax)),
+-                        value: la,
++                        value: la.into(),
+                     },
+                     // Implicit argument to the pcmpestri intrinsic
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::dx)),
+-                        value: lb,
++                        value: lb.into(),
+                     },
+                     // Implicit result of the pcmpestri intrinsic
+                     CInlineAsmOperand::Out {
+@@ -833,22 +833,22 @@ fn select4(
+                     CInlineAsmOperand::InOut {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm0)),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm1)),
+-                        value: b,
++                        value: b.into(),
+                     },
+                     // Implicit argument to the pcmpestri intrinsic
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::ax)),
+-                        value: la,
++                        value: la.into(),
+                     },
+                     // Implicit argument to the pcmpestri intrinsic
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::dx)),
+-                        value: lb,
++                        value: lb.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -881,12 +881,12 @@ fn select4(
+                     CInlineAsmOperand::InOut {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm0)),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm1)),
+-                        value: b,
++                        value: b.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -919,7 +919,7 @@ fn select4(
+                 &[CInlineAsmOperand::InOut {
+                     reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm0)),
+                     _late: true,
+-                    in_value: a,
++                    in_value: a.into(),
+                     out_place: Some(ret),
+                 }],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -938,7 +938,7 @@ fn select4(
+                 &[CInlineAsmOperand::InOut {
+                     reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm0)),
+                     _late: true,
+-                    in_value: a,
++                    in_value: a.into(),
+                     out_place: Some(ret),
+                 }],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -959,12 +959,12 @@ fn select4(
+                     CInlineAsmOperand::InOut {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm0)),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm1)),
+-                        value: round_key,
++                        value: round_key.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -985,12 +985,12 @@ fn select4(
+                     CInlineAsmOperand::InOut {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm0)),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm1)),
+-                        value: round_key,
++                        value: round_key.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -1011,12 +1011,12 @@ fn select4(
+                     CInlineAsmOperand::InOut {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm0)),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm1)),
+-                        value: round_key,
++                        value: round_key.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -1037,12 +1037,12 @@ fn select4(
+                     CInlineAsmOperand::InOut {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm0)),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm1)),
+-                        value: round_key,
++                        value: round_key.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -1075,12 +1075,12 @@ fn select4(
+                     CInlineAsmOperand::InOut {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm1)),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm2)),
+-                        value: b,
++                        value: b.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -1101,12 +1101,12 @@ fn select4(
+                     CInlineAsmOperand::InOut {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm1)),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm2)),
+-                        value: b,
++                        value: b.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -1127,12 +1127,12 @@ fn select4(
+                     CInlineAsmOperand::InOut {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm1)),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm2)),
+-                        value: b,
++                        value: b.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -1153,12 +1153,12 @@ fn select4(
+                     CInlineAsmOperand::InOut {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm1)),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm2)),
+-                        value: b,
++                        value: b.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -1180,17 +1180,17 @@ fn select4(
+                     CInlineAsmOperand::InOut {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm1)),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm2)),
+-                        value: b,
++                        value: b.into(),
+                     },
+                     // Implicit argument to the sha256rnds2 instruction
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm0)),
+-                        value: k,
++                        value: k.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -1211,12 +1211,12 @@ fn select4(
+                     CInlineAsmOperand::InOut {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm1)),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm2)),
+-                        value: b,
++                        value: b.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -1237,12 +1237,12 @@ fn select4(
+                     CInlineAsmOperand::InOut {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm1)),
+                         _late: true,
+-                        in_value: a,
++                        in_value: a.into(),
+                         out_place: Some(ret),
+                     },
+                     CInlineAsmOperand::In {
+                         reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm2)),
+-                        value: b,
++                        value: b.into(),
+                     },
+                 ],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+@@ -1339,7 +1339,7 @@ fn select4(
+                 &[CInlineAsmOperand::InOut {
+                     reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm0)),
+                     _late: true,
+-                    in_value: a,
++                    in_value: a.into(),
+                     out_place: Some(ret),
+                 }],
+                 InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,

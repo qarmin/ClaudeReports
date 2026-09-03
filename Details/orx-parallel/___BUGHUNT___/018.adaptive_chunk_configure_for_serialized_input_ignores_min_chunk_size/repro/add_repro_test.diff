@@ -1,0 +1,88 @@
+diff --git a/src/runner/runner_variants/adaptive_chunk/adaptive_chunk_runner.rs b/src/runner/runner_variants/adaptive_chunk/adaptive_chunk_runner.rs
+index e6163c64..23f38b39 100644
+--- a/src/runner/runner_variants/adaptive_chunk/adaptive_chunk_runner.rs
++++ b/src/runner/runner_variants/adaptive_chunk/adaptive_chunk_runner.rs
+@@ -108,3 +108,83 @@ impl<P: ParThreadPool> ParRunner for AdaptiveChunkRunner<P> {
+     #[inline(always)]
+     fn complete_computation(_state: Self::State) {}
+ }
++
++#[cfg(test)]
++mod bughunt_candidate_018_tests {
++    use super::*;
++    use crate::pool::get_global_pool;
++    use core::num::NonZeroUsize;
++    use std::println;
++
++    type TestPool = crate::pool::DefaultPool;
++
++    fn chosen_chunk_size_for_serialized_input(
++        chunk_size_param: ChunkSize,
++        n: usize,
++    ) -> (usize, usize) {
++        let size_hint = (n, Some(n));
++        let params = Params {
++            chunk_size: chunk_size_param,
++            ..Default::default()
++        };
++
++        let mut runner: AdaptiveChunkRunner<TestPool> = AdaptiveChunkRunner::new(get_global_pool());
++        let mut state = runner.new_state(params, 1, size_hint);
++        let min_chunk_size = state.min_chunk_size;
++
++        <AdaptiveChunkRunner<TestPool> as ParRunner>::configure_for_serialized_input(
++            &mut state, size_hint,
++        );
++        let chosen =
++            <AdaptiveChunkRunner<TestPool> as ParRunner>::next_chunk_size(&state, size_hint);
++        (min_chunk_size, chosen)
++    }
++
++    // Candidate 018: a caller requesting ChunkSize::Min(N) on a serialized source must never
++    // see a chunk size below N, the same guarantee ChunkSize::Min gives on a non-serialized source.
++    // Exit-code convention (see repro/): this test asserts the CORRECT/expected behavior, so it
++    // fails (reproduces the bug) on pristine code and passes once the fix is applied.
++    #[test]
++    fn serialized_input_respects_requested_min_chunk_size() {
++        let requested_min: usize = 1000;
++        let (min_chunk_size, chosen) = chosen_chunk_size_for_serialized_input(
++            ChunkSize::Min(NonZeroUsize::new(requested_min).unwrap()),
++            8,
++        );
++
++        println!("requested_min={requested_min}, actually_chosen_chunk_size={chosen}");
++
++        assert_eq!(min_chunk_size, requested_min);
++        assert!(
++            chosen >= requested_min,
++            "BUG: serialized-input chunk size {chosen} is below the requested minimum {requested_min}"
++        );
++    }
++
++    // Control: ChunkSize::Exact is unaffected by this bug (`next_chunk_size` reads
++    // `state.fixed_chunk_size`, a separate field set correctly in `new_state`, before ever
++    // consulting the value `configure_for_serialized_input` computes) - this must keep passing
++    // both before and after the fix.
++    #[test]
++    fn serialized_input_exact_chunk_size_is_unaffected() {
++        let exact: usize = 1000;
++        let (_min_chunk_size, chosen) = chosen_chunk_size_for_serialized_input(
++            ChunkSize::Exact(NonZeroUsize::new(exact).unwrap()),
++            8,
++        );
++
++        println!("exact={exact}, actually_chosen_chunk_size={chosen}");
++        assert_eq!(chosen, exact);
++    }
++
++    // Control: ChunkSize::Auto (min_chunk_size == 1) must keep picking the same
++    // heuristic-derived value as before the fix - the fix must not regress the Auto path.
++    #[test]
++    fn serialized_input_auto_chunk_size_still_uses_heuristic() {
++        let (min_chunk_size, chosen) = chosen_chunk_size_for_serialized_input(ChunkSize::Auto, 8);
++
++        println!("auto: min_chunk_size={min_chunk_size}, actually_chosen_chunk_size={chosen}");
++        assert_eq!(min_chunk_size, 1);
++        assert_eq!(chosen, 2); // thread_load = 8/1 = 8, 8 < 1024 => 8/4 = 2
++    }
++}

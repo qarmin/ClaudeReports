@@ -1,0 +1,23 @@
+# FemtoVG needs a display. `run` uses the current one, `run-xvfb` a virtual one
+# (needs xvfb, libxkbcommon-x11-0, libxcb-xkb1, libgl1-mesa-dri).
+bin := justfile_directory() + "/../../../target/rdebug/perf_test"
+harness := justfile_directory() + "/../.."
+
+build:
+    cd {{ harness }} && cargo build --profile rdebug --bin perf_test
+
+# Baseline numbers for the rects scene. Apply the two patches to see the improvement:
+#   git -C ../../.. apply perf_test/___OPTIMIZATIONS___/06_femtovg_path_reuse/slint_scratch_path.diff
+#   (femtovg_path_clear.diff is already applied to the femtovg checkout)
+#   and add [patch.crates-io] femtovg = { path = "femtovg" } to the root Cargo.toml
+run: build
+    {{ bin }} --mode rects --count 3000 --frames 8
+    {{ bin }} --mode rects --count 3000 --frames 6 --alloc-profile 3 | sed -n '/allocation sites/,/^$/p' | head -10
+
+run-xvfb: build
+    LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -s "-screen 0 1280x900x24" {{ bin }} --mode rects --count 3000 --frames 8
+    LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -s "-screen 0 1280x900x24" {{ bin }} --mode rects --count 3000 --frames 6 --alloc-profile 3 | sed -n '/allocation sites/,/^$/p' | head -10
+
+# Software renderer version of the same scene: no display needed, no GPU
+run-headless: build
+    {{ bin }} --bench --mode rects --count 3000 --frames 8

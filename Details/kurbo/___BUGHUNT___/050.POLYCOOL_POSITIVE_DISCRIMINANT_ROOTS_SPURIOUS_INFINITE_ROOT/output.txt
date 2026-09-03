@@ -1,0 +1,62 @@
+Captured via `just test` in this candidate's own folder (fresh clone of
+https://github.com/linebender/kurbo.git at ca273499e3e48bd2de6f02aa8e99a148984e45f3, `cargo run
+--release` in repro/, which depends on the real public `polycool` crate via a path dependency into
+that clone).
+
+=== reproduce-before (pristine clone, no patch applied) ===
+Quadratic::roots() = [-0.5]
+Quadratic::positive_discriminant_roots() = Some((-inf, -0.5))
+REPRODUCED - positive_discriminant_roots() returned a non-finite bound: (-inf, -0.5)
+(process exited with code 1, as expected for "bug present")
+
+=== apply patch.diff ===
+(git apply succeeded cleanly against the pristine clone)
+
+=== reproduce-after (patched clone) ===
+Quadratic::roots() = [-0.5]
+Quadratic::positive_discriminant_roots() = None
+did not reproduce - positive_discriminant_roots() returned None
+(process exited with code 0, as expected for "bug fixed")
+
+=== Repeatability (worked directly in the project's working tree, debug build, not release) ===
+Ran the same case 3 additional times via a temporary #[test] in polycool/src/quadratic.rs
+(`cargo test -p polycool --lib bughunt050 -- --nocapture`), before the fix was applied:
+
+Run 1:
+roots() = [-0.5]
+positive_discriminant_roots() = Some((-inf, -0.5))
+thread '...positive_discriminant_roots_linear_degenerate' panicked at polycool/src/quadratic.rs:153:13:
+lo should be finite, got -inf
+
+Run 2: identical output/panic.
+Run 3: identical output/panic.
+
+=> Reproduces 3/3 (in fact deterministic - this is pure floating-point arithmetic with no
+randomness/threading involved, so every run with the same input produces bit-identical output).
+
+=== Fix verified against 3 inputs in the same bug class (temporary tests, patched tree) ===
+cargo test -p polycool --lib bughunt050 -- --nocapture
+
+running 3 tests
+case1 positive_discriminant_roots() = None                     (a == 0: 2x + 1 = 0)
+case2 positive_discriminant_roots() = None                     (a == 0: 3x - 6 = 0, different b/c)
+case3 positive_discriminant_roots() = Some((1.0, 2.0))          (normal quadratic: x^2 - 3x + 2 = 0, unaffected)
+test quadratic::bughunt050::positive_discriminant_roots_linear_degenerate ... ok
+test quadratic::bughunt050::positive_discriminant_roots_linear_degenerate_variant ... ok
+test quadratic::bughunt050::positive_discriminant_roots_normal_quadratic_still_works ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out
+
+=== Project test suite, before vs after (main project's own working tree, --release) ===
+Before (unpatched), `cargo test -p polycool --release -- --skip planted_root_deg5`:
+  test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out
+  (planted_root_deg5 skipped: pre-existing, unrelated flaky test, see candidate
+  017.POLYCOOL_PLANTED_ROOT_ILL_CONDITIONED_TOLERANCE)
+
+After (patched), same command:
+  test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out
+  (identical - no regressions)
+
+Whole-workspace `cargo test --workspace --release -- --skip planted_root_deg5`, both before and
+after the patch: 185 passed; 2 failed (kurbo::bezpath::tests::test_elements_to_segments_starts_on_closepath
+and kurbo::bezpath::tests::test_must_not_start_on_quad) - confirmed these 2 failures are identical
+and pre-existing on the unmodified base commit too (unrelated to polycool/quadratic.rs).

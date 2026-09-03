@@ -1,0 +1,81 @@
+=== Candidate 015: real repro/ run against a clean checkout of base_commit
+=== (7516831426fb70f36d62c521c5477f6a7265b36a), via `cd repro && cargo run --release`.
+=== This is a real, standalone Cargo binary depending on the project's own real, public
+=== `vello_cpu`/`vello_example_scenes` crates, running the REAL `FunkyPathsScene::render()`
+=== through the REAL `vello_cpu::RenderContext` public API (the exact entry point the native
+=== winit demo and wasm/webgl demo both use for this scene).
+
+$ cd repro && cargo run --release
+   Compiling vello_common v0.2.0 (.../clone/sparse_strips/vello_common)
+   [... normal dependency build output omitted ...]
+   Compiling vello_cpu v0.2.0 (.../clone/sparse_strips/vello_cpu)
+   Compiling vello_hybrid v0.2.0 (.../clone/sparse_strips/vello_hybrid)
+   Compiling vello_example_scenes v0.0.0 (.../clone/sparse_strips/vello_example_scenes)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 32.84s
+     Running `target/release/repro`
+pixel at (350, 450): PremulRgba8 { r: 0, g: 0, b: 0, a: 0 } (premultiplied RGBA)
+wrote funky_scene.png
+PASS (bug NOT reproduced): pixel at (350, 450) is background (alpha=0), as expected for a correctly closed/bounded fill
+
+=> At base_commit (current HEAD, 2026-08-31), the historically-reported bug (issue #1240) does
+   NOT reproduce. See funky_scene_at_HEAD.png (a correctly bounded pair of triangles, matching
+   what the scene is supposed to look like) vs. issue_1240_original_screenshot.png (the actual
+   image attached to the GitHub issue, showing the second triangle's fill leaking unbounded to
+   the right edge of the viewport).
+
+Repeated 3 times total (this run, plus 2 additional `cargo run --release` reruns against the
+same clone, no rebuild needed) - byte-identical PASS output all 3 times. Pure deterministic
+rasterization of static geometry, no randomness/threading involved (num_threads: 0).
+
+
+=== Causal verification: re-running the SAME repro/ after applying historical_bug.patch to the
+=== clone (which reintroduces, verbatim, the exact pre-b373c2ca `closed`-flag logic that
+=== `flatten_simd.rs`'s `flatten()` function used before commit b373c2ca "vello_common: Correctly
+=== handle subpaths without initial `MoveTo` (#1544)"), to confirm this repro genuinely exercises
+=== the code path that mattered (not a no-op).
+
+$ git -C clone apply ../historical_bug.patch
+$ cd repro && cargo run --release
+   Compiling vello_common v0.2.0 (.../clone/sparse_strips/vello_common)
+   Compiling glifo v0.3.0 (.../clone/glifo)
+   Compiling vello_cpu v0.2.0 (.../clone/sparse_strips/vello_cpu)
+   Compiling vello_hybrid v0.2.0 (.../clone/sparse_strips/vello_hybrid)
+   Compiling vello_example_scenes v0.0.0 (.../clone/sparse_strips/vello_example_scenes)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 13.71s
+     Running `target/release/repro`
+pixel at (350, 450): PremulRgba8 { r: 0, g: 0, b: 255, a: 255 } (premultiplied RGBA)
+wrote funky_scene.png
+FAIL (bug reproduced): pixel at (350, 450) has alpha 255, expected fully transparent background
+
+=> With the pre-fix logic reinstated, the SAME repro/, against the SAME scene, on the SAME
+   commit's dependency tree, immediately reproduces the exact artifact from the GitHub issue
+   screenshot - see funky_scene_HISTORICAL_BUG_reference.png (visually identical composition to
+   issue_1240_original_screenshot.png: a correct thin needle triangle at top, and the second
+   triangle degenerating into an unbounded fill extending to the canvas's right edge).
+
+Repeated 3 times total (this run + 2 reruns) - byte-identical FAIL output all 3 times.
+
+$ git -C clone checkout -- sparse_strips/vello_common/src/flatten_simd.rs   # clone left clean
+
+
+=== Project test suite, pristine base_commit checkout, release build (no patch applied - there
+=== is nothing to fix, the bug is already gone at base_commit; these numbers are the "before"
+=== state referenced by RESULT.md, there is no "after" since no source change was made).
+
+$ cargo test -p vello_common --release
+test result: ok. 159 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+   Doc-tests vello_common
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+$ cargo test -p vello_cpu --release --lib
+test result: ok. 81 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Note: `cargo test -p vello_sparse_tests` (the real end-to-end rendering snapshot suite, which
+covers rendering scenarios closest to this candidate) could not be run in this sandbox - its
+reference PNGs are Git-LFS-tracked and this sandbox has no `git-lfs` binary on PATH. See
+`___BUGHUNT___/README.md`'s "Toolchain availability" section for the sparse-checkout workaround
+used to get a checkout at all, and why it necessarily excludes those specific snapshot
+directories.

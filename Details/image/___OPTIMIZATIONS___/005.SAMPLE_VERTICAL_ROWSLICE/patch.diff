@@ -1,0 +1,73 @@
+diff --git a/src/imageops/sample.rs b/src/imageops/sample.rs
+index 25864cac..fffd4b2f 100644
+--- a/src/imageops/sample.rs
++++ b/src/imageops/sample.rs
+@@ -515,6 +515,68 @@ where
+     let sratio = if ratio < 1.0 { 1.0 } else { ratio };
+     let src_support = filter.support * sratio;
+ 
++    // Fast path: if the source exposes a canonical packed-pixel view (true for the common
++    // `ImageBuffer<P, Vec<S>>` case), read every contributing row directly through slice
++    // indexing instead of `get_pixel`'s per-call bounds checks and trait dispatch.
++    let pix_stride = <P as Pixel>::CHANNEL_COUNT as usize;
++    if let Some(view) = image.to_pixel_view() {
++        let (sw, row_stride) = view.strides_wh();
++        if sw == pix_stride {
++            let samples: &[S] = view.samples();
++            let out_stride = width as usize * MAX_CHANNEL;
++            let out_raw = out.subpixels_mut();
++
++            for outy in 0..new_height {
++                // For an explanation of this algorithm, see the comments
++                // in horizontal_sample.
++                let inputy = (outy as f32 + 0.5) * ratio;
++
++                let left = (inputy - src_support).floor() as i64;
++                let left = clamp(left, 0, <i64 as From<_>>::from(height) - 1) as u32;
++
++                let right = (inputy + src_support).ceil() as i64;
++                let right = clamp(
++                    right,
++                    <i64 as From<_>>::from(left) + 1,
++                    <i64 as From<_>>::from(height),
++                ) as u32;
++
++                let inputy = inputy - 0.5;
++
++                ws.clear();
++                let mut sum = 0.0;
++                for i in left..right {
++                    let w = (filter.kernel)((i as f32 - inputy) / sratio);
++                    ws.push(w);
++                    sum += w;
++                }
++                for w in ws.iter_mut() {
++                    *w /= sum;
++                }
++
++                let row_start = outy as usize * out_stride;
++                let out_row = &mut out_raw[row_start..row_start + out_stride];
++
++                for (x, dst) in out_row.chunks_exact_mut(MAX_CHANNEL).enumerate() {
++                    let mut acc = [1.0f32; MAX_CHANNEL];
++
++                    for (i, &w) in ws.iter().enumerate() {
++                        let base = (left as usize + i) * row_stride + x * pix_stride;
++                        let src_pixel = &samples[base..base + pix_stride];
++
++                        for (a, &c) in acc.iter_mut().zip(src_pixel) {
++                            *a += <f32 as NumCast>::from(c).unwrap() * w;
++                        }
++                    }
++
++                    dst.copy_from_slice(&acc);
++                }
++            }
++
++            return out;
++        }
++    }
++
+     for outy in 0..new_height {
+         // For an explanation of this algorithm, see the comments
+         // in horizontal_sample.

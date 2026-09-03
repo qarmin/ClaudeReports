@@ -1,0 +1,79 @@
+diff --git a/internal/core/textlayout/sharedparley/selection.rs b/internal/core/textlayout/sharedparley/selection.rs
+index 9fb19d4c3..efac5e724 100644
+--- a/internal/core/textlayout/sharedparley/selection.rs
++++ b/internal/core/textlayout/sharedparley/selection.rs
+@@ -102,7 +102,7 @@ pub(super) fn run_coverage(run_x: &Range<f32>, spans: &[SelectionSpan]) -> RunCo
+     if overlapping { RunCoverage::Partial } else { RunCoverage::Unselected }
+ }
+ 
+-impl Layout {
++impl Layout<'_> {
+     /// Resolves `selection_range` into per-line horizontal spans, for the lines whose boxes may
+     /// intersect `visible_band` (a physical y range in item coordinates; spans feed drawing only,
+     /// so off-screen lines need none). Pass an unbounded band to resolve everything.
+@@ -118,15 +118,29 @@ pub(super) fn selection_geometry(
+     ) -> SelectionSpans {
+         let mut spans = Vec::new();
+ 
+-        for (paragraph_index, paragraph) in self.visible_paragraphs().iter().enumerate() {
++        // Paragraphs are stacked in order, so binary-search the first one that can reach the band
++        // instead of walking the document to it -- a selection spanning 400 000 paragraphs was
++        // costing ~0.8 ms per frame in skipped iterations alone. Start one paragraph earlier and
++        // stop one past the band, for the same reason the draw loop does: ink may overhang the
++        // line box, and the per-paragraph test below trims those two edge paragraphs.
++        let visible = self.visible_paragraphs();
++        let first = visible
++            .partition_point(|p| {
++                self.y_offset + p.y + PhysicalLength::new(p.metrics.height) < visible_band.start
++            })
++            .saturating_sub(1);
++
++        for paragraph_index in first..visible.len() {
++            let paragraph = &self.paragraphs[paragraph_index];
+             // Like the draw cull, padded by an (average) line height for ink that overhangs its
+             // line box: such a line still draws, so it still needs its spans.
+             let paragraph_top = self.y_offset + paragraph.y;
+-            let paragraph_height = PhysicalLength::new(paragraph.layout.height());
+-            let line_pad = paragraph_height / paragraph.layout.lines().len().max(1) as f32;
+-            if paragraph_top + paragraph_height + line_pad < visible_band.start
+-                || paragraph_top - line_pad > visible_band.end
+-            {
++            let paragraph_height = PhysicalLength::new(paragraph.metrics.height);
++            let line_pad = paragraph_height / paragraph.metrics.line_count.max(1) as f32;
++            if paragraph_top - line_pad > visible_band.end {
++                break;
++            }
++            if paragraph_top + paragraph_height + line_pad < visible_band.start {
+                 continue;
+             }
+ 
+@@ -140,20 +154,18 @@ pub(super) fn selection_geometry(
+             let local_start = selection_start - paragraph.range.start;
+             let local_end = selection_end - paragraph.range.start;
+ 
++            // Only reached for paragraphs the band lets through, so a large document doesn't
++            // re-shape itself to resolve a selection that spans it.
++            let Some(glyphs) = self.glyphs(paragraph_index) else {
++                continue;
++            };
++
+             let selection = parley::editing::Selection::new(
+-                parley::editing::Cursor::from_byte_index(
+-                    &paragraph.layout,
+-                    local_start,
+-                    Default::default(),
+-                ),
+-                parley::editing::Cursor::from_byte_index(
+-                    &paragraph.layout,
+-                    local_end,
+-                    Default::default(),
+-                ),
++                parley::editing::Cursor::from_byte_index(&glyphs, local_start, Default::default()),
++                parley::editing::Cursor::from_byte_index(&glyphs, local_end, Default::default()),
+             );
+ 
+-            selection.geometry_with(&paragraph.layout, |rect, line| {
++            selection.geometry_with(&glyphs, |rect, line| {
+                 // Snap the horizontal edges to device pixels once, here, so that the highlight
+                 // rectangle and the glyph clip derived from the same span are pixel-identical.
+                 let x = (rect.x0 as f32).round()..(rect.x1 as f32).round();

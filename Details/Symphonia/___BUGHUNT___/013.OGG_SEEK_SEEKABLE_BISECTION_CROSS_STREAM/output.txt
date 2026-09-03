@@ -1,0 +1,55 @@
+=== BEFORE fix (base_commit ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee) ===
+$ cargo run --release -- assets/out_long.ogg
+found 2 track(s):
+  track id=0x344085ff
+  track id=0x769f9c6f
+seeking track 0x344085ff to time=1.07s (seekable File source) ...
+TIMEOUT: seek() did not return within 10s -- infinite loop confirmed
+
+(3/3 repeat runs, release build, deterministic - same result every time; process pegs one CPU
+core at ~100% until killed)
+
+=== AFTER fix (patch.diff applied) ===
+run1:
+found 2 track(s):
+  track id=0x344085ff
+  track id=0x769f9c6f
+seeking track 0x344085ff to time=1.07s (seekable File source) ...
+seek returned: ok=true
+run1 exit=0
+run2:
+found 2 track(s):
+  track id=0x344085ff
+  track id=0x769f9c6f
+seeking track 0x344085ff to time=1.07s (seekable File source) ...
+seek returned: ok=true
+run2 exit=0
+run3:
+found 2 track(s):
+  track id=0x344085ff
+  track id=0x769f9c6f
+seeking track 0x344085ff to time=1.07s (seekable File source) ...
+seek returned: ok=true
+run3 exit=0
+
+=== Mechanism confirmation (temporary instrumentation, reverted afterward) ===
+A temporary eprintln! added at the `packet.track_id != serial` arm in
+symphonia-format-ogg/src/demuxer.rs's do_seek() (in a scratch worktree, never committed/left in
+the real tree) printed, for this same repro input/target (track 0x344085ff, t=1.07s, seekable File
+source):
+
+DEBUG013: cross-stream packet seen: page_serial(peeked-from)=0x769f9c6f packet.track_id=0x769f9c6f seek_target_serial=0x344085ff pts=-128
+DEBUG013: cross-stream packet seen: page_serial(peeked-from)=0x769f9c6f packet.track_id=0x769f9c6f seek_target_serial=0x344085ff pts=-128
+DEBUG013: cross-stream packet seen: page_serial(peeked-from)=0x769f9c6f packet.track_id=0x769f9c6f seek_target_serial=0x344085ff pts=-128
+DEBUG013: confirmed spin (200 identical iterations), aborting
+
+This confirms that after the seekable bisection converges on a page belonging to track
+0x344085ff, that page's own buffered packets are exhausted before target_ts is reached, the loop's
+`_ => match self.read_page()` arm reads the next physical page (which belongs to the *other*
+logical stream, 0x769f9c6f), and the loop then spins on that peeked-but-never-discarded
+cross-stream packet forever - reached entirely through the seekable/bisection fast path
+(`is_seekable() == true`), no ReadOnlySource / non-seekable wrapper involved.
+
+=== Project test suite (cargo test --workspace --release), full worktree at base_commit ===
+Before fix: 106 passed, 0 failed
+After fix:  106 passed, 0 failed

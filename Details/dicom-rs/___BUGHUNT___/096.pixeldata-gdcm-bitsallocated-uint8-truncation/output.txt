@@ -1,0 +1,45 @@
+=== BEFORE fix (pristine df2b9e42), `cargo run` inside repro/ (3 separate runs) ===
+
+--- run 1 ---
+     Running `target/debug/repro`
+calling decode_pixel_data() via the gdcm feature's FFI path...
+Error: In .../gdcm-rs-0.6.0/GDCM/Source/MediaStorageAndFileFormat/gdcmPixelFormat.cxx, line 162, function gdcm::PixelFormat::ScalarType gdcm::PixelFormat::GetScalarType() const
+I have never seen this before BitsAllocated 2048
+
+Error: In .../gdcm-rs-0.6.0/GDCM/Source/MediaStorageAndFileFormat/gdcmPixelFormat.cxx, line 162, function gdcm::PixelFormat::ScalarType gdcm::PixelFormat::GetScalarType() const
+I have never seen this before BitsAllocated 2048
+
+Error: In .../gdcm-rs-0.6.0/GDCM/Source/MediaStorageAndFileFormat/gdcmPixelFormat.cxx, line 162, function gdcm::PixelFormat::ScalarType gdcm::PixelFormat::GetScalarType() const
+I have never seen this before BitsAllocated 2048
+
+repro: .../gdcm-rs-0.6.0/GDCM/Source/MediaStorageAndFileFormat/gdcmRLECodec.cxx:777: virtual bool gdcm::RLECodec::DecodeByStreams(std::istream&, std::ostream&): Assertion `length' failed.
+Aborted (core dumped)
+exit code: 134
+
+--- run 2 --- (identical message/location)
+exit code: 134
+
+--- run 3 --- (identical message/location)
+exit code: 134
+
+=== AFTER fix (patch.diff applied), `cargo run` inside repro/ ===
+   Compiling dicom-pixeldata v0.10.0 (.../clone/pixeldata)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.46s
+     Running `target/debug/repro`
+calling decode_pixel_data() via the gdcm feature's FFI path...
+did not abort - decode_pixel_data() returned a graceful Err: Unsupported BitsAllocated `2048`
+exit code: 0
+
+=== Project test suite (cargo test -p dicom-pixeldata --features "gdcm image" --lib), run against the clone ===
+Before fix: test result: FAILED. 81 passed; 2 failed; 3 ignored; 0 measured; 0 filtered out
+            (the 2 failures - tests::test_1bit_image_decoding_data and
+            tests::test_1bit_image_decoding_data_frame - are pre-existing and unrelated:
+            BitsAllocated=1 on a real test fixture (pydicom/liver.dcm) hits a distinct,
+            already-present "chunk size must be non-zero" panic in
+            pixeldata/src/gdcm.rs's decode_pixel_data_frame division-by-zero on
+            bits_allocated/8, and a downstream FrameOutOfRange in lib.rs - both present
+            identically before and after this candidate's fix, since BitsAllocated=1 is
+            explicitly allowed by the fix's `1 | 8 | 16 | 32` check)
+After fix:  test result: FAILED. 81 passed; 2 failed; 3 ignored; 0 measured; 0 filtered out
+            (same 2 pre-existing failures, unchanged - zero regressions introduced)

@@ -1,0 +1,43 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+# Note: this environment's git-lfs binary is missing, which makes a plain `git clone`/`git
+# checkout` fail (`git-lfs filter-process: 1: git-lfs: not found`) because two snapshot
+# directories are LFS-tracked. Neither this repro nor the patched crates touch those files, so
+# the clone step disables the LFS filter outright (`-c filter.lfs.*`) to stay robust regardless
+# of whether git-lfs is installed on the machine running this.
+clone:
+    rm -rf clone
+    git -c filter.lfs.process= -c filter.lfs.smudge=cat -c filter.lfs.required=false clone {{repo_url}} clone
+    cd clone && git -c filter.lfs.process= -c filter.lfs.smudge=cat -c filter.lfs.required=false checkout {{base_commit}}
+    cd clone && git config filter.lfs.process "" && git config filter.lfs.smudge cat && git config filter.lfs.required false
+
+# Build+run the standalone repro against the pristine clone - panics (non-zero exit) to
+# demonstrate the bug: a real `RenderContext::push_layer` + `fill_path` + `render_with` call
+# sequence panics inside `vello_common::util::strip_bbox`. The leading `-` tells `just` to
+# tolerate this recipe's nonzero exit so `just test`'s dependency chain continues on to
+# `apply`/`reproduce-after` instead of stopping here (the panic itself, printed above, is the
+# actual before/after evidence, not this recipe's own exit code).
+reproduce-before:
+    -cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - both cases render without panicking.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

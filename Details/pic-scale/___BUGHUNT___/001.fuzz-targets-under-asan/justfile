@@ -1,0 +1,50 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate found no pic-scale source bug (Status: Not reproducible), so there is no
+# patch.diff and no repro/ crate to apply a fix to. What this justfile reproduces instead is the
+# actual, real finding: cargo-fuzz's default ASAN build of the project's existing fuzz targets
+# hangs in this kind of sandbox, while `--sanitizer none` runs cleanly - see RESULT.md/output.txt.
+#
+# Fill in repo_url/base_commit when this candidate is created (read them once with
+# `git remote get-url origin` / `git rev-parse HEAD` in the main project).
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Demonstrates both halves of the finding: default ASAN hangs, --sanitizer none does not.
+test: clone asan-hangs nosan-works
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Should hang: the outer `timeout` has to kill it, it will not exit on its own within
+# -max_total_time=5. A clean "Done N runs in ..." here instead of a timeout means this
+# environment does NOT reproduce the ASAN hang (e.g. a different sandbox/host).
+asan-hangs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone/fuzz
+    cargo +nightly fuzz build --features avx,sse,nightly_avx512 resize_rgba
+    rm -rf /tmp/pic_scale_bughunt_001_corpus_asan && mkdir -p /tmp/pic_scale_bughunt_001_corpus_asan
+    echo "Expect this to hang and be killed by the 30s timeout below (that's the finding):"
+    if timeout 30 ./target/x86_64-unknown-linux-gnu/release/resize_rgba \
+        -max_total_time=5 -rss_limit_mb=1536 /tmp/pic_scale_bughunt_001_corpus_asan; then
+      echo "DID NOT HANG in this environment (finding not reproduced here)."
+    else
+      echo "HUNG as expected (killed by outer timeout, -max_total_time=5 was not honored)."
+    fi
+
+# Should complete cleanly in ~a few seconds, printing "Done N runs in ...".
+nosan-works:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone/fuzz
+    cargo +nightly fuzz build --sanitizer none --features avx,sse,nightly_avx512 resize_rgba
+    rm -rf /tmp/pic_scale_bughunt_001_corpus_nosan && mkdir -p /tmp/pic_scale_bughunt_001_corpus_nosan
+    timeout 30 ./target/x86_64-unknown-linux-gnu/release/resize_rgba \
+        -max_total_time=5 -rss_limit_mb=1536 /tmp/pic_scale_bughunt_001_corpus_nosan
+
+clean:
+    rm -rf clone

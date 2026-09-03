@@ -1,0 +1,69 @@
+Candidate 123 - GitHub issue Enet4/dicom-rs#169 ("Could not read data set token")
+Repro run against the local worktree (base_commit df2b9e42), release build.
+(Full `cargo build` warning/compile noise omitted; only the program's own stdout is kept.)
+
+=====================================================================
+BEFORE the patch (parser/src/dataset/read.rs at df2b9e42, unmodified)
+=====================================================================
+--- Variation A: opaque payload misread as element header (40 bytes) ---
+ERROR: Could not read data set token
+ERROR (debug): ReadToken { source: ReadValue { len: 1074340347, tag: Tag(0x2D18, 0x5444), source: ReadValueData { position: 24, source: Error { kind: UnexpectedEof, message: "failed to fill whole buffer" }, ... } } }
+  (this is the ORIGINAL bug's confusing generic error)
+--- Variation C: several private UN elements in a row (72 bytes) ---
+ERROR: Could not read data set token
+ERROR (debug): ReadToken { source: ReadValue { len: 538976288, tag: Tag(0x4341, 0x454D), source: ReadValueData { position: 24, source: Error { kind: UnexpectedEof, message: "failed to fill whole buffer" }, ... } } }
+  (this is the ORIGINAL bug's confusing generic error)
+--- Variation D: preceded by a normal element (50 bytes) ---
+ERROR: Could not read data set token
+ERROR (debug): ReadToken { source: ReadValue { len: 1074340347, tag: Tag(0x2D18, 0x5444), source: ReadValueData { position: 34, source: Error { kind: UnexpectedEof, message: "failed to fill whole buffer" }, ... } } }
+  (this is the ORIGINAL bug's confusing generic error)
+--- Control: all-zero opaque payload (expected OK) (40 bytes) ---
+OK: parsed 1 top-level elements (no failure)
+  tag (2005,1080) vr SQ len Length(Undefined)
+
+BUG REPRODUCED: a CP-246-style private UN undefined-length element's opaque item payload was
+misread as a nested element header, causing a spurious parse failure ("Could not read data set
+token" once wrapped by dicom-object).
+
+process exit code: 1
+
+=====================================================================
+AFTER the patch (patch.diff applied)
+=====================================================================
+--- Variation A: opaque payload misread as element header (40 bytes) ---
+ERROR: Could not read data set token
+ERROR (debug): ReadToken { source: ElementLengthExceedsContainer { tag: Tag(0x2D18, 0x5444), len: 1074340347, remaining: 8, ... } }
+  (this is the patched, clear, specific error)
+--- Variation C: several private UN elements in a row (72 bytes) ---
+ERROR: Could not read data set token
+ERROR (debug): ReadToken { source: ElementLengthExceedsContainer { tag: Tag(0x4341, 0x454D), len: 538976288, remaining: 0, ... } }
+  (this is the patched, clear, specific error)
+--- Variation D: preceded by a normal element (50 bytes) ---
+ERROR: Could not read data set token
+ERROR (debug): ReadToken { source: ElementLengthExceedsContainer { tag: Tag(0x2D18, 0x5444), len: 1074340347, remaining: 8, ... } }
+  (this is the patched, clear, specific error)
+--- Control: all-zero opaque payload (expected OK) (40 bytes) ---
+OK: parsed 1 top-level elements (no failure)
+  tag (2005,1080) vr SQ len Length(Undefined)
+
+process exit code: 0
+
+=====================================================================
+NOTE
+=====================================================================
+In both runs, the outer "Could not read data set token" (object/src/lib.rs's ReadToken,
+Display-only) is unchanged - that's dicom-object's generic wrapper around any DataSetReader
+error, exactly matching the original issue's reported message. What changes is the *underlying
+source error* (visible via {:?} / Error::source()): before the patch it's an opaque
+`ReadValue { ... UnexpectedEof ... }` with no indication of what went wrong; after the patch it's
+a new, specific `ElementLengthExceedsContainer` error naming the offending tag, its bogus
+declared length, and how many bytes actually remained in its enclosing item.
+
+None of the triggering variations parse successfully after the patch - the fix does not achieve
+dcmtk-level interoperability with these files (that would require heuristically distinguishing
+"opaque binary payload" from "real nested data set" inside a CP-246 item, which real-world DICOM
+toolkits like dcmtk/GDCM implement as a nontrivial guessing routine - judged out of scope for a
+bounded fix here). See RESULT.md.
+
+Full cargo test --workspace --exclude dcms results (both before and after the patch):
+410 passed; 0 failed; 2 ignored

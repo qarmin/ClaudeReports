@@ -1,0 +1,96 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate re-applies candidate 002.YBR_FIXED_POINT's exact patch (patch.diff here is
+# a copy of that candidate's own patch.diff, unmodified - see RESULT.md for why: no new source
+# change was made, this candidate only inspects generated assembly) and additionally disassembles
+# both the baseline and patched release builds to check for SIMD auto-vectorization.
+#
+# Like candidate 002, this candidate's harness (bench_pipeline) is untracked in the main dicom-rs
+# repo, so this justfile is self-contained only *given the whole ___OPTIMIZATIONS___ folder kept
+# together* - it copies the canonical harness copy from ../harness/bench_pipeline into ./clone as
+# part of `clone:` (see SKILL.md's "Bench harnesses: grow a few, don't multiply" / "Why
+# per-candidate folders clone").
+#
+# `just test` clones dicom-rs at the pinned commit, builds baseline + patched bench binaries (both
+# with and without the `rayon` feature), runs the timing/correctness re-check, and dumps the
+# disassembly of the colorspace-conversion hot path for all four binaries into ./asm_out/ so the
+# "no packed SIMD instructions" claim in RESULT.md can be independently re-checked from a fresh
+# clone. Requires `objdump` on PATH (binutils).
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench disasm
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    rm -rf clone/___bench_pipeline
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___bench_pipeline
+    sed -i 's#\.\./\.\./\.\./#../#g' clone/___bench_pipeline/Cargo.toml
+
+sc_dep_line := 'dicom-pixeldata = { path = "../pixeldata", default-features = false, features = ["image", "ndarray", "native"] }'
+mc_dep_line := 'dicom-pixeldata = { path = "../pixeldata", features = ["image", "ndarray"] }'
+
+build-baseline:
+    cd clone/___bench_pipeline && cargo build --release
+    cp clone/___bench_pipeline/target/release/bench clone/___bench_pipeline/target/release/bench_baseline_mc
+    sed -i 's#dicom-pixeldata = .*#{{sc_dep_line}}#' clone/___bench_pipeline/Cargo.toml
+    cd clone/___bench_pipeline && cargo build --release --target-dir target_sc
+    cp clone/___bench_pipeline/target_sc/release/bench clone/___bench_pipeline/target_sc/release/bench_baseline_sc
+    sed -i 's#dicom-pixeldata = .*#{{mc_dep_line}}#' clone/___bench_pipeline/Cargo.toml
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/___bench_pipeline && cargo build --release
+    cp clone/___bench_pipeline/target/release/bench clone/___bench_pipeline/target/release/bench_patched_mc
+    sed -i 's#dicom-pixeldata = .*#{{sc_dep_line}}#' clone/___bench_pipeline/Cargo.toml
+    cd clone/___bench_pipeline && cargo build --release --target-dir target_sc
+    cp clone/___bench_pipeline/target_sc/release/bench clone/___bench_pipeline/target_sc/release/bench_patched_sc
+    sed -i 's#dicom-pixeldata = .*#{{mc_dep_line}}#' clone/___bench_pipeline/Cargo.toml
+
+bin_baseline_mc := "clone/___bench_pipeline/target/release/bench_baseline_mc"
+bin_patched_mc := "clone/___bench_pipeline/target/release/bench_patched_mc"
+bin_baseline_sc := "clone/___bench_pipeline/target_sc/release/bench_baseline_sc"
+bin_patched_sc := "clone/___bench_pipeline/target_sc/release/bench_patched_sc"
+testfile := "clone/___bench_pipeline/testdata/ybr_big.dcm"
+testfile_random := "clone/___bench_pipeline/testdata/ybr_random.dcm"
+
+bench:
+    @echo "=== multi-core (default features, rayon enabled), baseline ==="
+    {{bin_baseline_mc}} colorspace {{testfile}} 200
+    @echo "=== multi-core (default features, rayon enabled), patched ==="
+    {{bin_patched_mc}} colorspace {{testfile}} 200
+    @echo "=== single-core (--no-default-features, no rayon), baseline ==="
+    taskset -c 0 {{bin_baseline_sc}} colorspace {{testfile}} 200
+    @echo "=== single-core (--no-default-features, no rayon), patched ==="
+    taskset -c 0 {{bin_patched_sc}} colorspace {{testfile}} 200
+    @echo "=== correctness: same checksum on the tiled-real-content file? ==="
+    {{bin_baseline_mc}} colorspace {{testfile}} 1
+    {{bin_patched_mc}} colorspace {{testfile}} 1
+    @echo "=== correctness: checksums WILL differ on the random-content file (characterized 1-LSB diff, see 002/RESULT.md) ==="
+    {{bin_baseline_mc}} colorspace {{testfile_random}} 1
+    {{bin_patched_mc}} colorspace {{testfile_random}} 1
+
+# Dumps full objdump disassembly of all four binaries and greps out the colorspace-conversion
+# symbols/inlined loop so the "no packed xmm/ymm SIMD across pixels" claim can be re-checked
+# without hand-locating addresses again. Look for `.LCPI`/`floorf` (baseline) vs. `imul`/`sar`
+# immediate-coefficient patterns (patched) in the output, and confirm no `pmulld`/`vpmulld`/packed
+# multi-lane integer ops appear around either.
+disasm:
+    mkdir -p asm_out
+    objdump -d -C {{bin_baseline_mc}} > asm_out/baseline_mc_full.s
+    objdump -d -C {{bin_patched_mc}} > asm_out/patched_mc_full.s
+    objdump -d -C {{bin_baseline_sc}} > asm_out/baseline_sc_full.s
+    objdump -d -C {{bin_patched_sc}} > asm_out/patched_sc_full.s
+    @echo "=== baseline rayon closure (convert_colorspace_u8), scalar SSE + floorf calls expected ==="
+    awk '/<&dicom_pixeldata::convert_colorspace_u8::\{closure#0\} as core::ops::function::FnMut<\(&mut \[u8\],\)>>::call_mut>:/{p=1} p; /^$/{if(p)exit}' asm_out/baseline_mc_full.s
+    @echo "=== patched rayon closure (convert_colorspace_u8), scalar GPR integer expected, no xmm/ymm ==="
+    awk '/<&dicom_pixeldata::convert_colorspace_u8::\{closure#0\} as core::ops::function::FnMut<\(&mut \[u8\],\)>>::call_mut>:/{p=1} p; /^$/{if(p)exit}' asm_out/patched_mc_full.s
+
+clean:
+    rm -rf clone asm_out

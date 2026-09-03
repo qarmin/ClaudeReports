@@ -1,0 +1,95 @@
+warning: variant `BigEndian` is never constructed
+  --> /home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/018.MANUAL_MIDPOINT_BISECTION_OVERFLOW_REMAINING_SITES/clone/symphonia-format-riff/src/common.rs:27:5
+   |
+25 | pub enum ByteOrder {
+   |          --------- variant in this enum
+26 |     LittleEndian,
+27 |     BigEndian,
+   |     ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `parse_and_skip_unread` is never used
+   --> /home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/018.MANUAL_MIDPOINT_BISECTION_OVERFLOW_REMAINING_SITES/clone/symphonia-format-riff/src/common.rs:155:8
+    |
+150 | pub trait ParseChunk: Sized {
+    |           ---------- associated function in this trait
+...
+155 |     fn parse_and_skip_unread<B: ReadBytes>(reader: &mut B, tag: [u8; 4], len: u32) -> Result<Self> {
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `parse_and_skip_unread` is never used
+   --> /home/rafal/Projekty/Obce/Symphonia/___BUGHUNT___/018.MANUAL_MIDPOINT_BISECTION_OVERFLOW_REMAINING_SITES/clone/symphonia-format-riff/src/common.rs:187:12
+    |
+178 | impl<P: ParseChunk> ChunkParser<P> {
+    | ---------------------------------- method in this implementation
+...
+187 |     pub fn parse_and_skip_unread<B: ReadBytes>(&self, reader: &mut B) -> Result<P> {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `symphonia-format-riff` (lib) generated 3 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running `target/debug/repro`
+=== Part 1: symphonia-core SeekIndex::search (util.rs:120) ===
+  inserted 2000000 SeekPoints via the real public SeekIndex::insert API
+  ran 14599 SeekIndex::search() calls across the full range, no panic
+  real FLAC SEEKTABLE ceiling: 932067 points (this run used 2.1x that many)
+  usize::MAX/2 = 9223372036854775807 -- a Vec<SeekPoint> would need to reach roughly that many elements for (lower + upper) to overflow; SeekPoint's own size (>= 20 bytes) means Vec's own isize::MAX-byte allocation ceiling is hit far earlier than that on every real platform
+
+=== Part 2: OGG bisection sites (demuxer.rs:192 / physical.rs:130) - 2 real ffmpeg-encoded Vorbis physical streams concatenated (small) ===
+  file size = 14323 bytes (genuine, on-disk chained OGG file)
+ DEBUG symphonia_core::formats::probe > selected format reader 'ogg' with score 255
+ DEBUG symphonia_format_ogg::page     > grow page buffer to 8192 bytes
+ INFO  symphonia_format_ogg::demuxer  > starting new physical stream
+ INFO  symphonia_format_ogg::demuxer  > selected vorbis mapper for stream with serial=0xe190ea26
+  opened OK (physical.rs:130 chained-stream bisection ran during open, no panic)
+ DEBUG symphonia_format_ogg::demuxer  > seeking track=0xe190ea26 to frame_ts=0
+ DEBUG symphonia_format_ogg::demuxer  > seek: target_ts=-1024 (rap=1024)
+ DEBUG symphonia_format_ogg::demuxer  > seeked track=0xe190ea26 to packet_ts=-128 (delta=-128)
+  seek to 0s OK (demuxer.rs:192 bisection ran, no panic): actual_ts=Timestamp(-128)
+ DEBUG symphonia_format_ogg::demuxer  > seeking track=0xe190ea26 to frame_ts=44100
+ DEBUG symphonia_format_ogg::demuxer  > seek: target_ts=43076 (rap=1024)
+ DEBUG symphonia_format_ogg::demuxer  > seeked track=0xe190ea26 to packet_ts=42560 (delta=-1540)
+  seek to 1s OK (demuxer.rs:192 bisection ran, no panic): actual_ts=Timestamp(42560)
+  finished (no crash)
+
+=== Part 2: OGG bisection sites (demuxer.rs:192 / physical.rs:130) - 2 real ffmpeg-encoded Vorbis physical streams concatenated (large, forces chained bisection) ===
+  file size = 96220 bytes (genuine, on-disk chained OGG file)
+ DEBUG symphonia_core::formats::probe > selected format reader 'ogg' with score 255
+ DEBUG symphonia_format_ogg::page     > grow page buffer to 8192 bytes
+ INFO  symphonia_format_ogg::demuxer  > starting new physical stream
+ INFO  symphonia_format_ogg::demuxer  > selected vorbis mapper for stream with serial=0xab6ddf32
+ DEBUG symphonia_format_ogg::physical > media source stream is chained, bisecting end of physical stream
+  opened OK (physical.rs:130 chained-stream bisection ran during open, no panic)
+ DEBUG symphonia_format_ogg::demuxer  > seeking track=0xab6ddf32 to frame_ts=0
+ DEBUG symphonia_format_ogg::demuxer  > seek: target_ts=-1024 (rap=1024)
+ DEBUG symphonia_format_ogg::demuxer  > seeked track=0xab6ddf32 to packet_ts=-128 (delta=-128)
+  seek to 0s OK (demuxer.rs:192 bisection ran, no panic): actual_ts=Timestamp(-128)
+  seek to 1s failed (no crash): seek error: requested seek timestamp is out-of-range for stream
+  finished (no crash)
+
+=== Part 2: OGG bisection sites (demuxer.rs:192 / physical.rs:130) - single long (231KB) non-chained physical stream, mid-file seek ===
+  file size = 231799 bytes (genuine, on-disk chained OGG file)
+ DEBUG symphonia_core::formats::probe > selected format reader 'ogg' with score 255
+ DEBUG symphonia_format_ogg::page     > grow page buffer to 8192 bytes
+ INFO  symphonia_format_ogg::demuxer  > starting new physical stream
+ INFO  symphonia_format_ogg::demuxer  > selected vorbis mapper for stream with serial=0x8cf012
+  opened OK (physical.rs:130 chained-stream bisection ran during open, no panic)
+ DEBUG symphonia_format_ogg::demuxer  > seeking track=0x8cf012 to frame_ts=441000
+ DEBUG symphonia_format_ogg::demuxer  > seek: target_ts=439976 (rap=1024)
+ DEBUG symphonia_format_ogg::demuxer  > seek: bisect step: page={ start_ts=2657856, end_ts=2702912 } byte_range=[3935, 117867, 231799]
+ DEBUG symphonia_format_ogg::demuxer  > seeked track=0x8cf012 to packet_ts=439872 (delta=-1128)
+  seek to 10s OK (demuxer.rs:192 bisection ran, no panic): actual_ts=Timestamp(439872)
+ DEBUG symphonia_format_ogg::demuxer  > seeking track=0x8cf012 to frame_ts=2646000
+ DEBUG symphonia_format_ogg::demuxer  > seek: target_ts=2644976 (rap=1024)
+ DEBUG symphonia_format_ogg::demuxer  > seek: bisect step: page={ start_ts=2657856, end_ts=2702912 } byte_range=[3935, 117867, 231799]
+ DEBUG symphonia_format_ogg::demuxer  > seeked track=0x8cf012 to packet_ts=2644544 (delta=-1456)
+  seek to 60s OK (demuxer.rs:192 bisection ran, no panic): actual_ts=Timestamp(2644544)
+ DEBUG symphonia_format_ogg::demuxer  > seeking track=0x8cf012 to frame_ts=4851000
+ DEBUG symphonia_format_ogg::demuxer  > seek: target_ts=4849976 (rap=1024)
+ DEBUG symphonia_format_ogg::demuxer  > seek: bisect step: page={ start_ts=2657856, end_ts=2702912 } byte_range=[3935, 117867, 231799]
+ DEBUG symphonia_format_ogg::demuxer  > seeked track=0x8cf012 to packet_ts=4849216 (delta=-1784)
+  seek to 110s OK (demuxer.rs:192 bisection ran, no panic): actual_ts=Timestamp(4849216)
+  finished (no crash)
+
+ALL CASES COMPLETED WITHOUT A PANIC

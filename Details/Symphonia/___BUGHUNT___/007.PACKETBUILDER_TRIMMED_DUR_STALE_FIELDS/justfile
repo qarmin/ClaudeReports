@@ -1,0 +1,34 @@
+# Self-contained reproduction for candidate 007: PacketBuilder::trimmed_dur computes the built
+# packet's `dur` from the stale, still-default (Duration::ZERO) self.trim_start/self.trim_end
+# fields instead of the freshly computed local trim_start/trim_end variables, so a trimmed
+# packet's `.dur` always equals the full, untrimmed block duration.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Real MP3 files produced by ffmpeg/libmp3lame (LAME/Xing gapless tags with nonzero encoder
+# delay). Should print "BUG: packet[0].dur (...) == full untrimmed block_dur (...)" and exit 1.
+# The leading `-` lets `just test` continue on to apply/reproduce-after despite this expected
+# non-zero exit code (the demonstrated bug).
+reproduce-before:
+    -cd repro && cargo run --release -- assets/gapless.mp3
+    -cd repro && cargo run --release -- assets/gapless2.mp3
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Should now print "OK: packet[0].dur (...) correctly excludes the encoder delay" and exit 0 for
+# both files.
+reproduce-after:
+    cd repro && cargo run --release -- assets/gapless.mp3
+    cd repro && cargo run --release -- assets/gapless2.mp3
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

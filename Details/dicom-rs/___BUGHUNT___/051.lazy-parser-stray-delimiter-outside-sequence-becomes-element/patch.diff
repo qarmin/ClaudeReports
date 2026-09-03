@@ -1,0 +1,87 @@
+diff --git a/parser/src/dataset/lazy_read.rs b/parser/src/dataset/lazy_read.rs
+index 5c00bea8..06b20da7 100644
+--- a/parser/src/dataset/lazy_read.rs
++++ b/parser/src/dataset/lazy_read.rs
+@@ -71,6 +71,8 @@ pub enum Error {
+         bytes_read: u64,
+         backtrace: Backtrace,
+     },
++    #[snafu(display("Unexpected item tag {} while reading element header", tag))]
++    UnexpectedItemTag { tag: Tag, backtrace: Backtrace },
+     #[snafu(display("Unexpected undefined value length at {} bytes", bytes_read))]
+     UndefinedLength {
+         bytes_read: u64,
+@@ -496,8 +498,13 @@ where
+                 }))
+             }
+         } else {
+-            // a data element header or item delimiter is expected
+-            match self.parser.decode_header() {
++            // a data element header or item delimiter is expected.
++            //
++            // Note: stray group-0xFFFE markers are ignored via `continue`
++            // rather than a recursive call, so that a long run of them in
++            // the input cannot grow the call stack unboundedly.
++            loop {
++            return match self.parser.decode_header() {
+                 Ok(DataElementHeader {
+                     tag,
+                     vr: VR::SQ,
+@@ -524,6 +531,49 @@ where
+
+                     Some(Ok(LazyDataToken::SequenceStart { tag, len }))
+                 }
++                Ok(DataElementHeader {
++                    tag: Tag(0xFFFE, 0xE00D),
++                    ..
++                }) if self.seq_delimiters.is_empty() => {
++                    // ignore delimiter, we are not in a sequence
++                    tracing::warn!(
++                        "Item delimitation item outside of a sequence in position {}",
++                        bytes_read
++                    );
++                    continue;
++                }
++                Ok(DataElementHeader {
++                    tag: Tag(0xFFFE, 0xE0DD),
++                    ..
++                }) if self.seq_delimiters.is_empty() => {
++                    // ignore delimiter, we are not in a sequence - same
++                    // treatment as a stray item delimiter above. Without
++                    // this, a lone sequence delimiter reaching here falls
++                    // through to the generic element-header arm below,
++                    // manufacturing a bogus top-level `DataElement` with a
++                    // reserved tag that this crate cannot even encode back
++                    // out again.
++                    tracing::warn!(
++                        "Sequence delimitation item outside of a sequence in position {}",
++                        bytes_read
++                    );
++                    continue;
++                }
++                Ok(DataElementHeader {
++                    tag: tag @ Tag(0xFFFE, 0xE000),
++                    ..
++                }) => {
++                    // An Item marker is only ever valid where an item
++                    // header is expected (decoded via `decode_item_header`
++                    // while iterating a sequence's items), never here,
++                    // where an ordinary element header or item delimiter
++                    // is expected. Letting it through would otherwise be
++                    // misread as the start of a new, bogus data set
++                    // sequence (its length is usually undefined), leaving
++                    // the reader unable to make sense of what follows.
++                    self.hard_break = true;
++                    Some(UnexpectedItemTagSnafu { tag }.fail())
++                }
+                 Ok(DataElementHeader {
+                     tag: Tag(0xFFFE, 0xE00D),
+                     ..
+@@ -588,6 +638,7 @@ where
+                     self.hard_break = true;
+                     Some(Err(e).context(ReadHeaderSnafu { bytes_read }))
+                 }
++            };
+             }
+         }
+     }

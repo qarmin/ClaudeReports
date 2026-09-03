@@ -1,0 +1,78 @@
+Real captured output from temporary #[cfg(test)] probes added directly to src/math/welch.rs
+(pub(crate) item, so only reachable from inside the crate itself - reverted afterward, git status
+confirmed clean afterward).
+
+Build: `cargo test --lib math::welch::bughunt_probe -- --nocapture --test-threads=1` (debug
+profile, unoptimized + debuginfo).
+
+=== run 1 ===
+$ cargo test --lib math::welch::bughunt_probe -- --nocapture --test-threads=1
+
+running 2 tests
+test math::welch::bughunt_probe::negative_boundary ... welch(-1.0) = 0
+ok
+test math::welch::bughunt_probe::negative_domain_guard ... welch(-2.0) = -3
+
+thread 'math::welch::bughunt_probe::negative_domain_guard' (27040) panicked at src/math/welch.rs:55:9:
+assertion `left == right` failed: welch(-2.0) should be 0.0 outside its support
+  left: -3.0
+ right: 0.0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: test failed, to rerun pass `--lib`
+
+=== run 2 (repeat, negative_domain_guard only) ===
+$ cargo test --lib math::welch::bughunt_probe::negative_domain_guard -- --nocapture --test-threads=1
+
+running 1 test
+test math::welch::bughunt_probe::negative_domain_guard ... welch(-2.0) = -3
+
+thread 'math::welch::bughunt_probe::negative_domain_guard' (27068) panicked at src/math/welch.rs:55:9:
+assertion `left == right` failed: welch(-2.0) should be 0.0 outside its support
+  left: -3.0
+ right: 0.0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+error: test failed, to rerun pass `--lib`
+
+welch(-2.0) = -3.0 both runs (2/2), confirming the isolated function-level defect: the domain
+guard `x >= 1f32.as_()` only rejects large positive x, so any x <= -1 falls through to the
+`1 - x*x` branch and returns a large negative value instead of the expected 0.0 outside the
+window's support. Note welch(-1.0) happens to coincidentally return 0.0 (1 - (-1)*(-1) = 0), so
+the boundary itself is not the clearest demonstration - x further from the boundary (-2.0) shows
+the wrong-value behavior unambiguously.
+
+=== Why this is not reachable through generate_weights (the only real caller) ===
+grep across the crate confirms `welch` has exactly one call site: `src/sampler.rs:271`,
+`ResamplingFunction::Welch => ResamplingFilter::new(welch, 2f32)`. `ResamplingFilter::new` (
+`src/sampler.rs:186-194`) always sets `window: None`, `is_resizable_kernel: true`,
+`is_area_filter: false`.
+
+`src/compute_weights.rs`'s `generate_weights` is the sole place in the crate that ever calls a
+`ResamplingFilter.kernel` function pointer. Since `is_area_filter` is false for Welch, the
+`is_area` branch is never taken (`is_area = resampling_filter.is_area_filter && scale < 1.0`
+short-circuits to false), so execution always goes through the non-area branch
+(`compute_weights.rs:80-171`). Since `window_func` is `None` for Welch, the `window_func == None`
+arm (`compute_weights.rs:136-139`) is always used:
+
+    let dx = dx.abs();
+    weight = resampling_function(dx * filter_scale);
+
+- `dx.abs()` is non-negative for any real `dx`.
+- `filter_scale = 1.0 / filter_scale_cutoff`, and `filter_scale_cutoff = scale.max(1.0)` (Welch is
+  a resizable kernel, so this is always the `scale.max(1.0)` arm, never the constant-`1.0` arm) -
+  `scale = in_size as f32 / out_size as f32` is a ratio of two `usize`s cast to a float, which is
+  always `>= 0.0` regardless of the actual `in_size`/`out_size` values (there is no way for a
+  `usize`-derived cast to produce a negative float), so `filter_scale_cutoff >= 1.0` and
+  `filter_scale` is always strictly positive, in `(0.0, 1.0]`.
+
+The product of a non-negative value (`dx.abs()`) and a strictly positive value (`filter_scale`) is
+always non-negative. So `welch` only ever receives `x >= 0.0` through this call path - the
+`x <= -1` branch that triggers the bug is structurally unreachable, independent of `in_size`/
+`out_size`/scale-factor edge cases (this does not even depend on the crate's own size validation
+holding, unlike the analogous `kaiser` finding in candidate 011, since `usize -> f32` casts can
+never go negative regardless of the magnitude involved).

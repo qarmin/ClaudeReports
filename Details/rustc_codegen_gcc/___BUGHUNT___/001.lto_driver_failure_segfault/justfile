@@ -1,0 +1,36 @@
+# Self-contained reproduction for this candidate.
+#
+# No patch.diff exists for this candidate (Confirmed, no bounded fix attempted this session - see
+# RESULT.md's "The fix"), so this only has a `reproduce-before` step, not the usual
+# clone/apply/reproduce-after cycle.
+#
+# This bug is triggered purely by the project's own build system (no dependency on any other
+# rustc_codegen_gcc crate/API beyond the compiled backend itself), so `clone` here does the full
+# project setup (./y.sh prepare && ./y.sh build --sysroot --release) rather than just checking out
+# source - that setup is itself part of what's needed to reproduce, and is the slow part (several
+# minutes, downloads a prebuilt libgccjit.so).
+#
+# Reproducing this requires this environment's default config (config.example.toml's
+# `download-gccjit = true`, copied to config.toml) - see RESULT.md's "What's not done / open
+# questions" for why that specific setting is believed to matter here.
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && cp config.example.toml config.toml
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Build the standalone repro crate through the cloned project's own build system - this should
+# crash rustc with SIGSEGV (signal 11), the same way it does against the main project checkout.
+reproduce-before:
+    cd clone && CHANNEL=release ./y.sh cargo build --manifest-path "{{justfile_directory()}}/repro/Cargo.toml"
+
+clean:
+    rm -rf clone

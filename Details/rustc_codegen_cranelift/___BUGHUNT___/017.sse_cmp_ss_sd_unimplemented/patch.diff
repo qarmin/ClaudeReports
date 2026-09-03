@@ -1,0 +1,86 @@
+diff --git a/src/intrinsics/llvm_x86.rs b/src/intrinsics/llvm_x86.rs
+index 136e9896..2e0ec772 100644
+--- a/src/intrinsics/llvm_x86.rs
++++ b/src/intrinsics/llvm_x86.rs
+@@ -199,25 +199,23 @@ pub(super) fn codegen_x86_llvm_intrinsic_call<'tcx>(
+             );
+         }
+ 
+-        "llvm.x86.sse.cmp.ps" | "llvm.x86.sse2.cmp.pd" => {
++        "llvm.x86.sse.cmp.ps"
++        | "llvm.x86.sse2.cmp.pd"
++        | "llvm.x86.sse.cmp.ss"
++        | "llvm.x86.sse2.cmp.sd" => {
+             let (x, y, kind) = match args {
+                 [x, y, kind] => (x, y, kind),
+                 _ => bug!("wrong number of args for intrinsic {intrinsic}"),
+             };
+             let x = codegen_operand(fx, &x.node);
+             let y = codegen_operand(fx, &y.node);
+-            let kind = if let Some(const_) = kind.node.constant() {
+-                crate::constant::eval_mir_constant(fx, const_).0
+-            } else {
+-                unreachable!("{kind:?}")
+-            };
++            // stdarch passes the predicate as `IMM5 as i8`, which for the scalar forms is a
++            // cast into a temporary rather than a `const {}` block, so it is not an
++            // `Operand::Constant` here.
++            let kind = crate::constant::mir_operand_get_const_val(fx, &kind.node)
++                .unwrap_or_else(|| unreachable!("{kind:?}"));
+ 
+-            let flt_cc = match kind
+-                .try_to_bits(Size::from_bytes(1))
+-                .unwrap_or_else(|| panic!("kind not scalar: {:?}", kind))
+-                .try_into()
+-                .unwrap()
+-            {
++            let flt_cc = match i32::from(kind.to_u8()) {
+                 _CMP_EQ_OQ | _CMP_EQ_OS => FloatCC::Equal,
+                 _CMP_LT_OS | _CMP_LT_OQ => FloatCC::LessThan,
+                 _CMP_LE_OS | _CMP_LE_OQ => FloatCC::LessThanOrEqual,
+@@ -304,13 +302,38 @@ pub(super) fn codegen_x86_llvm_intrinsic_call<'tcx>(
+             /// True (unordered, signaling)
+             const _CMP_TRUE_US: i32 = 0x1f;
+ 
+-            simd_pair_for_each_lane(fx, x, y, ret, &|fx, lane_ty, res_lane_ty, x_lane, y_lane| {
+-                let res_lane = match lane_ty.kind() {
+-                    ty::Float(_) => fx.bcx.ins().fcmp(flt_cc, x_lane, y_lane),
+-                    _ => unreachable!("{:?}", lane_ty),
+-                };
+-                bool_to_zero_or_max_uint(fx, res_lane_ty, res_lane)
+-            });
++            if intrinsic == "llvm.x86.sse.cmp.ss" || intrinsic == "llvm.x86.sse2.cmp.sd" {
++                // The scalar forms compare lane 0 only and pass the upper lanes of `x` through
++                // unchanged.
++                let (lane_count, _) = x.layout().ty.simd_size_and_type(fx.tcx);
++                let (_, ret_lane_ty) = ret.layout().ty.simd_size_and_type(fx.tcx);
++                let ret_lane_layout = fx.layout_of(ret_lane_ty);
++
++                let x_lane = x.value_lane(fx, 0).load_scalar(fx);
++                let y_lane = y.value_lane(fx, 0).load_scalar(fx);
++                let res_lane = fx.bcx.ins().fcmp(flt_cc, x_lane, y_lane);
++                let res_lane = bool_to_zero_or_max_uint(fx, ret_lane_ty, res_lane);
++                ret.place_lane(fx, 0).write_cvalue(fx, CValue::by_val(res_lane, ret_lane_layout));
++
++                for lane_idx in 1..lane_count {
++                    let lane = x.value_lane(fx, lane_idx);
++                    ret.place_lane(fx, lane_idx).write_cvalue(fx, lane);
++                }
++            } else {
++                simd_pair_for_each_lane(
++                    fx,
++                    x,
++                    y,
++                    ret,
++                    &|fx, lane_ty, res_lane_ty, x_lane, y_lane| {
++                        let res_lane = match lane_ty.kind() {
++                            ty::Float(_) => fx.bcx.ins().fcmp(flt_cc, x_lane, y_lane),
++                            _ => unreachable!("{:?}", lane_ty),
++                        };
++                        bool_to_zero_or_max_uint(fx, res_lane_ty, res_lane)
++                    },
++                );
++            }
+         }
+         "llvm.x86.ssse3.pshuf.b.128" | "llvm.x86.avx2.pshuf.b" => {
+             let (a, b) = match args {

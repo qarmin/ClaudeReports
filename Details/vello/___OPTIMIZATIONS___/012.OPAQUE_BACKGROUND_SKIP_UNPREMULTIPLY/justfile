@@ -1,0 +1,76 @@
+# Self-contained reproduction for candidate 012 (opaque-background detection to skip
+# Pixmap::take_unpremultiplied's per-pixel unpremultiply pass, PR #1850).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff bundles two things: (1) a new Criterion bench group (`integration::background`,
+# with three functions: `render`, `render_and_take_unpremultiplied`, and
+# `take_unpremultiplied_only`) added to the project's own already-tracked `sparse_strips/vello_bench`
+# crate, needed to reach/measure the code path, and (2) the actual fix: `RootBackground`
+# detection in vello_common/vello_cpu that recognizes a viewport-covering, fully opaque
+# `fill_rect` drawn first and, when preserved through to the end of the scene, marks the
+# resulting `Pixmap::may_have_transparency` as `false` so `take_unpremultiplied()` can skip its
+# per-pixel unpremultiply scan entirely. Both are real diffs against the project's own source
+# (vello_bench is a normal in-repo crate, not an untracked harness), so a single patch.diff
+# covers both and `just test` can build+bench for real from a fresh clone.
+#
+# This repo has Git LFS-tracked snapshot PNGs (sparse_strips/vello_sparse_tests/snapshots/*.png)
+# unrelated to this candidate's own bench/library code; `just clone` disables the LFS filter so
+# this works even without `git-lfs` installed (the clone step below matches what this session's
+# own investigation needed - LFS smudge/clean disabled - vello_sparse_tests' own snapshot tests
+# were not used for this candidate's correctness check for the same reason, see RESULT.md).
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git -c filter.lfs.required=false -c filter.lfs.smudge= -c filter.lfs.process= clone --no-checkout {{repo_url}} clone
+    cd clone && git config filter.lfs.required false && git config filter.lfs.smudge "" && git config filter.lfs.process "" && git config filter.lfs.clean "" && git checkout {{base_commit}}
+
+# Build the BASELINE bench binary (no RootBackground detection, and no bgra_to_rgba-style
+# bench group yet) before applying the patch - not meaningful to compare against, since the
+# `integration/background` bench group doesn't exist until the patch is applied. This recipe
+# exists only so `apply` + `build-patched` below is a fair single build; the actual baseline
+# comparison binary is derived in `bench:` below by reverting just the library-side hunks.
+build-baseline:
+    cd clone && cargo build --release -p vello_bench --benches --features vello_bench/extended
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone && cargo build --release -p vello_bench --benches --features vello_bench/extended
+    cp "$(find clone/target/release/deps -maxdepth 1 -iname 'main-*' ! -name '*.d' | head -1)" ./bin_patched
+
+# There is no meaningful "before" run for the new bench group (it doesn't exist before the
+# patch is applied, since the bench group itself is part of the patch) - this reproduces the
+# detection-vs-no-detection comparison from RESULT.md by re-deriving a "no RootBackground
+# detection" binary via a local revert of just the library-side hunks (vello_common +
+# vello_cpu + vello_sparse_tests), keeping the same bench harness for both sides.
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "=== patched (RootBackground detection enabled) ==="
+    ./bin_patched --bench 'integration/background' --warm-up-time 1 --measurement-time 2
+    echo ""
+    echo "=== reverting only the library-side fix to get a no-detection comparison binary ==="
+    cd clone
+    git diff --no-color -- sparse_strips/vello_common sparse_strips/vello_cpu sparse_strips/vello_sparse_tests > /tmp/vello012_lib_only.diff
+    git checkout -- sparse_strips/vello_common sparse_strips/vello_cpu sparse_strips/vello_sparse_tests
+    cargo build --release -p vello_bench --benches --features vello_bench/extended
+    cp "$(find target/release/deps -maxdepth 1 -iname 'main-*' ! -name '*.d' | head -1)" ../bin_baseline
+    git apply /tmp/vello012_lib_only.diff
+    cd ..
+    echo "=== baseline (no RootBackground detection, same bench harness) ==="
+    ./bin_baseline --bench 'integration/background' --warm-up-time 1 --measurement-time 2
+    echo ""
+    echo "Compare the 'render_and_take_unpremultiplied' and 'take_unpremultiplied_only' 'time:'"
+    echo "lines above - see RESULT.md for this candidate's own interleaved, multi-repeat"
+    echo "measurement methodology and noise-floor discussion."
+
+clean:
+    rm -rf clone bin_baseline bin_patched

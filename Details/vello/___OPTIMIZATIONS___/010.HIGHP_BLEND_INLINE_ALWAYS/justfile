@@ -1,0 +1,71 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# repo_url/base_commit were read via `git remote get-url origin` / `git rev-parse HEAD` in the
+# main project at the moment patch.diff was captured.
+#
+# This candidate reuses the project's own existing benchmark (`sparse_strips/vello_bench`,
+# `fine_blend` criterion group) but that group's `F32Kernel`/highp variants are commented out at
+# the shared-macro level by design (see `vello_dev_macros::bench` - f32 benches are disabled by
+# default project-wide to keep the default bench run short). `harness.diff` adds two small,
+# standalone bench functions directly in `vello_bench/src/fine/blend.rs` (`multiply_f32` -
+# exercises `highp::blend::mix`'s separable-Mix path - and `src_atop_f32` - exercises
+# `highp::compose::ComposeExt::compose` with `Mix::Normal` so `mix` short-circuits) across every
+# available SIMD level. `harness.diff` is applied for BOTH the baseline and patched build below,
+# so the only difference between the two bench runs is `patch.diff` itself.
+#
+# IMPORTANT, read before trusting a delta from this justfile: on the machine this candidate was
+# actually measured on, `patch.diff` applied on top of `base_commit` produced a BYTE-IDENTICAL
+# release binary to the unpatched baseline (confirmed via `md5sum`) - the specific vectorization
+# gap PR #1579 (linebender/vello) aimed to close was already fully addressed by a later, more
+# thorough PR (#1688, "Better inlining of SIMD kernels for improved x86 performance"), already
+# merged into `base_commit` itself. `patch.diff` here only adds four `#[inline(always)]` hints on
+# top of what #1688 already put in place (on `blend::mix`, `ComposeExt::compose`, and the two
+# `fill`/`alpha_fill::blend` wrapper functions) - exactly the outer-function inlining PR #1579
+# still wanted that #1688's author deliberately left off (per that PR's own description: "we just
+# call `fill` and any method inside of that will have a corresponding vectorize call... This way,
+# we also don't have to inline it"). See RESULT.md for the full explanation - this justfile still
+# runs a real bench comparison so a reader with a different toolchain/CPU can double check that a
+# byte-identical binary is what they get too, not just take this on faith.
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone at the pinned commit, add the harness (needed by both sides), build+run a
+# BASELINE bench, apply the library patch, build+run a PATCHED bench.
+test: clone bench-baseline apply bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && git apply "{{justfile_directory()}}/harness.diff"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+bench-baseline:
+    @echo "=== baseline (before patch) ==="
+    cd clone && cargo build --release -p vello_bench --bench main
+    cp clone/target/release/deps/main-* "{{justfile_directory()}}/bin_baseline" 2>/dev/null || true
+    cd clone && cargo bench --release -p vello_bench --bench main -- 'blend/(multiply|src_atop)_f32'
+
+bench-patched:
+    @echo "=== patched (after patch) ==="
+    cd clone && cargo build --release -p vello_bench --bench main
+    md5sum "{{justfile_directory()}}/bin_baseline" clone/target/release/deps/main-* 2>/dev/null | grep main- || true
+    cd clone && cargo bench --release -p vello_bench --bench main -- 'blend/(multiply|src_atop)_f32'
+
+# Runs the project's own unit test suite for the touched crate, before and after - separate from
+# `just test` since it isn't needed to see the (non-)delta above.
+test-correctness: clone
+    @echo "=== baseline test suite ==="
+    cd clone && cargo test --release -p vello_cpu --features f32_pipeline --lib
+    just apply
+    @echo "=== patched test suite ==="
+    cd clone && cargo test --release -p vello_cpu --features f32_pipeline --lib
+
+clean:
+    rm -rf clone bin_baseline

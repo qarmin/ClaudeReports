@@ -1,0 +1,72 @@
+# Self-contained reproduction for candidate 024 (_mm_clflush / _mm_clflushopt abort at run time
+# under cg_clif).
+#
+# Nothing here reaches outside this folder: `just clone` fetches cg_clif into ./clone (gitignored)
+# and builds it, then the repro is compiled twice from the same source - once with plain rustc
+# (LLVM = the oracle) and once with the clone's dist/cargo-clif - and the run-time output compared.
+#
+# `just test` is the full cycle: clone, build cg_clif, show LLVM's answer, show the run-time abort,
+# apply patch.diff, rebuild, show the abort is gone and the program now prints LLVM's answer.
+#
+# To point the reproduce recipes at an existing cg_clif checkout instead of ./clone:
+#   CLIF_ROOT=/path/to/rustc_codegen_cranelift just llvm clif
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+clif := env_var_or_default("CLIF_ROOT", justfile_directory() / "clone")
+
+test:
+    @test -z "${CLIF_ROOT:-}" || { echo "run 'just test' without CLIF_ROOT set - it builds ./clone"; exit 2; }
+    just clone
+    just build-clif
+    @echo "=== LLVM (the oracle) ==="
+    just llvm
+    @echo "=== cg_clif BEFORE the patch (expected: abort on llvm.x86.sse2.clflush) ==="
+    -just clif
+    just apply
+    just build-clif
+    @echo "=== cg_clif AFTER the patch (expected: same output as LLVM) ==="
+    just clif
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-clif:
+    cd {{clif}} && ./y.sh prepare
+    cd {{clif}} && ./y.sh build
+
+# The oracle: plain rustc/LLVM on the same source.
+llvm:
+    ulimit -c 0 && cd repro && CARGO_TARGET_DIR=target-llvm cargo run --bin clflush_repro
+
+# The same source through cg_clif. Fresh target dir each time so a stale object file from the
+# other backend/patch state can never be reused.
+clif:
+    ulimit -c 0 && cd repro && rm -rf target-clif && CARGO_TARGET_DIR=target-clif {{clif}}/dist/cargo-clif run --bin clflush_repro
+
+# Per-intrinsic single-file sweep over the whole x86 cache-control family reachable from stdarch:
+# clflush, clflushopt, prefetchrs, _mm_prefetch, pause, and the sfence/lfence/mfence trio.
+# Informational, not part of `just test` - prefetchrs and the three fences are NOT covered by
+# patch.diff (see RESULT.md), so this sweep still shows differences after the patch.
+sweep:
+    #!/usr/bin/env bash
+    ulimit -c 0
+    cd repro/sweep
+    for f in *.rs; do
+      n="${f%.rs}"
+      rustc -Copt-level=0 -o "/tmp/${n}_llvm" "$f" 2>/dev/null
+      l=$("/tmp/${n}_llvm" 2>&1 | tail -1); le=$?
+      {{clif}}/dist/rustc-clif -Copt-level=0 -o "/tmp/${n}_clif" "$f" 2>/dev/null
+      c=$("/tmp/${n}_clif" 2>&1 | tail -1); ce=$?
+      if [ "$l" = "$c" ]; then r=SAME; else r=DIFFER; fi
+      printf '%-14s %-6s llvm[%d]=%-28s clif[%d]=%s\n' "$n" "$r" "$le" "$l" "$ce" "$c"
+    done
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+clean:
+    rm -rf clone repro/target-llvm repro/target-clif

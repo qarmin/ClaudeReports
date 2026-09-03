@@ -1,0 +1,121 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index e869c49..a35769f 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -940,8 +940,28 @@ impl<T: CellType> Range<T> {
+     /// ```
+     ///
+     pub fn from_sparse(cells: Vec<Cell<T>>) -> Range<T> {
++        match Range::from_sparse_bounded(cells, usize::MAX) {
++            Ok(range) => range,
++            // max_cells is usize::MAX here, so the dense grid (bounded by real cell
++            // positions, at most u32::MAX * u32::MAX) can never exceed it.
++            Err(_) => unreachable!(),
++        }
++    }
++
++    /// Like [`Range::from_sparse()`], but rejects a `cells` vector whose bounding box (the
++    /// dense grid `from_sparse` would otherwise unconditionally allocate) would exceed
++    /// `max_cells` elements, returning the size that would have been requested instead.
++    ///
++    /// `cells`' bounding box comes from the min/max row/column actually present, which can be
++    /// attacker-controlled when parsing an untrusted file - two genuine cells positioned near
++    /// opposite corners of a worksheet are enough to request a dense grid of billions of
++    /// elements.
++    pub(crate) fn from_sparse_bounded(
++        cells: Vec<Cell<T>>,
++        max_cells: usize,
++    ) -> Result<Range<T>, usize> {
+         if cells.is_empty() {
+-            return Range::empty();
++            return Ok(Range::empty());
+         }
+         // cells do not always appear in (row, col) order
+         // search bounds
+@@ -958,6 +978,9 @@ impl<T: CellType> Range<T> {
+         let cols = (col_end - col_start + 1) as usize;
+         let rows = (row_end - row_start + 1) as usize;
+         let len = cols.saturating_mul(rows);
++        if len > max_cells {
++            return Err(len);
++        }
+         let mut v = vec![T::default(); len];
+         v.shrink_to_fit();
+         for c in cells {
+@@ -968,11 +991,11 @@ impl<T: CellType> Range<T> {
+                 *v = c.val;
+             }
+         }
+-        Range {
++        Ok(Range {
+             start: (row_start, col_start),
+             end: (row_end, col_end),
+             inner: v,
+-        }
++        })
+     }
+ 
+     /// Set a value at an absolute position in a `Range`.
+diff --git a/src/xls.rs b/src/xls.rs
+index 50925c6..cafa43e 100644
+--- a/src/xls.rs
++++ b/src/xls.rs
+@@ -82,8 +82,24 @@ pub enum XlsError {
+         /// iFmt value, See 2.4.126 Format
+         ifmt: u16,
+     },
++    /// The worksheet's used range would require more cells than `MAX_DENSE_RANGE_CELLS`.
++    CellLimitExceeded {
++        /// Number of cells requested
++        requested: usize,
++        /// Maximum allowed cells
++        max: usize,
++    },
+ }
+ 
++/// Maximum number of cells in the dense grid a `worksheet_range()` call will build. The used
++/// range is derived from the actual min/max cell position found in the file (BIFF `Number`/
++/// `Label`/etc. records encode row/column as 16-bit fields), which two genuinely positioned
++/// cells near opposite corners of a worksheet can inflate to `u16::MAX * u16::MAX` (~4.29
++/// billion) regardless of how many cells are actually present - this bounds the resulting
++/// allocation instead of attempting it unconditionally. Matches the cap `ods.rs`/`xlsx::mod.rs`
++/// use for the same reason.
++pub const MAX_DENSE_RANGE_CELLS: usize = 100_000_000;
++
+ from_err!(std::io::Error, XlsError, Io);
+ from_err!(crate::cfb::CfbError, XlsError, Cfb);
+ from_err!(crate::vba::VbaError, XlsError, Vba);
+@@ -120,6 +136,12 @@ impl std::fmt::Display for XlsError {
+             XlsError::Art(s) => write!(f, "Invalid art record '{s}'"),
+             XlsError::WorksheetNotFound(name) => write!(f, "Worksheet '{name}' not found"),
+             XlsError::InvalidFormat { ifmt } => write!(f, "Invalid ifmt value: '{ifmt}'"),
++            XlsError::CellLimitExceeded { requested, max } => {
++                write!(
++                    f,
++                    "Cell limit exceeded ({requested} cells requested, max {max})"
++                )
++            }
+         }
+     }
+ }
+@@ -694,8 +716,18 @@ impl<RS: Read + Seek> Xls<RS> {
+                     _ => (),
+                 }
+             }
+-            let range = Range::from_sparse(cells);
+-            let formula = Range::from_sparse(formulas);
++            let range = Range::from_sparse_bounded(cells, MAX_DENSE_RANGE_CELLS).map_err(
++                |requested| XlsError::CellLimitExceeded {
++                    requested,
++                    max: MAX_DENSE_RANGE_CELLS,
++                },
++            )?;
++            let formula = Range::from_sparse_bounded(formulas, MAX_DENSE_RANGE_CELLS).map_err(
++                |requested| XlsError::CellLimitExceeded {
++                    requested,
++                    max: MAX_DENSE_RANGE_CELLS,
++                },
++            )?;
+             sheets.insert(
+                 name,
+                 SheetData {

@@ -1,0 +1,272 @@
+diff --git a/sparse_strips/vello_sparse_shaders/shaders/helpers/extend.wesl b/sparse_strips/vello_sparse_shaders/shaders/helpers/extend.wesl
+index 0f963abe..62a0d0cc 100644
+--- a/sparse_strips/vello_sparse_shaders/shaders/helpers/extend.wesl
++++ b/sparse_strips/vello_sparse_shaders/shaders/helpers/extend.wesl
+@@ -34,3 +34,44 @@ fn extend_mode_normalized(t: f32, mode: u32) -> f32 {
+         }
+     }
+ }
++
++// A stricter variant of `extend_mode`, used only by callers that independently extend several
++// neighboring taps around a single sample point (e.g. `bicubic_sample`'s 16-tap kernel): doing
++// that can land a tap's raw position exactly on a wrap/reflection boundary far more often than
++// `extend_mode`'s original single-upfront-call usage ever did, which exposes two edge cases
++// `extend_mode` itself doesn't need to handle for its existing (single-tap) callers:
++//
++// - Repeat/Reflect's `max` is meant to be exclusive; the plain formula can still land exactly on
++//   it. Matches vello_cpu's `extend()`, which applies the identical `.min(max - 1.0)` safety
++//   clamp for this same reason (see its own comment "In certain edge cases, we might still end
++//   up with a higher number").
++// - Reflect additionally needs vello_cpu's exact 1-ULP-down bias in the "descending" (mirrored)
++//   half of the period (`vello_cpu/src/fine/common/image.rs`, itself sourced from
++//   <https://github.com/google/skia/blob/220738774f7a0ce4a6c7bd17519a336e5e5dea5b/src/opts/SkRasterPipeline_opts.h#L3274-L3290>)
++//   to avoid flooring to the texel just past the edge instead of the last real one when a tap's
++//   raw position lands exactly on the boundary.
++//
++// Deliberately not merged into `extend_mode` itself: `extend_mode`'s existing single-upfront-tap
++// callers (the un-fixed `bilinear_sample`/nearest-neighbor paths, and gradients via
++// `extend_mode_normalized` directly) already produce the correct result with the plain formula
++// for every case the project's own test suite exercises them with, and changing `extend_mode`'s
++// own Reflect output wholesale broke several of those (`image_bilinear_*_hybrid` tests) even
++// though they never call the new multi-tap code this variant exists for.
++fn extend_mode_precise(t: f32, mode: u32, max: f32) -> f32 {
++    switch mode {
++        case EXTEND_PAD: {
++            return clamp(t, 0.0, max - 1.0);
++        }
++        case EXTEND_REPEAT: {
++            return min(extend_mode_normalized(t / max, mode) * max, max - 1.0);
++        }
++        case EXTEND_REFLECT, default: {
++            let u = t - floor(t * 0.5 / max) * 2.0 * max;
++            let s = floor(u / max);
++            var m = u - 2.0 * s * (u - max);
++            let biased_bits = bitcast<u32>(m) - u32(s);
++            m = bitcast<f32>(biased_bits);
++            return min(m, max - 1.0);
++        }
++    }
++}
+diff --git a/sparse_strips/vello_sparse_shaders/shaders/helpers/external_texture.wesl b/sparse_strips/vello_sparse_shaders/shaders/helpers/external_texture.wesl
+index 077c829f..853d5daa 100644
+--- a/sparse_strips/vello_sparse_shaders/shaders/helpers/external_texture.wesl
++++ b/sparse_strips/vello_sparse_shaders/shaders/helpers/external_texture.wesl
+@@ -3,6 +3,7 @@
+ 
+ //! Sampling helpers for externally bound image textures.
+ 
++import package::helpers::extend::extend_mode_precise;
+ import package::helpers::image::{
+     IMAGE_QUALITY_HIGH,
+     IMAGE_QUALITY_MEDIUM,
+@@ -30,36 +31,51 @@ fn external_bilinear_sample(
+ 
+ // This is the same as `helpers::image::bicubic_sample`, but for a 2D texture
+ // instead of an atlas texture array.
++//
++// Note: `coords` here is the *local* sample position relative to `image_offset` (i.e. not
++// yet clamped/wrapped/reflected by the extend mode) - see the identical comment on
++// `helpers::image::bicubic_sample` for why each of the 16 taps must be extended
++// individually instead of extending a single already-averaged center position once.
+ fn external_bicubic_sample(
+     external_texture: texture_2d<f32>,
+     coords: vec2<f32>,
+     image_offset: vec2<f32>,
+     image_size: vec2<f32>,
++    extend_modes: vec2<u32>,
+ ) -> vec4<f32> {
+-    let image_max = image_offset + image_size - vec2(1.0);
+     let frac_coords = fract(coords + 0.5);
+     let cx = cubic_weights(frac_coords.x);
+     let cy = cubic_weights(frac_coords.y);
+ 
+-    let s00 = textureLoad(external_texture, vec2<i32>(clamp(coords + vec2(-1.5, -1.5), image_offset, image_max)), 0);
+-    let s10 = textureLoad(external_texture, vec2<i32>(clamp(coords + vec2(-0.5, -1.5), image_offset, image_max)), 0);
+-    let s20 = textureLoad(external_texture, vec2<i32>(clamp(coords + vec2(0.5, -1.5), image_offset, image_max)), 0);
+-    let s30 = textureLoad(external_texture, vec2<i32>(clamp(coords + vec2(1.5, -1.5), image_offset, image_max)), 0);
++    let x0 = floor(extend_mode_precise(coords.x - 1.5, extend_modes.x, image_size.x));
++    let x1 = floor(extend_mode_precise(coords.x - 0.5, extend_modes.x, image_size.x));
++    let x2 = floor(extend_mode_precise(coords.x + 0.5, extend_modes.x, image_size.x));
++    let x3 = floor(extend_mode_precise(coords.x + 1.5, extend_modes.x, image_size.x));
++
++    let y0 = floor(extend_mode_precise(coords.y - 1.5, extend_modes.y, image_size.y));
++    let y1 = floor(extend_mode_precise(coords.y - 0.5, extend_modes.y, image_size.y));
++    let y2 = floor(extend_mode_precise(coords.y + 0.5, extend_modes.y, image_size.y));
++    let y3 = floor(extend_mode_precise(coords.y + 1.5, extend_modes.y, image_size.y));
++
++    let s00 = textureLoad(external_texture, vec2<i32>(image_offset + vec2(x0, y0)), 0);
++    let s10 = textureLoad(external_texture, vec2<i32>(image_offset + vec2(x1, y0)), 0);
++    let s20 = textureLoad(external_texture, vec2<i32>(image_offset + vec2(x2, y0)), 0);
++    let s30 = textureLoad(external_texture, vec2<i32>(image_offset + vec2(x3, y0)), 0);
+ 
+-    let s01 = textureLoad(external_texture, vec2<i32>(clamp(coords + vec2(-1.5, -0.5), image_offset, image_max)), 0);
+-    let s11 = textureLoad(external_texture, vec2<i32>(clamp(coords + vec2(-0.5, -0.5), image_offset, image_max)), 0);
+-    let s21 = textureLoad(external_texture, vec2<i32>(clamp(coords + vec2(0.5, -0.5), image_offset, image_max)), 0);
+-    let s31 = textureLoad(external_texture, vec2<i32>(clamp(coords + vec2(1.5, -0.5), image_offset, image_max)), 0);
++    let s01 = textureLoad(external_texture, vec2<i32>(image_offset + vec2(x0, y1)), 0);
++    let s11 = textureLoad(external_texture, vec2<i32>(image_offset + vec2(x1, y1)), 0);
++    let s21 = textureLoad(external_texture, vec2<i32>(image_offset + vec2(x2, y1)), 0);
++    let s31 = textureLoad(external_texture, vec2<i32>(image_offset + vec2(x3, y1)), 0);
+ 
+-    let s02 = textureLoad(external_texture, vec2<i32>(clamp(coords + vec2(-1.5, 0.5), image_offset, image_max)), 0);
+-    let s12 = textureLoad(external_texture, vec2<i32>(clamp(coords + vec2(-0.5, 0.5), image_offset, image_max)), 0);
+-    let s22 = textureLoad(external_texture, vec2<i32>(clamp(coords + vec2(0.5, 0.5), image_offset, image_max)), 0);
+-    let s32 = textureLoad(external_texture, vec2<i32>(clamp(coords + vec2(1.5, 0.5), image_offset, image_max)), 0);
++    let s02 = textureLoad(external_texture, vec2<i32>(image_offset + vec2(x0, y2)), 0);
++    let s12 = textureLoad(external_texture, vec2<i32>(image_offset + vec2(x1, y2)), 0);
++    let s22 = textureLoad(external_texture, vec2<i32>(image_offset + vec2(x2, y2)), 0);
++    let s32 = textureLoad(external_texture, vec2<i32>(image_offset + vec2(x3, y2)), 0);
+ 
+-    let s03 = textureLoad(external_texture, vec2<i32>(clamp(coords + vec2(-1.5, 1.5), image_offset, image_max)), 0);
+-    let s13 = textureLoad(external_texture, vec2<i32>(clamp(coords + vec2(-0.5, 1.5), image_offset, image_max)), 0);
+-    let s23 = textureLoad(external_texture, vec2<i32>(clamp(coords + vec2(0.5, 1.5), image_offset, image_max)), 0);
+-    let s33 = textureLoad(external_texture, vec2<i32>(clamp(coords + vec2(1.5, 1.5), image_offset, image_max)), 0);
++    let s03 = textureLoad(external_texture, vec2<i32>(image_offset + vec2(x0, y3)), 0);
++    let s13 = textureLoad(external_texture, vec2<i32>(image_offset + vec2(x1, y3)), 0);
++    let s23 = textureLoad(external_texture, vec2<i32>(image_offset + vec2(x2, y3)), 0);
++    let s33 = textureLoad(external_texture, vec2<i32>(image_offset + vec2(x3, y3)), 0);
+ 
+     let row0 = cx.x * s00 + cx.y * s10 + cx.z * s20 + cx.w * s30;
+     let row1 = cx.x * s01 + cx.y * s11 + cx.z * s21 + cx.w * s31;
+@@ -76,11 +92,13 @@ fn sample_external_image(
+     external_texture: texture_2d<f32>,
+     quality: u32,
+     coords: vec2<f32>,
++    local_coords: vec2<f32>,
+     image_offset: vec2<f32>,
+     image_size: vec2<f32>,
++    extend_modes: vec2<u32>,
+ ) -> vec4<f32> {
+     if quality == IMAGE_QUALITY_HIGH {
+-        return external_bicubic_sample(external_texture, coords, image_offset, image_size);
++        return external_bicubic_sample(external_texture, local_coords, image_offset, image_size, extend_modes);
+     }
+     if quality == IMAGE_QUALITY_MEDIUM {
+         return external_bilinear_sample(
+diff --git a/sparse_strips/vello_sparse_shaders/shaders/helpers/image.wesl b/sparse_strips/vello_sparse_shaders/shaders/helpers/image.wesl
+index 3b787617..c99acc0c 100644
+--- a/sparse_strips/vello_sparse_shaders/shaders/helpers/image.wesl
++++ b/sparse_strips/vello_sparse_shaders/shaders/helpers/image.wesl
+@@ -3,6 +3,8 @@
+ 
+ //! Shared encoded image accessors and atlas sampling (bilinear/bicubic) helpers.
+ 
++import package::helpers::extend::extend_mode_precise;
++
+ /// Image rendering quality.
+ const IMAGE_QUALITY_LOW: u32 = 0u;
+ const IMAGE_QUALITY_MEDIUM: u32 = 1u;
+@@ -102,42 +104,57 @@ fn bilinear_sample(
+ // interpolating them with a cubic filter. The generated matrix is 4x4 and represent the coefficients
+ // of the cubic function used to  calculate weights based on the `x_fract` and `y_fract` of the
+ // location we are looking at.
++// Note: `coords` here is the *local* sample position relative to `image_offset` (i.e. not
++// yet clamped/wrapped/reflected by the extend mode). Each of the 16 neighboring texel
++// positions must be extended individually, exactly as vello_cpu's `extend_x!`/`extend_y!`
++// macros do (see `vello_cpu/src/fine/common/image.rs`): extending a single already-averaged
++// center position once (as this used to do) collapses e.g. `Repeat`'s wraparound near the
++// image edge into a smeared duplicate of the edge texel instead of correctly blending across
++// the wrap boundary.
+ fn bicubic_sample(
+     tex: texture_2d_array<f32>,
+     coords: vec2<f32>,
+     atlas_idx: i32,
+     image_offset: vec2<f32>,
+     image_size: vec2<f32>,
+-    _extend_modes: vec2<u32>,
+-    _image_padding: f32,
++    extend_modes: vec2<u32>,
+ ) -> vec4<f32> {
+-     let atlas_max = image_offset + image_size - vec2(1.0);
+      let frac_coords = fract(coords + 0.5);
+      // Get cubic weights for x and y directions
+      let cx = cubic_weights(frac_coords.x);
+      let cy = cubic_weights(frac_coords.y);
+-     
+-     // Sample 4x4 grid around coords
+-     let s00 = textureLoad(tex, vec2<i32>(clamp(coords + vec2(-1.5, -1.5), image_offset, atlas_max)), atlas_idx, 0);
+-     let s10 = textureLoad(tex, vec2<i32>(clamp(coords + vec2(-0.5, -1.5), image_offset, atlas_max)), atlas_idx, 0);
+-     let s20 = textureLoad(tex, vec2<i32>(clamp(coords + vec2(0.5, -1.5), image_offset, atlas_max)), atlas_idx, 0);
+-     let s30 = textureLoad(tex, vec2<i32>(clamp(coords + vec2(1.5, -1.5), image_offset, atlas_max)), atlas_idx, 0);
+-     
+-     let s01 = textureLoad(tex, vec2<i32>(clamp(coords + vec2(-1.5, -0.5), image_offset, atlas_max)), atlas_idx, 0);
+-     let s11 = textureLoad(tex, vec2<i32>(clamp(coords + vec2(-0.5, -0.5), image_offset, atlas_max)), atlas_idx, 0);
+-     let s21 = textureLoad(tex, vec2<i32>(clamp(coords + vec2(0.5, -0.5), image_offset, atlas_max)), atlas_idx, 0);
+-     let s31 = textureLoad(tex, vec2<i32>(clamp(coords + vec2(1.5, -0.5), image_offset, atlas_max)), atlas_idx, 0);
+-     
+-     let s02 = textureLoad(tex, vec2<i32>(clamp(coords + vec2(-1.5, 0.5), image_offset, atlas_max)), atlas_idx, 0);
+-     let s12 = textureLoad(tex, vec2<i32>(clamp(coords + vec2(-0.5, 0.5), image_offset, atlas_max)), atlas_idx, 0);
+-     let s22 = textureLoad(tex, vec2<i32>(clamp(coords + vec2(0.5, 0.5), image_offset, atlas_max)), atlas_idx, 0);
+-     let s32 = textureLoad(tex, vec2<i32>(clamp(coords + vec2(1.5, 0.5), image_offset, atlas_max)), atlas_idx, 0);
+-     
+-     let s03 = textureLoad(tex, vec2<i32>(clamp(coords + vec2(-1.5, 1.5), image_offset, atlas_max)), atlas_idx, 0);
+-     let s13 = textureLoad(tex, vec2<i32>(clamp(coords + vec2(-0.5, 1.5), image_offset, atlas_max)), atlas_idx, 0);
+-     let s23 = textureLoad(tex, vec2<i32>(clamp(coords + vec2(0.5, 1.5), image_offset, atlas_max)), atlas_idx, 0);
+-     let s33 = textureLoad(tex, vec2<i32>(clamp(coords + vec2(1.5, 1.5), image_offset, atlas_max)), atlas_idx, 0);
+-    
++
++     let x0 = floor(extend_mode_precise(coords.x - 1.5, extend_modes.x, image_size.x));
++     let x1 = floor(extend_mode_precise(coords.x - 0.5, extend_modes.x, image_size.x));
++     let x2 = floor(extend_mode_precise(coords.x + 0.5, extend_modes.x, image_size.x));
++     let x3 = floor(extend_mode_precise(coords.x + 1.5, extend_modes.x, image_size.x));
++
++     let y0 = floor(extend_mode_precise(coords.y - 1.5, extend_modes.y, image_size.y));
++     let y1 = floor(extend_mode_precise(coords.y - 0.5, extend_modes.y, image_size.y));
++     let y2 = floor(extend_mode_precise(coords.y + 0.5, extend_modes.y, image_size.y));
++     let y3 = floor(extend_mode_precise(coords.y + 1.5, extend_modes.y, image_size.y));
++
++     // Sample 4x4 grid around coords, each tap independently extended
++     let s00 = textureLoad(tex, vec2<i32>(image_offset + vec2(x0, y0)), atlas_idx, 0);
++     let s10 = textureLoad(tex, vec2<i32>(image_offset + vec2(x1, y0)), atlas_idx, 0);
++     let s20 = textureLoad(tex, vec2<i32>(image_offset + vec2(x2, y0)), atlas_idx, 0);
++     let s30 = textureLoad(tex, vec2<i32>(image_offset + vec2(x3, y0)), atlas_idx, 0);
++
++     let s01 = textureLoad(tex, vec2<i32>(image_offset + vec2(x0, y1)), atlas_idx, 0);
++     let s11 = textureLoad(tex, vec2<i32>(image_offset + vec2(x1, y1)), atlas_idx, 0);
++     let s21 = textureLoad(tex, vec2<i32>(image_offset + vec2(x2, y1)), atlas_idx, 0);
++     let s31 = textureLoad(tex, vec2<i32>(image_offset + vec2(x3, y1)), atlas_idx, 0);
++
++     let s02 = textureLoad(tex, vec2<i32>(image_offset + vec2(x0, y2)), atlas_idx, 0);
++     let s12 = textureLoad(tex, vec2<i32>(image_offset + vec2(x1, y2)), atlas_idx, 0);
++     let s22 = textureLoad(tex, vec2<i32>(image_offset + vec2(x2, y2)), atlas_idx, 0);
++     let s32 = textureLoad(tex, vec2<i32>(image_offset + vec2(x3, y2)), atlas_idx, 0);
++
++     let s03 = textureLoad(tex, vec2<i32>(image_offset + vec2(x0, y3)), atlas_idx, 0);
++     let s13 = textureLoad(tex, vec2<i32>(image_offset + vec2(x1, y3)), atlas_idx, 0);
++     let s23 = textureLoad(tex, vec2<i32>(image_offset + vec2(x2, y3)), atlas_idx, 0);
++     let s33 = textureLoad(tex, vec2<i32>(image_offset + vec2(x3, y3)), atlas_idx, 0);
++
+     // Interpolate in x direction for each row
+     let row0 = cx.x * s00 + cx.y * s10 + cx.z * s20 + cx.w * s30;
+     let row1 = cx.x * s01 + cx.y * s11 + cx.z * s21 + cx.w * s31;
+diff --git a/sparse_strips/vello_sparse_shaders/shaders/render.wesl b/sparse_strips/vello_sparse_shaders/shaders/render.wesl
+index 755595ff..69fe32f5 100644
+--- a/sparse_strips/vello_sparse_shaders/shaders/render.wesl
++++ b/sparse_strips/vello_sparse_shaders/shaders/render.wesl
+@@ -426,19 +426,23 @@ fn fs_main(
+                     external_texture,
+                     image_quality,
+                     final_xy,
++                    local_xy + offset,
+                     image_offset,
+                     image_size,
++                    image_extend_modes,
+                 );
+             } else if image_quality == IMAGE_QUALITY_HIGH {
+-                let final_xy = image_offset + extended_xy;
++                // Unlike the other branches, `bicubic_sample` needs the un-extended local
++                // coordinates: it extends each of its 16 neighboring sample positions
++                // individually (see the comment on `bicubic_sample` itself for why applying
++                // the extend mode once, upfront, to a single already-averaged position is wrong).
+                 sample_color = bicubic_sample(
+                     atlas_texture_array,
+-                    final_xy,
++                    local_xy + offset,
+                     i32(image_atlas_index),
+                     image_offset,
+                     image_size,
+                     image_extend_modes,
+-                    image_padding,
+                 );
+             } else if image_quality == IMAGE_QUALITY_MEDIUM {
+                 let final_xy = image_offset + extended_xy - vec2(0.5);

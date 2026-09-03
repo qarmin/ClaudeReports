@@ -1,0 +1,33 @@
+diff --git a/hayro-syntax/src/filter/dct.rs b/hayro-syntax/src/filter/dct.rs
+index a4fbd176..a308954c 100644
+--- a/hayro-syntax/src/filter/dct.rs
++++ b/hayro-syntax/src/filter/dct.rs
+@@ -8,6 +8,12 @@ use zune_jpeg::zune_core::colorspace::ColorSpace;
+ use zune_jpeg::zune_core::colorspace::ColorSpace::CMYK;
+ use zune_jpeg::zune_core::options::DecoderOptions;
+ 
++/// Ceiling on the decoded output buffer (`width * height * num_components`), mirroring
++/// `hayro-syntax`'s `ccitt.rs::MAX_PIXELS`: an attacker-controlled JPEG (or PDF `/DeviceN`
++/// component count) can otherwise force an eager allocation many times larger than any real
++/// image, independent of how much actual encoded data is present.
++const MAX_OUTPUT_BYTES: usize = 64_000_000 * 4;
++
+ pub(crate) fn decode(
+     data: &[u8],
+     params: &Dict<'_>,
+@@ -60,6 +66,15 @@ pub(crate) fn decode(
+         out_colorspace = ColorSpace::RGB;
+     }
+ 
++    let (dec_width, dec_height) = decoder.dimensions().unwrap();
++    let output_len = dec_width
++        .checked_mul(dec_height)?
++        .checked_mul(out_colorspace.num_components())?;
++
++    if output_len > MAX_OUTPUT_BYTES {
++        return None;
++    }
++
+     decoder.set_options(DecoderOptions::default().jpeg_set_out_colorspace(out_colorspace));
+     let mut decoded = decoder.decode().ok()?;
+ 

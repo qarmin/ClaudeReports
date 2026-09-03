@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# Follow-up to candidate 010: this repro drives every public `plan_*_resampling*` entry point in
+# `src/scaler.rs` (all pixel-format/bit-depth/AlphaPlanner-vs-DefaultPlanner/f32-workload-strategy
+# combinations, plus AR30/RA30) through the crate's real public API, with the same overflow-
+# adjacent `source_size`/`destination_size` pair that panicked candidate 010's narrower repro.
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone
+    -just reproduce-before
+    just apply
+    just reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should print "REPRODUCED" for 23 of
+# the 24 entry points tried (all except the Nearest-function AR30 case, which bypasses
+# generate_weights entirely) and exit non-zero, because overflow-checks = true is set in
+# repro/Cargo.toml so the bug is visible the same way it is under Cargo's default `dev` profile.
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should print "did not reproduce" for all 24
+# entry points and exit 0.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target

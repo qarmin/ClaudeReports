@@ -1,0 +1,39 @@
+diff --git a/src/decoder/lossless.rs b/src/decoder/lossless.rs
+index cd00476..43a9d7b 100644
+--- a/src/decoder/lossless.rs
++++ b/src/decoder/lossless.rs
+@@ -47,8 +47,14 @@ impl<R: Read> Decoder<R> {
+         let height = frame.image_size.height as usize;
+ 
+         let mut differences = vec![Vec::with_capacity(npixel); ncomp];
+-        for _mcu_y in 0..height {
+-            for _mcu_x in 0..width {
++        // Tracks, per MCU in raster order, whether that MCU is the first one after a restart
++        // marker - i.e. the per-pixel version of the restart boundary the prediction loop below
++        // needs. `mcus_left_until_restart` itself is only meaningful during this loop; reading it
++        // again afterwards (as a single frozen snapshot) does not tell you anything about any
++        // individual pixel's restart status.
++        let mut mcu_restarts = vec![false; npixel];
++        for mcu_y in 0..height {
++            for mcu_x in 0..width {
+                 if self.restart_interval > 0 {
+                     if mcus_left_until_restart == 0 {
+                         match huffman.take_marker(reader)? {
+@@ -64,6 +70,7 @@ impl<R: Read> Decoder<R> {
+ 
+                                 expected_rst_num = (expected_rst_num + 1) % 8;
+                                 mcus_left_until_restart = self.restart_interval;
++                                mcu_restarts[mcu_y * width + mcu_x] = true;
+                             }
+                             Some(marker) => {
+                                 return Err(Error::Format(format!(
+@@ -166,8 +173,7 @@ impl<R: Read> Decoder<R> {
+                             frame.precision,
+                             mcu_x,
+                             mcu_y,
+-                            self.restart_interval > 0
+-                                && mcus_left_until_restart == self.restart_interval - 1,
++                            mcu_restarts[mcu_y * width + mcu_x],
+                         );
+                         let result = ((prediction + diff) & 0xFFFF) as u16; // modulo 2^16
+                         results[i][mcu_y * width + mcu_x] = result << scan.point_transform;

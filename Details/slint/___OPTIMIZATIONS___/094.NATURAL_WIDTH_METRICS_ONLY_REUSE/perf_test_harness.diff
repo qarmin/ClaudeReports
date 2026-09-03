@@ -1,0 +1,96 @@
+--- a/perf_test/src/backend.rs
++++ b/perf_test/src/backend.rs
+@@ -71,6 +71,12 @@
+     pub item_border: f32,
+     pub font_size_variants: i32,
+     pub line_length: usize,
++    /// If set, one extra line of this many characters is prepended to the `text` mode's
++    /// generated document before the first frame -- always the widest line by a wide margin,
++    /// and never touched by `--type-text`/`--key-input` (both act at a fixed row further down).
++    /// Isolates edits that provably can't widen the document's longest line, unlike the ordinary
++    /// `--type-text` scene where the typed-into line eventually becomes the longest itself.
++    pub long_line_chars: Option<usize>,
+     pub wheel: bool,
+     pub type_text: bool,
+     pub select_all: bool,
+@@ -139,6 +145,7 @@
+         item_border: 1.0,
+         font_size_variants: 1,
+         line_length: 0,
++        long_line_chars: None,
+         wheel: false,
+         type_text: false,
+         select_all: false,
+@@ -274,6 +281,10 @@
+             }
+             "--font-sizes" => options.font_size_variants = value()?.parse().map_err(|_| "--font-sizes wants a number")?,
+             "--line-length" => options.line_length = value()?.parse().map_err(|_| "--line-length wants a number")?,
++            "--long-line" => {
++                options.long_line_chars =
++                    Some(value()?.parse().map_err(|_| "--long-line wants a number")?)
++            }
+             "--wheel" => options.wheel = true,
+             "--type-text" => options.type_text = true,
+             "--select-all" => options.select_all = true,
+@@ -368,6 +379,7 @@
+             item_border: options.item_border,
+             font_size_variants: options.font_size_variants,
+             line_length: if options.line_length > 0 { options.line_length } else { defaults.line_length },
++            long_line_chars: options.long_line_chars,
+             wheel: options.wheel,
+             type_text: options.type_text,
+             select_all: options.select_all,
+--- a/perf_test/src/bench.rs
++++ b/perf_test/src/bench.rs
+@@ -123,6 +123,8 @@
+     /// Base font size in logical px, so size and variety can be varied independently.
+     pub font_size_base: f32,
+     pub line_length: usize,
++    /// See `backend::Options::long_line_chars`.
++    pub long_line_chars: Option<usize>,
+     pub wheel: bool,
+     pub type_text: bool,
+     pub select_all: bool,
+@@ -190,6 +192,7 @@
+             font_size_variants: 1,
+             font_size_base: 13.0,
+             line_length: crate::generator::LINE_LEN,
++            long_line_chars: None,
+             wheel: false,
+             type_text: false,
+             select_all: false,
+@@ -429,7 +432,21 @@
+     let fill_start = Instant::now();
+     let fill_allocations = alloc_stats::allocations();
+     match options.mode {
+-        PerfMode::Text => app.global::<Logic>().invoke_add_lines(options.count),
++        PerfMode::Text => {
++            app.global::<Logic>().invoke_add_lines(options.count);
++            if let Some(chars) = options.long_line_chars {
++                // Prepended, not appended: `--type-text`/`--key-input` click at a fixed row
++                // (see `if options.key_input || ...` below), so inserting here keeps that row on
++                // an ordinary generated line, never on this one. `usize::MAX` as the index keeps
++                // this line's generated words distinct from every `push_line_of(.., index, ..)`
++                // call `invoke_add_lines` already made.
++                let mut long_line = String::new();
++                crate::generator::push_line_of(&mut long_line, usize::MAX, chars);
++                let mut text = String::from(app.get_text_content().as_str());
++                text.insert_str(0, &long_line);
++                app.set_text_content(text.into());
++            }
++        }
+         PerfMode::List | PerfMode::Scroll => {
+             app.global::<Logic>().invoke_add_records(options.count)
+         }
+@@ -845,6 +862,11 @@
+     if options.mode == PerfMode::Text {
+         println!("line length    {} characters", options.line_length);
+     }
++    if let Some(chars) = options.long_line_chars {
++        println!(
++            "long line      one extra {chars}-char line prepended, never edited by --type-text/--key-input"
++        );
++    }
+     if options.wheel {
+         println!("wheel          one wheel notch per frame (through Flickable)");
+     }

@@ -1,0 +1,47 @@
+diff --git a/symphonia-metadata/src/id3v2/mod.rs b/symphonia-metadata/src/id3v2/mod.rs
+index ec015de..f7143d5 100644
+--- a/symphonia-metadata/src/id3v2/mod.rs
++++ b/symphonia-metadata/src/id3v2/mod.rs
+@@ -461,12 +461,23 @@ impl ChapterGroupBuilder {
+ 
+     /// Build a chapter group from the added ID3v2 table of contents and chapters.
+     fn build(mut self) -> Option<ChapterGroup> {
++        // The TOC reference graph is built from a flat list of top-level frames (not from nested
++        // frame reads), so it can encode a very long chain (toc_0 -> toc_1 -> ... -> toc_n) at a
++        // tiny, near-constant cost per link. Cap the traversal depth to bound the recursion.
++        const MAX_TOC_DEPTH: u32 = 32;
++
+         /// Depth-first traversal of TOC elements to build the chapter hierarchy.
+         fn dfs(
+             id: &str,
++            depth: u32,
+             tocs: &mut HashMap<String, Id3v2TableOfContents>,
+             chaps: &mut HashMap<String, Id3v2Chapter>,
+         ) -> Option<ChapterGroup> {
++            if depth >= MAX_TOC_DEPTH {
++                debug!("id3v2: toc nesting depth limit reached");
++                return None;
++            }
++
+             // Attempt to remove the TOC with the provided TOC ID. If it was removed, create a
+             // chapter group from it.
+             tocs.remove(id).map(|toc| {
+@@ -481,7 +492,7 @@ impl ChapterGroupBuilder {
+                         // Item is a chapter.
+                         parent.items.push(ChapterGroupItem::Chapter(chap.chapter));
+                     }
+-                    else if let Some(child) = dfs(&child_id, tocs, chaps) {
++                    else if let Some(child) = dfs(&child_id, depth + 1, tocs, chaps) {
+                         // Item is a TOC.
+                         parent.items.push(ChapterGroupItem::Group(child));
+                     }
+@@ -501,7 +512,8 @@ impl ChapterGroupBuilder {
+         }
+ 
+         // Build a chapter group starting at top-level table of contents (TOC), if one exists.
+-        let top = self.root_toc_id.and_then(|toc_id| dfs(&toc_id, &mut self.tocs, &mut self.chaps));
++        let top =
++            self.root_toc_id.and_then(|toc_id| dfs(&toc_id, 0, &mut self.tocs, &mut self.chaps));
+ 
+         // After building the chapter group from the top-level TOC, any remaining TOC elements are
+         // unreferenced. The behaviour in this case is not specified by the standard. Therefore,

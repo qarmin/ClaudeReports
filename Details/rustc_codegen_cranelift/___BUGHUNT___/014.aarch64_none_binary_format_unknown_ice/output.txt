@@ -1,0 +1,91 @@
+===================================================================
+$ cd repro && CLIF_ROOT=<unpatched cg_clif @ 2bc05d45> bash run.sh   ; exit 1
+===================================================================
+==============================================================
+PART 1 - the realistic path: cargo build --target aarch64-unknown-none -Zbuild-std=core
+==============================================================
+--- plain cargo (LLVM) ---
+built OK; qemu-aarch64 printed: 7890598189674834828
+--- cargo-clif (cg_clif) ---
+cg_clif ICEd:
+thread 'rustc' (2927904) panicked at src/driver/aot.rs:52:6:
+called `Result::unwrap()` on an `Err` value: Backend(binary format is unknown)
+
+==============================================================
+PART 2 - build + link + RUN the aarch64 binary, LLVM vs cg_clif
+==============================================================
+----- aarch64-unknown-none -----
+  LLVM   : rc=0 out=[7890598189674834828]
+  cg_clif: rc=1 out=[  clif: ICE -> thread 'rustc' (2928159) panicked at src/driver/aot.rs:52:6: called `Result::unwrap()` on an `Err` value: Backend(binary format is unknown) ]
+  => MISMATCH: cg_clif could not produce a runnable binary
+----- aarch64-unknown-none-softfloat -----
+  LLVM   : rc=0 out=[7890598189674834828]
+  cg_clif: rc=1 out=[  clif: ICE -> thread 'rustc' (2928744) panicked at src/driver/aot.rs:52:6: called `Result::unwrap()` on an `Err` value: Backend(binary format is unknown) ]
+  => MISMATCH: cg_clif could not produce a runnable binary
+
+RESULT: BUG PRESENT (cg_clif ICEd / disagreed with LLVM)
+
+===================================================================
+$ cd repro && CLIF_ROOT=<same tree + patch.diff> bash run.sh          ; exit 0
+===================================================================
+==============================================================
+PART 1 - the realistic path: cargo build --target aarch64-unknown-none -Zbuild-std=core
+==============================================================
+--- plain cargo (LLVM) ---
+built OK; qemu-aarch64 printed: 7890598189674834828
+--- cargo-clif (cg_clif) ---
+no 'binary format is unknown' ICE from cargo-clif. Remaining diagnostics (if any):
+error: 128bit atomics not yet supported
+error: could not compile `core` (lib) due to 1 previous error
+
+==============================================================
+PART 2 - build + link + RUN the aarch64 binary, LLVM vs cg_clif
+==============================================================
+----- aarch64-unknown-none -----
+  LLVM   : rc=0 out=[7890598189674834828]
+  cg_clif: rc=0 out=[7890598189674834828]
+  => MATCH
+----- aarch64-unknown-none-softfloat -----
+  LLVM   : rc=0 out=[7890598189674834828]
+  cg_clif: rc=0 out=[7890598189674834828]
+  => MATCH
+
+RESULT: OK (cg_clif matches LLVM on every target above)
+
+===================================================================
+Raw ICE from the unpatched backend (full rustc stack, RUST_BACKTRACE=1)
+$ dist/rustc-clif --edition 2024 --crate-type bin --target aarch64-unknown-none \
+    -C opt-level=0 -C panic=abort --extern core=libcore.rlib \
+    --extern compiler_builtins=libcompiler_builtins.rlib -C link-arg=-e_start \
+    -o bare src/main.rs
+===================================================================
+warning: target feature `neon` must be enabled to ensure that the ABI of the current target can be implemented correctly
+  |
+  = note: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+  = note: for more information, see issue #116344 <https://github.com/rust-lang/rust/issues/116344>
+
+
+thread 'rustc' (2931692) panicked at src/driver/aot.rs:52:6:
+called `Result::unwrap()` on an `Err` value: Backend(binary format is unknown)
+stack backtrace:
+   0:     0x773b22609766 - <<std[2998bee3b0e5d588]::sys::backtrace::BacktraceLock>::print::DisplayBacktrace as core[3cf3978926eb57e0]::fmt::Display>::fmt
+   1:     0x773b22c0bd8f - core[3cf3978926eb57e0]::fmt::write
+   2:     0x773b2261ec4c - <std[2998bee3b0e5d588]::sys::stdio::unix::Stderr as core[3cf3978926eb57e0]::io::write::Write>::write_fmt
+   3:     0x773b225dcb3a - std[2998bee3b0e5d588]::panicking::default_hook::{closure#0}
+   4:     0x773b225fd9c3 - std[2998bee3b0e5d588]::panicking::default_hook
+   5:     0x773b215b0a0f - std[2998bee3b0e5d588]::panicking::update_hook::<alloc[592e58dec68c5427]::boxed::Box<rustc_driver_impl[554ade12355b72f6]::install_ice_hook::{closure#1}>>::{closure#0}
+   6:     0x773b225fde62 - std[2998bee3b0e5d588]::panicking::panic_with_hook
+   7:     0x773b225dcbf2 - std[2998bee3b0e5d588]::panicking::panic_handler::{closure#0}
+   8:     0x773b225d3a29 - std[2998bee3b0e5d588]::sys::backtrace::__rust_end_short_backtrace::<std[2998bee3b0e5d588]::panicking::panic_handler::{closure#0}, !>
+   9:     0x773b225de52d - __rustc[6adebc3d073c6bff]::rust_begin_unwind
+  10:     0x773b1f2952bc - core[3cf3978926eb57e0]::panicking::panic_fmt
+  11:     0x773b1e868ed2 - core[3cf3978926eb57e0]::result::unwrap_failed
+  12:     0x773b0f2b55a2 - rustc_codegen_cranelift[fa8037e011ca6e71]::driver::aot::make_module
+  13:     0x773b0f2b4b0c - rustc_codegen_cranelift[fa8037e011ca6e71]::driver::aot::codegen_cgu
+  14:     0x773b0f2b592f - <rustc_codegen_cranelift[fa8037e011ca6e71]::driver::aot::AotDriver as rustc_codegen_ssa[e78300e6ca9435]::traits::backend::ExtraBackendMethods>::compile_codegen_unit
+  15:     0x773b0f1b082a - rustc_codegen_ssa[e78300e6ca9435]::base::codegen_crate::<rustc_codegen_cranelift[fa8037e011ca6e71]::driver::aot::AotDriver, rustc_codegen_cranelift[fa8037e011ca6e71]::driver::aot::AotModule>
+  16:     0x773b0f1aecf2 - <rustc_codegen_cranelift[fa8037e011ca6e71]::CraneliftCodegenBackend as rustc_codegen_ssa[e78300e6ca9435]::traits::backend::CodegenBackend>::codegen_crate
+  17:     0x773b23ed7756 - <rustc_interface[bfce04871fb1cdcf]::queries::Linker>::codegen_and_build_linker
+  18:     0x773b23ecf04b - rustc_interface[bfce04871fb1cdcf]::interface::run_compiler::<(), rustc_driver_impl[554ade12355b72f6]::run_compiler::{closure#0}>::{closure#2}
+  19:     0x773b23f7e282 - std[2998bee3b0e5d588]::sys::backtrace::__rust_begin_short_backtrace::<rustc_interface[bfce04871fb1cdcf]::util::run_in_thread_with_globals<rustc_interface[bfce04871fb1cdcf]::util::run_in_thread_pool_with_globals<rustc_interface[bfce04871fb1cdcf]::interface::run_compiler<(), rustc_driver_impl[554ade12355b72f6]::run_compiler::{closure#0}>::{closure#2}, ()>::{closure#0}, ()>::{closure#0}::{closure#0}, ()>
+  20:     0x773b23f7e02d - <std[2998bee3b0e5d588]::thread::lifecycle::spawn_unchecked<rustc_interface[bfce04871fb1cdcf]::util::run_in_thread_with_globals<rustc_interface[bfce04871fb1cdcf]::util::run_in_thread_pool_with_globals<rustc_interface[bfce04871fb1cdcf]::interface::run_compiler<(), rustc_driver_impl[554ade12355b72f6]::run_compiler::{closure#0}>::{closure#2}, ()>::{closure#0}, ()>::{closure#0}::{closure#0}, ()>::{closure#1} as core[3cf3978926eb57e0]::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}

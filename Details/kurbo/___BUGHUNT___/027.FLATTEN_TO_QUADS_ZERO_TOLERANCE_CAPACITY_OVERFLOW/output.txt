@@ -1,0 +1,75 @@
+Captured output from running repro/ (release build) against the real public `kurbo::flatten`
+entry point, before and after applying patch.diff. Both runs used the same repro/src/main.rs; only
+the `kurbo` dependency (path-dependency to a local checkout) differed between the two.
+
+=== BEFORE (pristine kurbo @ ca273499e3e48bd2de6f02aa8e99a148984e45f3, unpatched) ===
+    Finished `release` profile [optimized] target(s) in 0.00s
+     Running `target/release/repro-027-flatten-to-quads-zero-tolerance-capacity-overflow`
+[case A: CurveTo, tolerance=0.0] flatten() PANICKED: capacity overflow
+[case B: QuadTo, tolerance=0.0] 5000000 elements in 91.536047ms, finished on its own: false, cutoff fired: true
+FAIL: flatten() mishandled tolerance=0.0 (see per-case output above)
+exit code: 1
+
+Repeat runs of case A alone (RUST_BACKTRACE=1), confirming the panic and its exact location,
+4/4 runs, both debug and release builds:
+
+thread 'main' panicked at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/alloc/src/raw_vec/mod.rs:28:5:
+capacity overflow
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: alloc::raw_vec::capacity_overflow
+   3: alloc::raw_vec::handle_error
+   4: <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+   5: <alloc::raw_vec::RawVecInner>::reserve
+   6: <alloc::raw_vec::RawVec<(kurbo::quadbez::QuadBez, kurbo::quadbez::FlattenParams)>>::reserve
+   7: <alloc::vec::Vec<(kurbo::quadbez::QuadBez, kurbo::quadbez::FlattenParams)>>::reserve
+   8: kurbo::bezpath::flatten::<kurbo::bezpath::BezPath, ...::main::{closure#0}>
+             at /tmp/kurbo-wt-027/kurbo/src/bezpath.rs:666:30
+   9: kurbo027_check::main
+
+Manual arithmetic (rustc -O, no crate involved) confirming the underlying float mechanism for
+`CubicBez::to_quads`'s `n` computation at kurbo/src/cubicbez.rs:94, accuracy=0.0, err=1.0 (an
+arbitrary nonzero value, standing in for any non-degenerate cubic):
+    max_hypot2=0 ratio=inf pw=inf ceil=inf as_usize=18446744073709551615
+
+=== AFTER (patched, patch.diff applied to the clone) ===
+   Compiling kurbo v0.13.1 (.../clone/kurbo)
+   Compiling repro-027-flatten-to-quads-zero-tolerance-capacity-overflow v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 0.77s
+     Running `target/release/repro-027-flatten-to-quads-zero-tolerance-capacity-overflow`
+[case A: CurveTo, tolerance=0.0] flatten() completed without panicking, 2 elements produced
+[case B: QuadTo, tolerance=0.0] 1048577 elements in 19.261361ms, finished on its own: true, cutoff fired: false
+PASS: flatten() handled tolerance=0.0 safely in both cases
+exit code: 0
+
+=== Additional inputs checked in the same bug class (against the patched worktree, via a small
+ad hoc driver reusing the same `kurbo::flatten` public entry point - not part of repro/, per
+CONFIRMATION.md section 7) ===
+
+case1 CurveTo tol=0.0: count=2 elapsed=94.447847ms
+case2 QuadTo  tol=0.0 (the case-B shape): count=1048577 elapsed=351ns
+case3 CurveTo tol=0.1 (sanity, unaffected by the fix): count=11
+
+zero:          tol=0            count=2
+neg-zero:      tol=-0           count=2
+negative:      tol=-1           count=2
+nan:           tol=NaN          count=2
+tiny-positive: tol=1e-322       count=1048577
+normal:        tol=0.1          count=11
+
+=== Project test suite (cargo test --workspace --all-features) ===
+
+BEFORE (pristine worktree):
+running 187 tests ... test result: ok. 187 passed; 0 failed; 0 ignored
+running 10 tests  ... test result: ok. 10 passed; 0 failed; 0 ignored
+running 55 tests  ... test result: ok. 55 passed; 0 failed; 0 ignored
+running 1 test    ... test result: ok. 0 passed; 0 failed; 1 ignored (pre-existing, unrelated doctest)
+
+AFTER (patched worktree, patch.diff applied):
+running 187 tests ... test result: ok. 187 passed; 0 failed; 0 ignored
+running 10 tests  ... test result: ok. 10 passed; 0 failed; 0 ignored
+running 55 tests  ... test result: ok. 55 passed; 0 failed; 0 ignored
+running 1 test    ... test result: ok. 0 passed; 0 failed; 1 ignored (same pre-existing doctest)
+
+Identical pass/fail counts before and after - no regressions.

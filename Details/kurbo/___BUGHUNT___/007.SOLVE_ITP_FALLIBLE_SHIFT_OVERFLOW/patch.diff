@@ -1,0 +1,44 @@
+diff --git a/kurbo/src/common.rs b/kurbo/src/common.rs
+index 9df3fc7..0f9ae6d 100644
+--- a/kurbo/src/common.rs
++++ b/kurbo/src/common.rs
+@@ -710,10 +710,21 @@ pub(crate) fn solve_itp_fallible<E>(
+ ) -> Result<(f64, f64), E> {
+     let n1_2 = (((b - a) / epsilon).log2().ceil() - 1.0).max(0.0) as usize;
+     let nmax = n0 + n1_2;
+-    let mut scaled_epsilon = epsilon * (1u64 << nmax) as f64;
++    // `nmax` can exceed 63 on a long enough curve (`ParamCurveArclen::inv_arclen` derives
++    // `epsilon` as `accuracy / total_arclen`, which shrinks - and so grows `nmax` - without bound
++    // as the curve gets longer). A plain `1u64 << nmax` then overflows the shift; `powi` on `f64`
++    // has no such limit (it saturates to `f64::INFINITY`, which only makes `r` below saturate to
++    // `+inf` and then get clamped to a `b - a`-sized value on the first iteration, rather than
++    // panicking/wrapping).
++    let powi_nmax: i32 = nmax.min(i32::MAX as usize).try_into().unwrap_or(i32::MAX);
++    let mut scaled_epsilon = epsilon * 2.0_f64.powi(powi_nmax);
+     while b - a > 2.0 * epsilon {
+         let x1_2 = 0.5 * (a + b);
+-        let r = scaled_epsilon - 0.5 * (b - a);
++        // Clamped to 0: unclamped, this goes negative once the bracket falls behind the `nmax`
++        // schedule, which can happen even without the shift overflow above once `epsilon` is
++        // finer than the `f64` resolution of the bracket - see the `xitp` fallback below, which
++        // depends on this clamp to behave correctly rather than pushing `xitp` outside `[a, b]`.
++        let r = (scaled_epsilon - 0.5 * (b - a)).max(0.0);
+         let xf = (yb * a - ya * b) / (yb - ya);
+         let sigma = x1_2 - xf;
+         // This has k2 = 2 hardwired for efficiency.
+@@ -728,6 +739,15 @@ pub(crate) fn solve_itp_fallible<E>(
+         } else {
+             x1_2 - r.copysign(sigma)
+         };
++        // `xitp` can round onto an endpoint while `epsilon` is still finer than the `f64`
++        // resolution around the bracket; fall back to bisection, and if even the midpoint can't
++        // land strictly inside, the bracket is as tight as the floats allow, so stop instead of
++        // looping forever re-evaluating the same point (the loop's own exit condition,
++        // `b - a > 2.0 * epsilon`, has no way to become false in that case on its own).
++        let xitp = if a < xitp && xitp < b { xitp } else { x1_2 };
++        if !(a < xitp && xitp < b) {
++            return Ok((a, b));
++        }
+         let yitp = f(xitp)?;
+         if yitp > 0.0 {
+             b = xitp;

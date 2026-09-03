@@ -1,0 +1,68 @@
+=== In-tree scratch scaling probe (src/imageops/sample.rs, scratch_thumbnail_huge_block_scaling_probe) ===
+Calls the private thumbnail_sample_block directly against a virtual O(1)-memory constant-color
+GenericImageView (no real buffer materialized), for m = floor(side/256) in {2,5,10,39,100,300,1000},
+side = 256*m + 55 (one STEP_SIZE short of the next multiple, the worst case per dimension).
+Compares the measured result against the analytically predicted ((m+1)/m)^2 inflation factor.
+
+--- debug build (cargo test --lib scratch_thumbnail_huge_block_scaling_probe -- --nocapture) ---
+running 1 test
+m=      2 d=      567 got=1.5275249481 predicted=1.5275250077 relative_error=1.24999991e0 predicted_relative_error=1.25000000e0
+m=      5 d=     1335 got=0.9776160121 predicted=0.9776160049 relative_error=4.40000011e-1 predicted_relative_error=4.40000000e-1
+m=     10 d=     2615 got=0.8214690089 predicted=0.8214690042 relative_error=2.10000007e-1 predicted_relative_error=2.10000000e-1
+m=     39 d=    10039 got=0.7141617537 predicted=0.7141617393 relative_error=5.19395346e-2 predicted_relative_error=5.19395135e-2
+m=    100 d=    25655 got=0.6925458908 predicted=0.6925458935 relative_error=2.00999960e-2 predicted_relative_error=2.01000000e-2
+test imageops::sample::tests::scratch_thumbnail_huge_block_scaling_probe ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.29s
+
+--- release build (cargo test --release --lib scratch_thumbnail_huge_block_scaling_probe -- --nocapture), extended to m=1000 ---
+running 1 test
+m=      2 d=      567 got=1.5275249481 predicted=1.5275250077 relative_error=1.24999991e0 predicted_relative_error=1.25000000e0
+m=      5 d=     1335 got=0.9776160121 predicted=0.9776160049 relative_error=4.40000011e-1 predicted_relative_error=4.40000000e-1
+m=     10 d=     2615 got=0.8214690089 predicted=0.8214690042 relative_error=2.10000007e-1 predicted_relative_error=2.10000000e-1
+m=     39 d=    10039 got=0.7141617537 predicted=0.7141617393 relative_error=5.19395346e-2 predicted_relative_error=5.19395135e-2
+m=    100 d=    25655 got=0.6925458908 predicted=0.6925458935 relative_error=2.00999960e-2 predicted_relative_error=2.01000000e-2
+m=    300 d=    76855 got=0.6834335327 predicted=0.6834335468 relative_error=6.67775705e-3 predicted_relative_error=6.67777778e-3
+m=   1000 d=   256055 got=0.6802584529 predicted=0.6802584823 relative_error=2.00095662e-3 predicted_relative_error=2.00100000e-3
+test imageops::sample::tests::scratch_thumbnail_huge_block_scaling_probe ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.64s
+
+Measured relative error matches the predicted ((m+1)/m)^2 - 1 model to within f32 rounding at
+every scale tried, from m=2 (600-ish px side, +125%) up to m=1000 (~256,000 px side, +0.2%) -
+this scratch test was reverted before this candidate's folder was written (not part of repro/,
+which uses only the real public API - see RESULT.md for why).
+
+=== Standalone repro/ (real public API, image::DynamicImage::thumbnail_exact) ===
+
+--- reproduce-before (pristine tree, run 1/2) ---
+Thumbnail huge-block-splitting scaling check (Luma32F, uniform color):
+  candidate-020-scale    600x600 -> 1x1 (m=2): expected 0.6789, got 1.5275249 | measured_relative_error=+1.250000 predicted_relative_error=+1.250000 | wrong=true
+  this-candidate-scale   10000x10000 -> 1x1 (m=39): expected 0.6789, got 0.7141618 | measured_relative_error=+0.051940 predicted_relative_error=+0.051940 | wrong=true
+REPRODUCED: the huge-block divisor bug fires at both scales through the real public DynamicImage::thumbnail_exact API. The 10000x10000 case's relative error is measurably smaller than the 600x600 case's (matching the ((m+1)/m)^2 shrinking-error model), but is still nonzero - the bug does not disappear at scale, it only gets harder to notice.
+(exit code 1)
+
+--- reproduce-before (pristine tree, run 2/2, deterministic repeat) ---
+Thumbnail huge-block-splitting scaling check (Luma32F, uniform color):
+  candidate-020-scale    600x600 -> 1x1 (m=2): expected 0.6789, got 1.5275249 | measured_relative_error=+1.250000 predicted_relative_error=+1.250000 | wrong=true
+  this-candidate-scale   10000x10000 -> 1x1 (m=39): expected 0.6789, got 0.7141618 | measured_relative_error=+0.051940 predicted_relative_error=+0.051940 | wrong=true
+REPRODUCED: the huge-block divisor bug fires at both scales through the real public DynamicImage::thumbnail_exact API. The 10000x10000 case's relative error is measurably smaller than the 600x600 case's (matching the ((m+1)/m)^2 shrinking-error model), but is still nonzero - the bug does not disappear at scale, it only gets harder to notice.
+(exit code 1)
+
+--- reproduce-after (patch.diff applied, run 1/2) ---
+Thumbnail huge-block-splitting scaling check (Luma32F, uniform color):
+  candidate-020-scale    600x600 -> 1x1 (m=2): expected 0.6789, got 0.6789000 | measured_relative_error=+0.000000 predicted_relative_error=+1.250000 | wrong=false
+  this-candidate-scale   10000x10000 -> 1x1 (m=39): expected 0.6789, got 0.6789000 | measured_relative_error=+0.000000 predicted_relative_error=+0.051940 | wrong=false
+Not reproduced: at least one of the two scales preserved the uniform source color (small=false, large=false).
+(exit code 0)
+
+--- reproduce-after (patch.diff applied, run 2/2, deterministic repeat) ---
+Thumbnail huge-block-splitting scaling check (Luma32F, uniform color):
+  candidate-020-scale    600x600 -> 1x1 (m=2): expected 0.6789, got 0.6789000 | measured_relative_error=+0.000000 predicted_relative_error=+1.250000 | wrong=false
+  this-candidate-scale   10000x10000 -> 1x1 (m=39): expected 0.6789, got 0.6789000 | measured_relative_error=+0.000000 predicted_relative_error=+0.051940 | wrong=false
+Not reproduced: at least one of the two scales preserved the uniform source color (small=false, large=false).
+(exit code 0)
+
+=== Project test suite (cargo test --no-fail-fast, default features) ===
+Before fix: 622 passed, 1 failed (regression::resizing_with_catmul, pre-existing/unrelated - see
+candidate 020 and 021's RESULT.md), 4 ignored.
+After fix:  622 passed, 1 failed (same test, same failure), 4 ignored.
+No new failures, no fixed-by-accident failures.

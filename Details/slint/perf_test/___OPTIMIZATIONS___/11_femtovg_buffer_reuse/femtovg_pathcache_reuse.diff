@@ -1,0 +1,108 @@
+diff --git a/src/path.rs b/src/path.rs
+index e39475d..6f6e9d7 100644
+--- a/src/path.rs
++++ b/src/path.rs
+@@ -112,7 +112,9 @@ pub struct Path {
+     last_pos: Position,
+     dist_tol: f32,
+     #[cfg_attr(feature = "serde", serde(skip))]
+-    pub(crate) cache: RefCell<Option<(u64, PathCache)>>,
++    /// The tessellation and the transform key it was made with. The key is `None` when the
++    /// buffers are kept but their contents are stale, which is what [`Self::clear`] leaves behind.
++    pub(crate) cache: RefCell<Option<(Option<u64>, PathCache)>>,
+ }
+ 
+ impl Path {
+@@ -129,6 +131,21 @@ impl Path {
+         std::mem::size_of::<PackedVerb>() * self.verbs.len() + std::mem::size_of::<f32>() * self.coords.len()
+     }
+ 
++    /// Removes all verbs and coordinates, keeping the allocated capacity so that the path can
++    /// be filled again without reallocating. Callers that draw many short-lived paths per
++    /// frame (a UI toolkit drawing one path per rectangle, say) can keep one path around
++    /// instead of allocating a new one per primitive.
++    pub fn clear(&mut self) {
++        self.verbs.clear();
++        self.coords.clear();
++        self.last_pos = Position::default();
++        // The tessellation belongs to the geometry that was just discarded, but its buffers are
++        // worth keeping: mark them stale instead of dropping them.
++        if let Some((key, _)) = &mut *self.cache.borrow_mut() {
++            *key = None;
++        }
++    }
++
+     /// Checks if the path is empty (contains no verbs).
+     pub fn is_empty(&self) -> bool {
+         self.verbs.is_empty()
+@@ -156,15 +173,24 @@ impl Path {
+         let key = transform.cache_key();
+ 
+         // this shouldn't need a bool once non lexic lifetimes are stable
+-        let needs_rebuild = if let Some((transform_cache_key, _cache)) = &*self.cache.borrow() {
+-            key != *transform_cache_key
+-        } else {
+-            true
++        let needs_rebuild = match &*self.cache.borrow() {
++            Some((Some(transform_cache_key), _cache)) => key != *transform_cache_key,
++            _ => true,
+         };
+ 
+         if needs_rebuild {
+-            let path_cache = PathCache::new(self.verbs(), transform, tess_tol, dist_tol);
+-            *self.cache.borrow_mut() = Some((key, path_cache));
++            let mut cache = self.cache.borrow_mut();
++            match &mut *cache {
++                // Re-tessellate into the buffers this path already owns.
++                Some((cache_key, path_cache)) => {
++                    path_cache.rebuild(self.verbs(), transform, tess_tol, dist_tol);
++                    *cache_key = Some(key);
++                }
++                None => {
++                    *cache =
++                        Some((Some(key), PathCache::new(self.verbs(), transform, tess_tol, dist_tol)))
++                }
++            }
+         }
+ 
+         RefMut::map(self.cache.borrow_mut(), |cache| &mut cache.as_mut().unwrap().1)
+diff --git a/src/path/cache.rs b/src/path/cache.rs
+index 904fdff..3cfeb1d 100644
+--- a/src/path/cache.rs
++++ b/src/path/cache.rs
+@@ -137,6 +137,26 @@ pub struct PathCache {
+ impl PathCache {
+     pub fn new(verbs: impl Iterator<Item = Verb>, transform: &Transform2D, tess_tol: f32, dist_tol: f32) -> Self {
+         let mut cache = Self::default();
++        cache.rebuild(verbs, transform, tess_tol, dist_tol);
++        cache
++    }
++
++    /// Tessellates into the buffers this cache already owns, keeping their capacity.
++    ///
++    /// A path that is filled again after its geometry or the transform changed would otherwise
++    /// allocate a fresh point and contour vector every time - once per primitive per frame for a
++    /// UI toolkit that draws a path per rectangle.
++    pub fn rebuild(
++        &mut self,
++        verbs: impl Iterator<Item = Verb>,
++        transform: &Transform2D,
++        tess_tol: f32,
++        dist_tol: f32,
++    ) {
++        let cache = self;
++        cache.contours.clear();
++        cache.points.clear();
++        cache.bounds = Bounds::default();
+ 
+         // Convert path verbs to a set of contours
+         for verb in verbs {
+@@ -256,8 +276,6 @@ impl PathCache {
+ 
+             true
+         });
+-
+-        cache
+     }
+ 
+     fn add_contour(&mut self) {

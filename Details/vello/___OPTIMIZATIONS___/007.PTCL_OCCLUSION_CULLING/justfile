@@ -1,0 +1,57 @@
+# Self-contained reproduction for candidate 007 (PTCL early-exit on fully-opaque overdraw,
+# https://github.com/linebender/vello/issues/409).
+#
+# No project benchmark reached this code path (classic `vello`'s GPU coarse-rasterization
+# PTCL builder has no existing perf harness), so `bench/` is a standalone crate depending on
+# `{ path = "../clone/vello" }` (shape 2 from this justfile's own template).
+#
+# `just test` clones the repo at the pinned commit, builds a baseline binary, applies
+# patch.diff, builds a patched binary, then runs both against a scene of 400 stacked
+# fully-opaque tile-aligned rectangles (the worst case described in issue #409) and prints
+# min/p50/mean/max render time plus a pixel hash of the output for a bit-exactness check.
+#
+# Needs a wgpu-compatible adapter (a real GPU, or a software Vulkan/GL fallback such as
+# lavapipe/llvmpipe). No adapter at all makes `bench` fail outright - that's an environment
+# limitation, not a bug in this justfile.
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    # -c filter.lfs.*: this repo's .gitattributes wires up Git LFS for reference PNG snapshots
+    # (used only by vello_sparse_tests, an unrelated rendering engine not touched by this
+    # candidate); on a machine without git-lfs installed, a plain clone hard-fails at checkout
+    # instead of just leaving pointer files in place. Disabling the filter here matches what
+    # happens automatically for anyone who already has git-lfs configured with
+    # `git lfs install --skip-smudge`, and is harmless for this candidate's own build/bench,
+    # which never reads those assets.
+    git -c filter.lfs.required=false -c filter.lfs.smudge= -c filter.lfs.process= clone --no-checkout {{repo_url}} clone
+    cd clone && git config filter.lfs.required false && git config filter.lfs.smudge "" && git config filter.lfs.process "" && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd bench && cargo build --release
+    cp bench/target/release/bench_overdraw ./bin_baseline
+
+build-patched:
+    cd bench && cargo build --release
+    cp bench/target/release/bench_overdraw ./bin_patched
+
+bench:
+    @echo "=== baseline (before patch) ==="
+    ./bin_baseline
+    @echo "=== patched (after patch) ==="
+    ./bin_patched
+    @echo "=== single-core (taskset -c 0), for a noise-floor sanity check ==="
+    @echo "-- baseline --"
+    taskset -c 0 ./bin_baseline
+    @echo "-- patched --"
+    taskset -c 0 ./bin_patched
+
+clean:
+    rm -rf clone bin_baseline bin_patched bench/target

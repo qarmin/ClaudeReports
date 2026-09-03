@@ -1,0 +1,168 @@
+diff --git a/src/abi/pass_mode.rs b/src/abi/pass_mode.rs
+index c4d4ddcf..88f522ed 100644
+--- a/src/abi/pass_mode.rs
++++ b/src/abi/pass_mode.rs
+@@ -16,7 +16,28 @@ pub(super) trait ArgAbiExt<'tcx> {
+     fn get_abi_return(&self, tcx: TyCtxt<'tcx>) -> (Option<AbiParam>, Vec<AbiParam>);
+ }
+ 
+-fn reg_to_abi_param(reg: Reg) -> AbiParam {
++/// The widest vector type any Cranelift backend can hold in an SSA value or pass in a register.
++/// Wider vectors (`I8X32`, `F32X8`, ...) do exist in Cranelift's *type system*, so building an
++/// `AbiParam` out of one succeeds and the failure only surfaces much later, as an
++/// `Unsupported("Unexpected SSA-value type: ...")` out of `Module::define_function` - which
++/// `src/base.rs` turns into an ICE. Reject such an ABI up front with a real diagnostic instead.
++const MAX_ABI_VECTOR_BITS: u64 = 128;
++
++fn reject_unsupported_vector_abi(tcx: TyCtxt<'_>, bits: u64, ty: Option<Ty<'_>>) -> ! {
++    let what = match ty {
++        Some(ty) => format!("SIMD vector type `{ty}`"),
++        None => "a SIMD vector".to_owned(),
++    };
++    tcx.dcx().fatal(format!(
++        "passing {what} by value is not yet supported by rustc_codegen_cranelift: the chosen \
++         ABI requires it to be passed in a {bits}-bit vector register, but the widest vector \
++         type Cranelift has is {MAX_ABI_VECTOR_BITS} bits. Pass it behind a pointer or \
++         reference, or use the default Rust ABI (which passes it indirectly) instead of an \
++         explicit `extern` ABI."
++    ))
++}
++
++fn reg_to_abi_param(tcx: TyCtxt<'_>, reg: Reg) -> AbiParam {
+     let clif_ty = match (reg.kind, reg.size.bytes()) {
+         (RegKind::Integer, 1) => types::I8,
+         (RegKind::Integer, 2) => types::I16,
+@@ -28,6 +49,10 @@ fn reg_to_abi_param(reg: Reg) -> AbiParam {
+         (RegKind::Float, 8) => types::F64,
+         (RegKind::Float, 16) => types::F128,
+         (RegKind::Vector { hint_vector_elem: _ }, size) => {
++            let bits = size.saturating_mul(8);
++            if bits > MAX_ABI_VECTOR_BITS {
++                reject_unsupported_vector_abi(tcx, bits, None);
++            }
+             types::I8.by(u32::try_from(size).unwrap()).unwrap()
+         }
+         _ => unreachable!("{:?}", reg),
+@@ -35,6 +60,16 @@ fn reg_to_abi_param(reg: Reg) -> AbiParam {
+     AbiParam::new(clif_ty)
+ }
+ 
++/// Build the single `AbiParam` for a vector passed/returned in a vector register, rejecting the
++/// widths Cranelift cannot represent instead of letting them ICE in `Module::define_function`.
++fn vector_to_abi_param<'tcx>(tcx: TyCtxt<'tcx>, layout: TyAndLayout<'tcx>) -> AbiParam {
++    let bits = layout.size.bits();
++    if bits > MAX_ABI_VECTOR_BITS {
++        reject_unsupported_vector_abi(tcx, bits, Some(layout.ty));
++    }
++    AbiParam::new(crate::intrinsics::clif_vector_type(tcx, layout))
++}
++
+ fn apply_attrs_to_abi_param(param: AbiParam, arg_attrs: ArgAttributes) -> AbiParam {
+     match arg_attrs.arg_ext {
+         RustcArgExtension::None => param,
+@@ -43,15 +78,18 @@ fn apply_attrs_to_abi_param(param: AbiParam, arg_attrs: ArgAttributes) -> AbiPar
+     }
+ }
+ 
+-fn cast_target_to_abi_params(cast: &CastTarget) -> SmallVec<[(Size, AbiParam); 2]> {
++fn cast_target_to_abi_params(
++    tcx: TyCtxt<'_>,
++    cast: &CastTarget,
++) -> SmallVec<[(Size, AbiParam); 2]> {
+     if let Some(offset_from_start) = cast.rest_offset {
+         assert_eq!(cast.prefix.len(), 1);
+         assert_eq!(cast.rest.unit.size, cast.rest.total);
+         let first = cast.prefix[0];
+         let second = cast.rest.unit;
+         return smallvec![
+-            (Size::ZERO, reg_to_abi_param(first)),
+-            (offset_from_start, reg_to_abi_param(second))
++            (Size::ZERO, reg_to_abi_param(tcx, first)),
++            (offset_from_start, reg_to_abi_param(tcx, second))
+         ];
+     }
+ 
+@@ -72,8 +110,8 @@ fn apply_attrs_to_abi_param(param: AbiParam, arg_attrs: ArgAttributes) -> AbiPar
+     let args = cast
+         .prefix
+         .iter()
+-        .map(|&reg| reg_to_abi_param(reg))
+-        .chain((0..rest_count).map(|_| reg_to_abi_param(cast.rest.unit)));
++        .map(|&reg| reg_to_abi_param(tcx, reg))
++        .chain((0..rest_count).map(|_| reg_to_abi_param(tcx, cast.rest.unit)));
+ 
+     let mut res = SmallVec::new();
+     let mut offset = Size::ZERO;
+@@ -89,7 +127,10 @@ fn apply_attrs_to_abi_param(param: AbiParam, arg_attrs: ArgAttributes) -> AbiPar
+         assert_eq!(cast.rest.unit.kind, RegKind::Integer);
+         res.push((
+             offset,
+-            reg_to_abi_param(Reg { kind: RegKind::Integer, size: Size::from_bytes(rem_bytes) }),
++            reg_to_abi_param(
++                tcx,
++                Reg { kind: RegKind::Integer, size: Size::from_bytes(rem_bytes) },
++            ),
+         ));
+     }
+ 
+@@ -106,8 +147,7 @@ impl<'tcx> ArgAbiExt<'tcx> for ArgAbi<'tcx, Ty<'tcx>> {
+                     attrs
+                 )],
+                 BackendRepr::SimdVector { .. } => {
+-                    let vector_ty = crate::intrinsics::clif_vector_type(tcx, self.layout);
+-                    smallvec![AbiParam::new(vector_ty)]
++                    smallvec![vector_to_abi_param(tcx, self.layout)]
+                 }
+                 _ => unreachable!("{:?}", self.layout.backend_repr),
+             },
+@@ -124,7 +164,7 @@ impl<'tcx> ArgAbiExt<'tcx> for ArgAbi<'tcx, Ty<'tcx>> {
+             },
+             PassMode::Cast { ref cast, pad_i32 } => {
+                 assert!(!pad_i32, "padding support not yet implemented");
+-                cast_target_to_abi_params(cast).into_iter().map(|(_, param)| param).collect()
++                cast_target_to_abi_params(tcx, cast).into_iter().map(|(_, param)| param).collect()
+             }
+             PassMode::Indirect { attrs, meta_attrs: None, on_stack } => {
+                 if on_stack {
+@@ -160,10 +200,10 @@ fn get_abi_return(&self, tcx: TyCtxt<'tcx>) -> (Option<AbiParam>, Vec<AbiParam>)
+                         attrs,
+                     )],
+                 ),
+-                BackendRepr::SimdVector { .. } => {
+-                    let vector_ty = crate::intrinsics::clif_vector_type(tcx, self.layout);
+-                    (None, vec![apply_attrs_to_abi_param(AbiParam::new(vector_ty), attrs)])
+-                }
++                BackendRepr::SimdVector { .. } => (
++                    None,
++                    vec![apply_attrs_to_abi_param(vector_to_abi_param(tcx, self.layout), attrs)],
++                ),
+                 _ => unreachable!("{:?}", self.layout.backend_repr),
+             },
+             PassMode::Pair(attrs_a, attrs_b) => match self.layout.backend_repr {
+@@ -182,7 +222,7 @@ fn get_abi_return(&self, tcx: TyCtxt<'tcx>) -> (Option<AbiParam>, Vec<AbiParam>)
+             },
+             PassMode::Cast { ref cast, .. } => (
+                 None,
+-                cast_target_to_abi_params(cast).into_iter().map(|(_, param)| param).collect(),
++                cast_target_to_abi_params(tcx, cast).into_iter().map(|(_, param)| param).collect(),
+             ),
+             PassMode::Indirect { attrs, meta_attrs: None, on_stack } => {
+                 assert!(!on_stack);
+@@ -208,7 +248,7 @@ pub(super) fn to_casted_value<'tcx>(
+ ) -> SmallVec<[Value; 2]> {
+     let (ptr, meta) = arg.force_stack(fx);
+     assert!(meta.is_none());
+-    cast_target_to_abi_params(cast)
++    cast_target_to_abi_params(fx.tcx, cast)
+         .into_iter()
+         .map(|(offset, param)| {
+             ptr.offset_i64(fx, offset.bytes() as i64).load(
+@@ -226,7 +266,7 @@ pub(super) fn from_casted_value<'tcx>(
+     layout: TyAndLayout<'tcx>,
+     cast: &CastTarget,
+ ) -> CValue<'tcx> {
+-    let abi_params = cast_target_to_abi_params(cast);
++    let abi_params = cast_target_to_abi_params(fx.tcx, cast);
+     let abi_param_size: u32 = abi_params.iter().map(|(_, param)| param.value_type.bytes()).sum();
+     let layout_size = u32::try_from(layout.size.bytes()).unwrap();
+     let ptr = fx.create_stack_slot(

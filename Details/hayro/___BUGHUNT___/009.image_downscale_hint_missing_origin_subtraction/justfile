@@ -1,0 +1,39 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone pristine, prove the bug exists (slow, inflated hint), apply the fix, prove
+# it's gone (fast, correct hint) - both against the exact same real PDF via the real, public,
+# top-level `hayro::render()` entry point.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should show both placements
+# (an ordinary thumbnail placement and a translate-0,0 placement, both of which carry non-zero
+# device-space translation once the page's own initial y-flip transform is folded in) taking
+# roughly the same, inflated (tens-of-milliseconds) time - the downscale hint is wrong for both.
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - both placements should now take a small
+# fraction of the unpatched time (low-single-digit milliseconds), and the ratio between them
+# should no longer diverge (the hint is now the placement's true device-space extent).
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

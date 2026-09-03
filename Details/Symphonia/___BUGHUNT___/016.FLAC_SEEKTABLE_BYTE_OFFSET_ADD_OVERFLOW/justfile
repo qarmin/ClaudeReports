@@ -1,0 +1,28 @@
+# Self-contained reproduction for candidate 016: FLAC seek-table byte_offset arithmetic overflow.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Should panic with "attempt to add with overflow" (non-zero exit is the expected, demonstrated
+# bug -- don't let it stop `just test` before reaching apply/reproduce-after).
+reproduce-before:
+    -cd repro && cargo run --release -- assets/seek_overflow_midpoint.flac 500
+    -cd repro && cargo run --release -- assets/seek_overflow_real.flac 0
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Should now print "seek returned Err" (byte range safely clamped, ordinary IO error), no panic.
+reproduce-after:
+    cd repro && cargo run --release -- assets/seek_overflow_midpoint.flac 500
+    cd repro && cargo run --release -- assets/seek_overflow_real.flac 0
+
+clean:
+    rm -rf clone

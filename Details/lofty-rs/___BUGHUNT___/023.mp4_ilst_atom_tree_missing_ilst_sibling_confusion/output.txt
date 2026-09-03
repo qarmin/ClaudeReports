@@ -1,0 +1,77 @@
+Captured via `just clone && just reproduce-before && just apply && just reproduce-after` in this
+candidate folder, base_commit 5c6565e36d35b9ea7de049daa67acc0be0fd3b01, release profile with
+overflow-checks = true (see repro/Cargo.toml).
+
+=== BEFORE fix (pristine clone), 3 repeat runs of `cargo run --release` ===
+
+--- run 1 ---
+    Finished `release` profile [optimized] target(s)
+     Running `target/release/repro023`
+REPRODUCED - meta's real `hdlr` atom (mdirappl) was destroyed by the `ilst` write; `save_to_existing` mistook it for an existing `ilst` atom that never existed
+
+--- run 2 ---
+    Finished `release` profile [optimized] target(s)
+     Running `target/release/repro023`
+REPRODUCED - meta's real `hdlr` atom (mdirappl) was destroyed by the `ilst` write; `save_to_existing` mistook it for an existing `ilst` atom that never existed
+
+--- run 3 ---
+    Finished `release` profile [optimized] target(s)
+     Running `target/release/repro023`
+REPRODUCED - meta's real `hdlr` atom (mdirappl) was destroyed by the `ilst` write; `save_to_existing` mistook it for an existing `ilst` atom that never existed
+
+(exit code 1 in all 3 runs)
+
+=== AFTER applying patch.diff, 3 repeat runs of `cargo run --release` ===
+
+--- run 1 ---
+    Finished `release` profile [optimized] target(s)
+     Running `target/release/repro023`
+did not reproduce - meta's real `hdlr` atom (mdirappl) survived the write
+
+--- run 2 ---
+    Finished `release` profile [optimized] target(s)
+     Running `target/release/repro023`
+did not reproduce - meta's real `hdlr` atom (mdirappl) survived the write
+
+--- run 3 ---
+    Finished `release` profile [optimized] target(s)
+     Running `target/release/repro023`
+did not reproduce - meta's real `hdlr` atom (mdirappl) survived the write
+
+(exit code 0 in all 3 runs)
+
+=== Supplementary: manual scratch dump against the main project's own working tree (pre-fix), a
+standalone hex dump of the written MP4 bytes, showing the real `hdlr` atom (originally 37 bytes at
+the very start of `meta`'s children, right after the 4-byte version/flags field) replaced in place
+by the new `ilst` atom, while the untouched trailing `free` atom (00 00 00 0e 66 72 65 65 ...)
+proves the rest of the file layout is otherwise undisturbed ===
+
+original len = 191, written len = 191
+meta's `hdlr` (mdirappl) survived in output: false
+0000: 00 00 00 10 66 74 79 70 4d 34 41 20 00 00 00 00   ....ftypM4A.....
+0010: 00 00 00 af 6d 6f 6f 76 00 00 00 60 74 72 61 6b   ....moov...`trak
+0020: 00 00 00 58 6d 64 69 61 00 00 00 1c 6d 64 68 64   ...Xmdia....mdhd
+0030: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 03 e8   ................
+0040: 00 00 00 00 00 00 00 14 68 64 6c 72 00 00 00 00   ........hdlr....
+0050: 00 00 00 00 73 6f 75 6e 00 00 00 20 6d 69 6e 66   ....soun....minf
+0060: 00 00 00 18 73 74 62 6c 00 00 00 10 73 74 73 64   ....stbl....stsd
+0070: 00 00 00 00 00 00 00 00 00 00 00 47 75 64 74 61   ...........Gudta
+0080: 00 00 00 3f 6d 65 74 61 00 00 00 00 00 00 00 25   ...?meta.......%
+0090: 69 6c 73 74 00 00 00 1d a9 6e 61 6d 00 00 00 15   ilst.....nam....
+00a0: 64 61 74 61 00 00 00 01 00 00 00 00 68 65 6c 6c   data........hell
+00b0: 6f 00 00 00 0e 66 72 65 65 01 01 01 01 01 01      o....free......
+
+(offset 0x88: `meta`'s real `hdlr` atom, size 0x25=37, was replaced in place by a new `ilst` atom
+of the same size; the trailing `free` atom at 0xb1 is untouched, confirming only the wrongly
+selected sibling atom was clobbered - the rest of the tree's bookkeeping is otherwise consistent)
+
+=== Project test suite, `lofty` crate, run identically before and after the fix (against the main
+project's own working tree, not the throwaway clone) ===
+
+Before (pristine):
+  cargo test -p lofty --lib        -> 256 passed; 0 failed; 0 ignored
+  cargo test -p lofty --test taglib -> 191 passed; 0 failed; 73 ignored
+
+After (patched):
+  cargo test -p lofty --lib        -> 256 passed; 0 failed; 0 ignored
+  cargo test -p lofty --test taglib -> 191 passed; 0 failed; 73 ignored

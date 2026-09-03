@@ -1,0 +1,51 @@
+# Self-contained reproduction for candidate 033.ASYNC_PDATAWRITER_CROSSOVER.
+#
+# Re-applies candidate 029's own patch.diff/bench-shim.diff unchanged (see RESULT.md - no new
+# source change here, just a finer payload-size sweep on the existing fix). Uses dicom-rs's own
+# bench_pipeline harness (untracked in the main repo - see SKILL.md's "shape 3" pattern),
+# self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+    rm -rf clone/___OPTIMIZATIONS___/harness/bench_pipeline/target
+
+# baseline = unpatched fix, but WITH the benchmark-only shim, so async-pdatawriter-inprocess can
+# run against it too (the shim is orthogonal to the real fix, needed on both sides)
+build-baseline:
+    cd clone && git apply "{{justfile_directory()}}/bench-shim.diff"
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --features async-pdatawriter-inprocess,dicom-ul/async,dicom-ul/bench-internals
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+    cd clone && git checkout -- ul/src/association/pdata.rs ul/Cargo.toml
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && git apply "{{justfile_directory()}}/bench-shim.diff"
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release --features async-pdatawriter-inprocess,dicom-ul/async,dicom-ul/bench-internals
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for mb in 100 150 200 250; do
+        echo "=== ${mb}MB, in-memory sink ==="
+        RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+            -- async-pdatawriter-inprocess "$mb" 15
+    done
+    echo "=== 300MB, in-memory sink ==="
+    RUNS="${RUNS:-9}" "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched \
+        -- async-pdatawriter-inprocess 300 10
+
+clean:
+    rm -rf clone bin_baseline bin_patched

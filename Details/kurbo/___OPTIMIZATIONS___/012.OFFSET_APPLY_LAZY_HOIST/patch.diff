@@ -1,0 +1,86 @@
+diff --git a/kurbo/src/offset.rs b/kurbo/src/offset.rs
+index 48ecfad..26a761f 100644
+--- a/kurbo/src/offset.rs
++++ b/kurbo/src/offset.rs
+@@ -90,6 +90,20 @@ struct ErrEval {
+     err_vecs: [Vec2; N_LSE],
+ }
+ 
++/// The parts of an approximation that depend only on the subdivision, not on the `(a, b)`
++/// parameters being refined - see [`CubicOffset::apply_base`].
++#[derive(Clone, Copy)]
++struct ApplyBase {
++    /// Start point of the approximation.
++    p0: Point,
++    /// End point of the approximation.
++    p3: Point,
++    /// Control point distance at `p0`, before the `a` term is added.
++    l0: f64,
++    /// Control point distance at `p3`, before the `b` term is subtracted.
++    l1: f64,
++}
++
+ /// Result of subdivision
+ struct SubdivisionPoint {
+     /// Source curve t value at subdivision point
+@@ -229,12 +243,17 @@ impl CubicOffset {
+         // Number of least-squares refinement steps. More gives a smaller
+         // error, but takes more time.
+         const N_REFINE: usize = 2;
++        // Built on demand: subdivisions that converge on the first try (very common when
++        // stroking short segments, e.g. dashes) never enter this loop, and must not pay to keep
++        // these values live across `eval_err`.
++        let mut base: Option<ApplyBase> = None;
+         for _ in 0..N_REFINE {
+             if err.err_squared <= self.tolerance * self.tolerance {
+                 break;
+             }
+             let (a2, b2) = self.refine_least_squares(rec, a, b, &err);
+-            let c_approx2 = self.apply(rec, a2, b2);
++            let base = *base.get_or_insert_with(|| self.apply_base(rec));
++            let c_approx2 = self.apply_with_base(rec, base, a2, b2);
+             let err2 = self.eval_err(rec, c_approx2, &mut ts);
+             if err2.err_squared >= err.err_squared {
+                 break;
+@@ -314,18 +333,36 @@ impl CubicOffset {
+     /// such solutions should be considered invalid, and have the unpleasant
+     /// property of sometimes passing error tolerance checks.
+     fn apply(&self, rec: &OffsetRec, a: f64, b: f64) -> CubicBez {
+-        // wondering if p0 and p3 should be in rec
++        self.apply_with_base(rec, self.apply_base(rec), a, b)
++    }
++
++    /// The part of [`Self::apply`] that depends only on the subdivision.
++    ///
++    /// Kept separate so that least-squares refinement, which calls `apply` repeatedly with the
++    /// same `rec`, can compute this once instead of once per candidate `(a, b)`.
++    #[inline]
++    fn apply_base(&self, rec: &OffsetRec) -> ApplyBase {
+         // Scale factor from derivatives to displacements
+         let s = (1. / 3.) * (rec.t1 - rec.t0);
+-        let p0 = self.c.eval(rec.t0) + self.d * rec.utan0.turn_90();
+-        let l0 = s * self.q.eval(rec.t0).to_vec2().length() + a * self.d;
++        ApplyBase {
++            p0: self.c.eval(rec.t0) + self.d * rec.utan0.turn_90(),
++            p3: self.c.eval(rec.t1) + self.d * rec.utan1.turn_90(),
++            l0: s * self.q.eval(rec.t0).to_vec2().length(),
++            l1: s * self.q.eval(rec.t1).to_vec2().length(),
++        }
++    }
++
++    #[inline]
++    fn apply_with_base(&self, rec: &OffsetRec, base: ApplyBase, a: f64, b: f64) -> CubicBez {
++        let p0 = base.p0;
++        let l0 = base.l0 + a * self.d;
+         let mut p1 = p0;
+         if l0 * rec.cusp0 > 0.0 {
+             p1 += l0 * rec.utan0;
+         }
+-        let p3 = self.c.eval(rec.t1) + self.d * rec.utan1.turn_90();
++        let p3 = base.p3;
+         let mut p2 = p3;
+-        let l1 = s * self.q.eval(rec.t1).to_vec2().length() - b * self.d;
++        let l1 = base.l1 - b * self.d;
+         if l1 * rec.cusp1 > 0.0 {
+             p2 -= l1 * rec.utan1;
+         }

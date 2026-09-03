@@ -1,0 +1,65 @@
+# Self-contained reproduction for candidate 010
+# (`simd_div`/`simd_rem` on 128-bit SIMD lanes ICE cg_clif via the src/base.rs `bug!()` funnel).
+#
+# Nothing here reaches outside this folder: `just clone` fetches cg_clif into ./clone (gitignored)
+# and builds it, then repro/ is compiled twice from the same source - once with plain rustc
+# (LLVM = the oracle) and once with the clone's dist/cargo-clif - and the run-time output diffed.
+#
+# `just test` is the full cycle: clone, build cg_clif, show LLVM's answer, show the ICE, apply
+# patch.diff, rebuild, show cg_clif now prints exactly LLVM's answer.
+#
+# To point the reproduce recipes at an existing cg_clif checkout instead of ./clone:
+#   CLIF_ROOT=/path/to/rustc_codegen_cranelift just llvm clif
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+clif := env_var_or_default("CLIF_ROOT", justfile_directory() / "clone")
+
+test:
+    @test -z "${CLIF_ROOT:-}" || { echo "run 'just test' without CLIF_ROOT set - it builds ./clone"; exit 2; }
+    just clone
+    just build-clif
+    @echo "=== LLVM (the oracle) ==="
+    just llvm
+    @echo "=== cg_clif BEFORE the patch (expected: ICE, 'the compiler unexpectedly panicked') ==="
+    -just clif
+    just apply
+    just build-clif
+    @echo "=== cg_clif AFTER the patch (expected: byte-identical to LLVM) ==="
+    just clif
+    just compare
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-clif:
+    cd {{clif}} && ./y.sh prepare
+    cd {{clif}} && ./y.sh build
+
+# The oracle: plain rustc/LLVM on the same source. opt-level 0 (see repro/Cargo.toml).
+llvm:
+    ulimit -c 0 && cd repro && CARGO_TARGET_DIR=target-llvm cargo run --quiet | tee ../llvm.out
+
+# The same source through cg_clif.
+clif:
+    ulimit -c 0 && cd repro && CARGO_TARGET_DIR=target-clif {{clif}}/dist/cargo-clif run --quiet | tee ../clif.out
+
+compare:
+    diff llvm.out clif.out && echo "LLVM and cg_clif agree on all 12 vector shapes"
+
+# The funnel half of the patch, shown on a lowering gap this patch does NOT fix
+# (`_mm256_stream_pd`, i.e. candidate 002's wide-SSA-vector gap): before the patch that gap is an
+# ICE with a backtrace and an ICE dump file, after it is a one-line diagnostic. Both still fail to
+# compile - only the diagnostic changes.
+funnel:
+    -cd repro && ulimit -c 0 && {{clif}}/dist/rustc-clif -Ctarget-cpu=native -o /tmp/stream_probe stream_probe.rs
+    rm -f repro/rustc-ice-*.txt
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+clean:
+    rm -rf clone repro/target-llvm repro/target-clif llvm.out clif.out repro/rustc-ice-*.txt

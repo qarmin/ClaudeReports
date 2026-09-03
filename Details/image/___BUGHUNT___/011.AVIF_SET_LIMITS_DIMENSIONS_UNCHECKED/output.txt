@@ -1,0 +1,76 @@
+=== just clone + shim + reproduce-before (pristine, unpatched image crate) ===
+
+encoded avif: 14086 bytes, 400x400
+AvifDecoder::new() [full dav1d decode happens inside this call]: 400x400 took 5.713566ms; 8x8 baseline took 2.616684ms
+decoder.set_limits({max_image_width: 10, max_image_height: 10}) on the already-decoded 400x400 AvifDecoder => Ok(())
+BUG A: AvifDecoder::set_limits() returned Ok() for a 400x400 image despite a 10x10 limit -- unlike PNG/JPEG/GIF/TIFF/HDR decoders, AvifDecoder's set_limits() never checks width/height at all, AND the full dav1d decode already ran unconditionally before this call.
+ImageReaderOptions::new(..).limits(10x10).decode() on a real 400x400 AVIF => is_err=true, took 3.101441ms (vs 5.713566ms full-decode-alone baseline above)
+(no output-level leak) decode() ultimately rejected the image via a redundant reader-level check: Image size exceeds limit -- but note this happened AFTER `into_reader()`'s call to `make_decoder()` already ran the full dav1d decode (~5.713566ms, same cost as the unprotected baseline above) since AvifDecoder::new() itself is not gated by any limit -- the CPU cost was already spent regardless of the eventual Err.
+
+RESULT: BUG REPRODUCED (AvifDecoder::set_limits ignores width/height limits)
+[process exit code: 1]
+
+=== just apply (patch.diff applied to clone) + reproduce-after ===
+
+encoded avif: 14086 bytes, 400x400
+AvifDecoder::new() [full dav1d decode happens inside this call]: 400x400 took 5.803806ms; 8x8 baseline took 2.417607ms
+decoder.set_limits({max_image_width: 10, max_image_height: 10}) on the already-decoded 400x400 AvifDecoder => Err(Limits(LimitError { kind: DimensionError }))
+(no bug A -- fixed) limits correctly rejected: Image size exceeds limit
+ImageReaderOptions::new(..).limits(10x10).decode() on a real 400x400 AVIF => is_err=true, took 2.829747ms (vs 5.803806ms full-decode-alone baseline above)
+(no output-level leak) decode() ultimately rejected the image via a redundant reader-level check: Image size exceeds limit -- but note this happened AFTER `into_reader()`'s call to `make_decoder()` already ran the full dav1d decode (~5.803806ms, same cost as the unprotected baseline above) since AvifDecoder::new() itself is not gated by any limit -- the CPU cost was already spent regardless of the eventual Err.
+
+RESULT: set_limits correctly enforces width/height limits (fix present)
+[process exit code: 0]
+
+=== Repeat runs for repeatability (pristine, unpatched, 3 total runs) ===
+
+Run 1: decoder.set_limits(...) => Ok(()) [BUG A present]
+Run 2: decoder.set_limits(...) => Ok(()) [BUG A present]
+Run 3: decoder.set_limits(...) => Ok(()) [BUG A present]
+(3/3 identical, deterministic - see conversation transcript / _reference/probe for the raw repeated runs)
+
+=== Project's own pre-existing (but never run in CI) test: tests/limits.rs::avif ===
+
+--- BEFORE (pristine main @ 44ce9226c541dd2b11897b9ef07156a28871cdb7) ---
+$ cargo test --no-default-features --features "avif avif-native" --test limits avif
+running 1 test
+test avif ... FAILED
+
+failures:
+
+---- avif stdout ----
+
+thread 'avif' (107005) panicked at tests/limits.rs:190:5:
+assertion failed: decoder.set_limits(width_height_limits()).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    avif
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.01s
+
+--- AFTER (patch.diff applied) ---
+$ cargo test --no-default-features --features "avif avif-native" --test limits avif
+running 1 test
+test avif ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.96s
+
+Note: CI's own test_avif_decoding job (.github/workflows/rust.yml) only runs `cargo build`
+with avif-native, never `cargo test` -- which is why this existing, correctly-written test has
+never actually caught this regression in CI.
+
+=== Wider regression check (avif-native feature): avif_termination + metadata + truncate_images ===
+Before: 1 passed (avif_termination), 1 passed (metadata::test_read_avif_compatible_brands), 14 passed (truncate_images) - 0 failed, both before and after patch.diff.
+
+=== Full project test suite (default features, cargo test --lib) ===
+Before: test result: ok. 331 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+After:  test result: ok. 331 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+=== Boundary-value check (fix not narrowly tailored to the one 400x400 input) ===
+64x32 real AVIF, patched tree:
+  - limit exactly 64x32            => set_limits Ok (accepted, as expected)
+  - limit 63x32 (width one under)  => set_limits Err (rejected, as expected)
+  - limit 64x31 (height one under) => set_limits Err (rejected, as expected)
+test boundary_exact_and_over ... ok

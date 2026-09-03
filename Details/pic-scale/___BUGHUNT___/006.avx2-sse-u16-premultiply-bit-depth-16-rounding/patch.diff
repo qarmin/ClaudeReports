@@ -1,0 +1,116 @@
+diff --git a/src/avx2/alpha_u16.rs b/src/avx2/alpha_u16.rs
+index d159f66..0b6d2f0 100644
+--- a/src/avx2/alpha_u16.rs
++++ b/src/avx2/alpha_u16.rs
+@@ -126,8 +126,15 @@ impl<const BIT_DEPTH: usize> Avx2PremultiplyExecutorDefault<BIT_DEPTH> {
+         let a0 = _mm256_unpacklo_epi16(alpha, _mm256_setzero_si256());
+         let a1 = _mm256_unpackhi_epi16(alpha, _mm256_setzero_si256());
+ 
+-        let mut s0 = _mm256_madd_epi16(p0, a0);
+-        let mut s1 = _mm256_madd_epi16(p1, a1);
++        // `_mm256_madd_epi16` treats its inputs as *signed* 16-bit lanes: safe for BIT_DEPTH
++        // 10/12 (max value 4095, always positive as i16), but values up to 65535 (BIT_DEPTH 16)
++        // wrap negative above 32767 and corrupt the product, so that depth needs an unsigned
++        // 32-bit multiply instead.
++        let (mut s0, mut s1) = if BIT_DEPTH == 16 {
++            (_mm256_mullo_epi32(p0, a0), _mm256_mullo_epi32(p1, a1))
++        } else {
++            (_mm256_madd_epi16(p0, a0), _mm256_madd_epi16(p1, a1))
++        };
+ 
+         s0 = _mm256_div_by_epi32::<BIT_DEPTH>(s0);
+         s1 = _mm256_div_by_epi32::<BIT_DEPTH>(s1);
+@@ -261,6 +268,13 @@ fn avx_premultiply_alpha_rgba_u16_row(dst: &mut [u16], src: &[u16], bit_depth: u
+             bit_depth,
+             Avx2PremultiplyExecutorDefault::<12>::default(),
+         );
++    } else if bit_depth == 16 {
++        avx_pa_dispatch(
++            dst,
++            src,
++            bit_depth,
++            Avx2PremultiplyExecutorDefault::<16>::default(),
++        );
+     } else {
+         avx_pa_dispatch(
+             dst,
+diff --git a/src/sse/alpha_u16.rs b/src/sse/alpha_u16.rs
+index c286920..d21c004 100644
+--- a/src/sse/alpha_u16.rs
++++ b/src/sse/alpha_u16.rs
+@@ -255,17 +255,55 @@ impl<const BIT_DEPTH: usize> Sse41PremultiplyExecutorDefault<BIT_DEPTH> {
+             let a_lo_f = _mm_unpacklo_epi16(aaaa, zeros);
+             let a_hi_f = _mm_unpackhi_epi16(aaaa, zeros);
+ 
++            // `_mm_madd_epi16` treats its inputs as *signed* 16-bit lanes: safe for BIT_DEPTH
++            // 10/12 (max value 4095, always positive as i16), but values up to 65535 (BIT_DEPTH
++            // 16) wrap negative above 32767 and corrupt the product, so that depth needs an
++            // unsigned 32-bit multiply instead.
++            #[inline(always)]
++            unsafe fn mul_channel<const BIT_DEPTH: usize>(
++                lo: __m128i,
++                hi: __m128i,
++                a_lo: __m128i,
++                a_hi: __m128i,
++            ) -> (__m128i, __m128i) {
++                unsafe {
++                    if BIT_DEPTH == 16 {
++                        (_mm_mullo_epi32(lo, a_lo), _mm_mullo_epi32(hi, a_hi))
++                    } else {
++                        (_mm_madd_epi16(lo, a_lo), _mm_madd_epi16(hi, a_hi))
++                    }
++                }
++            }
++
++            let (r_lo, r_hi) = mul_channel::<BIT_DEPTH>(
++                _mm_unpacklo_epi16(rrrr, zeros),
++                _mm_unpackhi_epi16(rrrr, zeros),
++                a_lo_f,
++                a_hi_f,
++            );
+             let new_rrrr = _mm_packus_epi32(
+-                _mm_div_by::<BIT_DEPTH>(_mm_madd_epi16(_mm_unpacklo_epi16(rrrr, zeros), a_lo_f)),
+-                _mm_div_by::<BIT_DEPTH>(_mm_madd_epi16(_mm_unpackhi_epi16(rrrr, zeros), a_hi_f)),
++                _mm_div_by::<BIT_DEPTH>(r_lo),
++                _mm_div_by::<BIT_DEPTH>(r_hi),
++            );
++            let (g_lo, g_hi) = mul_channel::<BIT_DEPTH>(
++                _mm_unpacklo_epi16(gggg, zeros),
++                _mm_unpackhi_epi16(gggg, zeros),
++                a_lo_f,
++                a_hi_f,
+             );
+             let new_gggg = _mm_packus_epi32(
+-                _mm_div_by::<BIT_DEPTH>(_mm_madd_epi16(_mm_unpacklo_epi16(gggg, zeros), a_lo_f)),
+-                _mm_div_by::<BIT_DEPTH>(_mm_madd_epi16(_mm_unpackhi_epi16(gggg, zeros), a_hi_f)),
++                _mm_div_by::<BIT_DEPTH>(g_lo),
++                _mm_div_by::<BIT_DEPTH>(g_hi),
++            );
++            let (b_lo, b_hi) = mul_channel::<BIT_DEPTH>(
++                _mm_unpacklo_epi16(bbbb, zeros),
++                _mm_unpackhi_epi16(bbbb, zeros),
++                a_lo_f,
++                a_hi_f,
+             );
+             let new_bbbb = _mm_packus_epi32(
+-                _mm_div_by::<BIT_DEPTH>(_mm_madd_epi16(_mm_unpacklo_epi16(bbbb, zeros), a_lo_f)),
+-                _mm_div_by::<BIT_DEPTH>(_mm_madd_epi16(_mm_unpackhi_epi16(bbbb, zeros), a_hi_f)),
++                _mm_div_by::<BIT_DEPTH>(b_lo),
++                _mm_div_by::<BIT_DEPTH>(b_hi),
+             );
+ 
+             let (rgba0, rgba1, rgba2, rgba3) =
+@@ -421,6 +459,13 @@ fn premultiply_alpha_sse_rgba_u16_row_impl(dst: &mut [u16], src: &[u16], bit_dep
+             bit_depth,
+             Sse41PremultiplyExecutorDefault::<12>::default(),
+         )
++    } else if bit_depth == 16 {
++        pma_sse41_rgba16_dispatch(
++            dst,
++            src,
++            bit_depth,
++            Sse41PremultiplyExecutorDefault::<16>::default(),
++        )
+     } else {
+         pma_sse41_rgba16_dispatch(dst, src, bit_depth, Sse41PremultiplyExecutorAny::default())
+     }

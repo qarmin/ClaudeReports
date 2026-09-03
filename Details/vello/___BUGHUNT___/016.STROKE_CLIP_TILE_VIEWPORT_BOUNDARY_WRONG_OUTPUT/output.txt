@@ -1,0 +1,89 @@
+Environment note (applies to every capture below): this sandbox has no real GPU (`/dev/dri` does
+not exist, no `nvidia-smi`, no Vulkan ICD installed - `/usr/share/vulkan/icd.d/` does not exist).
+The only wgpu adapter available anywhere in this session is a software one:
+
+  AdapterInfo { name: "llvmpipe (LLVM 21.1.8, 256 bits)", vendor: 65541, device: 0,
+  device_type: Cpu, driver: "", driver_info: "4.5 (Core Profile) Mesa 26.0.8-1ubuntu0.3",
+  backend: Gl, subgroup_min_size: 4, subgroup_max_size: 128, transient_saves_memory: false }
+
+=== Approach 1: vello_tests headless GPU-vs-"CPU" comparison test (AaConfig::Area) ===
+
+Added `stroke_rect_touching_viewport_boundary` to
+`vello_tests/tests/known_issues.rs`, calling `vello_tests::compare_gpu_cpu_sync` (the project's
+own real `Renderer::render_to_texture` public entry point, `use_cpu=false` vs `use_cpu=true`) with
+the reporter's exact scene and a 1044x800 canvas (the `simple` example's own window size).
+
+$ cargo test -p vello_tests --test known_issues stroke_rect_touching_viewport_boundary -- --nocapture
+running 1 test
+test stroke_rect_touching_viewport_boundary ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 3.96s
+
+Note: `use_cpu` only toggles which device runs the `pathtag_scan` stage (a Rust CPU fallback for
+one pipeline stage) - the coarse/tile-alloc/backdrop/fine WGSL shaders that would contain a
+viewport-boundary bug run identically either way on this machine (both dispatch through the same
+llvmpipe/Gl adapter), so this comparison is not an independent oracle for this specific bug class;
+it is included for completeness since it was the first thing tried.
+
+Manual pixel inspection of the actual rendered PNG (via VELLO_DEBUG_TEST=all) found the rendered
+image's only non-background pixels exactly bounding the expected stroked-rect outline, with zero
+stray pixels anywhere else across the full 1044x800 canvas:
+
+$ python3 -c "... scan every pixel, print (count, minx, maxx, miny, maxy) of non-background pixels ..."
+328 113 216 0 61
+
+(328 non-background pixels, bounding box x=[113,216] y=[0,61] - matches the expected 1px-wide
+outline of Rect::from_origin_size((113.5,0.5),(103.0,61.0)) exactly: perimeter of a 103x61 rect
+outline is 2*(103+61)-4 = 328.)
+
+=== Approach 2: install a real (or software) Vulkan backend to get closer to a genuine GPU compute path ===
+
+No root access (`sudo` refused: "no new privileges" flag set) and no Vulkan ICD package available
+via the configured apt sources (`apt-get download mesa-vulkan-drivers` -> "no candidate", network
+itself IS reachable - confirmed via `curl -sI https://google.com` - but the vulkan/lavapipe package
+isn't in this sandbox's apt sources). No `/dev/dri`, so no way to reach real GPU hardware or a
+hardware Vulkan/Metal/DX12 backend either. This approach was abandoned as infeasible in this
+session rather than yielding a negative result.
+
+=== Approach 3: same repro at AaConfig::Msaa16 (matching what `examples/simple` itself actually uses) ===
+
+`examples/simple/src/main.rs` calls `render_to_texture` with `antialiasing_method: AaConfig::Msaa16`
+(not the default `AaConfig::Area` used in approach 1). Re-ran the same comparison test with
+`params.anti_aliasing = AaConfig::Msaa16`:
+
+$ VELLO_DEBUG_TEST=all cargo test -p vello_tests --test known_issues stroke_rect_touching_viewport_boundary -- --nocapture
+running 1 test
+test stroke_rect_touching_viewport_boundary ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 4.41s
+
+Pixel scan again found the exact same result - non-background pixels bound exactly to the expected
+outline, no stray pixels anywhere else:
+
+328 113 216 0 61
+
+=== repro/ (standalone, public-API-only reproduction shipped with this candidate) ===
+
+Built from `repro/` against this session's live worktree (before restoring the `Cargo.toml` path
+to the `../clone/vello` placeholder used by `justfile`), then re-verified via `just clone` +
+`just reproduce-before` against a genuinely fresh clone at base_commit (see below) - both give the
+same result.
+
+$ ./target/release/repro   (run 3 times, matching CONFIRMATION.md section 1's repeat-run bar)
+=== run 1 ===
+Using adapter: AdapterInfo { name: "llvmpipe (LLVM 21.1.8, 256 bits)", vendor: 65541, device: 0, device_type: Cpu, device_pci_bus_id: "", driver: "", driver_info: "4.5 (Core Profile) Mesa 26.0.8-1ubuntu0.3", backend: Gl, subgroup_min_size: 4, subgroup_max_size: 128, transient_saves_memory: false }
+did not reproduce - all non-background pixels lie within the expected outline bounding box x=[113,217) y=[0,62)
+exit: 0
+
+=== run 2 ===
+Using adapter: AdapterInfo { name: "llvmpipe (LLVM 21.1.8, 256 bits)", vendor: 65541, device: 0, device_type: Cpu, device_pci_bus_id: "", driver: "", driver_info: "4.5 (Core Profile) Mesa 26.0.8-1ubuntu0.3", backend: Gl, subgroup_min_size: 4, subgroup_max_size: 128, transient_saves_memory: false }
+did not reproduce - all non-background pixels lie within the expected outline bounding box x=[113,217) y=[0,62)
+exit: 0
+
+=== run 3 ===
+Using adapter: AdapterInfo { name: "llvmpipe (LLVM 21.1.8, 256 bits)", vendor: 65541, device: 0, device_type: Cpu, device_pci_bus_id: "", driver: "", driver_info: "4.5 (Core Profile) Mesa 26.0.8-1ubuntu0.3", backend: Gl, subgroup_min_size: 4, subgroup_max_size: 128, transient_saves_memory: false }
+did not reproduce - all non-background pixels lie within the expected outline bounding box x=[113,217) y=[0,62)
+exit: 0
+
+$ just clone && just reproduce-before   (fresh clone at base_commit, from a scratch directory)
+... (git clone + checkout succeeds with the LFS-filter workaround) ...
+Using adapter: AdapterInfo { name: "llvmpipe (LLVM 21.1.8, 256 bits)", vendor: 65541, device: 0, device_type: Cpu, device_pci_bus_id: "", driver: "", driver_info: "4.5 (Core Profile) Mesa 26.0.8-1ubuntu0.3", backend: Gl, subgroup_min_size: 4, subgroup_max_size: 128, transient_saves_memory: false }
+did not reproduce - all non-background pixels lie within the expected outline bounding box x=[113,217) y=[0,62)

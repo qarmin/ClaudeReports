@@ -1,0 +1,30 @@
+diff --git a/parser/src/dataset/mod.rs b/parser/src/dataset/mod.rs
+index 18469cae..93cfb575 100644
+--- a/parser/src/dataset/mod.rs
++++ b/parser/src/dataset/mod.rs
+@@ -652,8 +652,24 @@ where
+             }
+             DataElementTokens::Header(elem) => {
+                 let elem = elem.take().unwrap();
++                let tag = elem.header().tag;
+                 match elem.into_value() {
+-                    Value::Sequence { .. } | Value::PixelSequence { .. } => unreachable!(),
++                    // The header was classified as an ordinary element (VR other than SQ,
++                    // and not undefined-length encapsulated pixel data - see `impl
++                    // From<DataElementHeader> for DataToken`), but the value actually held
++                    // is a sequence. This can only happen in malformed data (a VR/value
++                    // mismatch that the type system never prevents - see candidates
++                    // 025/026/092/093/094/095/120), but we try to handle it gracefully
++                    // anyway: there is no primitive representation to fall back to here (the
++                    // header token has already been emitted as an ordinary element, not a
++                    // sequence start), so skip the value entirely rather than panicking.
++                    Value::Sequence { .. } | Value::PixelSequence { .. } => {
++                        tracing::warn!(
++                            "Unexpected sequence value after header {} with a non-SQ VR, ignored",
++                            tag
++                        );
++                        (None, DataElementTokens::End)
++                    }
+                     Value::Primitive(value) => {
+                         // return primitive value, done
+                         let token = DataToken::PrimitiveValue(value);

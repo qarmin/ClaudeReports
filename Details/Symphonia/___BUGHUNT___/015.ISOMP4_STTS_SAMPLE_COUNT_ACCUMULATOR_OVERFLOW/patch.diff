@@ -1,0 +1,38 @@
+diff --git a/symphonia-format-isomp4/src/atoms/stts.rs b/symphonia-format-isomp4/src/atoms/stts.rs
+index 49292de..015fb86 100644
+--- a/symphonia-format-isomp4/src/atoms/stts.rs
++++ b/symphonia-format-isomp4/src/atoms/stts.rs
+@@ -27,7 +27,7 @@ impl SttsAtom {
+     /// is indexed relative to the `SttsAtom`. Complexity of this function in O(N).
+     pub fn find_timing_for_sample(&self, sample_num: u32) -> Option<(u64, u32)> {
+         let mut ts = 0;
+-        let mut next_entry_first_sample = 0;
++        let mut next_entry_first_sample: u32 = 0;
+ 
+         // The Stts atom compactly encodes a mapping between number of samples and sample duration.
+         // Iterate through each entry until the entry containing the next sample is found. The next
+@@ -35,7 +35,11 @@ impl SttsAtom {
+         // the n-1 iterated entries, plus the product of the number of consumed samples in the n-th
+         // iterated entry and sample duration.
+         for entry in &self.entries {
+-            next_entry_first_sample += entry.sample_count;
++            // An untrusted, attacker-controlled `sample_count` run summed across all preceding
++            // entries. On overflow there is no valid sample number left to find, so behave the
++            // same as running off the end of the entry list (return `None`) rather than
++            // wrapping/panicking.
++            next_entry_first_sample = next_entry_first_sample.checked_add(entry.sample_count)?;
+ 
+             if sample_num < next_entry_first_sample {
+                 let entry_sample_offset = sample_num + entry.sample_count - next_entry_first_sample;
+@@ -65,7 +69,10 @@ impl SttsAtom {
+             }
+ 
+             ts_accum += delta;
+-            sample_num += entry.sample_count;
++            // Same untrusted, attacker-controlled accumulator overflow risk as
++            // `find_timing_for_sample` above - treat overflow as "no such sample" instead of
++            // wrapping/panicking.
++            sample_num = sample_num.checked_add(entry.sample_count)?;
+         }
+ 
+         None

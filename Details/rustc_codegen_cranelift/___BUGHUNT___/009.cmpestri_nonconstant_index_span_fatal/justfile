@@ -1,0 +1,37 @@
+# Self-contained probe for candidate 009 (Status: Not reproducible).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing here reaches outside the folder it lives in, so the whole folder
+# can be copied anywhere and `just test` still works.
+#
+# There is no patch.diff for this candidate (nothing reproduced under default flags), so the
+# `apply`/`reproduce-after` steps of the standard template are omitted.
+
+repo_url := "git@github.com:rust-lang/rustc_codegen_cranelift.git"
+base_commit := "2bc05d45078dbee6495c008cbd5d1dc24edff53f"
+
+# Clone pristine, build cg_clif, run the probe matrix.
+test: clone build probe
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# ~2-4 min cold. Produces clone/dist/rustc-clif.
+build:
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build
+
+# 17 call shapes x 8 flag sets, cg_clif vs LLVM on the same sources.
+#
+# Expected result (this is the "Not reproducible" evidence): every cell is `OK OK` except
+#   s17_asm_in_same_body  -Copt-level=0 -Zinline-mir=yes        NOTCONST OK
+#   s17_asm_in_same_body  -Copt-level=3 -Zmir-enable-passes=-GVN NOTCONST OK
+# i.e. the span_fatal only fires under nightly MIR-pass-schedule overrides, never at any default
+# or stable -C flag set. See output.txt for the captured reference run and RESULT.md for why.
+probe:
+    ulimit -c 0 && RUSTC_CLIF="{{justfile_directory()}}/clone/dist/rustc-clif" bash probe/run.sh
+
+clean:
+    rm -rf clone probe/shapes

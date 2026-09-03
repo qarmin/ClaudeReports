@@ -1,0 +1,150 @@
+diff --git a/vello/src/scene.rs b/vello/src/scene.rs
+index 70542df7..3130e435 100644
+--- a/vello/src/scene.rs
++++ b/vello/src/scene.rs
+@@ -1018,12 +1018,12 @@ impl ColorPainter for DrawColorGlyphs<'_> {
+     }
+ 
+     fn fill(&mut self, brush: skrifa::color::Brush<'_>) {
+-        let brush = conv_brush(brush, self.cpal, self.foreground_brush);
++        let (brush, brush_flip) = conv_brush(brush, self.cpal, self.foreground_brush);
+         self.scene.fill(
+             Fill::NonZero,
+             Affine::IDENTITY,
+             &brush,
+-            Some(self.last_transform().to_kurbo()),
++            Some(self.last_transform().to_kurbo() * brush_flip),
+             &self.clip_box,
+         );
+     }
+@@ -1077,14 +1077,22 @@ impl ColorPainter for DrawColorGlyphs<'_> {
+             return;
+         };
+ 
++        let (brush, brush_flip) = conv_brush(brush, self.cpal, self.foreground_brush);
++        let brush_transform = brush_transform
++            .map(conv_skrifa_transform)
++            .map(|it| it.to_kurbo());
++        let brush_transform = if brush_flip == Affine::IDENTITY {
++            brush_transform
++        } else {
++            Some(brush_transform.unwrap_or(Affine::IDENTITY) * brush_flip)
++        };
++
+         let transform = self.last_transform();
+         self.scene.fill(
+             Fill::NonZero,
+             transform.to_kurbo(),
+-            &conv_brush(brush, self.cpal, self.foreground_brush),
+-            brush_transform
+-                .map(conv_skrifa_transform)
+-                .map(|it| it.to_kurbo()),
++            &brush,
++            brush_transform,
+             &path.0,
+         );
+     }
+@@ -1137,28 +1145,41 @@ fn conv_skrifa_transform(transform: skrifa::color::Transform) -> Transform {
+     }
+ }
+ 
++/// Converts a `skrifa` COLR brush into a `vello` [`Brush`].
++///
++/// Also returns an extra transform which must be composed into whatever `brush_transform` the
++/// caller passes to [`Scene::fill`] (as the innermost/rightmost factor, i.e.
++/// `existing_brush_transform * extra_transform`), so that gradients whose orientation needs
++/// correcting to bridge the difference between `peniko`'s and COLR's conventions (currently only
++/// sweep gradients) render the right way up. [`Affine::IDENTITY`] for every other brush kind.
+ fn conv_brush(
+     brush: skrifa::color::Brush<'_>,
+     cpal: &Cpal<'_>,
+     foreground_brush: BrushRef<'_>,
+-) -> Brush {
++) -> (Brush, Affine) {
+     match brush {
+         skrifa::color::Brush::Solid {
+             palette_index,
+             alpha,
+-        } => color_index(cpal, palette_index)
+-            .map(|it| Brush::Solid(it.multiply_alpha(alpha)))
+-            .unwrap_or(foreground_brush.to_owned().multiply_alpha(alpha)),
++        } => (
++            color_index(cpal, palette_index)
++                .map(|it| Brush::Solid(it.multiply_alpha(alpha)))
++                .unwrap_or(foreground_brush.to_owned().multiply_alpha(alpha)),
++            Affine::IDENTITY,
++        ),
+ 
+         skrifa::color::Brush::LinearGradient {
+             p0,
+             p1,
+             color_stops,
+             extend,
+-        } => Brush::Gradient(
+-            Gradient::new_linear(conv_point(p0), conv_point(p1))
+-                .with_extend(conv_extend(extend))
+-                .with_stops(ColorStopsConverter(color_stops, cpal, foreground_brush)),
++        } => (
++            Brush::Gradient(
++                Gradient::new_linear(conv_point(p0), conv_point(p1))
++                    .with_extend(conv_extend(extend))
++                    .with_stops(ColorStopsConverter(color_stops, cpal, foreground_brush)),
++            ),
++            Affine::IDENTITY,
+         ),
+         skrifa::color::Brush::RadialGradient {
+             c0,
+@@ -1167,10 +1188,13 @@ fn conv_brush(
+             r1,
+             color_stops,
+             extend,
+-        } => Brush::Gradient(
+-            Gradient::new_two_point_radial(conv_point(c0), r0, conv_point(c1), r1)
+-                .with_extend(conv_extend(extend))
+-                .with_stops(ColorStopsConverter(color_stops, cpal, foreground_brush)),
++        } => (
++            Brush::Gradient(
++                Gradient::new_two_point_radial(conv_point(c0), r0, conv_point(c1), r1)
++                    .with_extend(conv_extend(extend))
++                    .with_stops(ColorStopsConverter(color_stops, cpal, foreground_brush)),
++            ),
++            Affine::IDENTITY,
+         ),
+         skrifa::color::Brush::SweepGradient {
+             c0,
+@@ -1178,17 +1202,25 @@ fn conv_brush(
+             end_angle,
+             color_stops,
+             extend,
+-        } => Brush::Gradient(
+-            // TODO: This is upside-down, see
+-            // https://github.com/linebender/vello/pull/1221
+-            Gradient::new_sweep(
+-                conv_point(c0),
+-                start_angle.to_radians(),
+-                end_angle.to_radians(),
++        } => {
++            let c0 = conv_point(c0);
++            (
++                Brush::Gradient(
++                    // We need to invert the direction of the gradient to bridge the gap
++                    // between peniko and COLR (see the matching `Affine::scale_non_uniform`
++                    // returned below, which must be folded into the brush transform by the
++                    // caller): <https://github.com/linebender/vello/pull/1221>.
++                    Gradient::new_sweep(
++                        Point::new(c0.x, -c0.y),
++                        start_angle.to_radians(),
++                        end_angle.to_radians(),
++                    )
++                    .with_extend(conv_extend(extend))
++                    .with_stops(ColorStopsConverter(color_stops, cpal, foreground_brush)),
++                ),
++                Affine::scale_non_uniform(1.0, -1.0),
+             )
+-            .with_extend(conv_extend(extend))
+-            .with_stops(ColorStopsConverter(color_stops, cpal, foreground_brush)),
+-        ),
++        }
+     }
+ }
+ 

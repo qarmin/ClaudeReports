@@ -1,0 +1,192 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 6d2a3537..0d1a559a 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -44,10 +44,10 @@
+ use rustc_data_structures::unord::UnordSet;
+ use rustc_log::tracing::info;
+ use rustc_middle::dep_graph::WorkProductMap;
+-use rustc_session::config::{NATIVE_CPU, OutputFilenames};
++use rustc_session::config::{NATIVE_CPU, OutputFilenames, PrintKind, PrintRequest};
+ use rustc_session::{IncrCompSession, Session};
+ use rustc_span::{Symbol, sym};
+-use rustc_target::spec::{Arch, CfgAbi, Env, Os};
++use rustc_target::spec::{Arch, CfgAbi, Env, Os, RelocModel, TlsModel};
+ 
+ pub use crate::config::*;
+ use crate::prelude::*;
+@@ -156,6 +156,64 @@ fn thin_lto_supported(&self) -> bool {
+         false
+     }
+ 
++    fn print(&self, req: &PrintRequest, out: &mut String, sess: &Session) {
++        use std::fmt::Write;
++
++        match req.kind {
++            PrintKind::RelocationModels => {
++                writeln!(out, "Available relocation models:").unwrap();
++                for name in RelocModel::ALL.iter().map(RelocModel::desc).chain(["default"]) {
++                    writeln!(out, "    {name}").unwrap();
++                }
++                writeln!(out).unwrap();
++            }
++            PrintKind::CodeModels => {
++                writeln!(out, "Available code models:").unwrap();
++                for name in &["tiny", "small", "kernel", "medium", "large"] {
++                    writeln!(out, "    {name}").unwrap();
++                }
++                writeln!(out).unwrap();
++            }
++            PrintKind::TlsModels => {
++                writeln!(out, "Available TLS models:").unwrap();
++                for name in TlsModel::ALL.iter().map(TlsModel::desc) {
++                    writeln!(out, "    {name}").unwrap();
++                }
++                writeln!(out).unwrap();
++            }
++            PrintKind::StackProtectorStrategies => {
++                writeln!(
++                    out,
++                    r#"Available stack protector strategies:
++    all
++        Generate stack canaries in all functions.
++
++    strong
++        Generate stack canaries in a function if it either:
++        - has a local variable of `[T; N]` type, regardless of `T` and `N`
++        - takes the address of a local variable.
++
++          (Note that a local variable being borrowed is not equivalent to its
++          address being taken: e.g. some borrows may be removed by optimization,
++          while by-value argument passing may be implemented with reference to a
++          local stack variable in the ABI.)
++
++    basic
++        Generate stack canaries in functions with local variables of `[T; N]`
++        type, where `T` is byte-sized and `N` >= 8.
++
++    none
++        Do not generate stack canaries.
++"#
++                )
++                .unwrap();
++            }
++            PrintKind::TargetCPUs => print_target_cpus(sess, out),
++            PrintKind::TargetFeatures => print_target_features(sess, out),
++            req => bug!("rustc_codegen_cranelift can't handle print request {req:?}"),
++        }
++    }
++
+     fn target_config(&self, sess: &Session) -> TargetConfig {
+         // FIXME return the actually used target features. this is necessary for #[cfg(target_feature)]
+         let target_features = match sess.target.arch {
+@@ -267,6 +325,109 @@ fn target_tuple(sess: &Session) -> target_lexicon::Triple {
+     }
+ }
+ 
++/// The ISA-specific Cranelift settings available for `sess`'s target, or an empty list when
++/// Cranelift has no backend for it at all.
++///
++/// Deliberately infallible: this only feeds `--print` output, which must not hard-error on a
++/// target cg_clif cannot codegen for. So it neither goes through `target_tuple` (which calls
++/// `fatal` on an unparsable tuple) nor hands `isa::lookup` an architecture whose per-ISA
++/// `isa_builder` would `assert!` instead of returning `Err` (big-endian AArch64).
++fn isa_settings(sess: &Session) -> Vec<settings::Setting> {
++    use target_lexicon::{Aarch64Architecture, Architecture, Triple};
++
++    let Ok(triple) = back::versioned_llvm_target(sess).parse::<Triple>() else {
++        return Vec::new();
++    };
++    if !matches!(
++        triple.architecture,
++        Architecture::X86_64
++            | Architecture::Aarch64(Aarch64Architecture::Aarch64)
++            | Architecture::S390x
++            | Architecture::Riscv64(_)
++    ) {
++        return Vec::new();
++    }
++    match cranelift_codegen::isa::lookup(triple) {
++        Ok(isa_builder) => isa_builder.iter().collect(),
++        Err(_) => Vec::new(),
++    }
++}
++
++fn print_target_cpus(sess: &Session, out: &mut String) {
++    use std::fmt::Write;
++
++    // `-Ctarget-cpu=<name>` is forwarded to Cranelift as a settings preset, so the presets of the
++    // target's ISA are exactly the accepted values.
++    let mut presets = isa_settings(sess)
++        .into_iter()
++        .filter(|setting| setting.kind == settings::SettingKind::Preset)
++        .map(|setting| setting.name)
++        .collect::<Vec<_>>();
++    presets.sort_unstable();
++
++    writeln!(out, "Available CPUs for this target:").unwrap();
++    if sess.host.arch == sess.target.arch && !sess.target.requires_consistent_cpu {
++        writeln!(out, "    {NATIVE_CPU} - Select the CPU of the current host.").unwrap();
++    }
++    for name in presets {
++        writeln!(out, "    {name}").unwrap();
++    }
++    writeln!(out).unwrap();
++}
++
++fn print_target_features(sess: &Session, out: &mut String) {
++    use std::fmt::Write;
++
++    let mut rust_features = sess
++        .target
++        .rust_target_features()
++        .iter()
++        // Only list (experimentally) supported features.
++        .filter(|(_feature, gate, _implied)| gate.in_cfg())
++        .map(|(feature, _gate, _implied)| *feature)
++        .collect::<Vec<_>>();
++    rust_features.push("crt-static");
++    rust_features.sort_unstable();
++
++    // Cranelift's own codegen features are its ISA-specific `has_*` boolean settings. They are not
++    // the same namespace as the rustc feature names above and cannot be used in `cfg` or
++    // `#[target_feature]`.
++    let mut cranelift_features = isa_settings(sess)
++        .into_iter()
++        .filter(|setting| {
++            setting.kind == settings::SettingKind::Bool && setting.name.starts_with("has_")
++        })
++        .map(|setting| (setting.name, setting.description))
++        .collect::<Vec<_>>();
++    cranelift_features.sort_unstable();
++
++    let max_feature_len = rust_features
++        .iter()
++        .copied()
++        .chain(cranelift_features.iter().map(|(feature, _desc)| *feature))
++        .map(str::len)
++        .max()
++        .unwrap_or(0);
++
++    writeln!(out, "Features supported by rustc for this target:").unwrap();
++    for feature in &rust_features {
++        writeln!(out, "    {feature}").unwrap();
++    }
++    writeln!(out, "\nCode-generation features supported by Cranelift for this target:").unwrap();
++    for (feature, desc) in &cranelift_features {
++        writeln!(out, "    {feature:max_feature_len$} - {desc}").unwrap();
++    }
++    if cranelift_features.is_empty() {
++        writeln!(out, "    No code-generation features are known for this target.").unwrap();
++    }
++    writeln!(out, "\nUse +feature to enable a feature, or -feature to disable it.").unwrap();
++    writeln!(out, "For example, rustc -C target-cpu=mycpu -C target-feature=+feature1,-feature2\n")
++        .unwrap();
++    writeln!(out, "Code-generation features cannot be used in cfg or #[target_feature],").unwrap();
++    writeln!(out, "and may be renamed or removed in a future version of Cranelift or rustc.\n")
++        .unwrap();
++}
++
+ fn build_isa(sess: &Session, jit: bool) -> Arc<dyn TargetIsa + 'static> {
+     use target_lexicon::BinaryFormat;
+ 

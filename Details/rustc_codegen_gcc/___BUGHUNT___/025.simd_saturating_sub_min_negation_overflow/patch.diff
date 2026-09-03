@@ -1,0 +1,51 @@
+diff --git a/src/intrinsic/simd.rs b/src/intrinsic/simd.rs
+index 1416f4e..41dcd2d 100644
+--- a/src/intrinsic/simd.rs
++++ b/src/intrinsic/simd.rs
+@@ -1310,32 +1310,35 @@ pub fn generic_simd_intrinsic<'a, 'gcc, 'tcx>(
+             (true, false) => {
+                 // FIXME(antoyo): dyncast_vector should not require a call to unqualified.
+                 let arg_type = lhs.get_type().unqualified();
+-                // FIXME(antoyo): this uses the same algorithm from saturating add, but add the
+-                // negative of the right operand. Find a proper subtraction algorithm.
+-                let rhs = bx.context.new_unary_op(None, UnaryOp::Minus, arg_type, rhs);
+-
+-                // FIXME(antoyo): convert lhs and rhs to unsigned.
+-                let sum = lhs + rhs;
++                // NOTE: computing this as `lhs + (-rhs)` is wrong when `rhs` is the type's
++                // minimum value: negating it overflows and wraps back to the minimum value
++                // instead of producing its true (unrepresentable) mathematical negation, which
++                // silently corrupts the "sum" the overflow check below is based on. Subtracting
++                // directly avoids this: two's complement subtraction is well-defined (wraps, no
++                // UB) regardless of operand values.
++                let diff = lhs - rhs;
+                 let vector_type = arg_type.dyncast_vector().expect("vector type");
+                 let unit = vector_type.get_num_units();
+                 let a = bx.context.new_rvalue_from_int(elem_ty, ((elem_width as i32) << 3) - 1);
+                 let width = bx.context.new_rvalue_from_vector(None, lhs.get_type(), &vec![a; unit]);
+ 
++                // Subtraction overflows exactly when the operands have different signs and the
++                // result's sign differs from `lhs`'s (unlike addition, which overflows when the
++                // operands have the *same* sign - hence no bitwise negation of `xor1` here).
+                 let xor1 = lhs ^ rhs;
+-                let xor2 = lhs ^ sum;
+-                let and =
+-                    bx.context.new_unary_op(None, UnaryOp::BitwiseNegate, arg_type, xor1) & xor2;
++                let xor2 = lhs ^ diff;
++                let and = xor1 & xor2;
+                 let mask = and >> width;
+ 
+                 let one = bx.context.new_rvalue_one(elem_ty);
+                 let ones =
+                     bx.context.new_rvalue_from_vector(None, lhs.get_type(), &vec![one; unit]);
+                 let shift1 = ones << width;
+-                let shift2 = sum >> width;
++                let shift2 = diff >> width;
+                 let mask_min = shift1 ^ shift2;
+ 
+                 let and1 =
+-                    bx.context.new_unary_op(None, UnaryOp::BitwiseNegate, arg_type, mask) & sum;
++                    bx.context.new_unary_op(None, UnaryOp::BitwiseNegate, arg_type, mask) & diff;
+                 let and2 = mask & mask_min;
+ 
+                 and1 + and2

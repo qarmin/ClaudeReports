@@ -1,0 +1,90 @@
+diff --git a/encoding/src/adapters.rs b/encoding/src/adapters.rs
+index 3a114218..b4eb0592 100644
+--- a/encoding/src/adapters.rs
++++ b/encoding/src/adapters.rs
+@@ -420,10 +420,16 @@ pub trait PixelDataWriter {
+     ) -> EncodeResult<Vec<AttributeOp>> {
+         let frames = src.number_of_frames().unwrap_or(1);
+         let mut out = Vec::new();
++        let mut cumulative_offset: u32 = 0;
+         for frame in 0..frames {
+             let mut frame_data = Vec::new();
+             out = self.encode_frame(src, frame, options.clone(), &mut frame_data)?;
+-            offset_table.push(frame_data.len() as u32 + 8 * (frame + 1));
++            // PS3.5 A.4: each entry is the byte offset from the start of the first
++            // fragment to the start of that frame's first fragment (0 for frame 0)
++            offset_table.push(cumulative_offset);
++            cumulative_offset = cumulative_offset
++                .saturating_add(frame_data.len() as u32)
++                .saturating_add(8);
+             dst.push(frame_data);
+         }
+         Ok(out)
+@@ -586,7 +592,7 @@ mod tests {
+ 
+     use crate::adapters::RawPixelData;
+ 
+-    use super::PixelDataObject;
++    use super::{AttributeOp, EncodeOptions, EncodeResult, PixelDataObject, PixelDataWriter};
+ 
+     /// Generates frames with solid pixel data values 0, 1, and so on.
+     fn generated_rgb_frames(columns: u16, rows: u16) -> impl Iterator<Item = Vec<u8>> {
+@@ -690,6 +696,58 @@ mod tests {
+         }
+     }
+ 
++    struct IdentityPixelDataWriter;
++
++    impl PixelDataWriter for IdentityPixelDataWriter {
++        fn encode_frame(
++            &self,
++            src: &dyn PixelDataObject,
++            frame: u32,
++            _options: EncodeOptions,
++            dst: &mut Vec<u8>,
++        ) -> EncodeResult<Vec<AttributeOp>> {
++            // frame 0 has 4 bytes of "encoded" data, frame 1 has 6 bytes -
++            // distinct lengths so a wrong cumulative computation is obvious
++            let len = if frame == 0 { 4 } else { 6 };
++            dst.extend(std::iter::repeat(frame as u8).take(len));
++            let _ = src;
++            Ok(Vec::new())
++        }
++    }
++
++    #[test]
++    fn basic_offset_table_is_cumulative_repro() {
++        let obj = TestDataObject {
++            ts_uid: "1.2.3.4",
++            rows: 1,
++            columns: 1,
++            bits_allocated: 8,
++            bits_stored: 8,
++            samples_per_pixel: 1,
++            photometric_interpretation: "MONOCHROME2",
++            number_of_frames: 2,
++            flat_pixel_data: None,
++            pixel_data_sequence: None,
++        };
++
++        let writer = IdentityPixelDataWriter;
++        let mut dst = Vec::new();
++        let mut offset_table = Vec::new();
++        writer
++            .encode(&obj, EncodeOptions::default(), &mut dst, &mut offset_table)
++            .unwrap();
++
++        // per PS3.5 Annex A.4: entry[0] must always be 0 (the offset from the
++        // start of the fragment data to itself), and entry[n] is the
++        // cumulative byte offset (including the 8-byte item header of each
++        // preceding fragment) to the start of frame n's own fragment.
++        assert_eq!(
++            offset_table,
++            vec![0, 4 + 8],
++            "BOT entries must be cumulative offsets, not each frame's own length"
++        );
++    }
++
+     /// Frame pixel data can be retrieved from an object
+     /// with native pixel data.
+     #[test]

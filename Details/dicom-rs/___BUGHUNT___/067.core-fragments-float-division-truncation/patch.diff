@@ -1,0 +1,42 @@
+diff --git a/core/src/value/fragments.rs b/core/src/value/fragments.rs
+index 7c16bb5e..c14ad8fe 100644
+--- a/core/src/value/fragments.rs
++++ b/core/src/value/fragments.rs
+@@ -53,7 +53,8 @@ impl Fragments {
+             fragment_size + 1
+         };
+ 
+-        let number_of_fragments = (data.len() as f32 / fragment_size as f32).ceil() as u32;
++        let number_of_fragments =
++            u32::try_from(data.len().div_ceil(fragment_size as usize)).unwrap_or(u32::MAX);
+ 
+         // Calculate the encapsulated size. If necessary pad the vector with zeroes so all the
+         // chunks have the same fragment_size
+@@ -130,6 +131,27 @@ mod tests {
+     use crate::value::fragments::Fragments;
+     use crate::value::{InMemFragment, PixelFragmentSequence};
+ 
++    #[test]
++    fn fragments_new_large_data_truncation_repro() {
++        // f32 can't exactly represent 16_777_217 (2^24 + 1); the f32 division
++        // used to compute the fragment count rounds down, silently dropping
++        // the trailing byte(s) of `data`.
++        let len = 16_777_217usize;
++        let data = vec![0xABu8; len];
++        let fragments = Fragments::new(data, 2);
++        let total: usize = fragments.fragments.iter().map(|f| f.len()).sum();
++        // fragment_size is rounded up to an even number (2) and data is padded
++        // to a whole multiple of it, so the correct total is len rounded up to
++        // the next even number - not less than len, and not off by a whole
++        // fragment (16_777_216, one fragment short) like the f32-based
++        // computation produced.
++        assert_eq!(
++            total,
++            len.div_ceil(2) * 2,
++            "fragments should cover every byte of input data (plus at most 1 padding byte)"
++        );
++    }
++
+     #[test]
+     fn test_fragment_frame() {
+         let fragment = Fragments::new(vec![150, 164, 200], 0);

@@ -1,0 +1,53 @@
+Captured from `just test` run in a scratch copy of this candidate folder (fresh clone of
+https://github.com/linebender/kurbo.git at ca273499e3e48bd2de6f02aa8e99a148984e45f3, `repro/`
+built with `cargo run --release`).
+
+=== reproduce-before (pristine clone, no patch applied) ===
+$ cd repro && cargo run --release
+   Compiling kurbo v0.13.1 (/tmp/verify014/clone/kurbo)
+   Compiling repro v0.1.0 (/tmp/verify014/repro)
+    Finished `release` profile [optimized] target(s) in 1.05s
+     Running `target/release/repro`
+hits = [LineIntersection { line_t: 0.22009610828488635, segment_t: 0.2044964622641512 }]
+REPRODUCED - spurious intersection(s) reported for a cubic and line that do not cross: [LineIntersection { line_t: 0.22009610828488635, segment_t: 0.2044964622641512 }]
+(exit code 1)
+
+=== apply (patch.diff applied to the clone) ===
+$ cd clone && git apply "/tmp/verify014/patch.diff"
+(applied cleanly, no output)
+
+=== reproduce-after (patched clone) ===
+$ cd repro && cargo run --release
+   Compiling kurbo v0.13.1 (/tmp/verify014/clone/kurbo)
+   Compiling repro v0.1.0 (/tmp/verify014/repro)
+    Finished `release` profile [optimized] target(s) in 0.73s
+     Running `target/release/repro`
+hits = []
+did not reproduce - no intersection reported, as expected
+(exit code 0)
+
+=== Repeat-run confirmation (deterministic, pure floating-point computation, no RNG/threading) ===
+Ran `cargo run --example repro411 -p kurbo` (equivalent inline example, before the fix was
+applied) 3 times in the working tree used to investigate this candidate
+(/home/rafal/Projekty/Obce/kurbo/.worktrees/014-cubic-line-intersect); identical output every
+time:
+[LineIntersection { line_t: 0.22009610828488635, segment_t: 0.2044964622641512 }]
+is_empty = false
+
+=== Project test suite (kurbo/src/common.rs fix) ===
+Before fix (cargo test --workspace, at commit ca273499e3e48bd2de6f02aa8e99a148984e45f3):
+  kurbo unit tests:    187 passed; 0 failed; 0 ignored
+  polycool unit tests:  10 passed; 0 failed; 0 ignored
+  kurbo doctests:       55 passed; 0 failed
+  polycool doctests:     0 passed; 0 failed; 1 ignored
+  Total: 252 passed, 0 failed, 1 ignored
+
+After fix (same command, common.rs patched per patch.diff):
+  kurbo unit tests:    187 passed; 0 failed; 0 ignored
+  polycool unit tests:  10 passed; 0 failed; 0 ignored
+  kurbo doctests:       55 passed; 0 failed
+  polycool doctests:     0 passed; 0 failed; 1 ignored
+  Total: 252 passed, 0 failed, 1 ignored
+
+No regressions; identical pass/fail counts before and after (the fix only changes numerical
+behavior for the near-degenerate-cubic-coefficient case, which no existing test exercised).

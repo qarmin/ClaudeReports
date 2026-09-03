@@ -1,0 +1,72 @@
+diff --git a/src/decoder.rs b/src/decoder.rs
+index b8eb531..fc4fcea 100644
+--- a/src/decoder.rs
++++ b/src/decoder.rs
+@@ -907,6 +907,39 @@ impl<R: Read> Decoder<R> {
+             )
+         };
+ 
++        // Decide up front (before decoding any of the scan) whether this scan has enough rows
++        // to be worth batching through the worker's `append_rows` path at all - see
++        // 009.gated_row_batching/RESULT.md. Below the threshold, rows are still sent one at a
++        // time via `append_row` at the original call site (zero rayon dispatches, identical to
++        // the unpatched code). At or above it, rows are buffered and flushed via `append_rows`
++        // every `ROW_FLUSH_N` rows (plus a final flush for any remainder) instead of buffering
++        // the whole scan in one shot - this caps how much decoded-but-unconsumed coefficient
++        // data is held in memory at once on the batched path, unlike candidate 009's whole-scan
++        // buffer. See 016.hybrid_gated_periodic_flush/RESULT.md.
++        const ROW_BATCH_THRESHOLD: usize = 128;
++        const ROW_FLUSH_N: usize = 256;
++        let batch_this_scan = {
++            let mut total_rows = 0usize;
++            for mcu_y in 0..max_mcu_y {
++                if mcu_y * 8 >= frame.image_size.height {
++                    break;
++                }
++                for (i, component) in components.iter().enumerate() {
++                    if finished[i] {
++                        if !is_interleaved
++                            && (mcu_y + 1) * 8 < frame.image_size.height
++                            && (mcu_y + 1) % component.vertical_sampling_factor as u16 > 0
++                        {
++                            continue;
++                        }
++                        total_rows += 1;
++                    }
++                }
++            }
++            total_rows > ROW_BATCH_THRESHOLD
++        };
++        let mut pending_rows: Vec<(usize, Vec<i16>)> = Vec::new();
++
+         for mcu_y in 0..max_mcu_y {
+             if mcu_y * 8 >= frame.image_size.height {
+                 break;
+@@ -1053,13 +1086,24 @@ impl<R: Read> Decoder<R> {
+                         )
+                     };
+ 
+-                    // FIXME: additional potential work stealing opportunities for rayon case if we
+-                    // also internally can parallelize over components.
+-                    worker.append_row((i, row_coefficients))?;
++                    if batch_this_scan {
++                        pending_rows.push((i, row_coefficients));
++                        if pending_rows.len() >= ROW_FLUSH_N {
++                            worker.append_rows(&mut pending_rows.drain(..))?;
++                        }
++                    } else {
++                        // FIXME: additional potential work stealing opportunities for rayon case if we
++                        // also internally can parallelize over components.
++                        worker.append_row((i, row_coefficients))?;
++                    }
+                 }
+             }
+         }
+ 
++        if !pending_rows.is_empty() {
++            worker.append_rows(&mut pending_rows.drain(..))?;
++        }
++
+         let mut marker = huffman.take_marker(&mut self.reader)?;
+         while let Some(Marker::RST(_)) = marker {
+             marker = self.read_marker().ok();

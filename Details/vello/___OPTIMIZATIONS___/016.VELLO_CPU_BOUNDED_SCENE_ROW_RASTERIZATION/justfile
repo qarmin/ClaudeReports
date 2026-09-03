@@ -1,0 +1,62 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# This candidate reuses the project's own `vello_bench` crate (sparse_strips/vello_bench),
+# which already ships an `integration::images` criterion benchmark exercising the full
+# `RenderContext::render` (-> `render_with(RasterizerSettings::default())`) pipeline - exactly
+# the non-banded, `scene_rows: None` code path this candidate's patch touches. That benchmark
+# is gated behind vello_bench's own `extended` cargo feature, and multi-threading behind vello_cpu's
+# own `multithreading` feature (both stock features of the project, not added by this workspace).
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git -c filter.lfs.smudge=cat -c filter.lfs.clean=cat -c filter.lfs.process= -c filter.lfs.required=false clone {{repo_url}} clone
+    cd clone && git -c filter.lfs.smudge=cat -c filter.lfs.clean=cat -c filter.lfs.process= -c filter.lfs.required=false checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Single-threaded (default features) binary, for `taskset -c N` single-core measurement, and a
+# multi-threaded one (vello_cpu/multithreading) for the unpinned multi-core measurement.
+# NOTE: cargo never deletes a previous build's differently-hashed `main-<hash>` artifact, so with
+# two artifacts present picking "the" one by `ls` (alphabetical) can silently grab the WRONG,
+# stale one instead of the one just built - remove old ones first so exactly one is ever present.
+build-baseline:
+    rm -f clone/target/release/deps/main-*
+    cd clone && cargo bench -p vello_bench --features extended --no-run
+    @ls clone/target/release/deps/main-* | grep -v '\.d$' | head -1 | xargs -I{} cp {} ./bin_baseline_st
+    rm -f clone/target/release/deps/main-*
+    cd clone && cargo bench -p vello_bench --features extended,vello_cpu/multithreading --no-run
+    @ls clone/target/release/deps/main-* | grep -v '\.d$' | head -1 | xargs -I{} cp {} ./bin_baseline_mt
+
+build-patched:
+    rm -f clone/target/release/deps/main-*
+    cd clone && cargo bench -p vello_bench --features extended --no-run
+    @ls clone/target/release/deps/main-* | grep -v '\.d$' | head -1 | xargs -I{} cp {} ./bin_patched_st
+    rm -f clone/target/release/deps/main-*
+    cd clone && cargo bench -p vello_bench --features extended,vello_cpu/multithreading --no-run
+    @ls clone/target/release/deps/main-* | grep -v '\.d$' | head -1 | xargs -I{} cp {} ./bin_patched_mt
+
+# Runs the `images/overlapping` criterion benchmark (full non-banded render pipeline) for both
+# binaries, single-core (taskset -c 0) and multi-core (unpinned), so the reader can see the
+# same before/after this candidate's own RESULT.md reports. Criterion compares each `patched`
+# run against its own previously-saved baseline automatically (the "change:" line).
+bench:
+    @echo "=== single-core (taskset -c 0): baseline ==="
+    taskset -c 0 ./bin_baseline_st --bench images --noplot
+    @echo "=== single-core (taskset -c 0): patched ==="
+    taskset -c 0 ./bin_patched_st --bench images --noplot
+    @echo "=== multi-core (unpinned): baseline ==="
+    ./bin_baseline_mt --bench images --noplot
+    @echo "=== multi-core (unpinned): patched ==="
+    ./bin_patched_mt --bench images --noplot
+
+clean:
+    rm -rf clone bin_baseline_st bin_baseline_mt bin_patched_st bin_patched_mt

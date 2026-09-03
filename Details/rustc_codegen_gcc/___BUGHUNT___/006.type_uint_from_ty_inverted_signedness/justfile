@@ -1,0 +1,46 @@
+# Self-contained reproduction for candidate 006 (type_uint_from_ty_inverted_signedness).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone build reproduce-before apply rebuild reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r repro clone/repro
+
+# One-time setup: downloads a prebuilt libgccjit.so and builds the sysroot (core/alloc/std).
+# ~2-3 minutes on a modern multi-core machine, per this workspace's own README.md.
+build:
+    echo 'download-gccjit = true' > clone/config.toml
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Compile+run both repro files against the pristine (unpatched) backend - both are expected to
+# FAIL TO COMPILE (a real libgccjit `gcc_jit_block_add_assignment: mismatching types` error,
+# `rustc` aborting before the linker runs) - that IS the bug, there is no binary to run yet.
+reproduce-before:
+    cd clone && (CHANNEL=release ./y.sh rustc repro/simd_scatter_u32.rs -o /tmp/cand006_u32 && echo "UNEXPECTED: compiled cleanly" || echo "EXPECTED: compile failed (bug present)")
+    cd clone && (CHANNEL=release ./y.sh rustc repro/simd_scatter_u8.rs -o /tmp/cand006_u8 && echo "UNEXPECTED: compiled cleanly" || echo "EXPECTED: compile failed (bug present)")
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+rebuild:
+    cd clone && ./y.sh build --release
+
+# Same repro again, now against the patched clone - both should compile AND run, exiting 0.
+reproduce-after:
+    cd clone && CHANNEL=release ./y.sh rustc repro/simd_scatter_u32.rs -o /tmp/cand006_u32
+    /tmp/cand006_u32 && echo "PASS: u32 scatter exited 0"
+    cd clone && CHANNEL=release ./y.sh rustc repro/simd_scatter_u8.rs -o /tmp/cand006_u8
+    /tmp/cand006_u8 && echo "PASS: u8 scatter exited 0"
+
+clean:
+    rm -rf clone

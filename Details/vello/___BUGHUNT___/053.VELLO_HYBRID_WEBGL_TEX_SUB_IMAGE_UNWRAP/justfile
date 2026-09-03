@@ -1,0 +1,36 @@
+# Self-contained reproduction for candidate 053 (VELLO_HYBRID_WEBGL_TEX_SUB_IMAGE_UNWRAP).
+#
+# Status: Not reproducible - see RESULT.md. No patch.diff (nothing to fix; this candidate's
+# suspected trigger, a browser-level WebGL error surfacing as a thrown JS exception, was checked
+# empirically against a real browser and does not occur). `clone` is included so a reader can see
+# the exact source location the probes are about, even though the probes themselves are pure
+# Node.js/puppeteer driving a real headless Chromium's WebGL2 implementation, not the compiled
+# vello_hybrid/wasm code itself (see RESULT.md's "Fully reproducible" section for why that's the
+# right scope for this finding).
+
+repo_url := "https://github.com/linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    @echo "Relevant source: clone/sparse_strips/vello_hybrid/src/render/webgl/mod.rs (upload_rgba32ui_rows, ~line 3685)"
+
+# Real headless-Chromium probes (Node.js + puppeteer) of whether the browser's own texSubImage2D
+# can ever throw a JS exception (-> Err -> .unwrap() panic) for a genuine WebGL-level failure
+# (context loss, undersized buffer, invalid dimensions, deleted texture). Set CHROME_PATH to an
+# existing Chrome/Chromium-for-Testing binary if puppeteer's own bundled Chromium download isn't
+# reachable in your environment, or (as in the sandbox this candidate was investigated in) if
+# puppeteer's own downloaded full `chrome` binary aborts on launch with
+# "chrome_crashpad_handler: --database is required" (a crash-reporter/sandbox incompatibility
+# unrelated to this candidate) - a `chrome-headless-shell` build sidesteps that.
+reproduce-before:
+    cd repro && npm install
+    cd repro && node probe_context_loss.js
+    cd repro && node probe_error_conditions.js
+
+clean:
+    rm -rf clone node_modules

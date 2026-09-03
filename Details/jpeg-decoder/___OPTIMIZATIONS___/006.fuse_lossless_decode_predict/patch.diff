@@ -1,0 +1,236 @@
+diff --git a/src/decoder/lossless.rs b/src/decoder/lossless.rs
+index cd00476..995fe31 100644
+--- a/src/decoder/lossless.rs
++++ b/src/decoder/lossless.rs
+@@ -46,43 +46,64 @@ impl<R: Read> Decoder<R> {
+         let width = frame.image_size.width as usize;
+         let height = frame.image_size.height as usize;
+ 
+-        let mut differences = vec![Vec::with_capacity(npixel); ncomp];
+-        for _mcu_y in 0..height {
+-            for _mcu_x in 0..width {
+-                if self.restart_interval > 0 {
+-                    if mcus_left_until_restart == 0 {
+-                        match huffman.take_marker(reader)? {
+-                            Some(Marker::RST(n)) => {
+-                                if n != expected_rst_num {
+-                                    return Err(Error::Format(format!(
+-                                        "found RST{} where RST{} was expected",
+-                                        n, expected_rst_num
+-                                    )));
+-                                }
++        if scan.predictor_selection == Predictor::Ra {
++            // Predictor::Ra's prediction never depends on rb/rc or on restart state (see the
++            // `else` branch below, which does), and the entropy-decode loop already visits
++            // pixels in raster order: rb/rc's row is always finalized by the time we reach it,
++            // and ra (the current row's left neighbour) is available if the prediction is
++            // computed in the same left-to-right sweep as the decode. So decode+predict are
++            // fused here directly into `results`, skipping the `differences` intermediate
++            // buffer (and its full extra write+read pass) that the `else` branch below still
++            // needs for the general `predict()` case.
++            let default_prediction = 1 << (frame.precision - scan.point_transform - 1) as i32;
++            let mut left = [0i32; MAX_COMPONENTS];
++            let mut col0_prev = [0i32; MAX_COMPONENTS];
++            let mut result_slices: Vec<&mut [u16]> =
++                results.iter_mut().map(|v| v.as_mut_slice()).collect();
+ 
+-                                huffman.reset();
++            macro_rules! handle_restart {
++                () => {
++                    if self.restart_interval > 0 {
++                        if mcus_left_until_restart == 0 {
++                            match huffman.take_marker(reader)? {
++                                Some(Marker::RST(n)) => {
++                                    if n != expected_rst_num {
++                                        return Err(Error::Format(format!(
++                                            "found RST{} where RST{} was expected",
++                                            n, expected_rst_num
++                                        )));
++                                    }
+ 
+-                                expected_rst_num = (expected_rst_num + 1) % 8;
+-                                mcus_left_until_restart = self.restart_interval;
+-                            }
+-                            Some(marker) => {
+-                                return Err(Error::Format(format!(
+-                                    "found marker {:?} inside scan where RST{} was expected",
+-                                    marker, expected_rst_num
+-                                )))
+-                            }
+-                            None => {
+-                                return Err(Error::Format(format!(
+-                                    "no marker found where RST{} was expected",
+-                                    expected_rst_num
+-                                )))
++                                    huffman.reset();
++
++                                    expected_rst_num = (expected_rst_num + 1) % 8;
++                                    mcus_left_until_restart = self.restart_interval;
++                                }
++                                Some(marker) => {
++                                    return Err(Error::Format(format!(
++                                        "found marker {:?} inside scan where RST{} was expected",
++                                        marker, expected_rst_num
++                                    )))
++                                }
++                                None => {
++                                    return Err(Error::Format(format!(
++                                        "no marker found where RST{} was expected",
++                                        expected_rst_num
++                                    )))
++                                }
+                             }
+                         }
+-                    }
+ 
+-                    mcus_left_until_restart -= 1;
+-                }
++                        mcus_left_until_restart -= 1;
++                    }
++                };
++            }
+ 
++            for mcu_y in 0..height {
++                // Column 0 handled on its own so the mcu_x > 0 sweep below never has to branch
++                // on mcu_x - it always uses `left[i]`, matching the original's separate
++                // top-left/leftmost-column loops vs. its unconditional row loop.
++                handle_restart!();
+                 for (i, _component) in components.iter().enumerate() {
+                     let dc_table = self.dc_huffman_tables[scan.dc_table_indices[i]]
+                         .as_ref()
+@@ -100,43 +121,109 @@ impl<R: Read> Decoder<R> {
+                             ));
+                         }
+                     };
+-                    differences[i].push(diff);
+-                }
+-            }
+-        }
+-
+-        if scan.predictor_selection == Predictor::Ra {
+-            for (i, _component) in components.iter().enumerate() {
+-                // calculate the top left pixel
+-                let diff = differences[i][0];
+-                let prediction = 1 << (frame.precision - scan.point_transform - 1) as i32;
+-                let result = ((prediction + diff) & 0xFFFF) as u16; // modulo 2^16
+-                let result = result << scan.point_transform;
+-                results[i][0] = result;
+ 
+-                // calculate leftmost column, using top pixel as predictor
+-                let mut previous = result;
+-                for mcu_y in 1..height {
+-                    let diff = differences[i][mcu_y * width];
+-                    let prediction = previous as i32;
++                    let prediction = if mcu_y == 0 {
++                        default_prediction
++                    } else {
++                        col0_prev[i]
++                    };
+                     let result = ((prediction + diff) & 0xFFFF) as u16; // modulo 2^16
+                     let result = result << scan.point_transform;
+-                    results[i][mcu_y * width] = result;
+-                    previous = result;
++                    result_slices[i][mcu_y * width] = result;
++
++                    left[i] = result as i32;
++                    col0_prev[i] = result as i32;
+                 }
+ 
+-                // calculate rows, using left pixel as predictor
+-                for mcu_y in 0..height {
+-                    for mcu_x in 1..width {
+-                        let diff = differences[i][mcu_y * width + mcu_x];
+-                        let prediction = results[i][mcu_y * width + mcu_x - 1] as i32;
++                for mcu_x in 1..width {
++                    handle_restart!();
++                    for (i, _component) in components.iter().enumerate() {
++                        let dc_table = self.dc_huffman_tables[scan.dc_table_indices[i]]
++                            .as_ref()
++                            .unwrap();
++                        let value = huffman.decode(reader, dc_table)?;
++                        let diff = match value {
++                            0 => 0,
++                            1..=15 => huffman.receive_extend(reader, value)? as i32,
++                            16 => 32768,
++                            _ => {
++                                // Section F.1.2.1.1
++                                // Table F.1
++                                return Err(Error::Format(
++                                    "invalid DC difference magnitude category".to_owned(),
++                                ));
++                            }
++                        };
++
++                        let prediction = left[i];
+                         let result = ((prediction + diff) & 0xFFFF) as u16; // modulo 2^16
+                         let result = result << scan.point_transform;
+-                        results[i][mcu_y * width + mcu_x] = result;
++                        result_slices[i][mcu_y * width + mcu_x] = result;
++
++                        left[i] = result as i32;
+                     }
+                 }
+             }
+         } else {
++            let mut differences = vec![Vec::with_capacity(npixel); ncomp];
++            for _mcu_y in 0..height {
++                for _mcu_x in 0..width {
++                    if self.restart_interval > 0 {
++                        if mcus_left_until_restart == 0 {
++                            match huffman.take_marker(reader)? {
++                                Some(Marker::RST(n)) => {
++                                    if n != expected_rst_num {
++                                        return Err(Error::Format(format!(
++                                            "found RST{} where RST{} was expected",
++                                            n, expected_rst_num
++                                        )));
++                                    }
++
++                                    huffman.reset();
++
++                                    expected_rst_num = (expected_rst_num + 1) % 8;
++                                    mcus_left_until_restart = self.restart_interval;
++                                }
++                                Some(marker) => {
++                                    return Err(Error::Format(format!(
++                                        "found marker {:?} inside scan where RST{} was expected",
++                                        marker, expected_rst_num
++                                    )))
++                                }
++                                None => {
++                                    return Err(Error::Format(format!(
++                                        "no marker found where RST{} was expected",
++                                        expected_rst_num
++                                    )))
++                                }
++                            }
++                        }
++
++                        mcus_left_until_restart -= 1;
++                    }
++
++                    for (i, _component) in components.iter().enumerate() {
++                        let dc_table = self.dc_huffman_tables[scan.dc_table_indices[i]]
++                            .as_ref()
++                            .unwrap();
++                        let value = huffman.decode(reader, dc_table)?;
++                        let diff = match value {
++                            0 => 0,
++                            1..=15 => huffman.receive_extend(reader, value)? as i32,
++                            16 => 32768,
++                            _ => {
++                                // Section F.1.2.1.1
++                                // Table F.1
++                                return Err(Error::Format(
++                                    "invalid DC difference magnitude category".to_owned(),
++                                ));
++                            }
++                        };
++                        differences[i].push(diff);
++                    }
++                }
++            }
++
+             for mcu_y in 0..height {
+                 for mcu_x in 0..width {
+                     for (i, _component) in components.iter().enumerate() {

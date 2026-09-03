@@ -1,0 +1,61 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+#
+# patch.diff here is identical to 007.AFFINE_ROTATE90_270_BLOCKED_TRANSPOSE/patch.diff (BLOCK =
+# 64) - this candidate's own contribution is the `sweep` recipe, which rebuilds the bench with
+# BLOCK swapped to 32/128/256 in turn and compares each against the 64 build. See RESULT.md for
+# the numbers this produced.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+# patch.diff only touches src/imageops/affine.rs - no harness change needed, so the baseline
+# build (BLOCK=64) is just the pristine clone and the patched build is clone + apply.
+test: clone bench-baseline apply bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# patch.diff only touches src/imageops/affine.rs - the crate's own benches/imageops.rs already
+# has "rotate90"/"rotate270" criterion cases (they exercise rotate90_in/rotate270_in via the
+# public rotate90()/rotate270() wrappers), so no bench file changes or standalone bench crate
+# are needed.
+bench-baseline:
+    @echo "=== baseline (before patch) ==="
+    cd clone && cargo bench --bench imageops -- --exact rotate90
+    cd clone && cargo bench --bench imageops -- --exact rotate270
+
+bench-patched:
+    @echo "=== patched (after patch, BLOCK=64) ==="
+    cd clone && cargo bench --bench imageops -- --exact rotate90
+    cd clone && cargo bench --bench imageops -- --exact rotate270
+
+# Rebuilds the bench binary at BLOCK=32/64/128/256 in turn (both occurrences of the constant in
+# affine.rs) and saves each to ./clone/target/release/deps/block<N> for manual paired comparison,
+# e.g. with tools/paired.sh from the main workspace, or the run_pair.sh shape described in
+# RESULT.md's "What was tried" section.
+sweep: clone apply
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone
+    for B in 32 64 128 256; do
+        sed -i "s/const BLOCK: usize = 64;/const BLOCK: usize = $B;/" src/imageops/affine.rs
+        cargo bench --bench imageops --no-run
+        bin=$(find target/release/deps -maxdepth 1 -name 'imageops-*' -newer Cargo.toml -type f | head -1)
+        cp "$bin" "target/release/deps/block$B"
+        sed -i "s/const BLOCK: usize = $B;/const BLOCK: usize = 64;/" src/imageops/affine.rs
+    done
+    echo "Built target/release/deps/block32, block64, block128, block256 - compare pairwise by hand."
+
+clean:
+    rm -rf clone

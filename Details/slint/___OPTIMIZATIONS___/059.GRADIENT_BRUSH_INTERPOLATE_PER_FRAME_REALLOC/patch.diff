@@ -1,0 +1,62 @@
+diff --git a/internal/core/graphics/brush.rs b/internal/core/graphics/brush.rs
+index a093ccdf3..f942a352e 100644
+--- a/internal/core/graphics/brush.rs
++++ b/internal/core/graphics/brush.rs
+@@ -784,7 +784,11 @@ fn interpolate(&self, target_value: &Self, t: f32) -> Self {
+                 Brush::SolidColor(source_col.interpolate(target_col, t))
+             }
+             (Brush::SolidColor(col), Brush::LinearGradient(grad)) => {
+-                let mut new_grad = grad.clone();
++                // Build a fresh, exclusively-owned copy directly instead of `grad.clone()`:
++                // cloning the SharedVector first would bump its refcount above 1, forcing the
++                // subsequent `make_mut_slice()` onto its always-reallocate "shared" path even
++                // though nothing else needs to observe an in-between state.
++                let mut new_grad = LinearGradientBrush(SharedVector::from(grad.0.as_slice()));
+                 for x in new_grad.0.make_mut_slice().iter_mut().skip(1) {
+                     x.color = col.interpolate(&x.color, t);
+                 }
+@@ -797,7 +801,7 @@ fn interpolate(&self, target_value: &Self, t: f32) -> Self {
+                 if lhs.0.len() < rhs.0.len() {
+                     Self::interpolate(target_value, self, 1. - t)
+                 } else {
+-                    let mut new_grad = lhs.clone();
++                    let mut new_grad = LinearGradientBrush(SharedVector::from(lhs.0.as_slice()));
+                     let mut iter = new_grad.0.make_mut_slice().iter_mut();
+                     {
+                         let angle = &mut iter.next().unwrap().position;
+@@ -815,7 +819,7 @@ fn interpolate(&self, target_value: &Self, t: f32) -> Self {
+                 }
+             }
+             (Brush::SolidColor(col), Brush::RadialGradient(grad)) => {
+-                let mut new_grad = grad.clone();
++                let mut new_grad = RadialGradientBrush(SharedVector::from(grad.0.as_slice()));
+                 for x in new_grad.0.make_mut_slice().iter_mut().skip(RadialGradientBrush::HEADER) {
+                     x.color = col.interpolate(&x.color, t);
+                 }
+@@ -828,7 +832,7 @@ fn interpolate(&self, target_value: &Self, t: f32) -> Self {
+                 if lhs.0.len() < rhs.0.len() {
+                     Self::interpolate(target_value, self, 1. - t)
+                 } else {
+-                    let mut new_grad = lhs.clone();
++                    let mut new_grad = RadialGradientBrush(SharedVector::from(lhs.0.as_slice()));
+                     {
+                         let s = new_grad.0.make_mut_slice();
+                         // Center: interpolate when both sides are explicit. When one side is the
+@@ -864,7 +868,7 @@ fn interpolate(&self, target_value: &Self, t: f32) -> Self {
+                 }
+             }
+             (Brush::SolidColor(col), Brush::ConicGradient(grad)) => {
+-                let mut new_grad = grad.clone();
++                let mut new_grad = ConicGradientBrush(SharedVector::from(grad.0.as_slice()));
+                 for x in new_grad.0.make_mut_slice().iter_mut().skip(ConicGradientBrush::HEADER) {
+                     x.color = col.interpolate(&x.color, t);
+                 }
+@@ -877,7 +881,7 @@ fn interpolate(&self, target_value: &Self, t: f32) -> Self {
+                 if lhs.0.len() < rhs.0.len() {
+                     Self::interpolate(target_value, self, 1. - t)
+                 } else {
+-                    let mut new_grad = lhs.clone();
++                    let mut new_grad = ConicGradientBrush(SharedVector::from(lhs.0.as_slice()));
+                     {
+                         let s = new_grad.0.make_mut_slice();
+                         // angle (s[0])

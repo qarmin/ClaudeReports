@@ -1,0 +1,98 @@
+diff --git a/src/xlsx/mod.rs b/src/xlsx/mod.rs
+index 9d12ede..f31d95f 100644
+--- a/src/xlsx/mod.rs
++++ b/src/xlsx/mod.rs
+@@ -2590,14 +2590,86 @@ impl<RS: Read + Seek> Reader<RS> for Xlsx<RS> {
+         &self.metadata
+     }
+ 
++    // Deliberately does NOT delegate to `worksheet_range_ref()` + a whole-grid `.into_iter()
++    // .map(Into::into).collect()` (as it did previously): that pattern holds the fully-built
++    // `Range<DataRef>` dense grid alive for the entire time the new `Range<Data>` dense grid is
++    // being built (the source `Vec`'s backing allocation isn't freed until its `IntoIter` is
++    // fully drained), doubling peak RSS to two dense grids at once on a sparsely-populated sheet
++    // with a large declared/used range. Converting `DataRef -> Data` per cell during parsing,
++    // before either dense grid exists, means only one dense grid is ever live.
+     fn worksheet_range(&mut self, name: &str) -> Result<Range<Data>, XlsxError> {
+-        let rge = self.worksheet_range_ref(name)?;
+-        let inner = rge.inner.into_iter().map(|v| v.into()).collect();
+-        Ok(Range {
+-            start: rge.start,
+-            end: rge.end,
+-            inner,
+-        })
++        let header_row = self.options.header_row;
++        let mut cell_reader = match self.worksheet_cells_reader(name) {
++            Ok(reader) => reader,
++            Err(XlsxError::NotAWorksheet(typ)) => {
++                log::warn!("'{typ}' not a valid worksheet");
++                return Ok(Range::default());
++            }
++            Err(e) => return Err(e),
++        };
++        let len = cell_reader.dimensions().len();
++        let mut cells = Vec::new();
++        if len < 100_000 {
++            cells.reserve(len as usize);
++        }
++
++        match header_row {
++            HeaderRow::FirstNonEmptyRow => {
++                // the header row is the row of the first non-empty cell
++                loop {
++                    match cell_reader.next_cell() {
++                        Ok(Some(Cell {
++                            val: DataRef::Empty,
++                            ..
++                        })) => (),
++                        Ok(Some(cell)) => cells.push(Cell {
++                            pos: cell.pos,
++                            val: cell.val.into(),
++                        }),
++                        Ok(None) => break,
++                        Err(e) => return Err(e),
++                    }
++                }
++            }
++            HeaderRow::Row(header_row_idx) => {
++                // If `header_row` is a row index, we only add non-empty cells after this index.
++                loop {
++                    match cell_reader.next_cell() {
++                        Ok(Some(Cell {
++                            val: DataRef::Empty,
++                            ..
++                        })) => (),
++                        Ok(Some(cell)) => {
++                            if cell.pos.0 >= header_row_idx {
++                                cells.push(Cell {
++                                    pos: cell.pos,
++                                    val: cell.val.into(),
++                                });
++                            }
++                        }
++                        Ok(None) => break,
++                        Err(e) => return Err(e),
++                    }
++                }
++
++                // If `header_row` is set and the first non-empty cell is not at the `header_row`, we add
++                // an empty cell at the beginning with row `header_row` and same column as the first non-empty cell.
++                if cells.first().is_some_and(|c| c.pos.0 != header_row_idx) {
++                    cells.insert(
++                        0,
++                        Cell {
++                            pos: (
++                                header_row_idx,
++                                cells.first().expect("cells should not be empty").pos.1,
++                            ),
++                            val: Data::Empty,
++                        },
++                    );
++                }
++            }
++        }
++
++        Ok(Range::from_sparse(cells))
+     }
+ 
+     fn worksheet_formula(&mut self, name: &str) -> Result<Range<String>, XlsxError> {

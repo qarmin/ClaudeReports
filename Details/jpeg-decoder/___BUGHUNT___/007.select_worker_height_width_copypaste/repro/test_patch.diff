@@ -1,0 +1,59 @@
+diff --git a/src/decoder.rs b/src/decoder.rs
+index b8eb531..63e36b6 100644
+--- a/src/decoder.rs
++++ b/src/decoder.rs
+@@ -1506,3 +1506,54 @@ fn stbi_f2f(x: f32) -> i32 {
+ fn clamp_fixed_point(value: i32) -> u8 {
+     (value >> FIXED_POINT_OFFSET).min(255).max(0) as u8
+ }
++
++#[cfg(test)]
++mod bug007_select_worker_tests {
++    use super::*;
++
++    fn frame_with_output_size(width: u16, height: u16) -> FrameInfo {
++        FrameInfo {
++            is_baseline: true,
++            is_differential: false,
++            coding_process: CodingProcess::DctSequential,
++            entropy_coding: EntropyCoding::Huffman,
++            precision: 8,
++            image_size: Dimensions { width, height },
++            output_size: Dimensions { width, height },
++            mcu_size: Dimensions { width: 1, height: 1 },
++            components: Vec::new(),
++        }
++    }
++
++    #[test]
++    fn select_worker_should_use_width_times_height_not_width_squared() {
++        // Real area = 999 * 8 = 7992, well under PARALLELISM_THRESHOLD (128*128 = 16384),
++        // so the heuristic should pick Immediate. select_worker's `height` local is
++        // computed from `frame.output_size.width` (copy-paste bug), so it instead
++        // computes width * width = 998001, which is over the threshold, and wrongly
++        // picks Multithreaded. These exact dimensions (999x8) match the real JPEG fixture
++        // in repro/fixtures/test_wide.jpg, decoded end-to-end via the public API in
++        // repro/verify_dims.rs, so this reflects a real FrameInfo the real decode() path
++        // would build, not a value chosen only for this test.
++        let frame = frame_with_output_size(999, 8);
++        let choice = Decoder::<std::io::Empty>::select_worker(&frame, PreferWorkerKind::Multithreaded);
++        assert!(
++            matches!(choice, PreferWorkerKind::Immediate),
++            "999x8 image (area 7992 < 16384) should select Immediate, got Multithreaded"
++        );
++    }
++
++    #[test]
++    fn select_worker_opposite_direction_narrow_tall_image() {
++        // Real area = 10 * 2000 = 20000, over PARALLELISM_THRESHOLD (16384), so the
++        // heuristic should pick Multithreaded. The buggy width*width = 100 is far under
++        // the threshold, so it wrongly picks Immediate - the opposite mis-selection from
++        // the wide/short case above, confirming this isn't a one-off boundary quirk.
++        let frame = frame_with_output_size(10, 2000);
++        let choice = Decoder::<std::io::Empty>::select_worker(&frame, PreferWorkerKind::Multithreaded);
++        assert!(
++            matches!(choice, PreferWorkerKind::Multithreaded),
++            "10x2000 image (area 20000 > 16384) should select Multithreaded, got Immediate"
++        );
++    }
++}

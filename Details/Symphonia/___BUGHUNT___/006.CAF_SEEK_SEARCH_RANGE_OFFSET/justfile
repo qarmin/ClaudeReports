@@ -1,0 +1,29 @@
+# Self-contained reproduction for candidate 006: CafReader::seek()'s VariableAudioPacket arm
+# uses a partition_point() result relative to a search_range sub-slice as an absolute index into
+# the full packets array, without adding back search_range.start.
+
+repo_url := "https://github.com/pdeljanov/Symphonia.git"
+base_commit := "ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Should print "BUG CONFIRMED: ... landed on actual_ts=10 (expected 40)" and exit non-zero.
+# The leading `-` lets `just test` continue on to apply/reproduce-after despite this expected
+# non-zero exit code (the demonstrated bug), same as candidate 005's justfile.
+reproduce-before:
+    -cd repro && cargo run --release -- assets/variable_packets.caf 3 45 40
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Should now print "CORRECT: actual_ts == 40 as expected" and exit 0.
+reproduce-after:
+    cd repro && cargo run --release -- assets/variable_packets.caf 3 45 40
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

@@ -1,0 +1,58 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone`/`just
+# wasm-bindgen-cli` into ./clone / ./bin (both gitignored) - nothing in this justfile reaches
+# outside the folder it lives in. That means this whole folder can be copied anywhere (including
+# posted standalone, e.g. attached to a GitHub issue) and `just test` still works, with no
+# dependency on the main project checkout this candidate was originally found in.
+#
+# Needs: rustup with the wasm32-unknown-unknown target installable, and network access (to clone
+# the repo, fetch crates.io deps, and download the wasm-bindgen-cli release below - the same
+# release .github/workflows/rust.yml's own cross_compile_wasm CI job downloads, pinned to the
+# exact version repro/Cargo.toml's wasm-bindgen dev-dependency requests so the CLI and the
+# generated JS glue always agree).
+
+repo_url := "https://github.com/image-rs/jpeg-decoder.git"
+base_commit := "eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c"
+
+wasm_bindgen_version := "0.2.127"
+wasm_bindgen_url := "https://github.com/rustwasm/wasm-bindgen/releases/download/" + wasm_bindgen_version + "/wasm-bindgen-" + wasm_bindgen_version + "-x86_64-unknown-linux-musl.tar.gz"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone wasm-bindgen-cli reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Downloads the exact wasm-bindgen-test-runner binary matching repro/Cargo.toml's pinned
+# wasm-bindgen version, into ./bin (gitignored) - same mechanism CI uses, done once and reused.
+wasm-bindgen-cli:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -x bin/wasm-bindgen-test-runner ]; then exit 0; fi
+    mkdir -p bin
+    curl -sL -o /tmp/wbg-repro-017.tar.gz "{{wasm_bindgen_url}}"
+    rm -rf /tmp/wbg-repro-017-extract && mkdir -p /tmp/wbg-repro-017-extract
+    tar xzf /tmp/wbg-repro-017.tar.gz -C /tmp/wbg-repro-017-extract --strip-components=1
+    cp /tmp/wbg-repro-017-extract/wasm-bindgen-test-runner bin/
+    chmod +x bin/wasm-bindgen-test-runner
+    rustup target add wasm32-unknown-unknown
+
+# Build+run the standalone repro against the pristine clone, on the real wasm32 target under a
+# real wasm runtime (wasm-bindgen-test-runner + Node) - should demonstrate the bug (non-zero exit,
+# a panic backtrace for all three cases printed by the test harness).
+reproduce-before:
+    cd repro && CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="{{justfile_directory()}}/bin/wasm-bindgen-test-runner" cargo test --target wasm32-unknown-unknown
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer panic/trap (all 3 tests pass,
+# zero exit).
+reproduce-after:
+    cd repro && CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="{{justfile_directory()}}/bin/wasm-bindgen-test-runner" cargo test --target wasm32-unknown-unknown
+
+clean:
+    rm -rf clone bin repro/Cargo.lock repro/target

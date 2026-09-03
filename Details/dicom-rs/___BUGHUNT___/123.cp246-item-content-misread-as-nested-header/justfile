@@ -1,0 +1,39 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+
+repo_url := "git@github.com:qarmin/dicom-rs.git"
+base_commit := "df2b9e42"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git fetch origin {{base_commit}} && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug.
+# Adapt: repro/ depends on `{ path = "../clone/<crate_dir>" }`, so it always tracks whatever
+# state ./clone is currently in. Non-zero exit here is the EXPECTED outcome (repro's own
+# convention: 0 = did not reproduce, non-zero = reproduced) - don't let it abort `just test`.
+reproduce-before:
+    cd repro && cargo run --release; test "$?" -ne 0 && echo "(non-zero exit expected here: bug reproduced)"; true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone. The repro's exit code convention here
+# measures whether the *confusing generic I/O error* is gone (replaced by a clear, specific
+# "ElementLengthExceedsContainer" error) - NOT whether the file parses successfully overall.
+# This candidate's fix does not achieve full dcmtk-level interoperability - see RESULT.md.
+# Exit code must be 0 here.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

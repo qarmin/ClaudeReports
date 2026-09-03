@@ -1,0 +1,118 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index eb38d5dc..1d20ab18 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -43,6 +43,12 @@ dependencies = [
+  "alloc-no-stdlib",
+ ]
+ 
++[[package]]
++name = "allocator-api2"
++version = "0.2.21"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
++
+ [[package]]
+ name = "android_system_properties"
+ version = "0.1.5"
+@@ -477,6 +483,12 @@ version = "1.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
+ 
++[[package]]
++name = "equivalent"
++version = "1.0.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
++
+ [[package]]
+ name = "euclid"
+ version = "0.22.14"
+@@ -672,6 +684,8 @@ version = "0.17.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+ dependencies = [
++ "allocator-api2",
++ "equivalent",
+  "foldhash",
+ ]
+ 
+@@ -744,6 +758,7 @@ name = "hayro-interpret"
+ version = "0.7.0"
+ dependencies = [
+  "bitflags",
++ "hashbrown",
+  "hayro-cmap",
+  "hayro-syntax",
+  "image",
+diff --git a/hayro-interpret/Cargo.toml b/hayro-interpret/Cargo.toml
+index a6f1ba02..0626bd54 100644
+--- a/hayro-interpret/Cargo.toml
++++ b/hayro-interpret/Cargo.toml
+@@ -22,6 +22,7 @@ yoke = { workspace = true, features = ["derive"]}
+ siphasher = { workspace = true }
+ bitflags = { workspace = true }
+ rustc-hash = { workspace = true }
++hashbrown = "0.17"
+ 
+ [dev-dependencies]
+ image = { workspace = true, features = ["png"] }
+diff --git a/hayro-interpret/src/interpret/mod.rs b/hayro-interpret/src/interpret/mod.rs
+index 8bb5ae73..83226f1c 100644
+--- a/hayro-interpret/src/interpret/mod.rs
++++ b/hayro-interpret/src/interpret/mod.rs
+@@ -230,6 +230,16 @@ pub fn interpret<'a>(
+ ) {
+     let num_states = context.num_states();
+     let mut font_dict_cache = FxHashMap::<Name<'a>, Dict<'a>>::default();
++    // Caches the fully-resolved font per resource name, scoped to this content stream (like
++    // `font_dict_cache` above) rather than persisted on `context` - a `Tf` operator referencing
++    // the same name almost always means the same font throughout one content stream, but the
++    // same name can point at a different font in a nested Form XObject's own `Resources` dict
++    // (which gets its own fresh `interpret()` call/cache), so this must not survive across calls.
++    // Uses `hashbrown::HashMap` directly (rather than `std`'s `FxHashMap` alias) so the miss path
++    // below can call `raw_entry_mut()` and avoid `std::collections::HashMap::entry()`'s own
++    // `rustc_entry` compatibility-shim overhead.
++    let mut resolved_font_cache =
++        hashbrown::HashMap::<Name<'a>, Option<TextStateFont<'a>>, rustc_hash::FxBuildHasher>::default();
+ 
+     context.save_state();
+ 
+@@ -564,15 +574,28 @@ pub fn interpret<'a>(
+                 // 2) In case it's `None` because we were unable to resolve the font
+                 // (for whatever reason), leave it as `None`. Better showing no
+                 // text at all than garbage text.
+-                let font = if let Some(font_dict) = font_dict_cache.get(name).cloned() {
+-                    context.resolve_font(&font_dict)
+-                } else if let Some(font_dict) = resources.get_font(name) {
+-                    font_dict_cache.insert(name.clone(), font_dict.clone());
+-                    context.resolve_font(&font_dict)
+-                } else {
+-                    Font::new_standard(StandardFont::Helvetica, &context.settings.font_resolver)
+-                        .map(TextStateFont::Fallback)
+-                };
++                let font = resolved_font_cache
++                    .raw_entry_mut()
++                    .from_key(name)
++                    .or_insert_with(|| {
++                        let resolved = if let Some(font_dict) = font_dict_cache.get(name).cloned()
++                        {
++                            context.resolve_font(&font_dict)
++                        } else if let Some(font_dict) = resources.get_font(name) {
++                            font_dict_cache.insert(name.clone(), font_dict.clone());
++                            context.resolve_font(&font_dict)
++                        } else {
++                            Font::new_standard(
++                                StandardFont::Helvetica,
++                                &context.settings.font_resolver,
++                            )
++                            .map(TextStateFont::Fallback)
++                        };
++
++                        (name.clone(), resolved)
++                    })
++                    .1
++                    .clone();
+ 
+                 context.get_mut().text_state.font_size = t.1.as_f32();
+                 context.get_mut().text_state.font = font;

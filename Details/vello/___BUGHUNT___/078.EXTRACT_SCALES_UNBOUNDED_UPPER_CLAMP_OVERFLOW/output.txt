@@ -1,0 +1,114 @@
+=== Approach 1: manual boundary-value construction against the real public API ===
+(standalone probe crate depending on this worktree's vello_common via a path dependency,
+release build with debug-assertions/overflow-checks enabled)
+
+--- vello_common::util::extract_scales sweep ---
+uniform scale=1e18 -> extract_scales = (1000000000000000000, 1000000000000000000)
+uniform scale=1e19 -> extract_scales = (10000000000000000000, 10000000000000000000)
+uniform scale=1.9e19 -> extract_scales = (0.000001, 0.000001)
+uniform scale=5e19 -> extract_scales = (0.000001, 0.000001)
+uniform scale=1e20 -> extract_scales = (0.000001, 0.000001)
+uniform scale=1e25 -> extract_scales = (0.000001, 0.000001)
+uniform scale=1.7976931348623157e308 -> extract_scales = (0.000001, 0.000001)
+non-uniform scale_x=1e19, scale_y=1.0 -> extract_scales = (inf, 0.000001)
+non-uniform scale_x=1.9e19, scale_y=1.0 -> extract_scales = (inf, 0.000001)
+non-uniform scale_x=5e19, scale_y=1.0 -> extract_scales = (inf, 0.000001)
+non-uniform scale_x=1e20, scale_y=1.0 -> extract_scales = (inf, 0.000001)
+non-uniform scale_x=1e25, scale_y=1.0 -> extract_scales = (inf, 0.000001)
+
+(Note: a pure *uniform* scale transform that overflows f32 produces scale_x=scale_y=1e-6, not
+inf - because s1-s2 becomes inf-inf=NaN for a uniform scale, and f32::max(NaN, 1e-6) absorbs the
+NaN into the floor (this is candidate 019's already-confirmed, separate bug). A *non-uniform*
+scale (huge on one axis only) avoids that cancellation and genuinely produces scale_x=inf, which
+is this candidate's target.)
+
+--- GaussianBlur::new(inf-derived scaled_std_dev) hang, direct call, BEFORE fix (3 runs) ---
+$ cargo run --release   (run 1)
+uniform_scale = inf
+scaled_std_dev = inf
+calling GaussianBlur::new with scaled_std_dev (this should hang if the bug is real)...
+TIMEOUT after 5s: GaussianBlur::new never returned (thread abandoned, process will exit)
+
+$ cargo run --release   (run 2)
+TIMEOUT after 5s: GaussianBlur::new never returned (thread abandoned, process will exit)
+
+$ cargo run --release   (run 3)
+TIMEOUT after 5s: GaussianBlur::new never returned (thread abandoned, process will exit)
+
+=== Approach 2: real end-to-end repro via vello_cpu's public RenderContext API ===
+(standalone probe2 crate: RenderContext::new + set_transform + push_filter_layer(Filter::
+from_function(FilterFunction::Blur)) + fill_rect + pop_layer + render, release build)
+
+--- BEFORE fix (pristine code), 3 runs, each times out ---
+$ cargo run --release   (run 1)
+DEBUG transform_blur_params: transform=Affine([1e19, 0.0, 0.0, 1.0, 0.0, 0.0]) scale_x=inf scale_y=0.000001
+TIMEOUT after 10s: RenderContext::render() never returned (thread abandoned)
+
+$ cargo run --release   (run 2)
+DEBUG transform_blur_params: transform=Affine([1e19, 0.0, 0.0, 1.0, 0.0, 0.0]) scale_x=inf scale_y=0.000001
+TIMEOUT after 10s: RenderContext::render() never returned (thread abandoned)
+
+$ cargo run --release   (run 3)
+DEBUG transform_blur_params: transform=Affine([1e19, 0.0, 0.0, 1.0, 0.0, 0.0]) scale_x=inf scale_y=0.000001
+TIMEOUT after 10s: RenderContext::render() never returned (thread abandoned)
+
+(The `DEBUG transform_blur_params: ...` line came from a temporary one-line eprintln added to
+`transform_blur_params` purely to confirm the real render() call path actually reaches it with
+scale_x=inf; it was removed again before the fix was written, and is not part of patch.diff.)
+
+=== Applying the fix (patch.diff) and re-verifying ===
+
+--- Approach 1 re-run AFTER fix, varying the input within the same class (CONFIRMATION.md
+    section 7): vector A (this candidate's transform-driven overflow), vector B (a directly
+    huge std_deviation with no transform involved - the sibling vector noted by candidate 033),
+    plus two sanity checks that legitimate blurs still work correctly ---
+$ cargo run --release
+vector A (transform-driven inf): returned after 20.090452ms
+vector B (direct huge std_deviation): returned after 20.079291ms
+  sanity: n_decimations=10, kernel_size=13
+sanity (finite large scale): returned after 20.086304ms
+  sanity: n_decimations=0, kernel_size=13
+sanity (ordinary blur): returned after 20.090943ms
+
+(Both pathological vectors now return in ~20ms instead of hanging, and both legitimate cases -
+a real large-but-finite transform scale, and an ordinary small blur - still produce a real,
+non-identity kernel, i.e. the fix does not just silently disable blurring in general.)
+
+--- Approach 2 re-run AFTER fix, 3 runs, real vello_cpu RenderContext::render() ---
+$ cargo run --release   (run 1)
+render() RETURNED after 6.175868ms
+$ cargo run --release   (run 2)
+render() RETURNED after 5.902389ms
+$ cargo run --release   (run 3)
+render() RETURNED after 5.860491ms
+
+=== Project test suite (cargo test -p vello_common --release) ===
+
+BEFORE fix (pristine):
+test result: ok. 159 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+AFTER fix (patched):
+test result: ok. 159 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+No regressions; no new failures.
+
+=== `just test` against a genuinely fresh clone (this candidate's own justfile/repro/) ===
+
+$ just clone
+[...clones https://github.com/linebender/vello.git, checks out 7516831426fb70f36d62c521c5477f6a7265b36a...]
+HEAD is now at 75168314 Remove some Vello-Classic-specific info from the root README (#1698)
+
+$ just reproduce-before
+   Compiling repro v0.1.0 (.../078.../repro)
+    Finished `release` profile [optimized] target(s) in 19.06s
+     Running `target/release/repro`
+HANG: RenderContext::render() did not return within 10s (bug reproduced)
+
+$ just apply
+cd clone && git apply ".../078.../patch.diff"
+
+$ just reproduce-after
+   Compiling vello_common v0.2.0 (.../078.../clone/sparse_strips/vello_common)
+    Finished `release` profile [optimized] target(s) in 13.39s
+     Running `target/release/repro`
+OK: RenderContext::render() returned after 50.102238ms (bug not present / fixed)

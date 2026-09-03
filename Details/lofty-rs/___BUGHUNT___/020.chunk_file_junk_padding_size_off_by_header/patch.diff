@@ -1,0 +1,28 @@
+diff --git a/lofty/src/id3/v2/write/chunk_file.rs b/lofty/src/id3/v2/write/chunk_file.rs
+index 3a813d56..65bd3114 100644
+--- a/lofty/src/id3/v2/write/chunk_file.rs
++++ b/lofty/src/id3/v2/write/chunk_file.rs
+@@ -133,14 +133,21 @@ where
+ 			// - `IFF_CHUNK_HEADER_SIZE`, since we need at least `IFF_CHUNK_HEADER_SIZE` bytes to
+ 			// write a `JUNK` chunk
+ 			if (existing_tag_len - u64::from(IFF_CHUNK_HEADER_SIZE)) >= tag_chunk_size {
++				// The freed-up space (`remainder`) includes the `JUNK` chunk's own 8-byte header,
++				// so its declared (content-only) size must have that subtracted back out, or the
++				// `JUNK` chunk will claim to extend `IFF_CHUNK_HEADER_SIZE` bytes past the end of
++				// the old tag's region, corrupting whatever real chunk follows it on disk.
+ 				let remainder = existing_tag_len - tag_chunk_size;
+-				log::trace!("Existing tag large enough to overwrite (padding size: {remainder})");
++				let junk_content_size = remainder - u64::from(IFF_CHUNK_HEADER_SIZE);
++				log::trace!(
++					"Existing tag large enough to overwrite (padding size: {junk_content_size})"
++				);
+ 
+ 				file.seek(SeekFrom::Start(existing_id3_tag.start))?;
+ 				write_id3v2_chunk::<_, B>(tag, write_options, &mut file)?;
+ 
+ 				file.write_all(&JUNK_CHUNK_NAME)?;
+-				file.write_u32::<B>(remainder as u32)?;
++				file.write_u32::<B>(junk_content_size as u32)?;
+ 				return Ok(());
+ 			}
+ 		}

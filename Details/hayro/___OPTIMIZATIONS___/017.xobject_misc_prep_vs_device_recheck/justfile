@@ -1,0 +1,32 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate is a MEASUREMENT/characterization, not a source-code performance fix (same as
+# candidate 011): the patch only adds temporary Instant+AtomicU64 instrumentation (reused from
+# candidates 007/010/011's ../_reference/ diffs, verbatim) plus one new example
+# (`hayro/examples/bench_ops_reference.rs`) that prints the decomposed `xobject_misc` breakdown.
+# No permanent source change is being proposed here - see RESULT.md.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone at the pinned commit, apply the instrumentation, build, run the breakdown
+# against both test PDFs in this folder's testdata/.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Prints the full operator-bucket time breakdown (see RESULT.md for how to read it) against both
+# test PDFs, taskset-pinned for low noise. Override iteration count with `just bench 200`.
+bench iterations="40":
+    cd clone && cargo build --release --example bench_ops_reference -p hayro
+    taskset -c 2 ./clone/target/release/examples/bench_ops_reference "{{justfile_directory()}}/testdata/tile_clamp_bug.pdf" {{iterations}}
+    taskset -c 2 ./clone/target/release/examples/bench_ops_reference "{{justfile_directory()}}/testdata/animated-distributions.pdf" {{iterations}}
+
+clean:
+    rm -rf clone

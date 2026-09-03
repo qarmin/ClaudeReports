@@ -1,0 +1,46 @@
+# Self-contained reproduction for candidate 025 (simd_saturating_sub_min_negation_overflow).
+#
+# Unlike a typical `cargo run` repro, the thing under test is a compiler backend, not a library -
+# so "run the repro" means "compile a small Rust source file through the real backend
+# (`y.sh rustc`, wrapping `rustc -Zcodegen-backend=...`) and run the resulting binary", following
+# the same pattern as candidates 004/018 in this workspace.
+
+repo_url := "https://github.com/rust-lang/rustc_codegen_gcc.git"
+base_commit := "4cd7da5f9a5d9509b34ac0a766424ccdae706d33"
+
+test: clone build reproduce-before apply rebuild reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r repro clone/repro
+
+# One-time setup: downloads a prebuilt libgccjit.so and builds the sysroot (core/alloc/std).
+# ~2-3 minutes on a modern multi-core machine, per this workspace's own README.md.
+build:
+    echo 'download-gccjit = true' > clone/config.toml
+    cd clone && ./y.sh prepare
+    cd clone && ./y.sh build --sysroot --release
+
+# Compile+run the repro against the pristine (unpatched) backend - the `saturating_sub` mismatch
+# assertion should fail (panic, exit 101).
+reproduce-before:
+    ulimit -c 0
+    cd clone && CHANNEL=release ./y.sh rustc repro/simd_saturating_sub.rs -o /tmp/satsub_before
+    /tmp/satsub_before
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+rebuild:
+    cd clone && CHANNEL=release ./y.sh build --release
+
+# Same repro again, now against the patched backend - should exit 0 with no output.
+reproduce-after:
+    ulimit -c 0
+    cd clone && CHANNEL=release ./y.sh rustc repro/simd_saturating_sub.rs -o /tmp/satsub_after
+    /tmp/satsub_after
+
+clean:
+    rm -rf clone

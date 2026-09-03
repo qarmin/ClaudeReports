@@ -1,0 +1,101 @@
+import { CheckBox, Palette, ScrollView } from "std-widgets.slint";
+import { AddButtons, Logic } from "shared.slint";
+
+// Like the `TextEdit` widget, but it also exposes the cursor/anchor offsets so
+// the number of selected lines can be computed.
+component TextArea inherits Rectangle {
+    in property <TextWrap> wrap <=> ti.wrap;
+    in property <length> font-size <=> ti.font-size;
+    in property <string> font-family <=> ti.font-family;
+    in-out property <string> text <=> ti.text;
+    in-out property <length> scroll-y <=> sv.content-y;
+    out property <int> cursor-offset: ti.cursor-position-byte-offset;
+    out property <int> anchor-offset: ti.anchor-position-byte-offset;
+
+    background: Palette.control-background;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: Palette.border;
+    forward-focus: ti;
+
+    public function select-all() {
+        ti.select-all();
+    }
+
+    sv := ScrollView {
+        x: 8px;
+        y: 8px;
+        width: parent.width - 16px;
+        height: parent.height - 16px;
+        content-width: root.wrap == TextWrap.no-wrap ? max(self.visible-width, ti.preferred-width) : self.visible-width;
+        content-height: max(self.visible-height, ti.preferred-height);
+
+        ti := TextInput {
+            single-line: false;
+            wrap: no-wrap;
+            font-size: 13px;
+            color: Palette.foreground;
+            selection-background-color: Palette.selection-background;
+            selection-foreground-color: Palette.selection-foreground;
+            page-height: sv.visible-height;
+
+            cursor-position-changed(cpos) => {
+                if cpos.y + sv.content-y < 0px {
+                    sv.content-y = min(0px, max(sv.visible-height - self.height, -cpos.y));
+                } else if cpos.y + sv.content-y > sv.visible-height - 20px {
+                    // FIXME: font height hardcoded to 20px, same as in Slint's own TextEditBase
+                    sv.content-y = min(0px, max(sv.visible-height - self.height, sv.visible-height - cpos.y - 20px));
+                }
+                if cpos.x + sv.content-x < 0px {
+                    sv.content-x = min(0px, max(sv.visible-width - self.width, -cpos.x));
+                } else if cpos.x + sv.content-x > sv.visible-width {
+                    sv.content-x = min(0px, max(sv.visible-width - self.width, sv.visible-width - cpos.x));
+                }
+            }
+        }
+    }
+}
+
+export component TextModePage inherits VerticalLayout {
+    in-out property <string> text <=> ta.text;
+    in-out property <length> scroll-y <=> ta.scroll-y;
+    in-out property <bool> word-wrap <=> wrap-check.checked;
+
+    spacing: 6px;
+
+    HorizontalLayout {
+        spacing: 12px;
+
+        AddButtons {
+            add(count) => {
+                Logic.add-lines(count);
+            }
+            clear => {
+                Logic.clear-text();
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        wrap-check := CheckBox {
+            text: "word wrap";
+        }
+
+        mono-check := CheckBox {
+            text: "monospace";
+        }
+    }
+
+    ta := TextArea {
+        vertical-stretch: 1;
+        wrap: wrap-check.checked ? TextWrap.word-wrap : TextWrap.no-wrap;
+        font-family: mono-check.checked ? "monospace" : "";
+    }
+
+    Text {
+        text: Logic.selection-info(ta.text, ta.cursor-offset, ta.anchor-offset);
+        color: Palette.foreground;
+    }
+}

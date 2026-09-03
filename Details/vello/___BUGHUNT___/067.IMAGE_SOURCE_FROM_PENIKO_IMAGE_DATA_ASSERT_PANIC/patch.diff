@@ -1,0 +1,97 @@
+diff --git a/sparse_strips/vello_common/src/paint.rs b/sparse_strips/vello_common/src/paint.rs
+index 042697d1..768d4d44 100644
+--- a/sparse_strips/vello_common/src/paint.rs
++++ b/sparse_strips/vello_common/src/paint.rs
+@@ -158,17 +158,15 @@ impl ImageSource {
+     /// This is a somewhat lossy conversion, as the image data data is transformed to
+     /// [premultiplied RGBA8](`PremulRgba8`).
+     ///
+-    /// # Panics
+-    ///
+-    /// This panics if `image` has a `width` or `height` greater than `u16::MAX`.
+-    pub fn from_peniko_image_data(image: &peniko::ImageData) -> Self {
++    /// Returns `None` if `image` has a `width` or `height` greater than `u16::MAX`, since
++    /// `peniko::ImageData`'s dimensions (`u32`) can originate from untrusted, externally
++    /// decoded image data and may exceed what this crate's internal representation supports.
++    pub fn from_peniko_image_data(image: &peniko::ImageData) -> Option<Self> {
+         // TODO: how do we deal with `peniko::ImageFormat` growing? See also
+         // <https://github.com/linebender/vello/pull/996#discussion_r2080510863>.
+-        assert!(
+-            image.width <= u16::MAX as u32 && image.height <= u16::MAX as u32,
+-            "The image is too big. Its width and height can be no larger than {} pixels.",
+-            u16::MAX,
+-        );
++        if image.width > u16::MAX as u32 || image.height > u16::MAX as u32 {
++            return None;
++        }
+         let width = image.width.try_into().unwrap();
+         let height = image.height.try_into().unwrap();
+ 
+@@ -194,7 +192,7 @@ impl ImageSource {
+             PixelMetadata::new(image.alpha_type, true),
+         );
+ 
+-        Self::Pixmap(Arc::new(pixmap))
++        Some(Self::Pixmap(Arc::new(pixmap)))
+     }
+ }
+ 
+@@ -304,6 +302,7 @@ pub type PaintType = peniko::Brush<Image, Gradient>;
+ mod tests {
+     use super::ImageSource;
+     use alloc::sync::Arc;
++    use alloc::vec;
+ 
+     fn image_data(pixels: &[u8], alpha_type: peniko::ImageAlphaType) -> peniko::ImageData {
+         peniko::ImageData {
+@@ -321,18 +320,47 @@ mod tests {
+             &[10, 20, 30, 255, 40, 50, 60, 255],
+             peniko::ImageAlphaType::Alpha,
+         );
+-        assert!(!ImageSource::from_peniko_image_data(&opaque).may_have_transparency());
++        assert!(!ImageSource::from_peniko_image_data(&opaque).unwrap().may_have_transparency());
+ 
+         let translucent = image_data(
+             &[10, 20, 30, 255, 40, 50, 60, 128],
+             peniko::ImageAlphaType::Alpha,
+         );
+-        assert!(ImageSource::from_peniko_image_data(&translucent).may_have_transparency());
++        assert!(
++            ImageSource::from_peniko_image_data(&translucent)
++                .unwrap()
++                .may_have_transparency()
++        );
+ 
+         let premultiplied = image_data(
+             &[10, 20, 30, 255, 40, 50, 60, 255],
+             peniko::ImageAlphaType::AlphaPremultiplied,
+         );
+-        assert!(ImageSource::from_peniko_image_data(&premultiplied).may_have_transparency());
++        assert!(
++            ImageSource::from_peniko_image_data(&premultiplied)
++                .unwrap()
++                .may_have_transparency()
++        );
++    }
++
++    #[test]
++    fn from_peniko_image_data_rejects_oversized_dimensions() {
++        let width_too_big = peniko::ImageData {
++            data: peniko::Blob::new(Arc::new(vec![0_u8; 4])),
++            format: peniko::ImageFormat::Rgba8,
++            alpha_type: peniko::ImageAlphaType::Alpha,
++            width: u32::from(u16::MAX) + 1,
++            height: 1,
++        };
++        assert!(ImageSource::from_peniko_image_data(&width_too_big).is_none());
++
++        let height_too_big = peniko::ImageData {
++            data: peniko::Blob::new(Arc::new(vec![0_u8; 4])),
++            format: peniko::ImageFormat::Rgba8,
++            alpha_type: peniko::ImageAlphaType::Alpha,
++            width: 1,
++            height: u32::from(u16::MAX) + 1,
++        };
++        assert!(ImageSource::from_peniko_image_data(&height_too_big).is_none());
+     }
+ }

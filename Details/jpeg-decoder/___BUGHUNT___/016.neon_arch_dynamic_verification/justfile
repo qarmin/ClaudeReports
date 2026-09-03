@@ -1,0 +1,35 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate found no bug (Not reproducible) - there is no patch.diff, so the "apply"/
+# "reproduce-after" steps that a Confirmed candidate's justfile would have are omitted. `just test`
+# here means "run the dynamic-verification harness against the pristine repo" - it is the same
+# harness this candidate used to close the dynamic-coverage gap candidate 013 left open for
+# src/arch/neon.rs.
+#
+# Requirements on the machine running this (beyond a normal Rust toolchain):
+#   - a nightly Rust toolchain with the aarch64-unknown-linux-musl target and the llvm-tools
+#     component (`rustup target add aarch64-unknown-linux-musl && rustup component add llvm-tools-preview`)
+#   - qemu-aarch64 (qemu-user-static's aarch64 usermode emulator) on PATH
+# No external aarch64 cross-gcc/cross-linker is needed - the cross build below links statically
+# against musl using rustc's own self-contained rust-lld + bundled musl CRT objects.
+
+repo_url := "https://github.com/image-rs/jpeg-decoder.git"
+base_commit := "eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# repro/'s own Cargo.toml depends on jpeg-decoder via a `git`+`rev` dependency pinned to
+# base_commit (not a path into ./clone) - so this recipe works identically whether or not `clone`
+# was ever run; `clone` above exists only so a reader can inspect the exact source this candidate
+# investigated, mirroring the other candidates' justfile shape.
+reproduce-before:
+    cd repro && RUSTFLAGS="-C link-self-contained=yes -C linker-flavor=ld.lld -C linker=rust-lld" cargo +nightly build --release --target aarch64-unknown-linux-musl
+    qemu-aarch64 repro/target/aarch64-unknown-linux-musl/release/neon-dynamic-verification-repro
+
+clean:
+    rm -rf clone repro/target

@@ -1,0 +1,41 @@
+=== BEFORE (pristine tree, base_commit ac975f5d) - debug build, 1 of 3 identical runs ===
+wrote DNG with oversized ActiveArea to "/tmp/bughunt_007_activearea.dng"
+
+thread 'main' (75859) panicked at /home/rafal/Projekty/Obce/dnglab/rawler/src/imgop/mod.rs:166:26:
+attempt to subtract with overflow
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:80:14
+   2: core::panicking::panic_const::panic_const_sub_overflow
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:175:17
+   3: <rawler::imgop::Rect>::as_ltrb_offsets
+             at /home/rafal/Projekty/Obce/dnglab/rawler/src/imgop/mod.rs:166:26
+   4: <rawler::decoders::dng::DngDecoder>::get_active_area
+             at /home/rafal/Projekty/Obce/dnglab/rawler/src/decoders/dng.rs:376:38
+   5: <rawler::decoders::dng::DngDecoder>::make_camera
+             at /home/rafal/Projekty/Obce/dnglab/rawler/src/decoders/dng.rs:247:28
+   6: <rawler::decoders::dng::DngDecoder as rawler::decoders::Decoder>::raw_metadata
+             at /home/rafal/Projekty/Obce/dnglab/rawler/src/decoders/dng.rs:84:24
+   7: repro::main
+             at ./src/main.rs:62:19
+(reproduced identically 3/3 debug runs)
+
+This is the exact same panic location/mechanism as the independently, real-user-reported GitHub
+issue #582 ("Panic `attempt to subtract with overflow` in `src/imgop/mod.rs`", still open):
+that issue's own backtrace shows the identical call chain
+`Rect::as_ltrb_offsets -> DngDecoder::get_active_area -> DngDecoder::make_camera -> raw_metadata`,
+on a real user-supplied DNG file rather than this hand-built one.
+
+=== BEFORE, release build (same input) ===
+wrote DNG with oversized ActiveArea to "/tmp/bughunt_007_activearea.dng"
+raw_metadata returned Ok (bug not present)
+(release does NOT crash - overflow-checks=false lets the subtraction silently wrap to a huge
+usize value instead of panicking; that wrapped value is then stored as part of the camera's
+active-area border data with no further validation - not independently confirmed this session
+whether anything downstream misuses it, see RESULT.md "What's not done")
+
+=== AFTER (patch.diff applied) - same oversized-ActiveArea DNG, debug build ===
+wrote DNG with oversized ActiveArea to "/tmp/bughunt_007_activearea.dng"
+raw_metadata returned Ok (bug not present)

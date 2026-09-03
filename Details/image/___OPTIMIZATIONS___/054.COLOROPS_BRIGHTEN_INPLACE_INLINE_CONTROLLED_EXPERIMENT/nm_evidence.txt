@@ -1,0 +1,32 @@
+Symbol presence for brighten_in_place<ImageBuffer<Rgb<u8>, Vec<u8>>> / contrast_in_place<...> across the
+four bench binaries built and measured for this candidate. "no symbol" = fully inlined into the bench's
+call site; "symbol present" = not inlined (its own standalone function in the binary).
+
+  baseline (unpatched colorops.rs, unpatched loop)
+    brighten_in_place  : no symbol   (inlined)
+    contrast_in_place  : symbol present (NOT inlined, even in the unmodified baseline)
+    invert             : no symbol   (inlined)
+    huerotate_in_place : no symbol   (inlined)
+
+  fastpath (candidate 003's to_pixel_view_mut fast path, unannotated, both functions)
+    brighten_in_place  : symbol present (regression - matches candidate 003's finding)
+    contrast_in_place  : symbol present (regression/wash - was already not inlined in baseline)
+
+  fastpath_inline_always (fast path + #[inline(always)] on both functions)
+    brighten_in_place  : no symbol   (inlining recovered -> becomes a win, not just neutral)
+    contrast_in_place  : no symbol   (inlining recovered, but timing STILL regresses ~7-8%)
+
+  baseline_noinline (isolating control: ORIGINAL get_pixel/put_pixel loop, #[inline(never)] only,
+                      no fast-path code change at all)
+    brighten_in_place  : symbol present (forced non-inline alone reproduces an even LARGER
+                          regression, ~47%, than the fast path's ~21% - confirms inlining loss is
+                          the dominant mechanism, not the fast-path loop body)
+    contrast_in_place  : symbol present (already was non-inlined in plain baseline; forcing
+                          #[inline(never)] here changes essentially nothing, ~0-2%, within noise -
+                          confirms contrast_in_place's baseline never had an inlining
+                          opportunity to lose in the first place)
+
+  scoped_brighten_fix (this candidate's actual patch.diff: fast path + #[inline(always)] on
+                        brighten_in_place ONLY, contrast_in_place left untouched)
+    brighten_in_place  : no symbol   (inlined, matches baseline's own inlining status)
+    contrast_in_place  : symbol present (unmodified, same as baseline)

@@ -1,0 +1,54 @@
+import { Palette } from "std-widgets.slint";
+
+// A grid of `Image` items, all visible. Nothing else here measures the image path: decoding is
+// done once in Rust, so what this scene isolates is what the *renderer* does per image item -
+// scaling, caching of the scaled result, and whether sharing one source between items helps.
+export component ImageModePage inherits Rectangle {
+    in property <int> count;
+    in property <image> shared-source;
+    // One distinct source per item instead of one shared by all, to separate the per-item cost
+    // from the per-source cost (a renderer that caches by source would show a large gap).
+    in property <[image]> sources;
+    in property <bool> distinct;
+    in property <ImageFit> fit: ImageFit.fill;
+    // Scale the item away from the source's natural size, so the renderer cannot blit 1:1.
+    in property <bool> rescale;
+    // Repeat-tile the source with a crop smaller than the full image, the femtovg
+    // `draw_image_impl` branch that used to create, blit into and schedule the deletion of a
+    // temporary GPU texture on every single frame regardless of whether anything changed
+    // (candidate FEMTOVG_TILED_9SLICE_TEXTURE_PER_FRAME). Plain `Repeat`/`Round` tiling without a
+    // source crop does not reach that branch (the clip rect equals the full source), so the crop
+    // is required to actually exercise it.
+    in property <bool> tiling;
+    in-out property <length> scroll-y;
+
+    // Drawn size of each item. The per-pixel work in the renderer scales with this, so a small
+    // cell measures per-item overhead and a large one measures the blend loop.
+    in property <length> cell-width: 68px;
+    in property <length> cell-height: 52px;
+    property <int> columns: max(1, floor(self.width / self.cell-width));
+
+    clip: true;
+
+    for index in root.count: Image {
+        property <image> img: root.distinct && root.sources.length > 0
+            ? root.sources[mod(index, root.sources.length)]
+            : root.shared-source;
+        x: mod(index, root.columns) * root.cell-width;
+        y: floor(index / root.columns) * root.cell-height + mod(root.scroll-y, root.cell-height);
+        width: root.cell-width - 4px + (root.rescale ? 7px : 0px);
+        height: root.cell-height - 4px + (root.rescale ? 5px : 0px);
+        image-fit: root.fit;
+        source: self.img;
+        horizontal-tiling: root.tiling ? ImageTiling.repeat : ImageTiling.none;
+        vertical-tiling: root.tiling ? ImageTiling.repeat : ImageTiling.none;
+        // A crop smaller than the full source is required to reach the branch: plain
+        // `Repeat`/`Round` tiling over the whole source has a clip rect equal to the full
+        // image and never takes the temporary-texture path. When not tiling, crop to the
+        // full source so this has no effect (the default source-clip is the identity crop).
+        source-clip-x: root.tiling ? 8 : 0;
+        source-clip-y: root.tiling ? 8 : 0;
+        source-clip-width: root.tiling ? 40 : self.img.width;
+        source-clip-height: root.tiling ? 32 : self.img.height;
+    }
+}

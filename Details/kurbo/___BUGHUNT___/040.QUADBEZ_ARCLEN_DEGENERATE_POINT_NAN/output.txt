@@ -1,0 +1,57 @@
+=== BEFORE (pristine clone at ca273499e3e48bd2de6f02aa8e99a148984e45f3, patch not applied) ===
+$ cd repro && cargo run --release
+    Finished `release` profile [optimized] target(s) in 0.00s
+     Running `target/release/repro040`
+degenerate QuadBez::arclen(1e-6) = NaN
+origin-degenerate arclen = NaN
+negative-degenerate arclen = NaN
+BezPath::perimeter with one degenerate QuadTo = NaN
+BezPath::area (should stay correct/finite) = 100
+QuadSpline::to_quads() quad 0 arclen = 7.0710678118654755
+QuadSpline::to_quads() quad 1 arclen = NaN
+QuadSpline::to_quads() quad 2 arclen = 7.0710678118654755
+REPRODUCED - NaN observed from QuadBez::arclen on a degenerate segment
+exit 1
+
+(repeated 4 times total across this session - candidate loop's own worktree run plus 3 more direct
+runs of this exact repro binary - identical NaN output and exit code 1 every time; this is a pure
+deterministic floating-point computation with no randomness/seed involved, so bit-for-bit
+repeatability is expected and observed.)
+
+=== AFTER (same clone, patch.diff applied: `if a < 5e-4 * c` -> `if a < 5e-4 * c || a == 0.0`) ===
+$ cd clone && git apply ../patch.diff
+$ cd repro && cargo run --release
+   Compiling kurbo v0.13.1 (.../clone/kurbo)
+   Compiling repro040 v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 0.66s
+     Running `target/release/repro040`
+degenerate QuadBez::arclen(1e-6) = 0.000000000000001902194134104502
+origin-degenerate arclen = 0
+negative-degenerate arclen = 0.0000000000000029598842165996035
+BezPath::perimeter with one degenerate QuadTo = 40
+BezPath::area (should stay correct/finite) = 100
+QuadSpline::to_quads() quad 0 arclen = 7.0710678118654755
+QuadSpline::to_quads() quad 1 arclen = 0.0000000000000025121479338940403
+QuadSpline::to_quads() quad 2 arclen = 7.0710678118654755
+did not reproduce - no NaN in any of the above
+exit 0
+
+All previously-NaN values now come out as (correctly) ~0 or the correct finite arclen/perimeter,
+with only floating-point noise on the order of 1e-15 to 1e-16 remaining (matching the same
+Legendre-Gauss-quadrature fallback branch's usual precision for near-straight segments) - not
+exactly bit-identical 0.0, but far below any meaningful tolerance and no longer NaN.
+
+=== Project test suite (kurbo package), before and after the patch ===
+Before (pristine):
+running 187 tests
+test result: ok. 187 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+running 55 tests
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+After (patched):
+running 187 tests
+test result: ok. 187 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+running 55 tests
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+(Identical pass counts before and after - 187 unit tests + 55 doctests, 0 failures either way.)

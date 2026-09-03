@@ -1,0 +1,283 @@
+diff --git a/benches/imageops.rs b/benches/imageops.rs
+index d1b33ebe..df1692cb 100644
+--- a/benches/imageops.rs
++++ b/benches/imageops.rs
+@@ -123,5 +123,29 @@ pub fn bench_resize(c: &mut Criterion) {
+     }
+ }
+ 
+-criterion_group!(benches, bench_imageops, bench_resize);
++pub fn bench_thumbnail(c: &mut Criterion) {
++    // 4032x3024 (12MP) matches the source size used elsewhere in this repo's
++    // `___OPTIMIZATIONS___` sessions to profile decode/resize, so results are comparable.
++    let src = ImageBuffer::from_fn(4032, 3024, |x, y| {
++        Rgb([x as u8, (y / 8) as u8, ((x * 13 + y) % 256) as u8])
++    });
++
++    c.bench_function("thumbnail downscale 4032x3024 -> 200x150", |b| {
++        b.iter(|| imageops::thumbnail(&src, 200, 150));
++    });
++
++    // Small source enlarged to a much bigger target: every output pixel's window is fully
++    // inside a fractional (sub-pixel) span in both axes, so this routes essentially every
++    // output pixel through `thumbnail_sample_fraction_both` rather than the block-averaging
++    // path `bench_thumbnail`'s downscale case exercises.
++    let small_src = ImageBuffer::from_fn(200, 150, |x, y| {
++        Rgb([x as u8, (y / 2) as u8, ((x * 13 + y) % 256) as u8])
++    });
++
++    c.bench_function("thumbnail upscale 200x150 -> 4032x3024", |b| {
++        b.iter(|| imageops::thumbnail(&small_src, 4032, 3024));
++    });
++}
++
++criterion_group!(benches, bench_imageops, bench_resize, bench_thumbnail);
+ criterion_main!(benches);
+diff --git a/src/imageops/sample.rs b/src/imageops/sample.rs
+index 25864cac..b92579eb 100644
+--- a/src/imageops/sample.rs
++++ b/src/imageops/sample.rs
+@@ -608,6 +608,20 @@ where
+         return out;
+     }
+ 
++    // Fast path: if the source exposes a canonical packed-pixel view (true for the common
++    // `ImageBuffer<P, Vec<S>>` case), all four helpers below can read source pixels directly
++    // through slice indexing instead of `get_pixel`'s per-call bounds checks and trait dispatch.
++    let pix_stride = <P as Pixel>::CHANNEL_COUNT as usize;
++    let fast_view: Option<(&[S], usize)> = image.to_pixel_view().and_then(|view| {
++        let (sw, row_stride) = view.strides_wh();
++        if sw == pix_stride {
++            let samples: &[S] = view.samples();
++            Some((samples, row_stride))
++        } else {
++            None
++        }
++    });
++
+     let x_ratio = width as f32 / new_width as f32;
+     let y_ratio = height as f32 / new_height as f32;
+ 
+@@ -626,7 +640,7 @@ where
+             let right = clamp(rightf.ceil() as u32, left, width);
+ 
+             let avg = if bottom != top && left != right {
+-                thumbnail_sample_block(image, left, right, bottom, top)
++                thumbnail_sample_block(image, fast_view, left, right, bottom, top)
+             } else if bottom != top {
+                 // && left == right
+                 // In the first column we have left == 0 and right > ceil(y_scale) > 0 so this
+@@ -639,6 +653,7 @@ where
+                 let fraction_horizontal = (leftf.fract() + rightf.fract()) / 2.;
+                 thumbnail_sample_fraction_horizontal(
+                     image,
++                    fast_view,
+                     right - 1,
+                     fraction_horizontal,
+                     bottom,
+@@ -654,7 +669,14 @@ where
+                 );
+ 
+                 let fraction_vertical = (topf.fract() + bottomf.fract()) / 2.;
+-                thumbnail_sample_fraction_vertical(image, left, right, top - 1, fraction_vertical)
++                thumbnail_sample_fraction_vertical(
++                    image,
++                    fast_view,
++                    left,
++                    right,
++                    top - 1,
++                    fraction_vertical,
++                )
+             } else {
+                 // bottom == top && left == right
+                 let fraction_horizontal = (topf.fract() + bottomf.fract()) / 2.;
+@@ -662,6 +684,7 @@ where
+ 
+                 thumbnail_sample_fraction_both(
+                     image,
++                    fast_view,
+                     right - 1,
+                     fraction_horizontal,
+                     top - 1,
+@@ -677,7 +700,14 @@ where
+ }
+ 
+ /// Get a pixel for a thumbnail where the input window encloses at least a full pixel.
+-fn thumbnail_sample_block<I, P, S>(image: &I, left: u32, right: u32, bottom: u32, top: u32) -> P
++fn thumbnail_sample_block<I, P, S>(
++    image: &I,
++    fast_view: Option<(&[S], usize)>,
++    left: u32,
++    right: u32,
++    bottom: u32,
++    top: u32,
++) -> P
+ where
+     I: GenericImageView<Pixel = P>,
+     P: Pixel<Subpixel = S>,
+@@ -704,6 +734,7 @@ where
+             for x in (left..right).step_by(STEP_SIZE as usize) {
+                 let k = thumbnail_sample_block(
+                     image,
++                    fast_view,
+                     x,
+                     x.saturating_add(STEP_SIZE).min(right),
+                     y,
+@@ -714,6 +745,22 @@ where
+         }
+ 
+         ((right - left) as u64 / STEP_SIZE as u64) * ((top - bottom) as u64 / STEP_SIZE as u64)
++    } else if let Some((samples, row_stride)) = fast_view {
++        // standard case where all pixels are summed directly, reading straight from the
++        // source's packed-pixel view instead of through `get_pixel`'s trait dispatch.
++        let pix_stride = <P as Pixel>::CHANNEL_COUNT as usize;
++        let row_len = (right - left) as usize * pix_stride;
++        for y in bottom..top {
++            let row_start = y as usize * row_stride + left as usize * pix_stride;
++            let row = &samples[row_start..row_start + row_len];
++            for px in row.chunks_exact(pix_stride) {
++                for (s, &c) in sum.0.iter_mut().zip(px) {
++                    *s += ThumbnailSum::<S>::sample_val(c);
++                }
++            }
++        }
++
++        pixel_count
+     } else {
+         // standard case where all pixels are summed directly
+         for y in bottom..top {
+@@ -744,6 +791,7 @@ where
+ /// Get a thumbnail pixel where the input window encloses at least a vertical pixel.
+ fn thumbnail_sample_fraction_horizontal<I, P, S>(
+     image: &I,
++    fast_view: Option<(&[S], usize)>,
+     left: u32,
+     fraction_horizontal: f32,
+     bottom: u32,
+@@ -758,12 +806,30 @@ where
+ 
+     let mut sum_left = ThumbnailSum::zeroed();
+     let mut sum_right = ThumbnailSum::zeroed();
+-    for x in bottom..top {
+-        let k_left = image.get_pixel(left, x);
+-        sum_left.add_pixel(k_left);
++    if let Some((samples, row_stride)) = fast_view {
++        let pix_stride = <P as Pixel>::CHANNEL_COUNT as usize;
++        let left_off = left as usize * pix_stride;
++        for y in bottom..top {
++            let row_start = y as usize * row_stride;
++            let px_left = &samples[row_start + left_off..row_start + left_off + pix_stride];
++            for (s, &c) in sum_left.0.iter_mut().zip(px_left) {
++                *s += ThumbnailSum::<S>::sample_val(c);
++            }
++
++            let px_right =
++                &samples[row_start + left_off + pix_stride..row_start + left_off + 2 * pix_stride];
++            for (s, &c) in sum_right.0.iter_mut().zip(px_right) {
++                *s += ThumbnailSum::<S>::sample_val(c);
++            }
++        }
++    } else {
++        for x in bottom..top {
++            let k_left = image.get_pixel(left, x);
++            sum_left.add_pixel(k_left);
+ 
+-        let k_right = image.get_pixel(left + 1, x);
+-        sum_right.add_pixel(k_right);
++            let k_right = image.get_pixel(left + 1, x);
++            sum_right.add_pixel(k_right);
++        }
+     }
+ 
+     // Now we approximate: left/n*(1-fract) + right/n*fract
+@@ -791,6 +857,7 @@ where
+ /// Get a thumbnail pixel where the input window encloses at least a horizontal pixel.
+ fn thumbnail_sample_fraction_vertical<I, P, S>(
+     image: &I,
++    fast_view: Option<(&[S], usize)>,
+     left: u32,
+     right: u32,
+     bottom: u32,
+@@ -805,12 +872,30 @@ where
+ 
+     let mut sum_bot = ThumbnailSum::zeroed();
+     let mut sum_top = ThumbnailSum::zeroed();
+-    for x in left..right {
+-        let k_bot = image.get_pixel(x, bottom);
+-        sum_bot.add_pixel(k_bot);
++    if let Some((samples, row_stride)) = fast_view {
++        let pix_stride = <P as Pixel>::CHANNEL_COUNT as usize;
++        let bot_row_start = bottom as usize * row_stride;
++        let top_row_start = (bottom + 1) as usize * row_stride;
++        for x in left..right {
++            let off = x as usize * pix_stride;
++            let px_bot = &samples[bot_row_start + off..bot_row_start + off + pix_stride];
++            for (s, &c) in sum_bot.0.iter_mut().zip(px_bot) {
++                *s += ThumbnailSum::<S>::sample_val(c);
++            }
+ 
+-        let k_top = image.get_pixel(x, bottom + 1);
+-        sum_top.add_pixel(k_top);
++            let px_top = &samples[top_row_start + off..top_row_start + off + pix_stride];
++            for (s, &c) in sum_top.0.iter_mut().zip(px_top) {
++                *s += ThumbnailSum::<S>::sample_val(c);
++            }
++        }
++    } else {
++        for x in left..right {
++            let k_bot = image.get_pixel(x, bottom);
++            sum_bot.add_pixel(k_bot);
++
++            let k_top = image.get_pixel(x, bottom + 1);
++            sum_top.add_pixel(k_top);
++        }
+     }
+ 
+     // Now we approximate: bot/n*fract + top/n*(1-fract)
+@@ -838,6 +923,7 @@ where
+ /// Get a single pixel for a thumbnail where the input window does not enclose any full pixel.
+ fn thumbnail_sample_fraction_both<I, P, S>(
+     image: &I,
++    fast_view: Option<(&[S], usize)>,
+     left: u32,
+     fraction_vertical: f32,
+     bottom: u32,
+@@ -848,10 +934,34 @@ where
+     P: Pixel<Subpixel = S>,
+     S: Primitive + Enlargeable,
+ {
+-    let k_bl = image.get_pixel(left, bottom);
+-    let k_tl = image.get_pixel(left, bottom + 1);
+-    let k_br = image.get_pixel(left + 1, bottom);
+-    let k_tr = image.get_pixel(left + 1, bottom + 1);
++    let (k_bl, k_tl, k_br, k_tr) = if let Some((samples, row_stride)) = fast_view {
++        let pix_stride = <P as Pixel>::CHANNEL_COUNT as usize;
++        let bot_row_start = bottom as usize * row_stride;
++        let top_row_start = (bottom + 1) as usize * row_stride;
++        let left_off = left as usize * pix_stride;
++        let right_off = (left + 1) as usize * pix_stride;
++
++        let bl = *<P as Pixel>::from_slice(
++            &samples[bot_row_start + left_off..bot_row_start + left_off + pix_stride],
++        );
++        let tl = *<P as Pixel>::from_slice(
++            &samples[top_row_start + left_off..top_row_start + left_off + pix_stride],
++        );
++        let br = *<P as Pixel>::from_slice(
++            &samples[bot_row_start + right_off..bot_row_start + right_off + pix_stride],
++        );
++        let tr = *<P as Pixel>::from_slice(
++            &samples[top_row_start + right_off..top_row_start + right_off + pix_stride],
++        );
++        (bl, tl, br, tr)
++    } else {
++        (
++            image.get_pixel(left, bottom),
++            image.get_pixel(left, bottom + 1),
++            image.get_pixel(left + 1, bottom),
++            image.get_pixel(left + 1, bottom + 1),
++        )
++    };
+ 
+     let frac_v = fraction_vertical;
+     let frac_h = fraction_horizontal;

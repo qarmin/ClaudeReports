@@ -1,0 +1,260 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 378b39e1..2af16524 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -100,9 +100,7 @@ tiff = ["dep:tiff"]
+ webp = ["dep:image-webp"]
+ 
+ # Other features
+-# TODO: add pic-scale-safe rayon in the next breaking release,
+-# see https://github.com/image-rs/image/pull/2639#discussion_r2508356543
+-rayon = ["dep:rayon", "ravif?/threading", "exr?/rayon"] # Enables multi-threading
++rayon = ["dep:rayon", "ravif?/threading", "exr?/rayon", "pic-scale-safe/rayon"] # Enables multi-threading
+ nasm = ["ravif?/asm"] # Enables use of nasm by rav1e (requires nasm to be installed)
+ color_quant = ["dep:color_quant"] # Enables color quantization
+ avif-native = ["dep:mp4parse", "dep:dav1d"] # Enable native dependency libdav1d
+diff --git a/benches/imageops.rs b/benches/imageops.rs
+index d1b33ebe..f6121549 100644
+--- a/benches/imageops.rs
++++ b/benches/imageops.rs
+@@ -1,6 +1,6 @@
+ use std::{hint::black_box, time::Duration};
+ 
+-use criterion::{criterion_group, criterion_main, Criterion};
++use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+ use image::{
+     imageops::{self, FilterType},
+     math::Rect,
+@@ -123,5 +123,60 @@ pub fn bench_resize(c: &mut Criterion) {
+     }
+ }
+ 
+-criterion_group!(benches, bench_imageops, bench_resize);
++// Unlike `bench_resize` above (which calls the standalone `imageops::resize` free function, a
++// separate, older implementation that never touches pic-scale-safe), this exercises
++// `DynamicImage::resize_exact`, which delegates to the `pic-scale-safe` crate
++// (see `src/imageops/resize.rs`) - the code path affected by the `rayon` feature forwarding.
++// Two output sizes are compared: a large one (400x300, plenty of parallel work per prior
++// measurement) and a small one (64x48, closer to an icon/thumbnail output) to check whether
++// pic-scale-safe's unconditional `par_chunks_exact`/`par_chunks_exact_mut` dispatch (no minimum
++// row-count gate) costs more in thread-pool dispatch overhead than it saves at a small size.
++pub fn bench_resize_dynamic(c: &mut Criterion) {
++    let src = ImageBuffer::from_fn(4032, 3024, |x, y| {
++        // "random" pixel values
++        Rgb([x as u8, (y / 8) as u8, ((x * 13 + y) % 256) as u8])
++    });
++    let src_dyn = DynamicImage::from(src);
++
++    let mut group = c.benchmark_group("dynamic_resize");
++    let c = group.warm_up_time(Duration::from_secs(1)).sample_size(10);
++
++    for (w, h) in [(400u32, 300u32), (64, 48)] {
++        for filter in [FilterType::Lanczos3, FilterType::Triangle] {
++            c.bench_function(
++                &format!("DynamicImage::resize_exact 4032x3024->{w}x{h} {filter:?}"),
++                |b| {
++                    b.iter_batched(
++                        || src_dyn.clone(),
++                        |mut img| img.resize_exact(w, h, filter),
++                        BatchSize::LargeInput,
++                    );
++                },
++            );
++        }
++    }
++
++    // A small-source case: unlike the 4032x3024->64x48 case above (still a large amount of total
++    // convolution work because the horizontal pass scans every one of the 3024 source rows
++    // regardless of output height), this represents a small image being downscaled to an icon,
++    // where the *total* work is small enough that thread-dispatch overhead might dominate.
++    let small_src = ImageBuffer::from_fn(400, 300, |x, y| {
++        Rgb([x as u8, (y / 8) as u8, ((x * 13 + y) % 256) as u8])
++    });
++    let small_src_dyn = DynamicImage::from(small_src);
++    for filter in [FilterType::Lanczos3, FilterType::Triangle] {
++        c.bench_function(
++            &format!("DynamicImage::resize_exact 400x300->32x24 {filter:?}"),
++            |b| {
++                b.iter_batched(
++                    || small_src_dyn.clone(),
++                    |mut img| img.resize_exact(32, 24, filter),
++                    BatchSize::LargeInput,
++                );
++            },
++        );
++    }
++}
++
++criterion_group!(benches, bench_imageops, bench_resize, bench_resize_dynamic);
+ criterion_main!(benches);
+diff --git a/src/imageops/resize.rs b/src/imageops/resize.rs
+index 73219b7f..77b9a1f4 100644
+--- a/src/imageops/resize.rs
++++ b/src/imageops/resize.rs
+@@ -10,6 +10,48 @@ use std::ops::{AddAssign, BitXor};
+ use crate::{imageops::FilterType, DynamicImage, ImageBuffer, Pixel};
+ use pic_scale_safe::ResamplingFunction;
+ 
++/// Below this many source pixels, pic-scale-safe's internal `rayon` fan-out
++/// (`par_chunks_exact`/`par_chunks_exact_mut`, gated purely at compile time by its own `rayon`
++/// feature, with no minimum-size gate of its own) costs more in thread-dispatch overhead than it
++/// saves - but only for cheap-kernel filters (`Nearest`, `Bilinear` i.e. `FilterType::Triangle`);
++/// wider kernels like `Lanczos3`/`CatmullRom`/`Gaussian` have enough per-row work even at this
++/// size that the default multi-threaded path is still a net win there. See
++/// `___OPTIMIZATIONS___/024.FILTER_AWARE_PIC_SCALE_SAFE_RAYON_CAPPED_THREAD_COUNT` for the
++/// measurement this is based on (combines candidate 022's filter-aware gate with candidate 023's
++/// capped-not-single thread count).
++#[cfg(feature = "rayon")]
++const SMALL_RESIZE_SOURCE_PIXEL_THRESHOLD: usize = 500_000;
++
++/// Runs `f` on a cached, capped-size (`num_threads(4)`) rayon pool when `alg` is a cheap-kernel
++/// filter and the source is below the small-resize threshold, instead of letting pic-scale-safe's
++/// internal `par_chunks_exact`/`par_chunks_exact_mut` fan out across the (possibly large, e.g.
++/// 24-thread) global pool - same output, cheaper dispatch for small cheap resizes, without
++/// touching pic-scale-safe's own source. Every other filter/size combination is left on the
++/// default (global pool) path unconditionally.
++#[cfg(feature = "rayon")]
++fn run_resize<T: Send>(source_pixels: usize, alg: ResamplingFunction, f: impl FnOnce() -> T + Send) -> T {
++    use std::sync::OnceLock;
++    static SMALL_RESIZE_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
++
++    let cheap_kernel = matches!(alg, ResamplingFunction::Bilinear | ResamplingFunction::Nearest);
++    if cheap_kernel && source_pixels < SMALL_RESIZE_SOURCE_PIXEL_THRESHOLD {
++        let pool = SMALL_RESIZE_POOL.get_or_init(|| {
++            rayon::ThreadPoolBuilder::new()
++                .num_threads(4)
++                .build()
++                .expect("failed to build capped-thread pool")
++        });
++        pool.install(f)
++    } else {
++        f()
++    }
++}
++
++#[cfg(not(feature = "rayon"))]
++fn run_resize<T>(_source_pixels: usize, _alg: ResamplingFunction, f: impl FnOnce() -> T) -> T {
++    f()
++}
++
+ pub(crate) fn resize_impl(
+     image: &mut DynamicImage,
+     dst_width: u32,
+@@ -23,6 +65,7 @@ pub(crate) fn resize_impl(
+     let alg = algorithm; // otherwise rustfmt breaks up too-long-lines and the formatting is a mess
+     let src_size = ImageSize::new(image.width() as usize, image.height() as usize);
+     let dst_size = ImageSize::new(dst_width as usize, dst_height as usize);
++    let source_pixels = src_size.width * src_size.height;
+ 
+     // Premultiply the image by alpha channel to avoid color bleed from fully transparent pixels.
+     let mut premultiplied_by_alpha = false;
+@@ -35,56 +78,59 @@ pub(crate) fn resize_impl(
+ 
+     use pic_scale_safe::*;
+     use DynamicImage::*;
+-    let mut resized = match image {
+-        ImageLuma8(src) => {
+-            let resized = resize_plane8(src.subpixels(), src_size, dst_size, alg)?;
+-            ImageLuma8(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
+-        }
+-        ImageLumaA8(src) => {
+-            let resized = resize_plane8_with_alpha(src.subpixels(), src_size, dst_size, alg)?;
+-            ImageLumaA8(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
+-        }
+-        ImageRgb8(src) => {
+-            let resized = resize_rgb8(src.subpixels(), src_size, dst_size, alg)?;
+-            ImageRgb8(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
+-        }
+-        ImageRgba8(src) => {
+-            let resized = resize_rgba8(src.subpixels(), src_size, dst_size, alg)?;
+-            ImageRgba8(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
+-        }
+-        ImageLuma16(src) => {
+-            let resized = resize_plane16(src.subpixels(), src_size, dst_size, 16, alg)?;
+-            ImageLuma16(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
+-        }
+-        ImageLumaA16(src) => {
+-            let resized = resize_plane16_with_alpha(src.subpixels(), src_size, dst_size, 16, alg)?;
+-            ImageLumaA16(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
+-        }
+-        ImageRgb16(src) => {
+-            let resized = resize_rgb16(src.subpixels(), src_size, dst_size, 16, alg)?;
+-            ImageRgb16(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
+-        }
+-        ImageRgba16(src) => {
+-            let resized = resize_rgba16(src.subpixels(), src_size, dst_size, 16, alg)?;
+-            ImageRgba16(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
+-        }
+-        ImageLuma32F(src) => {
+-            let resized = resize_plane_f32(src.as_raw(), src_size, dst_size, alg)?;
+-            ImageLuma32F(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
+-        }
+-        ImageLumaA32F(src) => {
+-            let resized = resize_luma_alpha_f32(src.as_raw(), src_size, dst_size, alg)?;
+-            ImageLumaA32F(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
+-        }
+-        ImageRgb32F(src) => {
+-            let resized = resize_rgb_f32(src.subpixels(), src_size, dst_size, alg)?;
+-            ImageRgb32F(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
+-        }
+-        ImageRgba32F(src) => {
+-            let resized = resize_rgba_f32(src.subpixels(), src_size, dst_size, alg)?;
+-            ImageRgba32F(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
+-        }
+-    };
++    let image_ref: &mut DynamicImage = &mut *image;
++    let mut resized = run_resize(source_pixels, alg, move || -> Result<DynamicImage, String> {
++        Ok(match image_ref {
++            ImageLuma8(src) => {
++                let resized = resize_plane8(src.subpixels(), src_size, dst_size, alg)?;
++                ImageLuma8(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
++            }
++            ImageLumaA8(src) => {
++                let resized = resize_plane8_with_alpha(src.subpixels(), src_size, dst_size, alg)?;
++                ImageLumaA8(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
++            }
++            ImageRgb8(src) => {
++                let resized = resize_rgb8(src.subpixels(), src_size, dst_size, alg)?;
++                ImageRgb8(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
++            }
++            ImageRgba8(src) => {
++                let resized = resize_rgba8(src.subpixels(), src_size, dst_size, alg)?;
++                ImageRgba8(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
++            }
++            ImageLuma16(src) => {
++                let resized = resize_plane16(src.subpixels(), src_size, dst_size, 16, alg)?;
++                ImageLuma16(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
++            }
++            ImageLumaA16(src) => {
++                let resized = resize_plane16_with_alpha(src.subpixels(), src_size, dst_size, 16, alg)?;
++                ImageLumaA16(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
++            }
++            ImageRgb16(src) => {
++                let resized = resize_rgb16(src.subpixels(), src_size, dst_size, 16, alg)?;
++                ImageRgb16(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
++            }
++            ImageRgba16(src) => {
++                let resized = resize_rgba16(src.subpixels(), src_size, dst_size, 16, alg)?;
++                ImageRgba16(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
++            }
++            ImageLuma32F(src) => {
++                let resized = resize_plane_f32(src.as_raw(), src_size, dst_size, alg)?;
++                ImageLuma32F(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
++            }
++            ImageLumaA32F(src) => {
++                let resized = resize_luma_alpha_f32(src.as_raw(), src_size, dst_size, alg)?;
++                ImageLumaA32F(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
++            }
++            ImageRgb32F(src) => {
++                let resized = resize_rgb_f32(src.subpixels(), src_size, dst_size, alg)?;
++                ImageRgb32F(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
++            }
++            ImageRgba32F(src) => {
++                let resized = resize_rgba_f32(src.subpixels(), src_size, dst_size, alg)?;
++                ImageRgba32F(ImageBuffer::from_raw(dst_width, dst_height, resized).unwrap())
++            }
++        })
++    })?;
+     if premultiplied_by_alpha {
+         unpremultiply_alpha(&mut resized);
+     }

@@ -1,0 +1,62 @@
+# Self-contained reproduction for this candidate.
+#
+# This is a consolidation, not a new fix: patch.diff here is candidates 007
+# (Xlsx/Xlsb::worksheet_range_ref via Range::from_sparse_dense_hint), 011 (Xls's own
+# DenseRangeBuilder), and 013 (Xlsx/Xlsb::worksheet_formula reusing from_sparse_dense_hint)
+# combined into one diff against the same base_commit those three were each independently
+# measured against. All three touch disjoint call sites (src/xls.rs; src/xlsx/mod.rs +
+# src/xlsb/mod.rs's worksheet_range_ref; src/xlsx/mod.rs + src/xlsb/mod.rs's worksheet_formula)
+# and share only the from_sparse_dense_hint()/MAX_DENSE_RANGE_CELLS additions in src/lib.rs -
+# the only merge conflict when combining the three original patch.diffs was each one
+# independently re-adding that same shared lib.rs addition (each was authored against a clean,
+# unpatched base per this workflow's "always revert" rule) - resolved by keeping one copy.
+#
+# Uses the `rss_probe` harness from ../harness/rss_probe (untracked in the main calamine repo -
+# see ../README.md), which already has the `range` and `formula` modes candidates 007/011/013
+# each used individually - self-contained given the whole ___OPTIMIZATIONS___ folder kept
+# together. The formula fixture is generated fresh from candidate 013's own script.
+
+repo_url := "https://github.com/tafia/calamine.git"
+base_commit := "5c02e86e99ec5c1fb1dcc15e64c2bbaf19bff60d"
+harness_dir := "../harness/rss_probe"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/rss_probe
+    mkdir -p testdata
+    curl -sL -o testdata/big_300k_rows.xlsx https://test-files.sheetjs.com/8-by-300000-cells.xlsx
+    cp clone/tests/adhocallbabynames1996to2016.xls testdata/
+    python3 "{{justfile_directory()}}/../013.xlsx_xlsb_worksheet_formula_dense_hint_reuse/scripts/gen_formula_xlsx.py" 300000 8 testdata/big_formula.xlsx
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_baseline
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_patched
+
+bench:
+    @echo "=== baseline: worksheet_range() on big_300k_rows.xlsx (2.4M cells) ==="
+    ./rss_probe_baseline range testdata/big_300k_rows.xlsx
+    @echo "=== patched: same file (expect ~22% lower peak_rss_kb, identical sig/cells) ==="
+    ./rss_probe_patched range testdata/big_300k_rows.xlsx
+    @echo "=== baseline: worksheet_range() on adhocallbabynames1996to2016.xls (1.47M cells) ==="
+    ./rss_probe_baseline range testdata/adhocallbabynames1996to2016.xls
+    @echo "=== patched: same file (expect ~6% lower peak_rss_kb, identical sig/cells) ==="
+    ./rss_probe_patched range testdata/adhocallbabynames1996to2016.xls
+    @echo "=== baseline: worksheet_formula() on synthetic big_formula.xlsx (2.4M cells) ==="
+    ./rss_probe_baseline formula testdata/big_formula.xlsx
+    @echo "=== patched: same file (expect ~35% lower peak_rss_kb, identical sig/cells) ==="
+    ./rss_probe_patched formula testdata/big_formula.xlsx
+
+clean:
+    rm -rf clone rss_probe_baseline rss_probe_patched testdata

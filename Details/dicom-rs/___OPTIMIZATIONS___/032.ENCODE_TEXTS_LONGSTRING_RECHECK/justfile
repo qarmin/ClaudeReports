@@ -1,0 +1,65 @@
+# Self-contained reproduction for this candidate.
+#
+# Shape 3 (see templates/candidate_justfile): this project's own bench harness
+# (bench_pipeline) is untracked in the main dicom-rs repo (built by this skill itself across
+# many candidates - see ../README.md), so a fresh `git clone` of repo_url will never contain
+# it. This candidate is self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept
+# together (harness/ sibling directory required), not as a single isolated subfolder.
+#
+# patch.diff here is candidate 024's own patch (ENCODE_TEXTS_SINGLE_VALUE_FASTPATH), applied
+# unchanged - this candidate only re-measures it against much longer per-element string
+# fixtures via a harness-only gen-seq extension (str-len argument), not a new library patch.
+
+# base_commit is upstream/master's tip (this session's HEAD is detached there), NOT reachable
+# from a plain clone of origin (qarmin/dicom-rs.git) - origin's own master branch is stale (sits
+# at an old PR #525, while base_commit is PR #821). Confirmed by testing `just test` for real:
+# cloning origin and checking out base_commit failed ("unable to read tree") even though the
+# commit technically exists in origin's object store (fetchable by exact SHA, just not reachable
+# from any advertised ref on a plain clone). Using the upstream URL instead, matching every other
+# candidate's justfile in this workspace (001-031 all already use this same upstream URL, not
+# origin - confirmed by grep, so this is standing workspace convention, not a new fix).
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+harness_dir := "../harness/bench_pipeline"
+
+test: clone build-baseline apply build-patched genfixtures bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/bench_pipeline
+    rm -rf clone/___OPTIMIZATIONS___/harness/bench_pipeline/target
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_baseline
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/bench_pipeline && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/bench_pipeline/target/release/bench ./bin_patched
+
+genfixtures:
+    ./bin_baseline gen-seq testdata_300.dcm 10000 300
+    ./bin_baseline gen-seq testdata_1000.dcm 10000 1000
+
+bench:
+    @echo "=== baseline (before patch), write-only, 300B strings ==="
+    ./bin_baseline write-only testdata_300.dcm 50
+    @echo "=== patched (after patch), write-only, 300B strings ==="
+    ./bin_patched write-only testdata_300.dcm 50
+    @echo "=== baseline (before patch), write-only, 1000B strings ==="
+    ./bin_baseline write-only testdata_1000.dcm 50
+    @echo "=== patched (after patch), write-only, 1000B strings ==="
+    ./bin_patched write-only testdata_1000.dcm 50
+    @echo "=== baseline (before patch), roundtrip, 1000B strings ==="
+    ./bin_baseline roundtrip testdata_1000.dcm 50
+    @echo "=== patched (after patch), roundtrip, 1000B strings ==="
+    ./bin_patched roundtrip testdata_1000.dcm 50
+
+clean:
+    rm -rf clone bin_baseline bin_patched testdata_300.dcm testdata_1000.dcm

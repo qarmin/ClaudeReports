@@ -1,0 +1,91 @@
+=== BEFORE (pristine clone at ca273499e3e48bd2de6f02aa8e99a148984e45f3, no patch) ===
+$ cd repro && cargo run --release
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.00s
+     Running `target/release/repro`
+source valid x domain: [0, 0.44538671619481685]
+path control point x range: [-0.41091848490187266, 0.44538671619481685]
+accuracy = 0.000546361731294232
+escape beyond valid x domain: 0.41091848490187266
+REPRODUCED - a control point escaped the source curve's own valid x-domain by 0.41091848490187266 units (accuracy=0.000546361731294232)
+exit code: 1
+
+(repeated 2 more times, same clone, no rebuild between runs - bit-for-bit identical output and
+exit code all 3 runs; pure floating-point computation, no RNG/threading/layout dependence)
+
+=== AFTER (same clone, patch.diff applied) ===
+$ git apply patch.diff && cd repro && cargo run --release
+   Compiling kurbo v0.13.1 (.../clone/kurbo)
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.00s
+     Running `target/release/repro`
+source valid x domain: [0, 0.44538671619481685]
+path control point x range: [0, 0.44538671619481685]
+accuracy = 0.000546361731294232
+escape beyond valid x domain: 0
+did not reproduce - every control point stayed within the source curve's valid x-domain
+exit code: 0
+
+(repeated 2 more times after the first build - bit-for-bit identical output and exit code all 3
+runs)
+
+=== Root-cause instrumentation (temporary eprintln in fit_to_cubic's candidate loop, reverted
+before finalizing this candidate; not part of patch.diff) ===
+Run against a tree with candidate 008's and candidate 026's own patches pre-applied (to confirm
+this is a genuinely new instance, not a re-discovery of theirs), FIT_DEBUG=1 env var gating the
+print:
+
+cand range=0.0..1.0 accuracy=0.000546361731294232 d0=0 d1=1.9226104787848035 raw_err2=0.00000000038363984785496385 scaled_err2=0.000000004821812583749947 acc2=0.00000029851114142283054 spicy=false c=CubicBez { p0: (0.0, -0.0004406797675318165), p1: (0.0, -0.0004406797675318165), p2: (-0.41091848490187266, -0.0015586344920156094), p3: (0.44538671619481685, 0.0007842586359006357) }
+
+Only one candidate was generated for the whole [0,1] range and it was accepted immediately (no
+subdivision at all): d1 = 1.9226 chord-lengths - comfortably under both candidate 009's
+MAX_ARM_LEN = 10.0 and candidate 026's tighter MAX_ARM_LEN = 3.0 - and spicy = false, meaning
+`CurveDist::eval_dist` used only the cheap, one-sided `eval_ray` metric (the arc-length-based
+`eval_arc` cross-check was never invoked, because `spicy` reflects only the *source* curve's own
+tangent variation, not the candidate's). The reported error (raw_err2 ~= 3.8e-16, scaled_err2 ~=
+4.8e-9) is many orders of magnitude below acc2 (~2.99e-7), despite the candidate's own control
+point p2 = (-0.411, ...) sitting almost entirely outside the source curve's valid x in [0,
+0.445].
+
+=== Fuzzing that found this (kurbo/examples/fuzz045.rs, deleted from the worktree before
+finalizing; not part of patch.diff) ===
+$ FUZZ_ITERS=200000 ./target/release/examples/fuzz045
+...
+BAD_FIT seed_i=172491 cy=[0.017306602397907378, 0.13699463927825561, 0.014254470589270405, -0.002177413923525759, -0.027743653056815473] xscale=0.44538671619481685 amp=0.008977177264776565 accuracy=0.000546361731294232 pt=(-0.09842109231385016, -0.0007067954887841823) dist=0.09842145208148735
+...
+done: 200000 iterations, 30 failures
+
+(against a tree with candidates 008/026's own patches pre-applied; the harness generates random
+smooth degree-4-polynomial `ParamCurveFit` sources - see RESULT.md for why polylines alone, as
+used by 009/026's own fuzzing, do not exercise this code path - and checks the returned path
+against a refined (coarse-sample + local ternary-search) nearest-point oracle against the true
+source curve. An earlier, less careful version of this harness produced many spurious "BAD_FIT"
+reports from oracle under-resolution on its own randomly-generated curves - see RESULT.md's "What
+was tried" for how that was diagnosed and corrected before trusting any of these results.)
+
+=== Fix verified against the broader property-fuzz harness, not just the one triggering seed ===
+$ FUZZ_ITERS=200000 ./target/release/examples/fuzz045   # patch.diff applied
+done: 200000 iterations, 0 failures
+(real 0m26.462s - confirms the fix does not reintroduce the ~5x per-iteration slowdown seen when
+testing the `long_arm` mechanism alone, without also raising `MAX_ARM_LEN` back to 10.0 as a
+performance bound - see RESULT.md)
+
+=== Sanity check: existing polyline-sourced property fuzz (same shape as candidate 026's own
+harness, kurbo/examples/fuzz045_poly.rs, deleted before finalizing) still passes/fails identically
+with and without this candidate's patch - no regression, no improvement (a separate, already-
+smaller-magnitude residual noted in RESULT.md's "What's not done") ===
+$ FUZZ_ITERS=150000 ./target/release/examples/fuzz045_poly   # before this candidate's patch (008/026 only)
+done: 150000 iterations, 14 failures
+$ FUZZ_ITERS=150000 ./target/release/examples/fuzz045_poly   # after this candidate's patch (008/026 + this candidate)
+done: 150000 iterations, 14 failures
+(same 14 seeds, same escape magnitudes, in both runs)
+
+=== Project test suite, run in this worktree (cargo test --workspace) ===
+Before patch.diff:
+  kurbo lib tests:      187 passed / 0 failed
+  polycool lib tests:    10 passed / 0 failed
+  combined doctests:     55 passed / 0 failed (1 ignored, pre-existing/unrelated)
+After patch.diff (same worktree, patch applied):
+  kurbo lib tests:      187 passed / 0 failed
+  polycool lib tests:    10 passed / 0 failed
+  combined doctests:     55 passed / 0 failed (1 ignored)
+Identical counts before/after - no regressions, no new failures.

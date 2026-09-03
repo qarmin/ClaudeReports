@@ -1,0 +1,43 @@
+# Self-contained reproduction for this candidate.
+#
+# Re-measures candidate 006's Data::String -> Arc<str> patch (copied verbatim into this folder's
+# own patch.diff) against a large, real-format-shaped XLSB fixture built for this candidate - see
+# testdata/FIXTURE_NOTES.md for how/why it was built rather than downloaded.
+#
+# Uses the `rss_probe` harness from ../harness/rss_probe (untracked in the main calamine repo -
+# see ../README.md). Self-contained given the whole ___OPTIMIZATIONS___ folder kept together.
+
+repo_url := "https://github.com/tafia/calamine.git"
+base_commit := "5c02e86e99ec5c1fb1dcc15e64c2bbaf19bff60d"
+harness_dir := "../harness/rss_probe"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/___OPTIMIZATIONS___/harness
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/___OPTIMIZATIONS___/harness/rss_probe
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_baseline
+
+build-patched:
+    cd clone/___OPTIMIZATIONS___/harness/rss_probe && cargo build --release
+    cp clone/___OPTIMIZATIONS___/harness/rss_probe/target/release/rss_probe ./rss_probe_patched
+
+bench:
+    @echo "=== baseline: XLSB real-shaped file (watch peak_rss_kb: expect ~no change) ==="
+    ./rss_probe_baseline range testdata/big_300k_rows.xlsb
+    @echo "=== patched: XLSB real-shaped file (expect ~no peak change, small wall-clock win) ==="
+    ./rss_probe_patched range testdata/big_300k_rows.xlsb
+    @echo ""
+    @echo "=== run each a few times and compare elapsed_ms / peak_rss_kb / sig for a real signal ==="
+
+clean:
+    rm -rf clone rss_probe_baseline rss_probe_patched

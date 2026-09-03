@@ -1,0 +1,52 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./repro/clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g. attached
+# to a GitHub issue) and `just test` still works, with no dependency on the main project checkout
+# this candidate was originally found in.
+
+repo_url := "https://github.com/awxkee/pic-scale.git"
+base_commit := "7eec7cfde2aed58a1606a48b5c7bd084536f9624"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's (mostly) gone.
+# reproduce-before is expected to exit 1 (bug present in both WorkloadStrategy variants, both
+# AVX2 and SSE) - prefixed with `-` so the chain continues on to apply/reproduce-after instead of
+# stopping there. reproduce-after is ALSO expected to exit 1 (still "REPRODUCED") - see the
+# reproduce-after recipe's own comment for why that's the correct, documented outcome here, not a
+# failed fix.
+test: clone
+    -just reproduce-before
+    just apply
+    -just reproduce-after
+
+clone:
+    rm -rf repro/clone
+    git clone {{repo_url}} repro/clone
+    cd repro/clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug (nonzero
+# exit, "REPRODUCED" printed, 10/10 (strategy, seed) combinations hit the +/-1-off-by-exactly-one,
+# alpha-channel-untouched signature).
+reproduce-before:
+    cd repro && ./compare.sh
+
+apply:
+    cd repro/clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone. Only PARTIALLY fixed by design (see
+# RESULT.md's "What's not done"): WorkloadStrategy::PreferQuality (both AVX2 and SSE) becomes
+# bit-exact (0/5 "quality" combinations reproduce) but WorkloadStrategy::PreferSpeed - this
+# crate's own default - keeps reproducing on AVX2 (5/5 "speed" combinations still show the
+# signature; SSE ignores WorkloadStrategy entirely and is fixed either way), because
+# `Avx2DisassociateAlphaFast`'s fixed-point Q16 mulhi-based algorithm has its own, structurally
+# different, larger rounding error that this candidate's fix does not address (a full fix there
+# would mean replacing that whole algorithm, not a one-line-shape patch - out of scope, see
+# RESULT.md). Overall exit code is still 1 ("REPRODUCED") after the fix for this reason - read
+# the per-(strategy,seed) lines, not just the final exit code, to see the AVX2-PreferQuality/SSE
+# rows go from "REPRODUCED" to "clean" while AVX2-PreferSpeed rows stay "REPRODUCED".
+reproduce-after:
+    cd repro && ./compare.sh
+
+clean:
+    rm -rf repro/clone repro/simd/target repro/scalar/target repro/sse/target

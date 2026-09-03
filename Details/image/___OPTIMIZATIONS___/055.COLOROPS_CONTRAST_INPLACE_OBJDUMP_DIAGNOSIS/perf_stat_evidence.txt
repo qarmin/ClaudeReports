@@ -1,0 +1,73 @@
+All runs `taskset -c 3`, this session (2026-08-29). perf actually usable this session
+(`/proc/sys/kernel/perf_event_paranoid` = -1) - see projects/image.md update.
+
+=== criterion bench binaries (--bench contrast_in_place --exact --warm-up-time 1 --measurement-time 2) ===
+
+baseline_bin (unpatched get_pixel/put_pixel loop):
+  instructions            102907363872
+  cycles                   38725092829
+  branches                 19290991809
+  branch-misses              185038232
+  L1-dcache-load-misses      191656666
+  L1-dcache-loads           22484628057
+  criterion time: [8.3763 ms 8.3855 ms 8.3952 ms]
+
+patched_bin (fast path + #[inline(always)]):
+  instructions             99252532670
+  cycles                   39529847607
+  branches                 17496169403
+  branch-misses              184111540
+  L1-dcache-load-misses      188753587
+  L1-dcache-loads           39893225891
+  criterion time: [8.9391 ms 8.9426 ms 8.9464 ms]  (+6.6% vs baseline, matches paired-run result)
+
+Note: fewer instructions AND fewer branches for patched, yet more cycles (lower IPC) and ~1.77x
+more L1-dcache-loads. L1-dcache-load-misses is essentially unchanged - the extra loads are L1
+HITS, not cache misses.
+
+=== standalone examples/_perfcheck_055.rs harness (no criterion overhead, 40 iters, taskset -c 3) ===
+
+perfcheck_baseline (unpatched):
+  instructions   6122952681
+  cycles         1753588606
+  branches       1153492377
+  branch-misses     1407398
+  L1-dcache-loads          454621169   (~11.4M/iter)
+  L1-dcache-load-misses     12604162
+
+perfcheck_patched (fast path + #[inline(always)]):
+  instructions   5791051440
+  cycles         1901469231
+  branches       1070232528
+  branch-misses     2040174
+  L1-dcache-loads         2096880441   (~52.4M/iter, ~4.6x baseline)
+  L1-dcache-load-misses    12614647
+
+perfcheck_noinline (fast path, NO #[inline(always)] - candidate 003's exact patch):
+  instructions   5768800834
+  cycles         1831564659
+  branches       1072452296
+  L1-dcache-loads         2063904493   (~51.6M/iter - essentially identical to the
+                                        #[inline(always)] variant, confirms the extra loads
+                                        are NOT an inlining-context effect)
+  L1-dcache-load-misses    13042160
+
+perfcheck_chunksexact (fast path rewritten with safe `chunks_exact_mut` instead of
+`Pixel::pixels_from_channels_mut`'s raw-pointer cast, #[inline(always)] kept):
+  instructions   5851606802
+  cycles         1842200356
+  branches       1072410800
+  L1-dcache-loads         2068281410   (~51.7M/iter - same magnitude again, rules out the
+                                        raw-pointer-cast/alias-analysis hypothesis)
+  L1-dcache-load-misses    12988991
+
+=== paired wall-clock comparison, criterion bench binaries, this session ===
+
+contrast_in_place single-core (taskset -c 3), 8 pairs:
+  A(baseline) median 8.4096 ms, B(patched) median 8.9857 ms, ratio 1.069, B faster in 0/8 pairs
+
+contrast_in_place multi-core (unpinned), 6 pairs:
+  A(baseline) median 8.2798 ms, B(patched) median 8.7962 ms, ratio 1.062, B faster in 0/6 pairs
+
+Total: 0/14 pairs favor the patch, consistent with candidate 054's own finding (0/12 pairs,
++7-8%) in an earlier session on the same base commit.

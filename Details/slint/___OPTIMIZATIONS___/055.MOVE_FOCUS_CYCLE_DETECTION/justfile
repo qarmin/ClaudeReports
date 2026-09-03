@@ -1,0 +1,40 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/slint-ui/slint.git"
+base_commit := "cdb6c43f7ba9826cf0ec453d6e09c5a9a6975f25"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# No existing perf_test scene reaches this worst case: perf_test's own MainWindow chrome
+# (main.slint) always wraps every scene in a row of std-widgets Buttons, and those accept
+# keyboard focus within a handful of steps regardless of scene size - which hides the O(N^2)
+# cost entirely, since it never even reaches the large item array. `bench/` is a minimal
+# standalone scene with N plain Rectangles and nothing else focusable, built against this
+# clone. See ../README.md's "Instrumentation added for this workspace" for more.
+bench:
+    cd bench && cargo build --profile rdebug
+    @echo "Correctness: one Tab press must still find the FocusScope placed after N rectangles:"
+    ./bench/target/rdebug/focus_bench 2000 5 --check
+    @echo "Worst case timing (nothing in the scene is focusable, single Tab press repeated):"
+    for n in 2000 8000 32000 100000; do \
+        echo "-- count=$n --"; \
+        taskset -c 0 ./bench/target/rdebug/focus_bench $n 15; \
+    done
+
+clean:
+    rm -rf clone bench/target

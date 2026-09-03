@@ -1,0 +1,42 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# NOTE: requires the `gdcm` feature (native GDCM library bindings via the `gdcm-rs` crate),
+# which builds its own vendored C++ dependency from source via CMake - this can take longer
+# than the other candidates' repros on first build (cmake + a C++ compiler are required).
+#
+# NOTE: `reproduce-before`/`reproduce-after` intentionally use a plain (debug) `cargo run`,
+# not `--release` - the crash this candidate demonstrates is a debug assertion inside the
+# vendored GDCM C++ library, which only fires when GDCM itself is built without `NDEBUG`
+# (the `cmake` crate's default CMAKE_BUILD_TYPE for a debug Cargo profile). A `--release`
+# Cargo build would build GDCM in Release/NDEBUG mode instead, in which case the same root
+# cause (BitsAllocated=2048 truncating GDCM's internal pixel size to 0) manifests instead as
+# a silent, no-error `decode_pixel_data()` success whose declared dimensions don't match its
+# actual (empty) data buffer - see RESULT.md's "What was tried" table for that variant.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should abort (SIGABRT, exit
+# 134: bug reproduced).
+reproduce-before:
+    cd repro && cargo run; test "$?" -eq 134 && echo "(SIGABRT/exit 134 expected here: bug reproduced)"; true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Confirm the fix: repro now runs cleanly (exit 0, a graceful Err instead of an abort).
+reproduce-after:
+    cd repro && cargo run
+
+clean:
+    rm -rf clone

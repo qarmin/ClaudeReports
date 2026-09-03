@@ -1,0 +1,89 @@
+diff --git a/transfer-syntax-registry/src/adapters/jpegls.rs b/transfer-syntax-registry/src/adapters/jpegls.rs
+index 1fcf0496..bf00c29c 100644
+--- a/transfer-syntax-registry/src/adapters/jpegls.rs
++++ b/transfer-syntax-registry/src/adapters/jpegls.rs
+@@ -9,6 +9,75 @@ use dicom_encoding::adapters::{
+ };
+ use dicom_encoding::snafu::prelude::*;
+ 
++/// Reads a JPEG-LS codestream's own SOF55 (Start Of Frame) marker segment and computes the frame
++/// size it declares, without decoding anything - the same inputs (height, width, component count,
++/// bits per sample) that `charls`'s decoder uses to size its output buffer before it has validated
++/// any of the actual entropy-coded scan data that follows. Returns `None` if the marker can't be
++/// found or the stream is too short to safely read it; callers must not treat `None` as "the
++/// declared size is small" and skip validation - it only means this pre-check couldn't run, not
++/// that the real decoder's own header parsing will also fail.
++fn jpegls_declared_frame_size(data: &[u8]) -> Option<u64> {
++    const SOF55: u8 = 0xF7;
++    // markers with no following length field
++    const NO_LENGTH: [u8; 2] = [0xD8, 0xD9]; // SOI, EOI
++
++    let mut pos = 0usize;
++    while pos + 1 < data.len() {
++        if data[pos] != 0xFF {
++            pos += 1;
++            continue;
++        }
++        let marker = data[pos + 1];
++        pos += 2;
++        if NO_LENGTH.contains(&marker) || (0xD0..=0xD7).contains(&marker) || marker == 0x01 {
++            continue;
++        }
++        let seg_len = u16::from_be_bytes(*data.get(pos..pos + 2)?.first_chunk()?) as usize;
++        if seg_len < 2 {
++            return None;
++        }
++        let body = data.get(pos + 2..pos + seg_len)?;
++        if marker == SOF55 {
++            if body.len() < 6 {
++                return None;
++            }
++            let bits_per_sample = body[0] as u64;
++            let height = u16::from_be_bytes([body[1], body[2]]) as u64;
++            let width = u16::from_be_bytes([body[3], body[4]]) as u64;
++            let num_components = body[5] as u64;
++            let bytes_per_sample = bits_per_sample.div_ceil(8).max(1);
++            return height
++                .checked_mul(width)?
++                .checked_mul(num_components)?
++                .checked_mul(bytes_per_sample);
++        }
++        pos += seg_len - 2;
++    }
++    None
++}
++
++/// Rejects a JPEG-LS fragment whose own embedded frame header declares an output size wildly
++/// disproportionate to the actual fragment bytes available - guards against `charls`'s decoder
++/// aborting the whole process via an infallible allocation sized directly from that header,
++/// before it has decoded (or even validated) a single sample.
++fn check_declared_frame_size(frame_data: &[u8]) -> DecodeResult<()> {
++    const MIN_SUSPICIOUS_SIZE: u64 = 16 * 1024 * 1024;
++    const MAX_RATIO: u64 = 32;
++
++    if let Some(declared_size) = jpegls_declared_frame_size(frame_data) {
++        let actual_size = frame_data.len() as u64;
++        ensure_whatever!(
++            declared_size <= MIN_SUSPICIOUS_SIZE
++                || declared_size <= actual_size.saturating_mul(MAX_RATIO),
++            "JPEG-LS frame header declares an implausibly large frame ({} bytes) versus the \
++             encapsulated fragment size ({} bytes); refusing to decode",
++            declared_size,
++            actual_size
++        );
++    }
++    Ok(())
++}
++
+ /// Pixel data reader and writer for JPEG-LS transfer syntaxes.
+ #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+ pub struct JpegLsAdapter;
+@@ -40,6 +109,8 @@ impl PixelDataReader for JpegLsAdapter {
+             .frame_pixel_data(frame)
+             .context(decode_error::FrameRangeOutOfBoundsSnafu)?;
+ 
++        check_declared_frame_size(&frame_data)?;
++
+         let mut decoded = CharLS::default()
+             .decode(&frame_data)
+             .map_err(|error| error.to_string())

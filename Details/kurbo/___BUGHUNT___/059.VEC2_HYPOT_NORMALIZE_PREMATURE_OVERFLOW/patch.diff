@@ -1,0 +1,35 @@
+diff --git a/kurbo/src/vec2.rs b/kurbo/src/vec2.rs
+index 38aa2c2..51b427b 100644
+--- a/kurbo/src/vec2.rs
++++ b/kurbo/src/vec2.rs
+@@ -89,8 +89,28 @@ impl Vec2 {
+     /// ```
+     #[inline]
+     pub fn hypot(self) -> f64 {
+-        // Avoid f64::hypot as it calls a slow library function.
+-        self.hypot2().sqrt()
++        // Avoid f64::hypot as it calls a slow library function. Instead, scale
++        // by the larger component first so that squaring never overflows for
++        // any finite input that the true magnitude would still fit in an f64.
++        let x = self.x.abs();
++        let y = self.y.abs();
++        // `f64::max`/`min` ignore NaN, so infinities and NaNs need to be special-cased
++        // to match `f64::hypot`'s IEEE-754-derived behavior (infinite if either input is
++        // infinite, even if the other is NaN; NaN otherwise if either input is NaN).
++        if x.is_infinite() || y.is_infinite() {
++            return f64::INFINITY;
++        }
++        if x.is_nan() || y.is_nan() {
++            return f64::NAN;
++        }
++        let max = x.max(y);
++        let min = x.min(y);
++        if max == 0.0 {
++            0.0
++        } else {
++            let r = min / max;
++            max * r.mul_add(r, 1.0).sqrt()
++        }
+     }
+ 
+     /// Magnitude of vector.

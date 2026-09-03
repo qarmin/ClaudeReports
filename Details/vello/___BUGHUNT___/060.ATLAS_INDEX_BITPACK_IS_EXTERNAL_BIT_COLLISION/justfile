@@ -1,0 +1,41 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# This repro needs a real GPU adapter that reports more than 256 texture array layers (see
+# repro/src/main.rs's own assertion and comments, and ___BUGHUNT___/README.md's "GPU-based tests"
+# row for how this sandbox got one via SwiftShader's software Vulkan ICD). If no such adapter is
+# available in your environment, set VK_ICD_FILENAMES (or otherwise register a real/software
+# Vulkan ICD) before running `just test`.
+
+repo_url := "git@github.com:linebender/vello.git"
+base_commit := "7516831426fb70f36d62c521c5477f6a7265b36a"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug
+# (exit code 1, "REPRODUCED" printed, rendered pixel [0, 0, 0, 0] instead of [255, 0, 0, 255]).
+reproduce-before:
+    cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer demonstrate the bug: the
+# 257th atlas allocation now honestly fails with AtlasLimitReached (exit code 0, "did not
+# reproduce" printed) instead of silently corrupting the render.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone

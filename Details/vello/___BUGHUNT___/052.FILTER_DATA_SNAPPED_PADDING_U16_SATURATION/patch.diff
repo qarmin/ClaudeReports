@@ -1,0 +1,45 @@
+diff --git a/sparse_strips/vello_common/src/viewport.rs b/sparse_strips/vello_common/src/viewport.rs
+index 2096b393..71d98833 100644
+--- a/sparse_strips/vello_common/src/viewport.rs
++++ b/sparse_strips/vello_common/src/viewport.rs
+@@ -7,10 +7,23 @@ use crate::clip::{ClipState, PathDataRef};
+ use crate::filter::FilterData;
+ use crate::kurbo::{Affine, BezPath};
+ use crate::strip_generator::StripGenerator;
++use crate::tile::Tile;
+ use alloc::vec::Vec;
+ use fearless_simd::Level;
+ use peniko::Fill;
+ 
++/// Largest dimension that is safe to hand to `StripGenerator::new`: the previous multiple of
++/// `Tile::WIDTH`/`Tile::HEIGHT` below `u16::MAX`. `RectU16::snap_to_tile_coordinates` and
++/// `util::strip_bbox` round a rect's `x1`/`y1` up to the next tile multiple and convert back to
++/// pixels via `checked_mul(Tile::WIDTH).unwrap()`; a viewport whose width/height sits in
++/// `(MAX_SAFE_DIMENSION, u16::MAX]` has a partial last tile whose right/bottom edge would need to
++/// be represented as a value beyond `u16::MAX`, so drawing content that reaches into that partial
++/// tile panics. Clamping here keeps every root viewport (including a filter's own padded
++/// viewport, whose width/height derives from a filter's `FilterData::source_padding`, itself
++/// unbounded input scaled by an arbitrary transform - see `FilterData::new`) tile-aligned and
++/// within the range every other user of `RectU16`/tile arithmetic already assumes.
++const MAX_SAFE_DIMENSION: u16 = u16::MAX - (u16::MAX % Tile::WIDTH);
++
+ /// Viewport state storing information about clip state and active strip generators in
+ /// currently active root viewports.
+ #[derive(Debug)]
+@@ -91,12 +104,14 @@ impl ViewportState {
+             .strip_generator
+             .width()
+             .saturating_add(padding.left)
+-            .saturating_add(padding.right);
++            .saturating_add(padding.right)
++            .min(MAX_SAFE_DIMENSION);
+         let height = self
+             .strip_generator
+             .height()
+             .saturating_add(padding.top)
+-            .saturating_add(padding.bottom);
++            .saturating_add(padding.bottom)
++            .min(MAX_SAFE_DIMENSION);
+         // TODO: Use a pool of strip generators.
+         let filter_generator = StripGenerator::new(width, height, self.level);
+         let parent_generator = core::mem::replace(&mut self.strip_generator, filter_generator);

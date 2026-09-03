@@ -1,0 +1,64 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate is a measurement-only investigation - there is no patch.diff (no fix was made
+# to the tested project's own source; see RESULT.md's "The only two valid states" note). `just
+# test` instead reproduces both discovery measurements, each with its own minimal instrumentation
+# probe (kept separate so Q1's per-call eprintln! doesn't skew Q2's timing numbers):
+#
+#   Q1 (which 8x8 IDCT path runs): probe_q1_arch_detection.diff adds an eprintln! to both
+#      branches of src/arch/mod.rs's is_x86_feature_detected!("ssse3") check. Built against the
+#      canonical bench_decode harness unmodified (no --scale needed for this question).
+#
+#   Q2 (how much does reduced-size scalar IDCT cost, relative to total decode): probe_q2_idct_timing.diff
+#      adds AtomicU64 nanosecond/call-count accumulators in src/idct.rs (exposed via src/lib.rs)
+#      with no eprintln. Built against harness_scale_probe_main.rs, a full drop-in replacement for
+#      the canonical harness's main.rs (not a diff against it - the canonical harness has no
+#      --scale flag or probe-accessor calls at all, so a whole-file copy was simpler and more
+#      robust than a diff with brittle line-context).
+#
+# This candidate's harness copy-in makes it self-contained given the whole ___OPTIMIZATIONS___
+# folder (harness_dir below), not fully standalone with zero other setup - see
+# ___OPTIMIZATIONS___/README.md / SKILL.md's "Bench harnesses: grow a few, don't multiply" for why.
+
+repo_url := "https://github.com/image-rs/jpeg-decoder.git"
+base_commit := "eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c"
+harness_dir := "../harness/bench_decode"
+
+test: clone build bench
+
+clone:
+    rm -rf clone_q1 clone_q2
+    git clone {{repo_url}} clone_q1
+    cd clone_q1 && git checkout {{base_commit}}
+    git -C clone_q1 apply "{{justfile_directory()}}/probe_q1_arch_detection.diff"
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone_q1/bench_decode
+    sed -i 's#path = "\.\./\.\./\.\."#path = ".."#' clone_q1/bench_decode/Cargo.toml
+    git clone {{repo_url}} clone_q2
+    cd clone_q2 && git checkout {{base_commit}}
+    git -C clone_q2 apply "{{justfile_directory()}}/probe_q2_idct_timing.diff"
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone_q2/bench_decode
+    sed -i 's#path = "\.\./\.\./\.\."#path = ".."#' clone_q2/bench_decode/Cargo.toml
+    cp "{{justfile_directory()}}/harness_scale_probe_main.rs" clone_q2/bench_decode/src/main.rs
+
+build:
+    cd clone_q1/bench_decode && cargo +stable build --release
+    cp clone_q1/bench_decode/target/release/bench_decode ./bin_probe_q1
+    cd clone_q2/bench_decode && cargo +stable build --release
+    cp clone_q2/bench_decode/target/release/bench_decode ./bin_probe_q2
+
+bench:
+    @echo "=== Q1: which IDCT path runs? (stderr probe, 1 iter on tower.jpg, unique lines printed) ==="
+    ./bin_probe_q1 clone_q1/benches/tower.jpg 1 2>&1 >/dev/null | sort -u
+    @echo ""
+    @echo "=== Q2: full vs reduced-scale decode timing + IDCT-wrapper nanos, benches/large_image.jpg (2268x1512), 30 iters ==="
+    @echo "--- full (8/8, SIMD if available) ---"
+    ./bin_probe_q2 clone_q2/benches/large_image.jpg 30
+    @echo "--- 1/2 scale (4/8, scalar 4x4 IDCT) ---"
+    ./bin_probe_q2 clone_q2/benches/large_image.jpg 30 "" --scale 1134 756
+    @echo "--- 1/4 scale (2/8, scalar 2x2 IDCT) ---"
+    ./bin_probe_q2 clone_q2/benches/large_image.jpg 30 "" --scale 567 378
+    @echo "--- 1/8 scale (1/8, scalar 1x1 IDCT) ---"
+    ./bin_probe_q2 clone_q2/benches/large_image.jpg 30 "" --scale 284 189
+
+clean:
+    rm -rf clone_q1 clone_q2 bin_probe_q1 bin_probe_q2

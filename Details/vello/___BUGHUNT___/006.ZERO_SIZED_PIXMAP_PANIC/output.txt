@@ -1,0 +1,85 @@
+=== BEFORE (pristine checkout at base_commit 75168314) - `just reproduce-before` ===
+$ cd repro && cargo run
+   ...
+   Compiling vello_common v0.2.0 (/tmp/candidate006-verify/clone/sparse_strips/vello_common)
+   Compiling vello_cpu v0.2.0 (/tmp/candidate006-verify/clone/sparse_strips/vello_cpu)
+   Compiling repro v0.1.0 (/tmp/candidate006-verify/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.45s
+     Running `target/debug/repro`
+
+thread 'main' (34203) panicked at /tmp/candidate006-verify/clone/sparse_strips/vello_common/src/pixmap.rs:378:17:
+index out of bounds: the len is 0 but the index is 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - panicked: Any { .. }
+error: Recipe `reproduce-before` failed on line 20 with exit code 1
+
+=== Repeatability check (5/5 runs, debug build, same binary) ===
+run 1 exit=1
+run 2 exit=1
+run 3 exit=1
+run 4 exit=1
+run 5 exit=1
+
+=== Full backtrace of one such run (RUST_BACKTRACE=1) ===
+thread 'main' (15733) panicked at /tmp/vello-worktrees/candidate-006/sparse_strips/vello_common/src/pixmap.rs:378:17:
+index out of bounds: the len is 0 but the index is 0
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:80:14
+   2: core::panicking::panic_bounds_check
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:271:5
+   3: <usize as core::slice::index::SliceIndex<[color::rgba8::PremulRgba8]>>::index
+             at .../library/core/src/slice/index.rs:238:10
+   4: <[color::rgba8::PremulRgba8] as core::ops::index::Index<usize>>::index
+             at .../library/core/src/slice/index.rs:19:15
+   5: <alloc::vec::Vec<color::rgba8::PremulRgba8> as core::ops::index::Index<usize>>::index
+             at .../library/alloc/src/vec/mod.rs:3879:9
+   6: <vello_common::pixmap::Pixmap>::sample_idx
+             at sparse_strips/vello_common/src/pixmap.rs:378:17
+   7: vello_cpu::fine::common::image::sample::<fearless_simd::generated::avx2::Avx2>
+             at sparse_strips/vello_cpu/src/fine/common/image.rs:421:25
+   8: <vello_cpu::fine::common::image::PlainNNImagePainter<...> as core::iter::traits::iterator::Iterator>::next
+             at sparse_strips/vello_cpu/src/fine/common/image.rs:80:23
+   9: <... as vello_cpu::fine::Painter>::paint_u8::{closure#0}
+             at sparse_strips/vello_cpu/src/fine/mod.rs:1245:45
+  ...
+  14: <vello_cpu::fine::Fine<...>>::indexed_fill
+             at sparse_strips/vello_cpu/src/fine/mod.rs:910:21
+  15: <vello_cpu::fine::Fine<...>>::paint_fill
+             at sparse_strips/vello_cpu/src/fine/mod.rs:815:22
+  ...
+  18: vello_cpu::fine::rasterize_region::<...>
+             at sparse_strips/vello_cpu/src/fine/mod.rs:496:14
+  ...
+  30: <vello_cpu::render::RenderContext>::render_with::<&mut vello_common::pixmap::Pixmap>
+             at sparse_strips/vello_cpu/src/render.rs:817:25
+  31: <vello_cpu::render::RenderContext>::render::<&mut vello_common::pixmap::Pixmap>
+             at sparse_strips/vello_cpu/src/render.rs:757:14
+  32: repro::main::{closure#0}
+             at ./src/main.rs:34:17
+  37: repro::main
+             at ./src/main.rs:13:18
+
+=== AFTER (patch.diff applied to the clone) - `just apply` then `just reproduce-after` ===
+$ cd clone && git apply .../patch.diff
+$ cd repro && cargo run
+   Compiling vello_cpu v0.2.0 (/tmp/candidate006-verify/clone/sparse_strips/vello_cpu)
+   Compiling repro v0.1.0 (/tmp/candidate006-verify/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.44s
+     Running `target/debug/repro`
+did not reproduce - rendering with a zero-width Pixmap image completed normally
+
+=== Same fix also verified against zero-height and zero-width-and-height variants ===
+Pixmap::new(4, 0)  -> "did not reproduce - rendering with a zero-width Pixmap image completed normally"
+Pixmap::new(0, 0)  -> "did not reproduce - rendering with a zero-width Pixmap image completed normally"
+
+=== Project test suite (sparse_strips workspace), before and after the patch ===
+Before (pristine): `cargo test -p vello_cpu -p vello_common --lib`
+  vello_common: test result: ok. 159 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+  vello_cpu:    test result: ok. 81 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+After (patched):  `cargo test -p vello_cpu -p vello_common --lib`
+  vello_common: test result: ok. 159 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+  vello_cpu:    test result: ok. 81 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out

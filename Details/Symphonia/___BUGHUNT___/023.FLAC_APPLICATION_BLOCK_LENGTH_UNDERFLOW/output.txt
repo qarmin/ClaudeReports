@@ -1,0 +1,35 @@
+=== Real end-to-end repro (repro/src/main.rs), release build (debug-assertions=true,
+    overflow-checks=true), against a pristine clone at ee35874b571a35a9a6e15d3bc9a3aaf8f11fbeee,
+    3/3 identical runs ===
+$ cd repro && cargo run --release
+
+    Finished `release` profile [optimized] target(s) in 0.01s
+     Running `target/release/repro`
+=== Part 1: real end-to-end path (FlacReader::try_new on a crafted file) ===
+[real path] APPLICATION block, declared block_len=0 (body_len=0) via FlacReader::try_new: Err(out of bounds) -- clean error, no panic
+[real path] APPLICATION block, declared block_len=1 (body_len=1) via FlacReader::try_new: Err(out of bounds) -- clean error, no panic
+[real path] APPLICATION block, declared block_len=2 (body_len=2) via FlacReader::try_new: Err(out of bounds) -- clean error, no panic
+[real path] APPLICATION block, declared block_len=3 (body_len=3) via FlacReader::try_new: Err(out of bounds) -- clean error, no panic
+[real path] APPLICATION block, declared block_len=4 (body_len=4) via FlacReader::try_new: Err(malformed stream: flac: missing stream info block) -- clean error, no panic
+
+=== Part 2: direct, unscoped call to read_flac_application_block (NOT the real caller's usage) ===
+(the real demuxer never calls this function this way - see RESULT.md)
+
+thread 'main' (48814) panicked at /home/.../clone/symphonia-metadata/src/embedded/flac.rs:179:46:
+attempt to subtract with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- Repeated 2 more times (run 2 and run 3): byte-for-byte identical Part 1 output (5x "clean
+    error, no panic" lines, block_len 0..=4), and Part 2 panicked with the exact same message
+    and location both additional times. 3/3 runs total, fully deterministic (no seed/layout
+    dependency - the outcome follows directly from ScopedStream's own length bookkeeping, not
+    from any runtime randomness). ---
+
+=== For comparison: same repro run directly against the live working tree (not the clone),
+    identical outcome, confirming the clone/build setup itself isn't masking anything ===
+[real path] APPLICATION block, declared block_len=0 (body_len=0) via FlacReader::try_new: Err(out of bounds) -- clean error, no panic
+[real path] APPLICATION block, declared block_len=1 (body_len=1) via FlacReader::try_new: Err(out of bounds) -- clean error, no panic
+[real path] APPLICATION block, declared block_len=2 (body_len=2) via FlacReader::try_new: Err(out of bounds) -- clean error, no panic
+[real path] APPLICATION block, declared block_len=3 (body_len=3) via FlacReader::try_new: Err(out of bounds) -- clean error, no panic
+thread 'main' panicked at .../symphonia-metadata/src/embedded/flac.rs:179:46:
+attempt to subtract with overflow

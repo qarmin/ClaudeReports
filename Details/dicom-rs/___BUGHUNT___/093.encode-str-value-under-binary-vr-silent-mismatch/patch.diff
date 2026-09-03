@@ -1,0 +1,56 @@
+diff --git a/parser/src/stateful/encode.rs b/parser/src/stateful/encode.rs
+index addfea46..b7cc8606 100644
+--- a/parser/src/stateful/encode.rs
++++ b/parser/src/stateful/encode.rs
+@@ -46,6 +46,12 @@ pub enum Error {
+         source: std::io::Error,
+         backtrace: Backtrace,
+     },
++
++    #[snafu(display(
++        "Value representation {:?} requires a binary value, but the given value is textual",
++        vr
++    ))]
++    VrValueMismatch { vr: VR, backtrace: Backtrace },
+ }
+ 
+ pub type Result<T> = std::result::Result<T, Error>;
+@@ -215,8 +221,38 @@ where
+         de: &DataElementHeader,
+         value: &PrimitiveValue,
+     ) -> Result<()> {
++        // Declared VRs whose value is always binary per PS3.5 Table 6.2-1 (DS/IS are
++        // textual and excluded; SQ is not reachable here since sequences never carry a
++        // `PrimitiveValue`). Pairing one of these with a textual `Str`/`Strs` value means
++        // the caller built a `DataElement` whose declared VR and stored value disagree
++        // (e.g. via `DataElement::new`, `put`, or `update_value`) - encoding it would
++        // silently write the string's raw bytes under a binary-VR header instead of
++        // erroring, and the crate's own reader would then reinterpret those bytes as
++        // native-endian numbers/tags on the way back in.
++        let vr_expects_binary_value = matches!(
++            de.vr,
++            VR::AT
++                | VR::FL
++                | VR::FD
++                | VR::OB
++                | VR::OD
++                | VR::OF
++                | VR::OL
++                | VR::OV
++                | VR::OW
++                | VR::SL
++                | VR::SS
++                | VR::SV
++                | VR::UL
++                | VR::UN
++                | VR::US
++                | VR::UV
++        );
+         // intercept string encoding calls to use the text codec
+         match value {
++            PrimitiveValue::Str(_) | PrimitiveValue::Strs(_) if vr_expects_binary_value => {
++                VrValueMismatchSnafu { vr: de.vr }.fail()
++            }
+             PrimitiveValue::Str(text) => {
+                 self.encode_text_element(text, *de)?;
+                 Ok(())

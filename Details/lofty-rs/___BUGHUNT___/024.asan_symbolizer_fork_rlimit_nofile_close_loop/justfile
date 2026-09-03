@@ -1,0 +1,28 @@
+# Self-contained reproduction for candidate 024.
+#
+# This is a tooling/environment finding (root-causing candidates 009/018/019's ASAN hang down to
+# the exact blocked call), not a bug in lofty's own source - there is no patch.diff to apply, so
+# this justfile only has a reproduce-before step. The "fix" demonstrated by repro/run.sh
+# (lowering RLIMIT_NOFILE before invoking cargo fuzz) is a workaround for this sandbox/environment,
+# not a code change, so there's nothing to apply/reproduce-after against the clone.
+
+repo_url := "https://github.com/Serial-ATA/lofty-rs.git"
+base_commit := "5c6565e36d35b9ea7de049daa67acc0be0fd3b01"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Runs the real `cargo +nightly fuzz run` command against the pristine clone's own existing
+# fuzz/ target (mp4file_read_from by default): shows the ASAN hang with this environment's real
+# RLIMIT_NOFILE, captures a real gdb backtrace of the blocked call if gdb is available, then shows
+# the same command completing cleanly once RLIMIT_NOFILE is lowered first. Requires: nightly
+# toolchain + cargo-fuzz installed (same as required for candidates 009/018/019); gdb is optional.
+reproduce-before:
+    ./repro/run.sh clone mp4file_read_from
+
+clean:
+    rm -rf clone

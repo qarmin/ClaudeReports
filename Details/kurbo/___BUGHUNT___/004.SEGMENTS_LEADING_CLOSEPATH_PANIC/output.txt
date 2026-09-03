@@ -1,0 +1,58 @@
+Repro: ___BUGHUNT___/004.SEGMENTS_LEADING_CLOSEPATH_PANIC/repro
+Built/run with: cargo run --release (dependency path pointed at the checked-out kurbo tree)
+
+=== BEFORE (pristine tree, base_commit ca273499e3e48bd2de6f02aa8e99a148984e45f3) ===
+Run 1:
+$ cargo run --release
+    Finished `release` profile [optimized] target(s) in 1.66s
+     Running `target/release/repro`
+
+thread 'main' (50395) panicked at /tmp/kurbo_worktrees/candidate-004/kurbo/src/bezpath.rs:902:42:
+Can't start a segment on a ClosePath
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+segments(): REPRODUCED - panicked: "Can't start a segment on a ClosePath"
+
+thread 'main' (50551) panicked at /tmp/kurbo_worktrees/candidate-004/kurbo/src/bezpath.rs:902:42:
+Can't start a segment on a ClosePath
+BezPath::area(): REPRODUCED - panicked: "Can't start a segment on a ClosePath"
+$ echo $?
+1
+
+Run 2: exit 1 (same panic)
+Run 3: exit 1 (same panic)
+(3/3 runs reproduced deterministically - this is a pure logic panic, not layout/seed-dependent.)
+
+=== AFTER (same tree, patch.diff applied) ===
+$ cargo run --release
+   Compiling kurbo v0.13.1 (/tmp/kurbo_worktrees/candidate-004/kurbo)
+   Compiling repro-004-segments-closepath-panic v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 1.77s
+     Running `target/release/repro`
+segments(): did not reproduce - got []
+BezPath::area(): did not reproduce - got -0
+$ echo $?
+0
+
+=== Additional boundary-value check (not part of repro/, manual verification only) ===
+Confirms the fix doesn't just suppress the panic but still produces correct segments once a real
+MoveTo eventually appears, including multiple leading ClosePath elements:
+
+Input: [ClosePath, ClosePath, MoveTo((0,0)), LineTo((1,0)), LineTo((1,1)), ClosePath]
+Output: [Line((0,0)->(1,0)), Line((1,0)->(1,1)), Line((1,1)->(0,0))]
+(3 segments, as expected - the leading ClosePath elements are skipped and the subpath still
+closes back to (0,0) correctly.)
+
+=== Project test suite (cargo test --workspace), same tree ===
+Before patch:
+  running 187 tests ... ok. 187 passed; 0 failed
+  running 10 tests  ... ok. 10 passed; 0 failed
+  running 55 doctests ... ok. 55 passed; 0 failed
+  running 1 doctest (polycool) ... 0 passed; 0 failed; 1 ignored
+
+After patch:
+  running 187 tests ... ok. 187 passed; 0 failed
+  running 10 tests  ... ok. 10 passed; 0 failed
+  running 55 doctests ... ok. 55 passed; 0 failed
+  running 1 doctest (polycool) ... 0 passed; 0 failed; 1 ignored
+
+No change in pass/fail counts; no new failures introduced by the patch.

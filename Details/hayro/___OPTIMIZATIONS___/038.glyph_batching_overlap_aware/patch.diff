@@ -1,0 +1,75 @@
+diff --git a/hayro/src/glyph.rs b/hayro/src/glyph.rs
+index 0d4638e7..1152430a 100644
+--- a/hayro/src/glyph.rs
++++ b/hayro/src/glyph.rs
+@@ -120,18 +120,68 @@ impl Renderer<'_> {
+         }
+     }
+ 
++    /// Fills a batch of glyphs previously accumulated by `fill_outline_run` because their
++    /// (conservative, bbox-based) transformed extents were proven not to overlap each other.
++    /// A single glyph is filled the same way as the pre-batching code (no extra path
++    /// allocation); two or more are combined into one `BezPath` and filled with a single
++    /// `fill_path` call, which is only sound for `NonZero` fill when the glyphs don't overlap.
++    fn flush_glyph_batch(&mut self, run_transform: Affine, pending: &[(Rc<BezPath>, Affine)]) {
++        match pending {
++            [] => {}
++            [(outline, glyph_transform)] => {
++                self.ctx.set_transform(run_transform * *glyph_transform);
++                self.ctx.fill_path(outline.as_ref());
++                self.ctx.set_transform(run_transform);
++            }
++            _ => {
++                let mut combined = BezPath::new();
++                for (outline, glyph_transform) in pending {
++                    combined.extend(*glyph_transform * outline.as_ref());
++                }
++                self.ctx.fill_path(&combined);
++            }
++        }
++    }
++
+     fn fill_outline_run(&mut self, glyph_run: &GlyphRun<'_, '_>, props: &DrawProps<'_>) {
+         match &props.paint {
+             Paint::Color(_) => {
+                 let clip_path = self.begin_fill_run(props, Rect::ZERO);
++
++                // `apply_draw_props` (inside `begin_fill_run`) leaves the ctx transform at
++                // `props.transform`; batched fills rely on that invariant holding whenever
++                // `pending` is non-empty, so `flush_glyph_batch`'s single-glyph arm restores it
++                // after temporarily overriding it.
++                let mut pending: Vec<(Rc<BezPath>, Affine)> = Vec::new();
++                let mut pending_bbox = Rect::ZERO;
++
+                 for glyph in glyph_run.glyphs() {
+                     let Glyph::Outline(outline) = &**glyph else {
+                         continue;
+                     };
+ 
+-                    self.ctx.set_transform(props.transform * glyph.transform());
+-                    self.ctx.fill_path(self.cached_outline(outline).as_ref());
++                    let outline = self.cached_outline(outline);
++                    let glyph_transform = glyph.transform();
++                    // Conservative (over-approximating) bound: mapping the untransformed
++                    // outline's own bbox corners through `glyph_transform` always encloses the
++                    // transformed outline, so non-overlap here proves non-overlap of the actual
++                    // shapes without needing to materialize the transformed path first.
++                    let glyph_bbox = glyph_transform.transform_rect_bbox(outline.bounding_box());
++
++                    if !pending.is_empty() && pending_bbox.overlaps(glyph_bbox) {
++                        self.flush_glyph_batch(props.transform, &pending);
++                        pending.clear();
++                    }
++
++                    pending_bbox = if pending.is_empty() {
++                        glyph_bbox
++                    } else {
++                        pending_bbox.union(glyph_bbox)
++                    };
++                    pending.push((outline, glyph_transform));
+                 }
++                self.flush_glyph_batch(props.transform, &pending);
++
+                 self.finish_run(clip_path);
+             }
+             Paint::Pattern(_) => {

@@ -1,0 +1,44 @@
+diff --git a/src/builder.rs b/src/builder.rs
+index 8ec72bb..a68b808 100644
+--- a/src/builder.rs
++++ b/src/builder.rs
+@@ -919,13 +919,35 @@ impl<'a, 'gcc, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'gcc, 'tcx> {
+     }
+ 
+     fn lshr(&mut self, a: RValue<'gcc>, b: RValue<'gcc>) -> RValue<'gcc> {
+-        self.gcc_lshr(a, b)
++        // `lshr` always means a logical (zero-filling) shift, regardless of `a`'s declared GCC
++        // type - which can end up signed even for a semantically-unsigned Rust value (e.g. after
++        // a pointer-to-integer transmute, since `ptrtoint` bridges through a signed `isize`
++        // register type). Force the operand to the unsigned counterpart before the native `>>`
++        // so GCC (whose `>>` follows the *type's* sign, unlike LLVM's typeless integers) always
++        // performs a logical shift here, mirroring `division_operation`'s sign-forcing cast.
++        let a_type = a.get_type();
++        if self.is_native_int_type(a_type) && a_type.is_signed(self) {
++            let unsigned_type = a_type.to_unsigned(self.cx);
++            let a = self.context.new_cast(self.location, a, unsigned_type);
++            self.gcc_lshr(a, b)
++        } else {
++            self.gcc_lshr(a, b)
++        }
+     }
+ 
+     fn ashr(&mut self, a: RValue<'gcc>, b: RValue<'gcc>) -> RValue<'gcc> {
+-        // FIXME(antoyo): check whether behavior is an arithmetic shift for >> .
+-        // It seems to be if the value is signed.
+-        self.gcc_lshr(a, b)
++        // Mirror image of `lshr` above: `ashr` always means an arithmetic (sign-filling) shift,
++        // so force the operand to the signed counterpart before the native `>>` in case `a`'s
++        // declared GCC type ended up unsigned despite the Rust-level operation needing a signed
++        // shift.
++        let a_type = a.get_type();
++        if self.is_native_int_type(a_type) && !a_type.is_signed(self) {
++            let signed_type = a_type.to_signed(self.cx);
++            let a = self.context.new_cast(self.location, a, signed_type);
++            self.gcc_lshr(a, b)
++        } else {
++            self.gcc_lshr(a, b)
++        }
+     }
+ 
+     fn and(&mut self, a: RValue<'gcc>, b: RValue<'gcc>) -> RValue<'gcc> {

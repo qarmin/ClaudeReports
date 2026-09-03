@@ -1,0 +1,50 @@
+# Self-contained reproduction for candidate 018 (AdaptiveChunkRunner::configure_for_serialized_input
+# ignoring the caller's requested ChunkSize::Min on a serialized/iter-of-iter source).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# The suspect API (`ParRunner`, `AdaptiveChunkRunner::new_state`/`configure_for_serialized_input`/
+# `next_chunk_size`) lives in a private module (`mod runner;` in `src/lib.rs`) - not reachable
+# through any public API of the crate (verified: even `.with_diagnostics()`, whose provided method
+# is declared on the public-looking `ParRunner` trait, cannot be named from an external crate
+# because the module path to reach the trait is private). So unlike a normal candidate's
+# standalone `repro/` crate, this repro is a `#[cfg(test)]` module spliced directly into the
+# crate's own `src/runner/runner_variants/adaptive_chunk/adaptive_chunk_runner.rs` via
+# `repro/add_repro_test.diff`, then run with `cargo test` inside the clone. See RESULT.md for why.
+# This is not "faking a second participant" (CONFIRMATION.md section 11): the test calls the real
+# `ParRunner::new_state`/`configure_for_serialized_input`/`next_chunk_size` with a real `Params`
+# value exactly as a real caller's `.chunk_size(ChunkSize::Min(n))` would produce and pass through
+# - the only reason this can't be driven from outside the crate is Rust's own module privacy, not
+# an assumption about what a caller/peer would send.
+
+repo_url := "https://github.com/orxfun/orx-parallel.git"
+base_commit := "b9214fbeb714e4bb8f8858676a818cef2f21b097"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Splices the repro test module into the pristine clone and runs it.
+# Expected: `serialized_input_respects_requested_min_chunk_size` FAILS (non-zero exit) - that
+# failure IS the reproduction (chosen chunk size 2, ignoring the requested minimum of 1000). The
+# two sibling control tests (`serialized_input_exact_chunk_size_is_unaffected`,
+# `serialized_input_auto_chunk_size_still_uses_heuristic`) still pass, showing this is specific to
+# `ChunkSize::Min` on a serialized source, not a general breakage of `configure_for_serialized_input`.
+reproduce-before:
+    cd clone && git apply "{{justfile_directory()}}/repro/add_repro_test.diff"
+    cd clone && cargo test --lib bughunt_candidate_018_tests -- --nocapture
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - all 3 tests pass.
+reproduce-after:
+    cd clone && cargo test --lib bughunt_candidate_018_tests -- --nocapture
+
+clean:
+    rm -rf clone

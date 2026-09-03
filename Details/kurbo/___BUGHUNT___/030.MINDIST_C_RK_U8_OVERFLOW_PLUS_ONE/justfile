@@ -1,0 +1,42 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# `C_rk` (the function this candidate is about) is private inside kurbo's `mindist` module, and
+# its only real caller path (`min_dist_param`, `pub(crate)`) cannot be called from an external
+# crate's public API either - repro/ instead compiles the literal, unmodified `mindist.rs` from
+# `./clone` via `#[path]` (see repro/src/main.rs), so it always calls whatever is actually in
+# ./clone.
+#
+# This candidate is Not reproducible through any real call path (see RESULT.md for the full
+# closed-form argument and output.txt for every approach's captured output) - there is no
+# patch.diff, only `reproduce-before`, no `apply`/`reproduce-after`.
+
+repo_url := "https://github.com/linebender/kurbo.git"
+base_commit := "ca273499e3e48bd2de6f02aa8e99a148984e45f3"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - demonstrates that a real,
+# unmodified `min_dist_param` call at the documented degree-255 boundary does NOT panic at the
+# `upsilon + 1`/`varsigma + 1` lines this candidate names, in either build profile (it panics
+# elsewhere in debug - candidate 006's own already-known overflow - and returns a wrong-but-
+# non-crashing result in release, from candidate 019's own already-known overflow).
+# `-` on each line: a nonzero exit here means *some* panic occurred (see the printed message for
+# which one), which `just` would otherwise treat as a recipe failure - read the printed output
+# rather than the recipe's own exit status.
+reproduce-before:
+    -cd repro && cargo run
+    -cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target

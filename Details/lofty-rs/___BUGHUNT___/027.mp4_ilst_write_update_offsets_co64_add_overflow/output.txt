@@ -1,0 +1,60 @@
+== `just test` run against a fresh clone of the pristine repo (base_commit 5c6565e3), full cycle ==
+(build noise from `cargo`/`git clone` trimmed; everything else verbatim)
+
+just clone
+rm -rf clone
+git clone https://github.com/Serial-ATA/lofty-rs.git clone
+cd clone && git checkout 5c6565e36d35b9ea7de049daa67acc0be0fd3b01
+HEAD is now at 5c6565e3 0.25.1
+
+just reproduce-before
+cd repro && cargo run
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.76s
+     Running `target/debug/repro027`
+
+thread 'main' (194668) panicked at /home/rafal/Projekty/Obce/lofty-rs/___BUGHUNT___/027.mp4_ilst_write_update_offsets_co64_add_overflow/clone/lofty/src/mp4/ilst/write.rs:491:49:
+attempt to add with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - panicked: Any { .. }
+error: Recipe `reproduce-before` failed on line 29 with exit code 1
+
+just apply
+cd clone && git apply "/home/rafal/Projekty/Obce/lofty-rs/___BUGHUNT___/027.mp4_ilst_write_update_offsets_co64_add_overflow/patch.diff"
+
+just reproduce-after
+cd repro && cargo run
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.98s
+     Running `target/debug/repro027`
+did not reproduce - save_to returned a graceful error instead of panicking: FileEncodingError { format: Some(Mp4), .. }
+
+== Full backtrace (RUST_BACKTRACE=1), captured earlier against the main project's own working tree
+   before the fix, same crash input, confirming the exact panic site and call chain ==
+
+thread 'main' (185747) panicked at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/mp4/ilst/write.rs:491:49:
+attempt to add with overflow
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:80:14
+   2: core::panicking::panic_const::panic_const_add_overflow
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:175:17
+   3: lofty::mp4::ilst::write::update_offsets
+             at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/mp4/ilst/write.rs:491:40
+   4: lofty::mp4::ilst::write::save_to_existing
+             at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/mp4/ilst/write.rs:362:3
+   5: lofty::mp4::ilst::write::write_to::<core::io::cursor::Cursor<alloc::vec::Vec<u8>>, lofty::mp4::ilst::atom::AtomDataStorageIter>
+             at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/mp4/ilst/write.rs:135:5
+   6: <lofty::mp4::ilst::ref::IlstRef<lofty::mp4::ilst::atom::AtomDataStorageIter>>::write_to::<core::io::cursor::Cursor<alloc::vec::Vec<u8>>>
+             at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/mp4/ilst/ref.rs:38:3
+   7: <lofty::mp4::ilst::Ilst as lofty::tag::tag_ext::TagWriteExt>::save_to::<core::io::cursor::Cursor<alloc::vec::Vec<u8>>>
+             at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/mp4/ilst/mod.rs:658:17
+   8: <lofty::mp4::ilst::Ilst as lofty::tag::tag_ext::TagExt>::save_to::<core::io::cursor::Cursor<alloc::vec::Vec<u8>>>
+             at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/tag/tag_ext.rs:116:3
+   9: <lofty::mp4::Mp4File as lofty::file::audio_file::AudioFile>::save_to::<core::io::cursor::Cursor<alloc::vec::Vec<u8>>>
+             at /home/rafal/Projekty/Obce/lofty-rs/lofty/src/mp4/mod.rs:35:10
+
+== Project test suite, run before and after the fix (`cargo test -p lofty --lib --tests -- --test-threads=1`) ==
+
+Before fix: 646 passed, 0 failed, 73 ignored (7 test binaries: 256, 122, 56, 2, 15, 191, 4 passed respectively)
+After fix:  646 passed, 0 failed, 73 ignored (identical breakdown)

@@ -1,0 +1,128 @@
+diff --git a/benches/decode.rs b/benches/decode.rs
+index cfa788bc..0358d2c9 100644
+--- a/benches/decode.rs
++++ b/benches/decode.rs
+@@ -25,6 +25,7 @@ fn load_all(c: &mut Criterion) {
+                 "pal8rle.bmp",
+                 "rgb16-565.bmp",
+                 "rgb32bf.bmp",
++                "pal2_large.bmp",
+             ],
+             format: ImageFormat::Bmp,
+         },
+diff --git a/src/codecs/bmp/decoder.rs b/src/codecs/bmp/decoder.rs
+index cba61aed..253632ab 100644
+--- a/src/codecs/bmp/decoder.rs
++++ b/src/codecs/bmp/decoder.rs
+@@ -840,7 +840,7 @@ fn set_8bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+ 
+ fn set_4bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+     pixel_iter: &mut ChunksExactMut<u8>,
+-    palette: &[[u8; 3]],
++    palette: &[[u8; 3]; 256],
+     indices: T,
+     mut n_pixels: usize,
+ ) -> bool {
+@@ -870,7 +870,7 @@ fn set_4bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+ #[rustfmt::skip]
+ fn set_2bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+     pixel_iter: &mut ChunksExactMut<u8>,
+-    palette: &[[u8; 3]],
++    palette: &[[u8; 3]; 256],
+     indices: T,
+     mut n_pixels: usize,
+ ) -> bool {
+@@ -901,7 +901,7 @@ fn set_2bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+ 
+ fn set_1bit_pixel_run<'a, T: Iterator<Item = &'a u8>>(
+     pixel_iter: &mut ChunksExactMut<u8>,
+-    palette: &[[u8; 3]],
++    palette: &[[u8; 3]; 256],
+     indices: T,
+ ) {
+     for idx in indices {
+@@ -1846,7 +1846,12 @@ impl<R: BufRead + Seek> BmpDecoder<R> {
+         let num_channels = self.num_channels();
+         let row_byte_length = ((i32::from(self.bit_count) * self.width + 31) / 32 * 4) as usize;
+         let mut indices = vec![0; row_byte_length];
+-        let palette = self.palette.as_ref().unwrap();
++        // Palette is always exactly 256 entries (see `read_palette`); binding it as a
++        // fixed-size array lets the compiler prove the masked 1/2/4-bit indices used by
++        // `set_1bit_pixel_run`/`set_2bit_pixel_run`/`set_4bit_pixel_run` are always in bounds
++        // and elide the bounds check in those hot loops. Coerces to `&[[u8; 3]]` for the
++        // 8-bit path below, which is unaffected.
++        let palette: &[[u8; 3]; 256] = self.palette.as_ref().unwrap().as_slice().try_into().unwrap();
+         let bit_count = self.bit_count;
+         let width = self.width as usize;
+         let skip_palette = self.indexed_color;
+@@ -2130,8 +2135,11 @@ impl<R: BufRead + Seek> BmpDecoder<R> {
+         self.reader.seek(SeekFrom::Start(start_pos))?;
+ 
+         let num_channels = self.num_channels();
+-        let p = if image_type != ImageType::RLE24 {
+-            Some(self.palette.as_ref().unwrap())
++        // See the equivalent comment in `read_palettized_pixel_data`: binding as a fixed-size
++        // array lets `set_4bit_pixel_run`'s masked index elide its bounds check; coerces to
++        // `&[[u8; 3]]` for the RLE8 direct-index and `set_8bit_pixel_run` uses below.
++        let p: Option<&[[u8; 3]; 256]> = if image_type != ImageType::RLE24 {
++            Some(self.palette.as_ref().unwrap().as_slice().try_into().unwrap())
+         } else {
+             None
+         };
+diff --git a/tests/images/bmp/images/pal2_large.bmp b/tests/images/bmp/images/pal2_large.bmp
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f39b65571fe69eb8dca390c18f3041964514fdf
+GIT binary patch
+literal 123270
+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
+OOKpDVm)iWE&hH;@+-tP}
+
+literal 0
+HcmV?d00001
+
+diff --git a/tests/reference/bmp/images/pal2_large.bmp.png b/tests/reference/bmp/images/pal2_large.bmp.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..36ea2f6ba67d729664da022906a07e498150a350
+GIT binary patch
+literal 4286
+zcmeAS@N?(olHy`uVBq!ia0y~yVA=!1985rwrW?OS7#IXvJzX3_DsH{KW$4H3D8dq`
+z|ER0lGyal-qLVZ0;=X$>`tJ(rYHj5DfA5=r{`u>#Noi?mb<fZL{vLb%=$SKT{+yd1
+zmXMbA?9uDr+YfSq1lF&gAKmIYW9H1C`PouHD)RCHpz!lGnIL5;zRbqP#z^AHV74Vh
+z(JVHg;nz$IjEz6v0JHtToXyJ`XU?2y$_q5cW*eA28O#A2nFcnof9*&$zIYQNbZX9x
+zhT54kv`A9wNJ(}yDGx+Od{zuD3!uq;v;Y8>lr$(E?b5-;DI~d%mdf<4vVP71S8H=d
+ztIE-eezX+?Z#vSVK1Zs~M~w%z$Om!zd9;B`k3Q3A0~gfo9LS#LNN(W%<lda^wOm40
+S{w{D_g2B_(&t;ucLK6TfdgF%x
+
+literal 0
+HcmV?d00001
+

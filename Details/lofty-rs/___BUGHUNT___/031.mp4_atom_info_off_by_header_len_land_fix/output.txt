@@ -1,0 +1,46 @@
+=== BEFORE FIX (mainline, lofty/src/mp4/atom_info.rs unpatched) ===
+
+$ cargo run --bin repro031
+thread 'main' (233523) panicked at .../core/src/slice/index.rs:1009:51:
+range end index 3377 out of range for slice of length 3369
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - panicked: Any { .. }
+
+$ cargo run --bin mdia_slack_scope
++8: tag was silently lost (expected - moov.rs's own bug, candidate 030, still provides this slack independently of 026's fix)
++16: tag was silently lost (expected only on a fully unpatched tree - both bugs stacking)
+all checks behaved as documented for this tree - this binary always exits 0 when the above per-case messages match RESULT.md's documented behavior; read the printed lines, not just the exit code, to tell which of the two bugs (026/030) are present on this tree
+
+=== AFTER FIX (patch.diff applied to lofty/src/mp4/atom_info.rs) ===
+
+$ cargo run --bin repro031   (run 3 times)
+did not reproduce - suspect code path completed normally (read_from rejected the malformed file: FileParseError { ty: Some(Mp4), .. })
+did not reproduce - suspect code path completed normally (read_from rejected the malformed file: FileParseError { ty: Some(Mp4), .. })
+did not reproduce - suspect code path completed normally (read_from rejected the malformed file: FileParseError { ty: Some(Mp4), .. })
+
+$ cargo run --bin mdia_slack_scope
++8: tag was silently lost (expected - moov.rs's own bug, candidate 030, still provides this slack independently of 026's fix)
++16: read_from rejected the file outright (expected once candidate 026's fix is applied)
+all checks behaved as documented for this tree - this binary always exits 0 when the above per-case messages match RESULT.md's documented behavior; read the printed lines, not just the exit code, to tell which of the two bugs (026/030) are present on this tree
+
+=== Project test suite (cargo test -p lofty --lib --tests -- --test-threads=1) ===
+
+Before fix: 646 passed; 0 failed; 73 ignored (256 + 122 + 56 + 2 + 15 + 191 + 4 across the 7 test binaries)
+After fix:  646 passed; 0 failed; 73 ignored (identical breakdown, no change, no new failures)
+
+=== Isolation check: candidate 030's find_child_atom fix temporarily applied on top, to confirm ===
+=== atom_info.rs's bug alone (independent of moov.rs's own bug) causes the +8 mdia_slack_scope case ===
+
+lofty/src/mp4/moov.rs line 54 temporarily changed from
+    find_child_atom(reader, atom.len, *b"mdia", parse_options.parsing_mode)?
+to
+    find_child_atom(reader, atom.len - 8, *b"mdia", parse_options.parsing_mode)?
+(candidate 030's own already-verified fix, NOT part of this candidate's patch.diff, reverted
+before this candidate was written up)
+
+$ cargo run --bin mdia_slack_scope   (atom_info.rs still unpatched, moov.rs temporarily patched)
++8: tag was silently lost (reproduces via atom_info.rs's bug alone, with moov.rs's own bug fixed)
+
+This confirms candidate 026's atom_info.rs bug independently provides its own 8 bytes of
+"accept a too-large child atom" slack, reachable even when candidate 030's separate moov.rs bug
+is not present at all - not merely a restatement of candidate 030's finding.

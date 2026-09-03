@@ -1,0 +1,47 @@
+Real captured output from running this candidate's repro/ (via its own justfile) against a fresh
+clone of https://github.com/Enet4/dicom-rs.git at df2b9e4236298efa3fa37a1f360fc4bf284d586a.
+Input in all cases: a 236-byte crafted DICOM stream (valid file-meta group + an encapsulated
+Pixel Data element whose Basic Offset Table item declares a 4,294,967,280-byte length with no
+actual offset bytes following). All runs under `ulimit -v 500000` (500 MB virtual-memory cap).
+
+=== `just reproduce-master-baseline` (pristine clone, NEITHER patch applied - real current master) ===
+input file: 236 bytes
+memory allocation of 17179869120 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Aborted (core dumped)
+
+(17,179,869,120 = 4,294,967,280 * 4 - this is candidate 080's own already-recorded bug, the
+Vec<u32>::with_capacity(len) byte/element mixup in parser/src/dataset/read.rs, firing before this
+candidate's own code is ever reached. Included for comparison only - not a repro of this
+candidate's bug, see justfile's header comment and RESULT.md's "Root cause".)
+
+=== `just clone apply-prereq reproduce-before` (candidate 080's fix applied, THIS candidate's not) ===
+input file: 236 bytes
+memory allocation of 4294967280 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Aborted (core dumped)
+
+(4,294,967,280 - the declared length itself, no amplification. This is this candidate's own bug:
+StatefulDecoder::read_u32's unguarded vec.resize(base + n, 0) in parser/src/stateful/decode.rs.)
+
+Repeated 3/3 times, identical, deterministic.
+
+=== `just apply reproduce-after` (both candidate 080's fix AND this candidate's patch.diff applied) ===
+input file: 236 bytes
+did not abort - parser returned a graceful error: Could not read data set token
+
+Repeated 3/3 times, identical, deterministic.
+
+=== Test suite (cargo test -p dicom-parser -p dicom-object --lib), before vs after this
+    candidate's own patch.diff alone (no prereq needed - just a build-time regression check) ===
+
+Before (clean master, git stash):
+test result: ok. 75 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s   (dicom-object)
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s   (dicom-parser)
+
+After (patch.diff applied):
+test result: ok. 75 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s   (dicom-object)
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s   (dicom-parser)
+
+cargo test --workspace --lib, before and after: identical both times -
+351 passed; 0 failed; 2 ignored (sum across all workspace crates).

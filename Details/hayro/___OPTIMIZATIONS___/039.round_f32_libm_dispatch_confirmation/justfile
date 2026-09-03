@@ -1,0 +1,53 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# This candidate is two parts: (1) a symbol-dispatch investigation (no patch, `just probe`)
+# confirming what `f32::round()`'s libcall resolves to on this toolchain/libc, and (2) a
+# re-verification of candidate 010's already-measured win using 010's own patch.diff
+# (`just test`) - see RESULT.md for both.
+#
+# repo_url/base_commit read at the moment patch.diff was captured (`git remote get-url origin` /
+# `git rev-parse HEAD` in the main project).
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone at the pinned commit, apply the patch, build, run the bench.
+test: clone apply bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Uses the project's own hayro-bench jpx_decode_bench example against a real JPX-bearing PDF
+# already checked into the repo (hayro-tests/pdfs/load/issue391.pdf) - no bench/ subfolder needed.
+# Same bench/inputs as candidate 010's own justfile (this candidate reapplies 010's exact patch).
+bench:
+    cd clone && cargo build --release -p hayro-bench --bin jpx_decode_bench
+    taskset -c 2 ./clone/target/release/jpx_decode_bench clone/hayro-tests/pdfs/load/issue391.pdf --iterations 200
+
+# Part 1's symbol-identity check: build a minimal standalone probe (no patch needed - this is
+# about what `x.round()` resolves to by default) and inspect it with objdump/nm/gdb, matching
+# what RESULT.md's "Part 1" section walks through by hand.
+probe:
+    rm -rf probe && mkdir -p probe/src
+    printf '[package]\nname = "round_probe"\nversion = "0.1.0"\nedition = "2021"\n\n[profile.release]\nopt-level = 3\ndebug = true\n' > probe/Cargo.toml
+    printf 'use std::hint::black_box;\n\nfn main() {\n    let x: f32 = black_box(2.5);\n    println!("{}", round_it(x));\n}\n\n#[inline(never)]\nfn round_it(x: f32) -> f32 {\n    x.round()\n}\n' > probe/src/main.rs
+    cd probe && cargo build --release
+    @echo "=== call site (round_it) ==="
+    objdump -d --demangle probe/target/release/round_probe | grep -A2 '<round_probe::round_it>:'
+    @echo "=== is roundf local (statically linked) or imported? ==="
+    nm probe/target/release/round_probe | grep -w roundf
+    @echo "=== shared libs linked (note: no libm.so.6) ==="
+    ldd probe/target/release/round_probe
+    @echo "=== step into it with gdb (source path reveals compiler_builtins, not glibc) ==="
+    DEBUGINFOD_URLS= gdb -batch -ex "break roundf" -ex "run" -ex "bt 1" probe/target/release/round_probe
+
+clean:
+    rm -rf clone probe

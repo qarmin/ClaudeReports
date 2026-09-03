@@ -1,0 +1,45 @@
+diff --git a/kurbo/src/stroke.rs b/kurbo/src/stroke.rs
+index 4c9477d..1607b9e 100644
+--- a/kurbo/src/stroke.rs
++++ b/kurbo/src/stroke.rs
+@@ -738,17 +738,29 @@ fn dash_iter<'a>(
+     } else {
+         period
+     };
+-    let dash_offset = dash_offset.rem_euclid(period);
+-
+-    let mut dash_ix = 0;
+-    let mut dash_remaining = dashes[dash_ix] - dash_offset;
+-    let mut is_active = true;
+-    // Find place in dashes array for initial offset.
+-    while dash_remaining < 0.0 {
+-        dash_ix = (dash_ix + 1) % dashes.len();
+-        dash_remaining += dashes[dash_ix];
+-        is_active = !is_active;
+-    }
++    // A well-formed dash pattern has a strictly positive period. A non-positive (or NaN, e.g.
++    // from an array mixing infinities) period means the pattern is degenerate - most commonly a
++    // non-empty, even-length array whose entries sum to zero or less (all-zero, or negative
++    // entries canceling out) - and has no well-defined dash/gap split. Treat it the same as an
++    // empty dash pattern: emit the input unchanged, rather than feeding `rem_euclid` a zero/
++    // negative divisor, which either produces a silently-propagating NaN or, for a negative
++    // period, makes the search loop below diverge forever (it only ever adds more negative
++    // lengths to `dash_remaining`, so it can never reach `>= 0.0`).
++    let (dash_ix, dash_remaining, is_active) = if period > 0.0 {
++        let dash_offset = dash_offset.rem_euclid(period);
++        let mut dash_ix = 0;
++        let mut dash_remaining = dashes[dash_ix] - dash_offset;
++        let mut is_active = true;
++        // Find place in dashes array for initial offset.
++        while dash_remaining < 0.0 {
++            dash_ix = (dash_ix + 1) % dashes.len();
++            dash_remaining += dashes[dash_ix];
++            is_active = !is_active;
++        }
++        (dash_ix, dash_remaining, is_active)
++    } else {
++        (0, f64::INFINITY, true)
++    };
+     DashIterator {
+         inner,
+         input_done: false,

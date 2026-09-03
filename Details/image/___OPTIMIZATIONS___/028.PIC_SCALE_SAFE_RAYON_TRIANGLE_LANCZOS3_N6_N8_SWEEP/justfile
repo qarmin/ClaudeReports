@@ -1,0 +1,46 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+# That means this whole folder can be copied anywhere (including posted standalone, e.g.
+# attached to a GitHub issue/PR) and `just test` still works, with no dependency on the
+# main project checkout this candidate was originally found in.
+
+repo_url := "https://github.com/image-rs/image.git"
+base_commit := "44ce9226c541dd2b11897b9ef07156a28871cdb7"
+
+# patch.diff bundles the Cargo.toml + benches/imageops.rs harness hunks (rayon forwarded +
+# bench_resize_dynamic group, including the Triangle/Lanczos3 400x300->32x24 cases candidate 027
+# already added) with the actual fix under test (src/imageops/resize.rs, candidate 023's
+# `run_resize` gate, with num_threads(6) - the headline value this candidate's sweep tested for
+# Triangle/Lanczos3, per IDEAS.md's row). This candidate's own result is that num_threads(6) is a
+# wash against the already-established num_threads(4) for these two filters (unlike candidate
+# 027's clear win for CatmullRom/Gaussian) - see RESULT.md. apply-harness applies just the harness
+# hunks so the same benchmarks exist in both the baseline and patched build; apply-fix applies the
+# gate on top, for the patched build only.
+test: clone apply-harness bench-baseline apply-fix bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply-harness:
+    cd clone && git apply --exclude='src/imageops/resize.rs' "{{justfile_directory()}}/patch.diff"
+
+apply-fix:
+    cd clone && git apply --include='src/imageops/resize.rs' "{{justfile_directory()}}/patch.diff"
+
+# Reuses the repo's own `benches/imageops.rs` (extended by the harness hunk with the
+# `bench_resize_dynamic` group, including the Triangle/Lanczos3 400x300->32x24 cases) rather than
+# a standalone bench crate.
+bench-baseline:
+    @echo "=== baseline (before patch, i.e. rayon forwarded + bench harness, no capped pool at all) ==="
+    cd clone && cargo bench --bench imageops --features rayon -- "dynamic_resize/DynamicImage::resize_exact 400x300->32x24"
+
+bench-patched:
+    @echo "=== patched (after patch, num_threads(6)-capped pool applied) ==="
+    cd clone && cargo bench --bench imageops --features rayon -- "dynamic_resize/DynamicImage::resize_exact 400x300->32x24"
+
+clean:
+    rm -rf clone

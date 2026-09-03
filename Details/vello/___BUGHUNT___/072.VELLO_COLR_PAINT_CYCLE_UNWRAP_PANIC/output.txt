@@ -1,0 +1,58 @@
+=== BEFORE (unpatched vello/src/scene.rs, base_commit 7516831426fb70f36d62c521c5477f6a7265b36a) ===
+$ RUST_BACKTRACE=1 ./target/release/vello_colr_paint_cycle_unwrap_panic_repro
+(exit code 1)
+
+stdout:
+glyph 178 (paintcolrglyph_cycle_first): PANIC - called `Result::unwrap()` on an `Err` value: PaintCycleDetected
+glyph 178 (paintcolrglyph_cycle_first): PANIC - called `Result::unwrap()` on an `Err` value: PaintCycleDetected
+glyph 178 (paintcolrglyph_cycle_first): PANIC - called `Result::unwrap()` on an `Err` value: PaintCycleDetected
+glyph 178 (paintcolrglyph_cycle_first): 0/3 succeeded, 3/3 panicked
+glyph 179 (paintcolrglyph_cycle_second): PANIC - called `Result::unwrap()` on an `Err` value: PaintCycleDetected
+glyph 179 (paintcolrglyph_cycle_second): PANIC - called `Result::unwrap()` on an `Err` value: PaintCycleDetected
+glyph 179 (paintcolrglyph_cycle_second): PANIC - called `Result::unwrap()` on an `Err` value: PaintCycleDetected
+glyph 179 (paintcolrglyph_cycle_second): 0/3 succeeded, 3/3 panicked
+glyph 180 (no_cycle_multi_colrglyph): OK (negative control, as expected)
+
+stderr (one of six identical panics shown, one per catch_unwind call in the 3x178 + 3x179 loop):
+thread 'main' (355341) panicked at /tmp/vello_wt/072/vello/src/scene.rs:879:22:
+called `Result::unwrap()` on an `Err` value: PaintCycleDetected
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::result::unwrap_failed
+   3: <vello::scene::DrawGlyphs>::draw::<peniko::style::Fill, core::iter::sources::once::Once<vello_encoding::glyph::Glyph>>
+   4: vello_colr_paint_cycle_unwrap_panic_repro::draw_glyph
+   5: vello_colr_paint_cycle_unwrap_panic_repro::main
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+Final line printed before process::exit(1):
+REPRODUCED - classic vello's real Scene::draw_glyphs(..).draw(..) panics on a real COLRv1 font's deliberately-crafted PaintColrGlyph cycle glyph (colr.paint(..).unwrap() on skrifa's PaintError::PaintCycleDetected)
+
+Repeatability: 6/6 panics (2 distinct cycle glyphs x 3 repeat runs each), release build, deterministic.
+
+=== AFTER (vello/src/scene.rs patched per patch.diff) ===
+$ ./target/release/vello_colr_paint_cycle_unwrap_panic_repro
+(exit code 0)
+
+stdout:
+glyph 178 (paintcolrglyph_cycle_first): 3/3 succeeded, 0/3 panicked
+glyph 179 (paintcolrglyph_cycle_second): 3/3 succeeded, 0/3 panicked
+glyph 180 (no_cycle_multi_colrglyph): OK (negative control, as expected)
+did not reproduce - no panic for any glyph
+
+stderr: (empty)
+
+=== Broader differential-testing pass this candidate ran to find this (see RESULT.md) ===
+A full scan rendering all 221 glyphs of test_glyphs-glyf_colr_1.ttf through both vello_cpu
+(reference, via glifo) and classic vello (real wgpu device, SwiftShader Vulkan ICD) hit this same
+panic organically at glyph 178 partway through the scan (before any fix was applied):
+
+thread 'main' (313639) panicked at /tmp/vello_wt/072/vello/src/scene.rs:879:22:
+called `Result::unwrap()` on an `Err` value: PaintCycleDetected
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+After applying the same fix, the full 0..221 scan completes without panicking; glyphs 178/179
+(the cycle glyphs) render with 0 pixel difference against the vello_cpu reference (both glyphs
+happen to produce no visible output before the cycle is detected, on both renderers), and no
+other glyph's diff count changed relative to the pre-fix scan - i.e. the fix does not disturb the
+scene's layer-stack balance for glyphs drawn after a cycle glyph in the same run.

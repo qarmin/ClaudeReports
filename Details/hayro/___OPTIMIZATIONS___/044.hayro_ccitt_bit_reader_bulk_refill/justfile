@@ -1,0 +1,49 @@
+# Self-contained reproduction for candidate 044 (hayro-ccitt BitReader bulk-refill).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# repo_url/base_commit read via `git remote get-url origin` / `git rev-parse HEAD` in the main
+# project, at the moment patch.diff was captured.
+
+repo_url := "https://github.com/LaurenzV/hayro.git"
+base_commit := "5a5f0e247c970df948505ee0bb36e2df2504bf86"
+
+# Full cycle: clone at the pinned commit, build a BASELINE binary before touching anything,
+# apply the patch, build a PATCHED binary, then run both and print both results.
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Shape 2 (per SKILL.md): no suitable existing hayro-ccitt benchmark, so a standalone bench
+# crate lives in ./bench/, depending on `{ path = "../clone/hayro-ccitt" }`.
+build-baseline:
+    cd bench && cargo build --release
+    cp bench/target/release/bench ./bin_baseline
+
+build-patched:
+    cd bench && cargo build --release
+    cp bench/target/release/bench ./bin_patched
+
+# Prints the correctness hash (must match between baseline and patched - see bench/src/main.rs
+# for what it covers: a synthetic Group3-1D image round-tripped exactly, plus a replay of the
+# testdata/corpus/ sample) and a min/p50/mean/p95/max timing breakdown for each, single-core
+# pinned to core 2 (adjust if core 2 doesn't exist on the machine running this).
+bench:
+    @echo "=== baseline (before patch), taskset -c 2 ==="
+    taskset -c 2 ./bin_baseline testdata bench
+    @echo "=== patched (after patch), taskset -c 2 ==="
+    taskset -c 2 ./bin_patched testdata bench
+    @echo "=== baseline (before patch), unpinned/multi-core ==="
+    ./bin_baseline testdata bench
+    @echo "=== patched (after patch), unpinned/multi-core ==="
+    ./bin_patched testdata bench
+
+clean:
+    rm -rf clone bin_baseline bin_patched bench/target

@@ -1,0 +1,136 @@
+diff --git a/internal/core/textlayout/sharedparley/draw.rs b/internal/core/textlayout/sharedparley/draw.rs
+index 4bbf20a08..f7e3adff1 100644
+--- a/internal/core/textlayout/sharedparley/draw.rs
++++ b/internal/core/textlayout/sharedparley/draw.rs
+@@ -86,6 +86,20 @@ pub(super) fn visible_band(item_renderer: &impl GlyphRenderer) -> Range<Physical
+     top..(top + clip.height_length() * scale_factor)
+ }
+ 
++/// The horizontal counterpart of [`visible_band`].
++///
++/// Lines are culled vertically but glyph *runs* were never culled horizontally, so a `no-wrap` line
++/// wider than the viewport submitted every glyph on it to the renderer. That is not only wasted
++/// work: the software renderer casts a glyph's device rect to `i16`, and `euclid`'s `cast()`
++/// unwraps, so a run far enough to the right **panics** - reachable with a ~5 000 character line at
++/// a 13 px font. Skipping runs (and glyphs within a run) that cannot reach the clip fixes both.
++pub(super) fn visible_columns(item_renderer: &impl GlyphRenderer) -> Range<PhysicalLength> {
++    let scale_factor = item_renderer.scale_factor();
++    let clip = item_renderer.get_current_clip();
++    let left = clip.origin.x_length() * scale_factor;
++    left..(left + clip.width_length() * scale_factor)
++}
++
+ impl TextParagraph {
+     fn draw<R: GlyphRenderer>(
+         &self,
+@@ -93,6 +107,10 @@ fn draw<R: GlyphRenderer>(
+         paragraph_index: usize,
+         visible_extent: Option<ElisionCut>,
+         visible_band: &Range<PhysicalLength>,
++        // Glyphs and runs outside this horizontal band are dropped. `None` when eliding: the
++        // ellipsis is positioned from the run that overflows the width, so dropping runs there
++        // could lose it.
++        visible_columns: Option<&Range<PhysicalLength>>,
+         item_renderer: &mut R,
+         default_fill_brush: &<R as GlyphRenderer>::PlatformBrush,
+         default_stroke_brush: &Option<<R as GlyphRenderer>::PlatformBrush>,
+@@ -170,6 +188,19 @@ fn draw<R: GlyphRenderer>(
+             for item in line.items() {
+                 match item {
+                     parley::PositionedLayoutItem::GlyphRun(glyph_run) => {
++                        // Runs that cannot reach the clip horizontally. Padded by one line height
++                        // for ink that overhangs the run's advance (italics, swashes), the same
++                        // slack the vertical cull uses.
++                        if let Some(columns) = visible_columns {
++                            let run_start = PhysicalLength::new(glyph_run.offset());
++                            let run_end =
++                                PhysicalLength::new(glyph_run.offset() + glyph_run.advance());
++                            if run_end + line_height < columns.start
++                                || run_start - line_height > columns.end
++                            {
++                                continue;
++                            }
++                        }
+                         let ellipsis = if last_line {
+                             let (truncated_glyphs, ellipsis) = layout.glyphs_with_elision(
+                                 &glyph_run,
+@@ -183,6 +214,7 @@ fn draw<R: GlyphRenderer>(
+                                 default_fill_brush,
+                                 default_stroke_brush,
+                                 para_y,
++                                visible_columns,
+                                 &mut truncated_glyphs.into_iter(),
+                                 selection.map(|selection| &selection.foreground),
+                                 line_spans.unwrap_or_default(),
+@@ -195,6 +227,7 @@ fn draw<R: GlyphRenderer>(
+                                 default_fill_brush,
+                                 default_stroke_brush,
+                                 para_y,
++                                visible_columns,
+                                 &mut glyph_run.positioned_glyphs(),
+                                 selection.map(|selection| &selection.foreground),
+                                 line_spans.unwrap_or_default(),
+@@ -347,6 +380,11 @@ fn draw_glyph_run_with_selection<R: GlyphRenderer>(
+         default_fill_brush: &<R as GlyphRenderer>::PlatformBrush,
+         default_stroke_brush: &Option<<R as GlyphRenderer>::PlatformBrush>,
+         para_y: PhysicalLength,
++        // Glyphs outside this horizontal band are dropped. A `no-wrap` line of uniform style is a
++        // *single* glyph run spanning the whole line, so culling runs is not enough - the glyphs
++        // themselves have to be filtered, or a 5 000 character line hands the software renderer a
++        // device rect it cannot cast to `i16` and it panics. `None` when eliding.
++        visible_columns: Option<&Range<PhysicalLength>>,
+         glyphs_it: &mut dyn Iterator<Item = parley::layout::Glyph>,
+         // The selection foreground, and the spans it covers on this run's line. Both empty when
+         // there is no selection, which `run_coverage` reports as `Unselected`.
+@@ -355,6 +393,17 @@ fn draw_glyph_run_with_selection<R: GlyphRenderer>(
+     ) {
+         let run_x = glyph_run.offset()..glyph_run.offset() + glyph_run.advance();
+ 
++        // Bidi reorders glyphs within a run, so this filters rather than truncating.
++        let columns = visible_columns.cloned();
++        let mut glyphs_it = glyphs_it.filter(move |glyph| {
++            columns.as_ref().is_none_or(|columns| {
++                let start = PhysicalLength::new(glyph.x);
++                let end = PhysicalLength::new(glyph.x + glyph.advance);
++                end >= columns.start && start <= columns.end
++            })
++        });
++        let glyphs_it: &mut dyn Iterator<Item = parley::layout::Glyph> = &mut glyphs_it;
++
+         match run_coverage(&run_x, line_spans) {
+             RunCoverage::Unselected => Self::draw_glyph_run(
+                 glyph_run,
+@@ -630,6 +679,8 @@ pub(super) fn draw<R: GlyphRenderer>(
+         // skipping what lies outside it safe under any transform. The band only filters what is
+         // *drawn*; it never influences elision or `max-lines` accounting.
+         let visible_band = visible_band(item_renderer);
++        // Only when nothing is elided; see the run cull in `TextParagraph::draw`.
++        let visible_columns = (!self.is_eliding()).then(|| visible_columns(item_renderer));
+ 
+         // Paragraphs are stacked in order, so binary-search the first one whose box reaches the
+         // band. Start one paragraph earlier and stop one past the band: glyph ink may overhang
+@@ -652,6 +703,7 @@ pub(super) fn draw<R: GlyphRenderer>(
+                 paragraph_index,
+                 visible_extent,
+                 &visible_band,
++                visible_columns.as_ref(),
+                 item_renderer,
+                 &default_fill_brush,
+                 &default_stroke_brush,
+diff --git a/internal/core/textlayout/sharedparley/layout.rs b/internal/core/textlayout/sharedparley/layout.rs
+index bf2d8a72d..f71c37015 100644
+--- a/internal/core/textlayout/sharedparley/layout.rs
++++ b/internal/core/textlayout/sharedparley/layout.rs
+@@ -323,6 +323,12 @@ pub(super) fn dismantle(self) -> (Vec<TextParagraph>, RetainedLineBreaking) {
+ }
+ 
+ impl Layout {
++    /// Whether an ellipsis may be placed. The draw path skips its horizontal glyph-run cull then,
++    /// because the ellipsis is positioned from the run that overflows the width.
++    pub(super) fn is_eliding(&self) -> bool {
++        self.elision_info.is_some()
++    }
++
+     /// The paragraphs that have at least one line to show. Only differs from `paragraphs` when a
+     /// `max-lines` limit drops lines: paragraphs entirely below the cut don't take part in
+     /// hit-testing or selection.

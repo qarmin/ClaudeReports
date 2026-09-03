@@ -1,0 +1,64 @@
+diff --git a/src/upsampler.rs b/src/upsampler.rs
+index 10640fe..8ce9aa8 100644
+--- a/src/upsampler.rs
++++ b/src/upsampler.rs
+@@ -1,9 +1,19 @@
+ use alloc::boxed::Box;
+ use alloc::vec;
+ use alloc::vec::Vec;
++use std::cell::RefCell;
+ use crate::error::{Error, Result, UnsupportedFeature};
+ use crate::parser::Component;
+ 
++std::thread_local! {
++    // Reused across calls (and across images, since threads in a shared pool like rayon's
++    // outlive a single decode) to avoid a fresh Vec<Vec<u8>> allocation on every output row.
++    // Safe to reuse stale contents: every `upsample_row` impl below fully (re)writes the first
++    // `output_width` bytes it's given before `color_convert` reads them, and `output_width` is
++    // constant across all rows of one image.
++    static LINE_BUFFERS: RefCell<Vec<Vec<u8>>> = RefCell::new(Vec::new());
++}
++
+ pub struct Upsampler {
+     components: Vec<UpsamplerComponent>,
+     line_buffer_size: usize
+@@ -46,20 +56,28 @@ impl Upsampler {
+ 
+     pub fn upsample_and_interleave_row(&self, component_data: &[Vec<u8>], row: usize, output_width: usize, output: &mut [u8], color_convert: fn(&[Vec<u8>], &mut [u8])) {
+         let component_count = component_data.len();
+-        let mut line_buffers = vec![vec![0u8; self.line_buffer_size]; component_count];
+ 
+         debug_assert_eq!(component_count, self.components.len());
+ 
+-        for (i, component) in self.components.iter().enumerate() {
+-            component.upsampler.upsample_row(&component_data[i],
+-                                             component.width,
+-                                             component.height,
+-                                             component.row_stride,
+-                                             row,
+-                                             output_width,
+-                                             &mut line_buffers[i]);
+-        }
+-        color_convert(&line_buffers, output);
++        LINE_BUFFERS.with(|line_buffers| {
++            let mut line_buffers = line_buffers.borrow_mut();
++            if line_buffers.len() != component_count
++                || line_buffers.iter().any(|buf| buf.len() != self.line_buffer_size)
++            {
++                *line_buffers = vec![vec![0u8; self.line_buffer_size]; component_count];
++            }
++
++            for (i, component) in self.components.iter().enumerate() {
++                component.upsampler.upsample_row(&component_data[i],
++                                                 component.width,
++                                                 component.height,
++                                                 component.row_stride,
++                                                 row,
++                                                 output_width,
++                                                 &mut line_buffers[i]);
++            }
++            color_convert(&line_buffers, output);
++        });
+     }
+ }
+ 

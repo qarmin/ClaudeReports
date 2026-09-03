@@ -1,0 +1,42 @@
+# Self-contained reproduction for candidate 136
+# (pixeldata/src/gdcm.rs's ad-hoc PlanarConfiguration read silently swallows a cast error that
+# the shared, validating attribute::planar_configuration() helper would otherwise report).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into ./clone
+# (gitignored) - nothing here reaches outside the folder it lives in, so this folder can be copied
+# anywhere (e.g. attached to a GitHub issue) and `just test` still works.
+#
+# NOTE: this builds the vendored GDCM C++ library through gdcm-rs's cmake-driven build.rs
+# (the `gdcm` feature is unconditionally required by this repro's own Cargo.toml, since the bug
+# only exists on that decode path). On a cold cache that is minutes of C++ compilation, not seconds.
+#
+# repo_url is the upstream HTTPS remote rather than this checkout's own `origin`
+# (git@github.com:qarmin/dicom-rs.git), because that one is an SSH fork URL that is not usable
+# without credentials; base_commit below is the exact same commit on both.
+
+repo_url := "https://github.com/Enet4/dicom-rs.git"
+base_commit := "df2b9e4236298efa3fa37a1f360fc4bf284d586a"
+
+# Full cycle: clone pristine, show the bug, apply the fix, show it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Against the pristine clone. Expected: exits 1, prints the BUG line (cast error swallowed).
+reproduce-before:
+    @echo "===== BEFORE: pristine df2b9e42 ====="
+    cd repro && cargo run --release -q; echo "(exit code $?; non-zero is expected here)"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Against the patched clone. Expected: exits 0, the cast error is now correctly reported.
+reproduce-after:
+    @echo "===== AFTER: patch.diff applied ====="
+    cd repro && cargo run --release -q
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

@@ -1,0 +1,72 @@
+diff --git a/hayro-jpeg2000/src/j2c/build.rs b/hayro-jpeg2000/src/j2c/build.rs
+index b5e46e1f..bf1e6bca 100644
+--- a/hayro-jpeg2000/src/j2c/build.rs
++++ b/hayro-jpeg2000/src/j2c/build.rs
+@@ -4,7 +4,7 @@ use super::decode::{DecompositionStorage, TileDecompositions};
+ use super::rect::IntRect;
+ use super::tag_tree::TagTree;
+ use super::tile::{ResolutionTile, Tile};
+-use crate::error::{DecodingError, Result, ValidationError};
++use crate::error::{DecodingError, Result, ValidationError, bail};
+ use alloc::vec;
+ use core::iter;
+ use core::ops::Range;
+@@ -19,12 +19,31 @@ pub(crate) fn build(
+     build_decompositions(tile, storage, skipped_resolution_levels)
+ }
+ 
++/// Ceiling on the estimated total number of code-block *visits* (code-blocks summed across
++/// every raw resolution level of a tile, multiplied by the tile's own quality-layer count) a
++/// tile is about to cost to structurally build (`storage.code_blocks`/`storage.layers`/
++/// `storage.precincts`/`storage.tag_tree_nodes`), regardless of `skipped_resolution_levels` -
++/// `resolution_tiles()` (and therefore `build_precincts`/`build_code_blocks`) always walks every
++/// *raw* resolution level, not just the ones actually decoded.
++///
++/// Unlike a top-resolution-level-only estimate, this sums every raw resolution level's own
++/// actual code-block count (using that level's own, possibly precinct-clamped, code-block
++/// dimensions - see `ResolutionTile::code_block_width`/`code_block_height`, B-17/B-18) rather
++/// than assuming the top level's code-block area is representative of every level. A codestream
++/// that defines precincts (Scod bit 0) can legitimately set a distinct, arbitrarily small
++/// precinct size per resolution level, which directly clamps that level's own code-block size
++/// (down to 1x1) independently of the top level's - so a top-level-only estimate using the top
++/// level's (large) code-block area as the divisor for every level would silently pass a
++/// codestream whose intermediate levels' real code-block count is orders of magnitude larger.
++const MAX_RAW_CODE_BLOCK_LAYER_ESTIMATE: u64 = 4_000_000;
++
+ fn build_decompositions(
+     tile: &Tile<'_>,
+     storage: &mut DecompositionStorage<'_>,
+     skipped_resolution_levels: u8,
+ ) -> Result<()> {
+     let mut total_coefficients = 0_usize;
++    let mut raw_code_block_layer_estimate = 0_u64;
+ 
+     for component_tile in tile.component_tiles() {
+         let decoded_resolutions =
+@@ -35,6 +54,26 @@ fn build_decompositions(
+         total_coefficients = total_coefficients
+             .checked_add(component_samples)
+             .ok_or(ValidationError::ImageTooLarge)?;
++
++        // Sum every *raw* resolution level's own code-block count (using that level's own
++        // code-block dimensions, not the top level's) - see the doc comment on
++        // `MAX_RAW_CODE_BLOCK_LAYER_ESTIMATE` above for why a top-level-only estimate isn't
++        // safe here.
++        for resolution_tile in component_tile.resolution_tiles() {
++            let cb_area = u64::from(resolution_tile.code_block_width())
++                * u64::from(resolution_tile.code_block_height());
++            let level_estimate = resolution_tile
++                .rect
++                .area()
++                .saturating_div(cb_area)
++                .saturating_mul(u64::from(tile.num_layers));
++            raw_code_block_layer_estimate =
++                raw_code_block_layer_estimate.saturating_add(level_estimate);
++        }
++    }
++
++    if raw_code_block_layer_estimate > MAX_RAW_CODE_BLOCK_LAYER_ESTIMATE {
++        bail!(ValidationError::ImageTooLarge);
+     }
+ 
+     if storage.coefficients.is_empty() {

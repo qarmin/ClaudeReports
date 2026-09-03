@@ -1,0 +1,54 @@
+diff --git a/internal/core/item_rendering.rs b/internal/core/item_rendering.rs
+index 7d181113c..d314af971 100644
+--- a/internal/core/item_rendering.rs
++++ b/internal/core/item_rendering.rs
+@@ -608,7 +608,14 @@ fn visit_opacity(
+         _self_rc: &ItemRc,
+         _size: LogicalSize,
+     ) -> RenderingResult {
+-        self.apply_opacity(opacity_item.opacity());
++        let opacity = opacity_item.opacity();
++        if opacity <= 0.0 {
++            // Fully transparent: nothing under this item is visible, so don't visit its
++            // children at all (and don't evaluate their rendering-only bindings, which may
++            // otherwise perpetually re-arm animation-driven redraws for no visible effect).
++            return RenderingResult::ContinueRenderingWithoutChildren;
++        }
++        self.apply_opacity(opacity);
+         RenderingResult::ContinueRenderingChildren
+     }
+     fn visit_layer(
+diff --git a/internal/renderers/femtovg/itemrenderer.rs b/internal/renderers/femtovg/itemrenderer.rs
+index 6eb271c99..a58a2a569 100644
+--- a/internal/renderers/femtovg/itemrenderer.rs
++++ b/internal/renderers/femtovg/itemrenderer.rs
+@@ -541,6 +541,13 @@ fn visit_opacity(
+         _size: LogicalSize,
+     ) -> RenderingResult {
+         let opacity = opacity_item.opacity();
++        if opacity <= 0.0 {
++            // Fully transparent: nothing under this item is visible, so don't visit its
++            // children at all, and release any layer texture cached from a previous,
++            // non-zero opacity frame so it doesn't go stale.
++            self.layer_cache.release(item_rc);
++            return RenderingResult::ContinueRenderingWithoutChildren;
++        }
+         if Opacity::need_layer(item_rc, opacity) {
+             self.render_and_blend_layer(opacity, item_rc)
+         } else {
+diff --git a/internal/renderers/skia/itemrenderer.rs b/internal/renderers/skia/itemrenderer.rs
+index 4f22b2b83..d73c167fb 100644
+--- a/internal/renderers/skia/itemrenderer.rs
++++ b/internal/renderers/skia/itemrenderer.rs
+@@ -929,6 +929,11 @@ fn visit_opacity(
+         _size: LogicalSize,
+     ) -> RenderingResult {
+         let opacity = opacity_item.opacity();
++        if opacity <= 0.0 {
++            // Fully transparent: nothing under this item is visible, so don't visit its
++            // children, and don't allocate/render into an offscreen layer for it either.
++            return RenderingResult::ContinueRenderingWithoutChildren;
++        }
+         if Opacity::need_layer(item_rc, opacity) {
+             self.canvas.save_layer_alpha(None, (opacity * 255.) as u32);
+             self.state_stack.push(self.current_state);

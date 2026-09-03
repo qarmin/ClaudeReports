@@ -1,0 +1,82 @@
+=== Ground truth: plain rustc/LLVM (-O) ===
+OK   AtomicU8::fetch_max(100,200): 200
+OK   AtomicU8::fetch_min(200,100): 100
+OK   AtomicI8::fetch_min(100,-1): -1
+OK   AtomicI8::fetch_max(-1,100): 100
+OK   AtomicU16::fetch_max(100,60000): 60000
+OK   AtomicI16::fetch_min(100,-1): -1
+OK   AtomicU32::fetch_max(100,u32::MAX): 4294967295
+OK   AtomicI32::fetch_min(100,i32::MIN): -2147483648
+OK   AtomicI32::fetch_max(i32::MIN,100): 100
+OK   AtomicU64::fetch_max(100,u64::MAX): 18446744073709551615
+OK   AtomicI64::fetch_min(100,i64::MIN): -9223372036854775808
+
+=== rustc_codegen_gcc, BEFORE the fix (base_commit 4cd7da5f9a5d9509b34ac0a766424ccdae706d33) ===
+Command: CHANNEL=release ./y.sh rustc repro/atomic_extremum_report.rs -o /tmp/atomic_extremum_before -Copt-level=0 && /tmp/atomic_extremum_before
+FAIL AtomicU8::fetch_max(100,200): got 100, expected 200
+FAIL AtomicU8::fetch_min(200,100): got 200, expected 100
+OK   AtomicI8::fetch_min(100,-1): -1
+OK   AtomicI8::fetch_max(-1,100): 100
+FAIL AtomicU16::fetch_max(100,60000): got 100, expected 60000
+OK   AtomicI16::fetch_min(100,-1): -1
+FAIL AtomicU32::fetch_max(100,u32::MAX): got 100, expected 4294967295
+OK   AtomicI32::fetch_min(100,i32::MIN): -2147483648
+OK   AtomicI32::fetch_max(i32::MIN,100): 100
+FAIL AtomicU64::fetch_max(100,u64::MAX): got 100, expected 18446744073709551615
+OK   AtomicI64::fetch_min(100,i64::MIN): -9223372036854775808
+
+=== rustc_codegen_gcc, AFTER applying patch.diff ===
+Command: CHANNEL=release ./y.sh rustc repro/atomic_extremum_report.rs -o /tmp/atomic_extremum_after -Copt-level=0 && /tmp/atomic_extremum_after
+OK   AtomicU8::fetch_max(100,200): 200
+OK   AtomicU8::fetch_min(200,100): 100
+OK   AtomicI8::fetch_min(100,-1): -1
+OK   AtomicI8::fetch_max(-1,100): 100
+OK   AtomicU16::fetch_max(100,60000): 60000
+OK   AtomicI16::fetch_min(100,-1): -1
+OK   AtomicU32::fetch_max(100,u32::MAX): 4294967295
+OK   AtomicI32::fetch_min(100,i32::MIN): -2147483648
+OK   AtomicI32::fetch_max(i32::MIN,100): 100
+OK   AtomicU64::fetch_max(100,u64::MAX): 18446744073709551615
+OK   AtomicI64::fetch_min(100,i64::MIN): -9223372036854775808
+
+=== Repeat-run check: assert-based repro (atomic_extremum.rs), BEFORE binary, run 3x ===
+Command: CHANNEL=release ./y.sh rustc atomic_extremum.rs -o /tmp/atomic_extremum_before_assert -Copt-level=0 && for i in 1 2 3; do /tmp/atomic_extremum_before_assert; echo "exit: $?"; done
+
+--- run 1 ---
+
+thread 'main' (34217) panicked at atomic_extremum.rs:10:5:
+assertion `left == right` failed: AtomicU8::fetch_max(100,200) should be 200 (unsigned)
+  left: 100
+ right: 200
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit: 101
+--- run 2 ---
+
+thread 'main' (34218) panicked at atomic_extremum.rs:10:5:
+assertion `left == right` failed: AtomicU8::fetch_max(100,200) should be 200 (unsigned)
+  left: 100
+ right: 200
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit: 101
+--- run 3 ---
+
+thread 'main' (34219) panicked at atomic_extremum.rs:10:5:
+assertion `left == right` failed: AtomicU8::fetch_max(100,200) should be 200 (unsigned)
+  left: 100
+ right: 200
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit: 101
+
+=== Project test suite: 'cargo test' (tests/run/*.rs via lang_tester), --release, BEFORE and AFTER ===
+--- BEFORE (unpatched) ---
+29:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+45:test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+92:test result: ok. 41 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+139:test result: ok. 41 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+145:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+--- AFTER (patched) ---
+65:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+81:test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+128:test result: ok. 41 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+175:test result: ok. 41 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+181:test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

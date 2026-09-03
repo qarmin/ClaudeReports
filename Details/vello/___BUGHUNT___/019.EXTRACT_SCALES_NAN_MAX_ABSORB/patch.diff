@@ -1,0 +1,38 @@
+diff --git a/sparse_strips/vello_common/src/util.rs b/sparse_strips/vello_common/src/util.rs
+index 8d046237..15a911e3 100644
+--- a/sparse_strips/vello_common/src/util.rs
++++ b/sparse_strips/vello_common/src/util.rs
+@@ -124,11 +124,15 @@ pub fn is_axis_aligned(transform: &Affine) -> bool {
+ /// from arbitrary affine transformations.
+ #[inline]
+ pub fn extract_scales(transform: &Affine) -> (f32, f32) {
++    // Keep the coefficients (and every intermediate quantity below) in `f64`: for a
++    // near-singular transform, `s1` and `s2` can be nearly equal, so `s1 - s2` needs
++    // enough mantissa bits to represent a difference many orders of magnitude smaller
++    // than `s1`/`s2` themselves. Rounding `a`/`b`/`c`/`d` down to `f32` first (as this
++    // used to do) can throw away exactly those bits, making `s1 - s2` round to a small
++    // *negative* number even though it is mathematically always >= 0 - `.sqrt()` on
++    // that is NaN, which `f32::max` below then silently replaces with the unrelated
++    // 1e-6 floor instead of the small-but-nonzero singular value it actually is.
+     let [a, b, c, d, _, _] = transform.as_coeffs();
+-    let a = a as f32;
+-    let b = b as f32;
+-    let c = c as f32;
+-    let d = d as f32;
+ 
+     // Compute singular values using the same formula as kurbo's svd()
+     let a2 = a * a;
+@@ -139,9 +143,11 @@ pub fn extract_scales(transform: &Affine) -> (f32, f32) {
+     let s2 = ((a2 - b2 + c2 - d2).powi(2) + 4.0 * (a * b + c * d).powi(2)).sqrt();
+ 
+     let scale_x = (0.5 * (s1 + s2)).sqrt();
+-    let scale_y = (0.5 * (s1 - s2)).sqrt();
++    // Clamp before `.sqrt()`: `s1 - s2` is mathematically non-negative but residual
++    // `f64` rounding can still occasionally push it just below zero.
++    let scale_y = (0.5 * (s1 - s2)).max(0.0).sqrt();
+ 
+-    (scale_x.max(1e-6), scale_y.max(1e-6))
++    ((scale_x as f32).max(1e-6), (scale_y as f32).max(1e-6))
+ }
+ 
+ /// Extension methods for rectangles.

@@ -1,0 +1,82 @@
+diff --git a/src/xls.rs b/src/xls.rs
+index 50925c6..1553008 100644
+--- a/src/xls.rs
++++ b/src/xls.rs
+@@ -82,8 +82,24 @@ pub enum XlsError {
+         /// iFmt value, See 2.4.126 Format
+         ifmt: u16,
+     },
++    /// The worksheet's used range would require more cells than `MAX_DENSE_RANGE_CELLS`.
++    CellLimitExceeded {
++        /// Number of cells requested
++        requested: usize,
++        /// Maximum allowed cells
++        max: usize,
++    },
+ }
+ 
++/// Maximum number of cells in the dense grid a `worksheet_range()` call will build, and the
++/// largest `Vec::reserve()` request the `Dimensions` record is allowed to trigger. The
++/// `Dimensions` record's declared row/column span is attacker-controlled (its extended, 14-byte
++/// form encodes the end row as a raw `u32` and end column as a raw `u16`, with no validation) -
++/// bounding both the reservation and the eventual dense-grid build avoids requesting an
++/// arbitrarily large allocation from either. Matches the cap `ods.rs`/`xlsx::mod.rs` use for the
++/// same reason.
++pub const MAX_DENSE_RANGE_CELLS: usize = 100_000_000;
++
+ from_err!(std::io::Error, XlsError, Io);
+ from_err!(crate::cfb::CfbError, XlsError, Cfb);
+ from_err!(crate::vba::VbaError, XlsError, Vba);
+@@ -120,6 +136,12 @@ impl std::fmt::Display for XlsError {
+             XlsError::Art(s) => write!(f, "Invalid art record '{s}'"),
+             XlsError::WorksheetNotFound(name) => write!(f, "Worksheet '{name}' not found"),
+             XlsError::InvalidFormat { ifmt } => write!(f, "Invalid ifmt value: '{ifmt}'"),
++            XlsError::CellLimitExceeded { requested, max } => {
++                write!(
++                    f,
++                    "Cell limit exceeded ({requested} cells requested, max {max})"
++                )
++            }
+         }
+     }
+ }
+@@ -635,9 +657,15 @@ impl<RS: Read + Seek> Xls<RS> {
+                     // 512: Dimensions
+                     0x0200 => {
+                         let Dimensions { start, end } = parse_dimensions(r.data)?;
+-                        let rows = (end.0 - start.0 + 1) as usize;
+-                        let cols = (end.1 - start.1 + 1) as usize;
+-                        cells.reserve(rows.saturating_mul(cols));
++                        // end.0/end.1 come straight from the file (the extended, 14-byte form of
++                        // this record encodes the end row as a raw u32 and end column as a raw
++                        // u16, unvalidated) - saturating_sub avoids an underflow-driven wrap if
++                        // start > end, and the MAX_DENSE_RANGE_CELLS cap avoids reserving an
++                        // arbitrarily large amount for a declared span that vastly exceeds any
++                        // real worksheet.
++                        let rows = (end.0.saturating_sub(start.0) as usize).saturating_add(1);
++                        let cols = (end.1.saturating_sub(start.1) as usize).saturating_add(1);
++                        cells.reserve(rows.saturating_mul(cols).min(MAX_DENSE_RANGE_CELLS));
+                     }
+                     //0x0201 => cells.push(parse_blank(r.data)?), // 513: Blank
+                     0x0203 => cells.push(parse_number(r.data, &self.formats, self.is_1904)?), // 515: Number
+@@ -694,8 +722,18 @@ impl<RS: Read + Seek> Xls<RS> {
+                     _ => (),
+                 }
+             }
+-            let range = Range::from_sparse(cells);
+-            let formula = Range::from_sparse(formulas);
++            let range = Range::from_sparse_bounded(cells, MAX_DENSE_RANGE_CELLS).map_err(
++                |requested| XlsError::CellLimitExceeded {
++                    requested,
++                    max: MAX_DENSE_RANGE_CELLS,
++                },
++            )?;
++            let formula = Range::from_sparse_bounded(formulas, MAX_DENSE_RANGE_CELLS).map_err(
++                |requested| XlsError::CellLimitExceeded {
++                    requested,
++                    max: MAX_DENSE_RANGE_CELLS,
++                },
++            )?;
+             sheets.insert(
+                 name,
+                 SheetData {
