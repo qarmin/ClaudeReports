@@ -1,0 +1,30 @@
+diff --git a/src/input-sections.cc b/src/input-sections.cc
+index 42ac956e..2ad5ea9d 100644
+--- a/src/input-sections.cc
++++ b/src/input-sections.cc
+@@ -40,6 +40,14 @@ InputSection<E>::InputSection(Context<E> &ctx, ObjectFile<E> &file, i64 shndx,
+       name = file.shstrtab.data() + file.elf_sections[shndx].sh_name;
+     namelen = std::min<i64>(name.size(), UINT16_MAX);
+ 
++    // sh_offset/sh_size are untrusted values straight from the file; a
++    // pointer built from an out-of-range sh_offset (and any later read
++    // through it) must never be attempted before this check. SHT_NOBITS
++    // (.bss-like) sections are exempt from the sh_size half below - they
++    // occupy no space in the file at all, so a legitimately huge sh_size
++    // (e.g. a large .bss) has nothing to validate against file size.
++    if (shdr().sh_offset > (u64)file.mf->size)
++      Fatal(ctx) << file << ": " << name << ": section offset is out of range";
+     contents = file.mf->data + shdr().sh_offset;
+   }
+ 
+@@ -48,6 +56,10 @@ InputSection<E>::InputSection(Context<E> &ctx, ObjectFile<E> &file, i64 shndx,
+     sh_size = chdr.ch_size;
+     p2align = to_p2align(chdr.ch_addralign);
+   } else {
++    if (shdr().sh_type != SHT_NOBITS &&
++        shdr().sh_size > (u64)file.mf->size - shdr().sh_offset)
++      Fatal(ctx) << file << ": section is out of range: sh_offset="
++                 << shdr().sh_offset << " sh_size=" << shdr().sh_size;
+     sh_size = shdr().sh_size;
+     p2align = to_p2align(shdr().sh_addralign);
+   }

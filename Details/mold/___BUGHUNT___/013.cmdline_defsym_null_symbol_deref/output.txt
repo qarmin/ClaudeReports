@@ -1,0 +1,80 @@
+All output below is genuinely captured from real runs against a build of mold at
+base_commit c340272e6376f9a8e5b5cd6f6634f925f6d54e5c (a plain `-DCMAKE_BUILD_TYPE=Debug`
+build, default compiler), and against the same source tree with the one-line patch in
+patch.diff applied and rebuilt.
+
+=== 1. Direct invocation against UNPATCHED build, 5 repeat runs ===
+### Direct run (5x) against UNPATCHED base_commit c340272e build ###
+run 1 exit: 139
+run 2 exit: 139
+run 3 exit: 139
+run 4 exit: 139
+run 5 exit: 139
+
+(exit 139 = 128 + SIGSEGV(11): segmentation fault, 5/5 runs, fully deterministic)
+
+=== 2. gdb backtrace of the crash (UNPATCHED build) ===
+### gdb backtrace of the crash (unpatched build) ###
+warning: Error disabling address space randomization: Operation not permitted
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/usr/lib/x86_64-linux-gnu/libthread_db.so.1".
+
+Program received signal SIGSEGV, Segmentation fault.
+0x000060a2cfcf7bc6 in mold::parse_nonpositional_args<mold::X86_64> (ctx=...) at src/cmdline.cc:1745
+1745	    sym->gc_root = true;
+#0  0x000060a2cfcf7bc6 in mold::parse_nonpositional_args<mold::X86_64> (ctx=...) at src/cmdline.cc:1745
+#1  0x000060a2d0aff730 in mold::mold_main<mold::X86_64> (argc=5, argv=0x7ffe9b266128) at src/main.cc:338
+#2  0x000060a2d2831e7d in main (argc=5, argv=0x7ffe9b266128) at src/entry.cc:42
+
+(Full absolute paths in the original capture point at this worktree's own scratch clone;
+line numbers 1745/338/42 are exact. This crash happens in the parent process during
+argument parsing, before mold forks its link-worker child, so no fork-following gdb
+workaround was needed.)
+
+=== 3. repro/run.sh against UNPATCHED build ===
+=== malformed --defsym value (the bug) ===
+run.sh: line 22: 158366 Segmentation fault         "$MOLD" -o /tmp/mold_defsym_repro_out --defsym=foo=0x12z "$DIR/valid.o"
+exit status: 139
+CRASHED: killed by signal 11
+
+=== sanity: valid --defsym value still works ===
+mold: warning: entry symbol is not defined: _start
+exit status: 0
+
+=== 4. repro/run.sh against PATCHED build (fix applied, rebuilt, re-verified) ===
+=== malformed --defsym value (the bug) ===
+mold: fatal: -defsym: not a number: 0x12z
+exit status: 1
+did not crash (expected on a fixed binary: exit 1 with a diagnostic)
+
+=== sanity: valid --defsym value still works ===
+mold: warning: entry symbol is not defined: _start
+exit status: 0
+
+=== 5. Additional malformed variant in the same class (0xZZ, no valid hex digits at all), PATCHED build ===
+mold: fatal: -defsym: not a number: 0xZZ
+exit status: 1
+
+=== 6. Regression check: valid --defsym values still work, PATCHED build ===
+--defsym=foo=0x1234 (hex):    mold: warning: entry symbol is not defined: _start / exit 0
+--defsym=foo=1234   (decimal): mold: warning: entry symbol is not defined: _start / exit 0
+--defsym=foo=main   (symbol name): mold: warning: entry symbol is not defined: _start / exit 0
+
+=== 7. Project test suite (ctest --test-dir build-plain -j4), UNPATCHED build ===
+100% tests passed, 0 tests failed out of 476
+Total Test time (real) =  44.43 sec
+
+=== 8. Project test suite (ctest --test-dir build-plain -j4), PATCHED build ===
+100% tests passed, 0 tests failed out of 476
+Total Test time (real) =  85.44 sec
+
+No new failures introduced by the fix; no existing test broke; test count identical
+before/after (476/476 both times, ~13 skipped by ctest itself for feature/environment
+gating, counted the same way in both runs).
+
+Note: an earlier attempt to capture some of this evidence into generic /tmp/*.log
+filenames produced a corrupted "493 tests" figure for the "after" ctest run - this was
+traced to a filename collision with a concurrently-running sibling bug-hunt candidate
+also writing to /tmp on the same host (this session runs as one of several parallel
+worktrees). All figures actually reported in this file were re-captured into
+worktree-private paths (not shared /tmp) and re-verified before being written down here.

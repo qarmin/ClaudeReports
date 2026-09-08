@@ -1,0 +1,348 @@
+diff --git a/benches/decoder.rs b/benches/decoder.rs
+index 0be4248..4fb5357 100644
+--- a/benches/decoder.rs
++++ b/benches/decoder.rs
+@@ -48,6 +48,51 @@ fn load_all(c: &mut Criterion) {
+     test_utils::write_noncompressed_png(&mut data, 128, 4096);
+     bench_read_row(&mut g, data, "128x128-4k-idat");
+     g.finish();
++
++    // Coverage for decode paths that the real-file corpus in `tests/benches/` never exercises at
++    // all: it is entirely 8-bit, non-interlaced, color types 0/2/3/6 (see `tests/benches/README.md`
++    // and the `___OPTIMIZATIONS___/README.md` note dated 2026-09-02). These are synthetic,
++    // store-only-compressed (no deflate cost) so the numbers isolate the decoder-side work
++    // (bit-depth expansion, Adam7 deinterlacing, animation frame sequencing) from compression.
++    let mut g = c.benchmark_group("decode-coverage");
++    {
++        let mut data = Vec::new();
++        test_utils::write_gray_noncompressed_png(&mut data, 256, 256, 1);
++        bench_file(&mut g, data, "gray1-256x256".to_string());
++
++        let mut data = Vec::new();
++        test_utils::write_gray_noncompressed_png(&mut data, 256, 256, 2);
++        bench_file(&mut g, data, "gray2-256x256".to_string());
++
++        let mut data = Vec::new();
++        test_utils::write_gray_noncompressed_png(&mut data, 256, 256, 4);
++        bench_file(&mut g, data, "gray4-256x256".to_string());
++
++        let mut data = Vec::new();
++        test_utils::write_gray_noncompressed_png(&mut data, 256, 256, 16);
++        bench_file(&mut g, data, "gray16-256x256".to_string());
++
++        let mut data = Vec::new();
++        test_utils::write_palette_noncompressed_png(&mut data, 256, 256, 1);
++        bench_file(&mut g, data, "palette1-256x256".to_string());
++
++        let mut data = Vec::new();
++        test_utils::write_palette_noncompressed_png(&mut data, 256, 256, 4);
++        bench_file(&mut g, data, "palette4-256x256".to_string());
++
++        let mut data = Vec::new();
++        test_utils::write_rgb16_noncompressed_png(&mut data, 256, 256);
++        bench_file(&mut g, data, "rgb16-256x256".to_string());
++
++        let mut data = Vec::new();
++        test_utils::write_adam7_rgba8_noncompressed_png(&mut data, 256, 256);
++        bench_file(&mut g, data, "adam7-rgba8-256x256".to_string());
++
++        let mut data = Vec::new();
++        test_utils::write_apng(&mut data, 128, 128, 8);
++        bench_apng_file(&mut g, data, "apng-rgba8-128x128x8frames".to_string());
++    }
++    g.finish();
+ }
+ 
+ criterion_group! {benches, load_all}
+@@ -78,6 +123,34 @@ fn bench_file(g: &mut BenchmarkGroup<WallTime>, data: Vec<u8>, name: String) {
+     });
+ }
+ 
++/// This benchmarks decoding every frame of an APNG via repeated `Reader::next_frame` calls - the
++/// animation decode path, which `bench_file` (a single `next_frame` call) does not cover.
++fn bench_apng_file(g: &mut BenchmarkGroup<WallTime>, data: Vec<u8>, name: String) {
++    let mut reader = create_reader(data.as_slice());
++    let num_frames = reader
++        .info()
++        .animation_control()
++        .map(|a| a.num_frames)
++        .unwrap_or(1);
++    let mut image = vec![0; reader.output_buffer_size().unwrap()];
++
++    let mut total_bytes = 0u64;
++    for _ in 0..num_frames {
++        let info = reader.next_frame(&mut image).unwrap();
++        total_bytes += info.buffer_size() as u64;
++    }
++
++    g.throughput(Throughput::Bytes(total_bytes));
++    g.bench_with_input(name, &data, |b, data| {
++        b.iter(|| {
++            let mut reader = create_reader(data.as_slice());
++            for _ in 0..num_frames {
++                reader.next_frame(&mut image).unwrap();
++            }
++        })
++    });
++}
++
+ /// This benchmarks decoding via a sequence of `Reader::read_row` calls.
+ fn bench_read_row(g: &mut BenchmarkGroup<WallTime>, data: Vec<u8>, name: &str) {
+     let reader = create_reader(data.as_slice());
+diff --git a/src/test_utils.rs b/src/test_utils.rs
+index 4db0765..7465d52 100644
+--- a/src/test_utils.rs
++++ b/src/test_utils.rs
+@@ -115,3 +115,252 @@ pub fn write_rgba8_idats(w: &mut impl Write, size: u32, idat_bytes: usize) {
+ pub fn write_iend(w: &mut impl Write) {
+     write_chunk(w, b"IEND", &[]);
+ }
++
++/// Writes an IHDR chunk with fully explicit parameters (unlike
++/// [`write_rgba8_ihdr_with_width`], which is fixed to 8-bit RGBA, non-interlaced).
++/// See http://www.libpng.org/pub/png/spec/1.2/PNG-Chunks.html#C.IHDR
++pub fn write_ihdr(
++    w: &mut impl Write,
++    width: u32,
++    height: u32,
++    bit_depth: u8,
++    color_type: u8,
++    interlaced: bool,
++) {
++    let mut data = Vec::new();
++    data.write_u32::<byteorder::BigEndian>(width).unwrap();
++    data.write_u32::<byteorder::BigEndian>(height).unwrap();
++    data.write_u8(bit_depth).unwrap();
++    data.write_u8(color_type).unwrap();
++    data.write_u8(0).unwrap(); // compression method (0 is the only allowed value)
++    data.write_u8(0).unwrap(); // filter method (0 is the only allowed value)
++    data.write_u8(interlaced as u8).unwrap();
++    write_chunk(w, b"IHDR", &data);
++}
++
++/// Wraps `raw_scanlines` (rows already prefixed with their per-row filter-type byte) in a
++/// store-only zlib stream and writes it as one or more IDAT chunks of at most `idat_bytes` each.
++pub fn write_idats_from_raw(w: &mut impl Write, raw_scanlines: &[u8], idat_bytes: usize) {
++    let mut zlib_data = Vec::new();
++    let mut store_only_compressor =
++        fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(&mut zlib_data)).unwrap();
++    store_only_compressor.write_data(raw_scanlines).unwrap();
++    store_only_compressor.finish().unwrap();
++
++    for chunk in zlib_data.chunks(idat_bytes) {
++        write_chunk(w, b"IDAT", chunk);
++    }
++}
++
++/// Packs one-byte-per-sample values (each expected to fit in `bit_depth` bits) MSB-first into a
++/// PNG sub-byte scanline, as used by grayscale/palette rows at `bit_depth` 1, 2 or 4. A no-op copy
++/// when `bit_depth == 8`.
++fn pack_samples_msb_first(samples: &[u8], bit_depth: u8) -> Vec<u8> {
++    if bit_depth == 8 {
++        return samples.to_vec();
++    }
++    assert!(matches!(bit_depth, 1 | 2 | 4), "unsupported bit depth");
++    let samples_per_byte = 8 / bit_depth as usize;
++    let mut out = vec![0u8; samples.len().div_ceil(samples_per_byte)];
++    for (i, &sample) in samples.iter().enumerate() {
++        let shift = 8 - bit_depth as usize * (i % samples_per_byte + 1);
++        out[i / samples_per_byte] |= (sample & ((1 << bit_depth) - 1)) << shift;
++    }
++    out
++}
++
++/// Generates a synthetic, store-only-compressed grayscale image at `bit_depth` (1, 2, 4, 8 or 16)
++/// - covers the sub-byte and 16-bit decode paths that the 8-bit-only real-file corpus in
++/// `tests/benches/` does not exercise.
++pub fn write_gray_noncompressed_png(w: &mut impl Write, width: u32, height: u32, bit_depth: u8) {
++    write_png_sig(w);
++    write_ihdr(w, width, height, bit_depth, /* color_type = grayscale */ 0, false);
++
++    let max_sample: u32 = (1u32 << bit_depth) - 1;
++    let mut raw = Vec::new();
++    for y in 0..height {
++        raw.push(0u8); // filter = none
++        let row: Vec<u32> = (0..width).map(|x| (x + y) & max_sample).collect();
++        match bit_depth {
++            16 => {
++                for sample in row {
++                    raw.write_u16::<byteorder::BigEndian>(sample as u16)
++                        .unwrap();
++                }
++            }
++            8 => raw.extend(row.iter().map(|&s| s as u8)),
++            _ => {
++                let samples: Vec<u8> = row.iter().map(|&s| s as u8).collect();
++                raw.extend(pack_samples_msb_first(&samples, bit_depth));
++            }
++        }
++    }
++    write_idats_from_raw(w, &raw, usize::MAX);
++    write_iend(w);
++}
++
++/// Generates a synthetic, store-only-compressed palette (indexed-color) image at `bit_depth`
++/// (1, 2, 4 or 8) - covers the sub-byte palette-expansion decode path.
++pub fn write_palette_noncompressed_png(w: &mut impl Write, width: u32, height: u32, bit_depth: u8) {
++    write_png_sig(w);
++    write_ihdr(w, width, height, bit_depth, /* color_type = palette */ 3, false);
++
++    let palette_len = 1usize << bit_depth;
++    let mut palette = Vec::with_capacity(palette_len * 3);
++    for i in 0..palette_len {
++        let v = (i * 255 / (palette_len - 1).max(1)) as u8;
++        palette.extend_from_slice(&[v, 255 - v, v / 2]);
++    }
++    write_chunk(w, b"PLTE", &palette);
++
++    let mut raw = Vec::new();
++    for y in 0..height {
++        raw.push(0u8); // filter = none
++        let samples: Vec<u8> = (0..width)
++            .map(|x| ((x + y) % palette_len as u32) as u8)
++            .collect();
++        raw.extend(pack_samples_msb_first(&samples, bit_depth));
++    }
++    write_idats_from_raw(w, &raw, usize::MAX);
++    write_iend(w);
++}
++
++/// Generates a synthetic, store-only-compressed 16-bit RGB image - covers the 16-bit-per-channel
++/// decode path (byte-swap/sample-widening) that the 8-bit-only real-file corpus does not exercise.
++pub fn write_rgb16_noncompressed_png(w: &mut impl Write, width: u32, height: u32) {
++    write_png_sig(w);
++    write_ihdr(w, width, height, 16, /* color_type = RGB */ 2, false);
++
++    let mut raw = Vec::new();
++    for y in 0..height {
++        raw.push(0u8); // filter = none
++        for x in 0..width {
++            let r = (x * 65535 / width.max(1)) as u16;
++            let g = (y * 65535 / height.max(1)) as u16;
++            let b: u16 = 32768;
++            raw.write_u16::<byteorder::BigEndian>(r).unwrap();
++            raw.write_u16::<byteorder::BigEndian>(g).unwrap();
++            raw.write_u16::<byteorder::BigEndian>(b).unwrap();
++        }
++    }
++    write_idats_from_raw(w, &raw, usize::MAX);
++    write_iend(w);
++}
++
++/// The 7 Adam7 passes as `(x_start, y_start, x_step, y_step)`.
++/// See http://www.libpng.org/pub/png/spec/1.2/PNG-DataRep.html#DR.Interlaced-data-order
++const ADAM7_PASSES: [(u32, u32, u32, u32); 7] = [
++    (0, 0, 8, 8),
++    (4, 0, 8, 8),
++    (0, 4, 4, 8),
++    (2, 0, 4, 4),
++    (0, 2, 2, 4),
++    (1, 0, 2, 2),
++    (0, 1, 1, 2),
++];
++
++/// Generates a synthetic, store-only-compressed Adam7-interlaced RGBA8 image. The `png` crate's
++/// own [`crate::Encoder`] does not support writing interlaced images (see
++/// `FormatErrorKind::InterlacedEncodingUnsupported` in `src/encoder.rs`), so this hand-rolls the
++/// 7-pass sub-image layout instead - this is the only way to get an Adam7 test image other than
++/// lifting one of the tiny (32x32) `basi*.png` files from `tests/pngsuite/`.
++pub fn write_adam7_rgba8_noncompressed_png(w: &mut impl Write, width: u32, height: u32) {
++    write_png_sig(w);
++    write_ihdr(w, width, height, 8, /* color_type = RGBA */ 6, true);
++
++    let mut raw = Vec::new();
++    for (x0, y0, xs, ys) in ADAM7_PASSES {
++        let pass_width = if width > x0 { (width - x0 - 1) / xs + 1 } else { 0 };
++        let pass_height = if height > y0 { (height - y0 - 1) / ys + 1 } else { 0 };
++        for y in 0..pass_height {
++            raw.push(0u8); // filter = none
++            for x in 0..pass_width {
++                let color = ((x0 + x * xs + y0 + y * ys) % 256) as u8;
++                raw.extend_from_slice(&[color, 255 - color, color / 2, 0xff]);
++            }
++        }
++    }
++    write_idats_from_raw(w, &raw, usize::MAX);
++    write_iend(w);
++}
++
++/// Writes an acTL chunk (APNG animation control).
++/// See https://wiki.mozilla.org/APNG_Specification#.60acTL.60:_The_Animation_Control_Chunk
++pub fn write_actl(w: &mut impl Write, num_frames: u32, num_plays: u32) {
++    let mut data = Vec::new();
++    data.write_u32::<byteorder::BigEndian>(num_frames).unwrap();
++    data.write_u32::<byteorder::BigEndian>(num_plays).unwrap();
++    write_chunk(w, b"acTL", &data);
++}
++
++/// Writes an fcTL chunk (APNG frame control).
++/// See https://wiki.mozilla.org/APNG_Specification#.60fcTL.60:_The_Frame_Control_Chunk
++#[allow(clippy::too_many_arguments)]
++pub fn write_fctl(
++    w: &mut impl Write,
++    sequence_number: u32,
++    width: u32,
++    height: u32,
++    x_offset: u32,
++    y_offset: u32,
++    delay_num: u16,
++    delay_den: u16,
++    dispose_op: u8,
++    blend_op: u8,
++) {
++    let mut data = Vec::new();
++    data.write_u32::<byteorder::BigEndian>(sequence_number)
++        .unwrap();
++    data.write_u32::<byteorder::BigEndian>(width).unwrap();
++    data.write_u32::<byteorder::BigEndian>(height).unwrap();
++    data.write_u32::<byteorder::BigEndian>(x_offset).unwrap();
++    data.write_u32::<byteorder::BigEndian>(y_offset).unwrap();
++    data.write_u16::<byteorder::BigEndian>(delay_num).unwrap();
++    data.write_u16::<byteorder::BigEndian>(delay_den).unwrap();
++    data.write_u8(dispose_op).unwrap();
++    data.write_u8(blend_op).unwrap();
++    write_chunk(w, b"fcTL", &data);
++}
++
++/// Writes an fdAT chunk (APNG frame data), prefixed with `sequence_number`.
++/// See https://wiki.mozilla.org/APNG_Specification#.60fdAT.60:_The_Frame_Data_Chunk
++pub fn write_fdat(w: &mut impl Write, sequence_number: u32, frame_data: &[u8]) {
++    let mut data = Vec::new();
++    data.write_u32::<byteorder::BigEndian>(sequence_number)
++        .unwrap();
++    data.write_all(frame_data).unwrap();
++    write_chunk(w, b"fdAT", &data);
++}
++
++/// Generates a synthetic APNG with `num_frames` RGBA8 frames of size `width` x `height` - covers
++/// the animation decode path (repeated `next_frame` calls across `IDAT`/`fdAT`), which the
++/// single-frame-only real-file corpus does not exercise at all. The default image doubles as
++/// frame 0 (i.e. `sep_def_img = false`), the common case.
++pub fn write_apng(w: &mut impl Write, width: u32, height: u32, num_frames: u32) {
++    assert!(num_frames >= 1);
++    write_png_sig(w);
++    write_ihdr(w, width, height, 8, /* color_type = RGBA */ 6, false);
++    write_actl(w, num_frames, /* num_plays = */ 0);
++
++    let mut seq = 0u32;
++    write_fctl(w, seq, width, height, 0, 0, 1, 30, 0, 0);
++    seq += 1;
++    write_chunk(
++        w,
++        b"IDAT",
++        &generate_rgba8_with_width_and_height(width, height),
++    );
++
++    for _ in 1..num_frames {
++        write_fctl(w, seq, width, height, 0, 0, 1, 30, 0, 0);
++        seq += 1;
++        write_fdat(
++            w,
++            seq,
++            &generate_rgba8_with_width_and_height(width, height),
++        );
++        seq += 1;
++    }
++
++    write_iend(w);
++}

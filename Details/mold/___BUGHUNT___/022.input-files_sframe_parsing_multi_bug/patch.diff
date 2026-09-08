@@ -1,0 +1,82 @@
+diff --git a/src/input-files.cc b/src/input-files.cc
+index 2844c98d..7cf73b05 100644
+--- a/src/input-files.cc
++++ b/src/input-files.cc
+@@ -744,17 +744,28 @@ void ObjectFile<E>::parse_ehframe(Context<E> &ctx) {
+ // the attribute header), a one-byte info field and a number of
+ // variable-width data words encoded in that info field.
+ template <typename E>
+-static i64 sframe_fre_block_size(std::string_view data, i64 offset) {
++static i64 sframe_fre_block_size(Context<E> &ctx, InputSection<E> &isec,
++                                  std::string_view data, i64 offset) {
++  // `offset` and every field read below ultimately come from untrusted
++  // .sframe header/FDE fields, so each read must be checked against the
++  // section's real size before it happens.
++  if (offset < 0 || offset + 5 > (i64)data.size())
++    Fatal(ctx) << isec << ": corrupted .sframe section";
++
+   const u8 *attr = (const u8 *)data.data() + offset;
+   i64 num_fres = *(U16<E> *)attr;
+   i64 addr_size = 1 << bits(attr[2], 3, 0);
+ 
+   i64 p = offset + 5;
+   for (i64 i = 0; i < num_fres; i++) {
++    if (p + addr_size >= (i64)data.size())
++      Fatal(ctx) << isec << ": corrupted .sframe section";
+     u8 info = data[p + addr_size];
+     i64 num_words = bits(info, 4, 1);
+     i64 word_size = 1 << bits(info, 6, 5);
+     p += addr_size + 1 + num_words * word_size;
++    if (p > (i64)data.size())
++      Fatal(ctx) << isec << ": corrupted .sframe section";
+   }
+   return p - offset;
+ }
+@@ -779,6 +790,10 @@ void ObjectFile<E>::parse_sframe(Context<E> &ctx) requires supports_sframe<E> {
+     isec->is_alive = false;
+ 
+     std::string_view data = this->get_string(ctx, isec->shdr());
++
++    if (data.size() < sizeof(SFrameHeader<E>))
++      Fatal(ctx) << *isec << ": corrupted .sframe section";
++
+     const SFrameHeader<E> &hdr = *(const SFrameHeader<E> *)data.data();
+ 
+     if (hdr.magic != SFRAME_MAGIC)
+@@ -797,6 +812,15 @@ void ObjectFile<E>::parse_sframe(Context<E> &ctx) requires supports_sframe<E> {
+     i64 fde_off = hdr_len + hdr.fdeoff;
+     i64 fre_off = hdr_len + hdr.freoff;
+ 
++    // `hdr_len`/`fde_off`/`fre_off` are all derived from fully untrusted
++    // header fields; validate every one against the section's real size
++    // before it's used to index into `data`.
++    if (hdr_len < 0 || hdr_len > (i64)data.size() ||
++        fde_off < 0 || fre_off < 0 || fre_off > (i64)data.size() ||
++        num_fdes < 0 ||
++        fde_off + num_fdes * (i64)sizeof(SFrameFdeIdx<E>) > (i64)data.size())
++      Fatal(ctx) << *isec << ": corrupted .sframe section";
++
+     std::span<ElfRel<E>> rels = isec->get_rels(ctx);
+     i64 rel_idx = 0;
+ 
+@@ -816,6 +840,11 @@ void ObjectFile<E>::parse_sframe(Context<E> &ctx) requires supports_sframe<E> {
+       const ElfRel<E> &rel = rels[rel_idx];
+       i64 off = fre_off + ent.func_start_fre_off;
+ 
++      // `ent.func_start_fre_off` is an untrusted per-FDE field; validate the
++      // resulting offset before it's used to index into `data`.
++      if (off < 0 || off + 5 > (i64)data.size())
++        Fatal(ctx) << *isec << ": corrupted .sframe section";
++
+       InputSection<E> *func = get_section(this->elf_syms[rel.r_sym]);
+       if (!func)
+         continue;
+@@ -824,7 +853,7 @@ void ObjectFile<E>::parse_sframe(Context<E> &ctx) requires supports_sframe<E> {
+       fde.isec = func;
+       fde.sym = this->symbols[rel.r_sym];
+       fde.addend = rel.r_addend;
+-      fde.fre = data.substr(off, sframe_fre_block_size<E>(data, off));
++      fde.fre = data.substr(off, sframe_fre_block_size<E>(ctx, *isec, data, off));
+       fde.func_size = ent.func_size;
+       fde.num_fres = *(U16<E> *)(data.data() + off);
+       sframe_fdes.push_back(fde);

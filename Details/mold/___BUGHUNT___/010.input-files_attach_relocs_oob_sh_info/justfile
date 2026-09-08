@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# NOTE: -j5, not -j$(nproc) - a prior session on this same host got OOM-killed running a full
+# ASAN build + ctest at -j24 (24 cores, ASAN processes are memory-hungry). Raise this if you know
+# your machine has headroom.
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+
+test: clone build-before reproduce-before apply build-after reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-before:
+    mkdir -p clone/build
+    cd clone/build && cmake -DCMAKE_BUILD_TYPE=Debug -DMOLD_USE_ASAN=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ .. && cmake --build . -j5 --target mold
+
+# Should abort: libstdc++ hardening assertion "__n < this->size()" in
+# InputSectionTable<E>::operator[] (plain, non-hardened builds instead SIGSEGV - see output.txt).
+reproduce-before:
+    chmod +x repro/run.sh
+    ! ./repro/run.sh clone/build/mold
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-after:
+    cd clone/build && cmake --build . -j5 --target mold
+
+# Should no longer crash - the malformed relocation section is now simply not attached to a
+# target (mold links successfully, aside from its own unrelated "entry symbol is not defined"
+# warning for this deliberately minimal, entry-less test object).
+reproduce-after:
+    chmod +x repro/run.sh
+    ./repro/run.sh clone/build/mold
+
+clean:
+    rm -rf clone

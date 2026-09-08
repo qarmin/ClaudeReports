@@ -317,45 +317,57 @@ impl EncodeParams {
 
 fn encode(spec: &ImageSpec, data: &[u8], palette: Option<&[u8]>, params: &EncodeParams) -> Vec<u8> {
     let mut out = Vec::new();
-    {
-        let mut encoder = Encoder::new(&mut out, spec.width, spec.height);
-        encoder.set_color(spec.color);
-        encoder.set_depth(spec.depth);
-        encoder.set_filter(params.filter);
-        encoder.set_deflate_compression(params.compression);
-        if let Some(palette) = palette {
-            encoder.set_palette(palette);
-        }
-        if let Some(frames) = params.frames {
-            encoder.set_animated(frames, 0).expect("set_animated");
-        }
-
-        let mut writer = encoder.write_header().expect("write_header");
-
-        match params.stream_buffer {
-            None => {
-                let frames = params.frames.unwrap_or(1);
-                for _ in 0..frames {
-                    writer
-                        .write_image_data(black_box(data))
-                        .expect("write_image_data");
-                }
-            }
-            Some(buffer_size) => {
-                let frames = params.frames.unwrap_or(1);
-                let mut stream = writer
-                    .stream_writer_with_size(buffer_size)
-                    .expect("stream_writer_with_size");
-                for _ in 0..frames {
-                    stream.write_all(black_box(data)).expect("stream write_all");
-                }
-                stream.finish().expect("stream finish");
-            }
-        }
-
-        writer.finish().expect("finish");
-    }
+    encode_into(&mut out, spec, data, palette, params);
     out
+}
+
+/// Same encode as `encode`, but generic over the output sink so a `memory` mode run can write
+/// into `std::io::sink()` instead of a `Vec<u8>` - see that mode's own comment for why this
+/// matters (a `Vec<u8>` sink masks any peak-RSS improvement inside the encoder itself, since the
+/// harness's own sink then holds the whole encoded output in memory regardless).
+fn encode_into<W: Write>(
+    out: W,
+    spec: &ImageSpec,
+    data: &[u8],
+    palette: Option<&[u8]>,
+    params: &EncodeParams,
+) {
+    let mut encoder = Encoder::new(out, spec.width, spec.height);
+    encoder.set_color(spec.color);
+    encoder.set_depth(spec.depth);
+    encoder.set_filter(params.filter);
+    encoder.set_deflate_compression(params.compression);
+    if let Some(palette) = palette {
+        encoder.set_palette(palette);
+    }
+    if let Some(frames) = params.frames {
+        encoder.set_animated(frames, 0).expect("set_animated");
+    }
+
+    let mut writer = encoder.write_header().expect("write_header");
+
+    match params.stream_buffer {
+        None => {
+            let frames = params.frames.unwrap_or(1);
+            for _ in 0..frames {
+                writer
+                    .write_image_data(black_box(data))
+                    .expect("write_image_data");
+            }
+        }
+        Some(buffer_size) => {
+            let frames = params.frames.unwrap_or(1);
+            let mut stream = writer
+                .stream_writer_with_size(buffer_size)
+                .expect("stream_writer_with_size");
+            for _ in 0..frames {
+                stream.write_all(black_box(data)).expect("stream write_all");
+            }
+            stream.finish().expect("stream finish");
+        }
+    }
+
+    writer.finish().expect("finish");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -506,6 +518,65 @@ fn run_one(
     );
 }
 
+/// Measures peak RSS of the encoder itself, unmasked by the harness's own output buffer.
+///
+/// Every other mode collects the encoded PNG into a `Vec<u8>` (`encode()`) so it can hash/verify
+/// it - which means the harness's own sink ends up holding the whole encoded output in memory
+/// regardless of whether the library streamed its compressed output or buffered it internally.
+/// That makes `run_one`'s own `peak_rss_MiB` useless for judging an encoder-internal buffering
+/// change. This mode instead writes into `std::io::sink()` (discarded, never materialized), so
+/// the measured peak RSS reflects only what `png::Writer` itself holds - plus the one raw pixel
+/// buffer supplied by the caller, which is identical across configurations being compared.
+/// Correctness is still checked, once, via a separate normal `Vec`-sink encode + roundtrip.
+fn run_memory(
+    mode_label: &str,
+    label: &str,
+    spec: &ImageSpec,
+    data: &[u8],
+    palette: Option<&[u8]>,
+    params: &EncodeParams,
+    cfg: &RunConfig,
+) {
+    let frames = params.frames.unwrap_or(1);
+    let mut verify = "OK".to_string();
+    if !cfg.quiet_verify {
+        let encoded = encode(spec, data, palette, params);
+        if let Err(e) = verify_roundtrip(&encoded, data, frames) {
+            verify = format!("FAIL({e})");
+        }
+    }
+
+    let warmup = (cfg.iters / 10).max(1);
+    let mut samples = Vec::with_capacity(cfg.iters);
+
+    for i in 0..(cfg.iters + warmup) {
+        let start = Instant::now();
+        encode_into(std::io::sink(), spec, black_box(data), palette, params);
+        let elapsed = start.elapsed();
+        if i >= warmup {
+            samples.push(elapsed);
+        }
+    }
+
+    let s = stats(samples);
+    let raw_total = spec.raw_bytes() * frames as usize;
+    println!(
+        "RESULT mode={mode_label} cfg={label} img={}x{}x{} pattern_bytes={raw_total} n={} \
+         min={:.3}ms p50={:.3}ms mean={:.3}ms p95={:.3}ms max={:.3}ms \
+         peak_rss_MiB={:.1} verify={verify}",
+        spec.width,
+        spec.height,
+        spec.label(),
+        s.n,
+        s.min.as_secs_f64() * 1e3,
+        s.p50.as_secs_f64() * 1e3,
+        s.mean.as_secs_f64() * 1e3,
+        s.p95.as_secs_f64() * 1e3,
+        s.max.as_secs_f64() * 1e3,
+        peak_rss_kib() as f64 / 1024.0,
+    );
+}
+
 /// Decode side of an APNG - the one decode path `benches/decoder.rs` does not cover.
 fn run_decode_apng(
     spec: &ImageSpec,
@@ -626,6 +697,7 @@ struct Args {
     only: Option<String>,
     input: Option<String>,
     corpus: Option<String>,
+    skip_verify: bool,
 }
 
 fn parse_compression(s: &str) -> Option<DeflateCompression> {
@@ -656,7 +728,10 @@ MODES (repeatable; default: all)
     stream        StreamWriter with several buffer sizes
     decode-apng   decoding an animated PNG (the gap in benches/decoder.rs)
     corpus        re-encode every *.png in --corpus DIR, one line per file
-    all           every mode above except corpus (which needs --corpus)
+    memory        one run per DeflateCompression setting, encoding into std::io::sink()
+                  instead of a Vec (not part of `all` - see run_memory's own doc comment for why
+                  the other modes' peak_rss_MiB can't see an encoder-internal buffering change)
+    all           every mode above except corpus and memory (which need --corpus / are opt-in)
 
 OPTIONS
     --size N          square image edge in pixels (default 512)
@@ -672,6 +747,13 @@ OPTIONS
                       always generates its own images, since varying the color type is its point)
     --corpus DIR      directory of *.png files for the `corpus` mode
                       (the repo\'s own is tests/benches/)
+    --skip-verify     skip the correctness roundtrip check. Mandatory for a trustworthy
+                      `memory` mode peak_rss_MiB: the check itself encodes once into a `Vec`,
+                      which - being a monotonic high-water mark for the whole process - would
+                      otherwise permanently set the peak before the sink-based measurement loop
+                      even starts. Verify correctness separately (e.g. via `compress` mode on the
+                      same configuration, in its own process) instead of trusting an unverified
+                      `memory` run on its own.
     -h, --help        this text
 
 Every result line starts with `RESULT ` and is key=value throughout, so it can be parsed by
@@ -691,6 +773,7 @@ fn parse_args() -> Args {
         only: None,
         input: None,
         corpus: None,
+        skip_verify: false,
     };
 
     let mut it = std::env::args().skip(1);
@@ -708,6 +791,7 @@ fn parse_args() -> Args {
             "--only" => args.only = Some(value()),
             "--input" => args.input = Some(value()),
             "--corpus" => args.corpus = Some(value()),
+            "--skip-verify" => args.skip_verify = true,
             "-h" | "--help" => usage(),
             _ => usage(),
         }
@@ -750,7 +834,7 @@ fn main() {
     let palette = generate_palette();
     let cfg = RunConfig {
         iters: args.iters,
-        quiet_verify: false,
+        quiet_verify: args.skip_verify,
     };
 
     println!(
@@ -789,6 +873,22 @@ fn main() {
                     }
                     run_one(
                         "compress",
+                        &name,
+                        &source,
+                        &source_pixels,
+                        source_palette,
+                        &EncodeParams::simple(Filter::Adaptive, compression),
+                        &cfg,
+                    );
+                }
+            }
+            "memory" => {
+                for (name, compression) in compressions() {
+                    if !keep(&name) {
+                        continue;
+                    }
+                    run_memory(
+                        "memory",
                         &name,
                         &source,
                         &source_pixels,

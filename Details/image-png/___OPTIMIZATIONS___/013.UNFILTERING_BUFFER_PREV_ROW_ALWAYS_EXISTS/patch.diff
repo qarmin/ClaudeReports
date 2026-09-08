@@ -1,0 +1,113 @@
+diff --git a/src/decoder/mod.rs b/src/decoder/mod.rs
+index 131ad50..f1cb9c2 100644
+--- a/src/decoder/mod.rs
++++ b/src/decoder/mod.rs
+@@ -384,7 +384,8 @@ impl<R: BufRead> Reader<R> {
+         } else {
+             (self.subframe.rowlen as u64) * self.subframe.height as u64
+         };
+-        self.unfiltering_buffer.start_frame(frame_bytes);
++        self.unfiltering_buffer
++            .start_frame(frame_bytes, self.subframe.rowlen.saturating_sub(1));
+ 
+         // Allocate output buffer.
+         let buflen = self.unguarded_output_line_size(self.subframe.width);
+@@ -559,15 +560,15 @@ impl<R: BufRead> Reader<R> {
+             }
+             Some(interlace) => *interlace,
+         };
+-        if interlace.line_number() == 0 {
+-            self.unfiltering_buffer.reset_prev_row();
+-        }
+         let rowlen = match interlace {
+             InterlaceInfo::Null(_) => self.subframe.rowlen,
+             InterlaceInfo::Adam7(Adam7Info { samples: width, .. }) => {
+                 self.info().raw_row_length_from_width(width)
+             }
+         };
++        if interlace.line_number() == 0 {
++            self.unfiltering_buffer.reset_prev_row(rowlen - 1);
++        }
+ 
+         let output_line_size = self.output_line_size_for_interlace_info(&interlace);
+         let output_buffer = &mut output_buffer[..output_line_size];
+diff --git a/src/decoder/unfiltering_buffer.rs b/src/decoder/unfiltering_buffer.rs
+index 18c76cd..500b7f9 100644
+--- a/src/decoder/unfiltering_buffer.rs
++++ b/src/decoder/unfiltering_buffer.rs
+@@ -106,24 +106,47 @@ impl UnfilteringBuffer {
+ 
+     /// Called to indicate that there is no previous row (e.g. when the current
+     /// row is the first scanline of a given Adam7 pass).
+-    pub fn reset_prev_row(&mut self) {
+-        // Stash a previously allocated buffer (for potential reuse later)
+-        // rather than throwing it away when resetting `self.prev_row`.
+-        if let PrevRow::Scratch(buf) = &mut self.prev_row {
+-            self.scratch_buffer = std::mem::take(buf);
+-        }
+-
+-        self.prev_row = PrevRow::None;
++    ///
++    /// `row_len` is the number of (non-filter-byte) pixel bytes in a row of the
++    /// upcoming pass; per image-rs/image-png#661, rather than a `None` sentinel that every
++    /// consumer must special-case, we keep a real, zero-filled "previous row" of that length
++    /// around so `prev_row()` always returns actual data.
++    pub fn reset_prev_row(&mut self, row_len: usize) {
++        // Reuse whichever backing allocation is already available (the outgoing `Scratch`
++        // buffer, if any, else the stashed `scratch_buffer`) rather than allocating anew.
++        let mut buf = match std::mem::replace(&mut self.prev_row, PrevRow::None) {
++            PrevRow::Scratch(buf) => buf,
++            PrevRow::None | PrevRow::InPlace(_) => std::mem::take(&mut self.scratch_buffer),
++        };
++        buf.clear();
++        buf.resize(row_len, 0);
++        self.prev_row = PrevRow::Scratch(buf);
+         self.debug_assert_invariants();
+     }
+ 
+-    pub fn start_frame(&mut self, frame_bytes: u64) {
++    /// If `self.prev_row` currently owns a `Scratch` buffer, moves its allocation into
++    /// `self.scratch_buffer` for potential reuse (by `reset_prev_row` or
++    /// `unfilter_curr_row_using_scratch_buffer`) instead of dropping it. Leaves `self.prev_row`
++    /// as `PrevRow::None` - callers must immediately overwrite it.
++    fn stash_scratch_buf_for_reuse(&mut self) {
++        if let PrevRow::Scratch(buf) = std::mem::replace(&mut self.prev_row, PrevRow::None) {
++            self.scratch_buffer = buf;
++        }
++    }
++
++    /// `initial_row_len` seeds the same "real zero-filled previous row" invariant as
++    /// `reset_prev_row` for the very first row of the frame - needed because non-interlaced
++    /// full-frame decoding (`Reader::next_frame`) reaches the first row directly, without going
++    /// through `read_row`'s own `reset_prev_row` call. (For an interlaced frame this placeholder
++    /// is overwritten by `reset_prev_row` before the first row of pass 1 is actually unfiltered,
++    /// since that path always goes through `read_row`, so any value is safe here.)
++    pub fn start_frame(&mut self, frame_bytes: u64, initial_row_len: usize) {
+         self.data_stream.clear();
+-        self.prev_row = PrevRow::None;
+         self.current_start = 0;
+         self.filled = 0;
+         self.available = 0;
+         self.remaining_bytes = frame_bytes;
++        self.reset_prev_row(initial_row_len);
+     }
+ 
+     pub fn remaining_bytes(&self) -> u64 {
+@@ -273,7 +296,7 @@ impl UnfilteringBuffer {
+ 
+         unfilter(filter, bpp, prev, row);
+ 
+-        self.reset_prev_row();
++        self.stash_scratch_buf_for_reuse();
+         self.prev_row = PrevRow::InPlace(self.current_start + 1);
+         self.current_start += rowlen;
+         self.debug_assert_invariants();
+@@ -312,7 +335,7 @@ impl UnfilteringBuffer {
+ 
+         unfilter(filter, bpp, prev, &mut row);
+ 
+-        self.reset_prev_row();
++        self.stash_scratch_buf_for_reuse();
+         self.prev_row = PrevRow::Scratch(row);
+         self.current_start += rowlen;
+ 

@@ -1,0 +1,47 @@
+$ python3 repro/gen_evil_elf.py evil2.o
+wrote evil2.o
+$ readelf -S evil2.o   (excerpt)
+  [ 1] .symtab           SYMTAB     ...  Size 0x18  EntSize 0x18  Link 2  Info 5  Align 8
+      (1 symbol entry, sh_info=5 - claims 5 local symbols precede the globals, but there is
+       only 1 symbol total)
+
+=== plain (build-plain, non-ASAN) build, 3 repeat runs ===
+$ for i in 1 2 3; do build-plain/mold -o out2.exe evil2.o; echo "run $i exit: $?"; done
+terminate called after throwing an instance of 'std::length_error'
+  what():  vector<bool>::_M_fill_insert
+run 1 exit: 134
+terminate called after throwing an instance of 'std::length_error'
+  what():  vector<bool>::_M_fill_insert
+run 2 exit: 134
+terminate called after throwing an instance of 'std::length_error'
+  what():  vector<bool>::_M_fill_insert
+run 3 exit: 134
+
+=== ASAN/UBSAN build (build-asan), 2 repeat runs ===
+$ build-asan/mold -o out2.exe evil2.o; echo $?
+terminate called after throwing an instance of 'std::length_error'
+  what():  vector<bool>::_M_fill_insert
+134
+$ build-asan/mold -o out2.exe evil2.o; echo $?
+terminate called after throwing an instance of 'std::length_error'
+  what():  vector<bool>::_M_fill_insert
+134
+
+=== after patch.diff applied, both builds ===
+$ build-plain/mold -o out2.exe evil2.o; echo $?
+mold: fatal: evil2.o: symbol table's sh_info (index of first global symbol) is out of range
+1
+mold: fatal: evil2.o: symbol table's sh_info (index of first global symbol) is out of range
+1
+mold: fatal: evil2.o: symbol table's sh_info (index of first global symbol) is out of range
+1
+
+$ build-asan/mold -o out2.exe evil2.o; echo $?
+mold: fatal: evil2.o: symbol table's sh_info (index of first global symbol) is out of range
+1
+
+=== full test suite, build-asan, ctest -j5 (shared baseline with candidate 010, same session,
+    same unpatched HEAD c340272e) ===
+before patch: 99% tests passed, 1 tests failed out of 476 (323 - x86_64-run-clang, pre-existing,
+  see ___BUGHUNT___/README.md)
+after patch:  99% tests passed, 1 tests failed out of 476 (same x86_64-run-clang failure only)

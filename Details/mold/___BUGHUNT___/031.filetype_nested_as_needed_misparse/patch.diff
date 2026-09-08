@@ -1,0 +1,32 @@
+diff --git a/src/linker-script.cc b/src/linker-script.cc
+index f85852fe..563793c4 100644
+--- a/src/linker-script.cc
++++ b/src/linker-script.cc
+@@ -251,7 +251,8 @@ std::string_view Script<E>::get_script_output_type() {
+ 
+   if (tok.size() >= 3 && (tok[0] == "INPUT" || tok[0] == "GROUP") &&
+       tok[1] == "(") {
+-    if (tok.size() >= 5 && tok[2] == "AS_NEEDED" && tok[3] == "(")
++    // AS_NEEDED may be nested, e.g. GROUP(AS_NEEDED(AS_NEEDED(foo.so))).
++    while (tok.size() >= 5 && tok[2] == "AS_NEEDED" && tok[3] == "(")
+       tok = tok.subspan(2);
+     if (MappedFile *mf = resolve_path(tok[2], false))
+       return get_machine_type(ctx, rctx, mf);
+diff --git a/test/linker-script-group-as-needed.sh b/test/linker-script-group-as-needed.sh
+index 913845ba..4e7d30af 100755
+--- a/test/linker-script-group-as-needed.sh
++++ b/test/linker-script-group-as-needed.sh
+@@ -22,3 +22,13 @@ $QEMU $t/exe | grep 'Hello world'
+ 
+ $CC -B. -o $t/exe -L$t -l:libscript.a $t/a.o
+ $QEMU $t/exe | grep 'Hello world'
++
++cat <<EOF > $t/libscript2.a
++GROUP(AS_NEEDED(AS_NEEDED("$t/libB.so")))
++EOF
++
++$CC -B. -o $t/exe -L$t -lscript2 $t/a.o
++$QEMU $t/exe | grep 'Hello world'
++
++$CC -B. -o $t/exe -L$t -l:libscript2.a $t/a.o
++$QEMU $t/exe | grep 'Hello world'

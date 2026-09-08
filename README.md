@@ -52,11 +52,40 @@ In case of fixing big group of issues, I can easily generate a new report, to cl
 
 The date means when the report was generated.
 
+A project normally keeps one file, the newest. A few older reports are kept
+alongside it because they are linked to from outside this repo and those links
+should not break - they are listed under `keep` in `projects.toml`, and both
+`find_reports.py` and the refresh skill leave them alone.
+
 ## Format
 
 Only the interactive HTML files are stored here (`ProjectName_YYYYMMDD.html`).
 Each report has severity filters (critical / high / medium / low), type filters,
 and a "Copy as GitHub Markdown" button on each finding for easy issue reporting.
+
+## Keeping reports current
+
+Reports are refreshed against the projects' current code, so what you read is
+not just what was true on the audit date:
+
+- every finding carries the exact code snippet it was written against, and a
+  refresh re-clones the project and checks whether that block of code still
+  exists (line shifts and reindentation do not count as a change);
+- a finding whose main location changed - fixed, rewritten, or removed - is
+  dropped; if only one of its secondary locations changed, that location is
+  dropped and the finding stays;
+- locations that merely moved are rewritten to where the code is today, so the
+  line numbers and permalinks point at the current revision;
+- the date in the file name is the date of the last refresh, and the commit the
+  report was verified against is shown in the report header.
+
+Findings are never re-judged during a refresh: a refresh answers "is this still
+in the code", not "was this ever a real bug". `projects.toml` records the
+repository, branch and first audit date per project.
+
+The refresh itself is `.claude/skills/refresh-reports/` (`just refresh`), which
+re-renders each report with the current version of the report generator - that
+is how old reports end up in the same format as new ones.
 
 ## Collecting reports
 

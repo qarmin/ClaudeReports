@@ -60,4 +60,8 @@ regressions) and the full methodology behind each number.
 
 | # | Impact | Candidate | Fix lines | Result |
 |---|---|---|---|---|
-| 001 | <Strong win / Small win> | <plain-language description of what's slow or what the patch changes, e.g. "Gradient stops collected into a Vec per primitive per frame"> | <+A/-D, e.g. "+14/-6"> | <one-clause headline number, e.g. "-12.4% frame time"> |
+| 017 | Strong win | Encoder built the entire zlib-compressed stream into one in-memory buffer before splitting it into IDAT/fdAT chunks, instead of streaming like the `StreamWriter` path already does | +114/-43 | Peak RSS at 4096x4096 RGBA8, default compression: -40.3%, consistent across sizes and single-/multi-core |
+| 015 | Strong win | Adam7's sub-byte (1/2/4-bit) expansion does one bounds-checked byte write per pixel because multiple pixels alias the same output byte; batching same-byte writes removes the per-pixel bounds check | +70/-20 | bpp=1 -5%..-14%, bpp=2 -12%..-21%, bpp=4 noise..-3.8% (criterion, single- and multi-core agree) |
+| 016 | Small win | Decoder clones fully-assembled chunk bytes into `Info::captured_chunks` even for chunk types with no dedicated parser, where nothing reads the source buffer afterward | +44/-1 | -25.8% median decode latency for a 1 MiB captured unrecognized chunk, 15/15 paired runs consistent |
+| 004 | Small win | Encoder reallocates per-row scratch buffers from zero on every animation frame instead of reusing them across frames | +15/-8 | allocs -56% (8 frames) to -64% (32 frames), exact counter; no time change |
+| 002 | Strong win | Decoder clones PLTE/sBIT/tRNS/eXIf/bKGD chunk bytes into `Info` instead of moving them before discarding the source buffer | +23/-5 | -95.2% decode latency for a 1 MiB eXIf chunk, paired 15/15 |

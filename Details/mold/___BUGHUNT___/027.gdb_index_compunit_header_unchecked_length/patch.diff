@@ -1,0 +1,136 @@
+diff --git a/src/gdb-index.cc b/src/gdb-index.cc
+index 251d125f..b874edef 100644
+--- a/src/gdb-index.cc
++++ b/src/gdb-index.cc
+@@ -276,8 +276,13 @@ static u32 initialize_gdb_name(MapValue &value, const char *name) {
+ }
+ 
+ template <typename E>
+-static DwarfKind get_dwarf_kind(Context<E> &ctx, u8 *p) {
++static DwarfKind get_dwarf_kind(Context<E> &ctx, u8 *p, u8 *end) {
++  if (p + 4 > end)
++    Fatal(ctx) << "--gdb-index: .debug_info is truncated";
++
+   if (*(U32<E> *)p == 0xffff'ffff) {
++    if (p + sizeof(CuHdrDwarf2_64<E>) > end)
++      Fatal(ctx) << "--gdb-index: truncated .debug_info compile unit header";
+     CuHdrDwarf2_64<E> &hdr = *(CuHdrDwarf2_64<E> *)p;
+     if (hdr.version > 5)
+       Fatal(ctx) << "--gdb-index: DWARF version " << hdr.version
+@@ -285,6 +290,8 @@ static DwarfKind get_dwarf_kind(Context<E> &ctx, u8 *p) {
+     return (hdr.version == 5) ? DWARF5_64 : DWARF2_64;
+   }
+ 
++  if (p + sizeof(CuHdrDwarf2_32<E>) > end)
++    Fatal(ctx) << "--gdb-index: truncated .debug_info compile unit header";
+   CuHdrDwarf2_32<E> &hdr = *(CuHdrDwarf2_32<E> *)p;
+   if (hdr.version > 5)
+     Fatal(ctx) << "--gdb-index: DWARF version " << hdr.version
+@@ -622,7 +629,8 @@ read_address_ranges(Context<E> &ctx, const Compunit &cu) {
+ 
+ template <typename E, typename PubnamesHdr>
+ static i64 read_pubnames_cu(Context<E> &ctx, const PubnamesHdr &hdr,
+-                            std::vector<Compunit> &cus, ObjectFile<E> &file) {
++                            std::vector<Compunit> &cus, ObjectFile<E> &file,
++                            u8 *section_end) {
+   using Offset = decltype(hdr.size);
+ 
+   // Compunits are sorted by offset, so we can use binary search.
+@@ -633,19 +641,31 @@ static i64 read_pubnames_cu(Context<E> &ctx, const PubnamesHdr &hdr,
+     return &*it;
+   };
+ 
+-  Compunit *cu = get_cu(hdr.debug_info_offset);
+-  i64 size = hdr.size + offsetof(PubnamesHdr, size) + sizeof(hdr.size);
++  // Compute the unit stride in u64 to avoid the signed/unsigned overflow that
++  // would let a hostile length field wrap to a small or negative value.
++  u64 size = (u64)hdr.size + offsetof(PubnamesHdr, size) + sizeof(hdr.size);
+   u8 *p = (u8 *)&hdr + sizeof(hdr);
++
++  // The unit must contain at least its header and must fit in the section.
++  if (size < sizeof(hdr) || size > (u64)(section_end - (u8 *)&hdr))
++    Fatal(ctx) << file << ": corrupted .debug_gnu_pubnames: invalid unit length";
++
++  Compunit *cu = get_cu(hdr.debug_info_offset);
+   u8 *end = (u8 *)&hdr + size;
+ 
+-  while (p < end) {
++  while (p + sizeof(Offset) <= end) {
+     if (*(Offset *)p == 0)
+       break;
+     p += sizeof(Offset);
+ 
++    if (p >= end)
++      break;
+     u8 type = *p++;
+     const char *name = (char *)p;
+-    i64 len = strlen(name);
++    u8 *nul = (u8 *)memchr(p, 0, end - p);
++    if (!nul)
++      Fatal(ctx) << file << ": corrupted .debug_gnu_pubnames: unterminated name";
++    i64 len = nul - p;
+     p += len + 1;
+     cu->names.emplace_back(
+       hash_string(std::string_view(name, len)), type, name);
+@@ -678,10 +698,18 @@ static void read_pubnames(Context<E> &ctx, std::vector<Compunit> &cus,
+     u8 *end = p + contents.size();
+ 
+     while (p < end) {
+-      if (*(U32<E> *)p == 0xffff'ffff)
+-        p += read_pubnames_cu(ctx, *(PubnamesHdr64<E> *)p, cus, file);
+-      else
+-        p += read_pubnames_cu(ctx, *(PubnamesHdr32<E> *)p, cus, file);
++      if (p + 4 > end)
++        Fatal(ctx) << file << ": corrupted .debug_gnu_pubnames: truncated header";
++
++      if (*(U32<E> *)p == 0xffff'ffff) {
++        if (p + sizeof(PubnamesHdr64<E>) > end)
++          Fatal(ctx) << file << ": corrupted .debug_gnu_pubnames: truncated header";
++        p += read_pubnames_cu(ctx, *(PubnamesHdr64<E> *)p, cus, file, end);
++      } else {
++        if (p + sizeof(PubnamesHdr32<E>) > end)
++          Fatal(ctx) << file << ": corrupted .debug_gnu_pubnames: truncated header";
++        p += read_pubnames_cu(ctx, *(PubnamesHdr32<E> *)p, cus, file, end);
++      }
+     }
+   }
+ }
+@@ -702,14 +730,30 @@ static std::vector<Compunit> read_compunits(Context<E> &ctx) {
+     u8 *end = begin + contents.size();
+ 
+     for (u8 *p = begin; p < end;) {
+-      DwarfKind kind = get_dwarf_kind(ctx, p);
+-      i64 size;
+-      if (kind == DWARF2_32 || kind == DWARF5_32)
+-        size = ((CuHdrDwarf2_32<E> *)p)->size + 4;
+-      else
+-        size = ((CuHdrDwarf2_64<E> *)p)->size + 12;
+-
+-      cus.push_back(Compunit{kind, p - begin, size, (i32)file_idx});
++      DwarfKind kind = get_dwarf_kind(ctx, p, end);
++
++      // Compute the compile-unit stride in u64 to avoid the signed overflow
++      // (a top-bit-set 64-bit unit_length becomes a negative i64) and the
++      // 32-bit wraparound that would otherwise let `p += size` stall or walk
++      // backwards and loop forever, pushing Compunits until memory is
++      // exhausted.
++      u64 hdr_size;
++      u64 size;
++      if (kind == DWARF2_32 || kind == DWARF5_32) {
++        hdr_size = sizeof(CuHdrDwarf2_32<E>);
++        size = (u64)((CuHdrDwarf2_32<E> *)p)->size + 4;
++      } else {
++        hdr_size = sizeof(CuHdrDwarf2_64<E>);
++        size = (u64)((CuHdrDwarf2_64<E> *)p)->size + 12;
++      }
++
++      // A compile unit must contain at least its own header and must fit in
++      // the remaining section bytes.
++      if (size < hdr_size || size > (u64)(end - p))
++        Fatal(ctx) << file << ": --gdb-index: corrupted .debug_info: invalid"
++                   << " compile unit length";
++
++      cus.push_back(Compunit{kind, p - begin, (i64)size, (i32)file_idx});
+       p += size;
+     }
+ 

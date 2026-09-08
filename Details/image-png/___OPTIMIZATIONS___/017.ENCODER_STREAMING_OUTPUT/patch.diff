@@ -1,0 +1,229 @@
+diff --git a/src/encoder.rs b/src/encoder.rs
+index 4bddf3d..89f7a4b 100644
+--- a/src/encoder.rs
++++ b/src/encoder.rs
+@@ -566,6 +566,69 @@ fn write_fdat_chunk<W: Write>(
+     Ok(())
+ }
+ 
++/// Which kind of PNG chunk a [`ChunkStreamWriter`] is currently emitting into.
++enum ChunkSink<'a> {
++    Idat,
++    Fdat(&'a mut u32),
++}
++
++/// Buffers compressed image data and emits it as a sequence of IDAT/fdAT chunks as soon as
++/// [`STREAM_CHUNK_CAP`] bytes have accumulated, instead of requiring the whole compressed stream
++/// to be held in memory before any chunk can be written.
++struct ChunkStreamWriter<'a, 'w, W: Write> {
++    w: &'w mut W,
++    kind: ChunkSink<'a>,
++    buffer: Vec<u8>,
++}
++
++const STREAM_CHUNK_CAP: usize = 64 * 1024;
++
++impl<'a, 'w, W: Write> ChunkStreamWriter<'a, 'w, W> {
++    fn new(w: &'w mut W, kind: ChunkSink<'a>) -> Self {
++        ChunkStreamWriter {
++            w,
++            kind,
++            buffer: Vec::with_capacity(STREAM_CHUNK_CAP),
++        }
++    }
++
++    /// Writes out whatever is currently buffered as one chunk, if any.
++    fn flush_chunk(&mut self) -> Result<()> {
++        if self.buffer.is_empty() {
++            return Ok(());
++        }
++        match &mut self.kind {
++            ChunkSink::Idat => write_chunk(&mut *self.w, chunk::IDAT, &self.buffer)?,
++            ChunkSink::Fdat(sequence_number) => {
++                write_fdat_chunk(&mut *self.w, **sequence_number, &self.buffer)?;
++                **sequence_number = sequence_number.wrapping_add(1);
++            }
++        }
++        self.buffer.clear();
++        Ok(())
++    }
++}
++
++impl<W: Write> Write for ChunkStreamWriter<'_, '_, W> {
++    fn write(&mut self, mut data: &[u8]) -> io::Result<usize> {
++        let total = data.len();
++        while !data.is_empty() {
++            let space = STREAM_CHUNK_CAP - self.buffer.len();
++            let take = space.min(data.len());
++            self.buffer.extend_from_slice(&data[..take]);
++            data = &data[take..];
++            if self.buffer.len() == STREAM_CHUNK_CAP {
++                self.flush_chunk()?;
++            }
++        }
++        Ok(total)
++    }
++
++    fn flush(&mut self) -> io::Result<()> {
++        Ok(())
++    }
++}
++
+ impl<W: Write> Writer<W> {
+     fn new(w: W, info: PartialInfo, options: Options) -> Writer<W> {
+         Writer {
+@@ -792,10 +855,6 @@ impl<W: Write> Writer<W> {
+         }
+     }
+ 
+-    const MAX_IDAT_CHUNK_LEN: u32 = u32::MAX >> 1;
+-    #[allow(non_upper_case_globals)]
+-    const MAX_fdAT_CHUNK_LEN: u32 = (u32::MAX >> 1) - 4;
+-
+     /// Writes the next image data.
+     pub fn write_image_data(&mut self, data: &[u8]) -> Result<()> {
+         if self.info.color_type == ColorType::Indexed && !self.info.has_palette {
+@@ -832,15 +891,50 @@ impl<W: Write> Writer<W> {
+         let bpp = self.info.bpp_in_prediction();
+         let filter_method = self.options.filter;
+ 
+-        let zlib_encoded = match self.options.compression {
++        // Decide, and write, everything that must precede the compressed image data (the fcTL
++        // chunk, if any) before compression starts. This lets `NoCompression`/`Level` stream
++        // their output straight into IDAT/fdAT chunks as it's produced instead of buffering the
++        // whole compressed image in memory first, matching what `StreamWriter` already does.
++        let write_as_fdat = match self.info.frame_control {
++            None => false,
++            Some(_) if self.should_skip_frame_control_on_default_image() => false,
++            Some(ref mut fctl) => {
++                fctl.encode(&mut self.w)?;
++                fctl.sequence_number = fctl.sequence_number.wrapping_add(1);
++                self.animation_written += 1;
++
++                // If the default image is the first frame of an animation, it's still an IDAT.
++                self.images_written != 0
++            }
++        };
++
++        let Writer { w, info, .. } = self;
++        let sink = if write_as_fdat {
++            let fctl = info
++                .frame_control
++                .as_mut()
++                .expect("write_as_fdat is only set when frame_control is Some");
++            ChunkSink::Fdat(&mut fctl.sequence_number)
++        } else {
++            ChunkSink::Idat
++        };
++
++        match self.options.compression {
+             DeflateCompression::NoCompression => {
++                // `StoredOnlyCompressor` needs `Seek` to back-patch each stored block's header,
++                // which `ChunkStreamWriter` deliberately doesn't implement (already-flushed chunk
++                // bytes can't be rewritten), so this path still buffers the whole output first.
+                 let mut compressor =
+                     fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
+                 for line in data.chunks(in_len) {
+                     compressor.write_data(&[0])?;
+                     compressor.write_data(line)?;
+                 }
+-                compressor.finish()?.into_inner()
++                let compressed = compressor.finish()?.into_inner();
++
++                let mut stream_writer = ChunkStreamWriter::new(w, sink);
++                stream_writer.write_all(&compressed)?;
++                stream_writer.flush_chunk()?;
+             }
+             DeflateCompression::FdeflateUltraFast => {
+                 let mut compressor = fdeflate::Compressor::new(std::io::Cursor::new(Vec::new()))?;
+@@ -855,13 +949,15 @@ impl<W: Write> Writer<W> {
+                 }
+ 
+                 let compressed = compressor.finish()?.into_inner();
+-                if compressed.len()
++                let compressed = if compressed.len()
+                     > fdeflate::StoredOnlyCompressor::<()>::compressed_size((in_len + 1) * height)
+                 {
+                     // Write uncompressed data since the result from fast compression would take
+                     // more space than that.
+                     //
+-                    // This is essentially a fallback to NoCompression.
++                    // This is essentially a fallback to NoCompression. It needs the whole
++                    // compressed candidate buffered first (above) to make this size comparison,
++                    // so it can't stream directly the way the other two paths do.
+                     let mut compressor =
+                         fdeflate::StoredOnlyCompressor::new(std::io::Cursor::new(Vec::new()))?;
+                     for line in data.chunks(in_len) {
+@@ -871,13 +967,19 @@ impl<W: Write> Writer<W> {
+                     compressor.finish()?.into_inner()
+                 } else {
+                     compressed
+-                }
++                };
++
++                let mut stream_writer = ChunkStreamWriter::new(w, sink);
++                stream_writer.write_all(&compressed)?;
++                stream_writer.flush_chunk()?;
+             }
+             DeflateCompression::Level(level) => {
+                 let mut current = vec![0; in_len];
+ 
+-                let mut zlib =
+-                    ZlibEncoder::new(Vec::new(), flate2::Compression::new(u32::from(level)));
++                let mut zlib = ZlibEncoder::new(
++                    ChunkStreamWriter::new(w, sink),
++                    flate2::Compression::new(u32::from(level)),
++                );
+                 for line in data.chunks(in_len) {
+                     let filter_type = filter(filter_method, bpp, prev, line, &mut current);
+ 
+@@ -885,34 +987,10 @@ impl<W: Write> Writer<W> {
+                     zlib.write_all(&current)?;
+                     prev = line;
+                 }
+-                zlib.finish()?
++                zlib.finish()?.flush_chunk()?;
+             }
+         };
+ 
+-        match self.info.frame_control {
+-            None => {
+-                self.write_zlib_encoded_idat(&zlib_encoded)?;
+-            }
+-            Some(_) if self.should_skip_frame_control_on_default_image() => {
+-                self.write_zlib_encoded_idat(&zlib_encoded)?;
+-            }
+-            Some(ref mut fctl) => {
+-                fctl.encode(&mut self.w)?;
+-                fctl.sequence_number = fctl.sequence_number.wrapping_add(1);
+-                self.animation_written += 1;
+-
+-                // If the default image is the first frame of an animation, it's still an IDAT.
+-                if self.images_written == 0 {
+-                    self.write_zlib_encoded_idat(&zlib_encoded)?;
+-                } else {
+-                    for chunk in zlib_encoded.chunks(Self::MAX_fdAT_CHUNK_LEN as usize) {
+-                        write_fdat_chunk(&mut self.w, fctl.sequence_number, chunk)?;
+-                        fctl.sequence_number = fctl.sequence_number.wrapping_add(1);
+-                    }
+-                }
+-            }
+-        }
+-
+         self.increment_images_written();
+ 
+         Ok(())
+@@ -938,13 +1016,6 @@ impl<W: Write> Writer<W> {
+         self.options.sep_def_img && self.images_written == 0
+     }
+ 
+-    fn write_zlib_encoded_idat(&mut self, zlib_encoded: &[u8]) -> Result<()> {
+-        for chunk in zlib_encoded.chunks(Self::MAX_IDAT_CHUNK_LEN as usize) {
+-            self.write_chunk(chunk::IDAT, chunk)?;
+-        }
+-        Ok(())
+-    }
+-
+     /// Set the used filter type.
+     ///
+     /// The default filter is [`Filter::Adaptive`] which automatically selects the best filter

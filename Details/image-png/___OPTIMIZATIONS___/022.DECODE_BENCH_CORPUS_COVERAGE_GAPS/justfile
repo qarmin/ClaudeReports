@@ -1,0 +1,45 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate is NOT a speed optimization of the library - it adds a new `decode-coverage`
+# benchmark group (+ generator helpers in src/test_utils.rs) to benches/decoder.rs, covering
+# decode paths (16-bit depth, sub-byte 1/2/4-bit depth, Adam7 interlacing, APNG) that the
+# existing `tests/benches/` corpus never exercises at all. So "before" (baseline) genuinely has
+# no `decode-coverage` group to compare against - `just test` shows that gap directly (baseline's
+# `--list` has no such group) and then shows the patched build's real numbers, rather than a
+# before/after delta on the same benchmark case.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/image-rs/image-png.git"
+base_commit := "05ccdb9c8ae7fc50f4787ba2888a1c515adad944"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-baseline:
+    @echo "=== baseline: benches/decoder.rs group list (no decode-coverage group exists yet) ==="
+    cd clone && cargo bench --bench decoder -- --list
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone && cargo build --release --bench decoder
+
+bench:
+    @echo "=== patched: benches/decoder.rs group list (decode-coverage now exists) ==="
+    cd clone && cargo bench --bench decoder -- --list
+    @echo "=== patched: decode-coverage group, single-core (taskset -c 0) ==="
+    cd clone && taskset -c 0 cargo bench --bench decoder -- decode-coverage
+    @echo "=== patched: decode-coverage group, unpinned (multi-core / realistic) ==="
+    cd clone && cargo bench --bench decoder -- decode-coverage
+    @echo "=== patched: cargo test (correctness, no output/behavior change expected) ==="
+    cd clone && cargo test --release
+
+clean:
+    rm -rf clone

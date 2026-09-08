@@ -1,0 +1,43 @@
+# Self-contained reproduction for candidate 023 (input-files_parse_fde_encoding_short_cie).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# mold is C++20/CMake (not Rust/cargo) - build with a Debug config so the same
+# `-D_GLIBCXX_ASSERTIONS` mold's own CMakeLists.txt enables for CMAKE_BUILD_TYPE=Debug is active;
+# that's the build/tool combination this candidate's bug actually manifests as an observable crash
+# under (see RESULT.md - the same crafted input produces zero visible symptom in a Release build).
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone build-before reproduce-before apply build-after reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-before:
+    cmake -S clone -B clone/build-plain -DCMAKE_BUILD_TYPE=Debug
+    cmake --build clone/build-plain -j4
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug
+# (SIGABRT via libstdc++'s __glibcxx_assert on an out-of-bounds string_view::operator[] read).
+reproduce-before:
+    ulimit -c 0 && bash repro/run.sh clone/build-plain/mold
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-after:
+    cmake --build clone/build-plain -j4
+
+# Same repro again, now against the patched clone - should no longer crash, just a clean
+# `mold: fatal: ...: corrupted CIE record: too short` and exit 1.
+reproduce-after:
+    ulimit -c 0 && bash repro/run.sh clone/build-plain/mold
+
+clean:
+    rm -rf clone

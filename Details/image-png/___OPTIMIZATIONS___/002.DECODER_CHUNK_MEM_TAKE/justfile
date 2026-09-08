@@ -1,0 +1,42 @@
+# Self-contained reproduction for this candidate.
+#
+# Shape 2: no existing benchmark reaches metadata-chunk decoding, so a standalone bench crate
+# lives in ./bench/, with its Cargo.toml depending on `{ path = "../clone" }` (rewritten by
+# `clone:` below to point at the fresh checkout). Everything needed is in this folder or fetched
+# by `just clone` - this folder can be copied/posted standalone and `just test` still works.
+
+repo_url := "https://github.com/image-rs/image-png.git"
+base_commit := "05ccdb9c8ae7fc50f4787ba2888a1c515adad944"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/bench" clone/bench
+    sed -i 's|path = "../../.."|path = ".."|' clone/bench/Cargo.toml
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/bench && cargo build --release
+    cp clone/bench/target/release/chunk_take_bench ./bin_baseline
+
+build-patched:
+    cd clone/bench && cargo build --release
+    cp clone/bench/target/release/chunk_take_bench ./bin_patched
+
+# Note: `just` runs each recipe line as its own separate shell invocation, so `ulimit -c 0` is
+# prefixed onto each line that actually executes the binary rather than set once on its own line.
+bench:
+    @echo "=== baseline (before patch): note the exif1048576B line especially, see RESULT.md ==="
+    ulimit -c 0 && ./bin_baseline --iters 300
+    @echo "=== patched (after patch) ==="
+    ulimit -c 0 && ./bin_patched --iters 300
+    @echo "=== paired timing on the 1 MiB config (last RESULT line each run) ==="
+    RUNS=15 "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- --iters 300
+
+clean:
+    rm -rf clone bin_baseline bin_patched

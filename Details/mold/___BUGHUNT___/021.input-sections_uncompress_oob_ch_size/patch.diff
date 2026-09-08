@@ -1,0 +1,40 @@
+diff --git a/src/input-sections.cc b/src/input-sections.cc
+index 42ac956e..6a6adf7e 100644
+--- a/src/input-sections.cc
++++ b/src/input-sections.cc
+@@ -5,6 +5,14 @@
+ 
+ namespace mold {
+ 
++// An upper bound on a compressed section's claimed decompressed size
++// (SHF_COMPRESSED's ch_size field). This value is fully attacker-
++// controlled; without a cap, a malicious ch_size drives an unbounded
++// `new u8[sh_size]` in InputSection::uncompress() before any real
++// decompression or consistency check runs. 4 GiB is far larger than
++// any real-world debug section.
++static constexpr u64 MAX_UNCOMPRESSED_SIZE = 1ULL << 32;
++
+ static i64 to_p2align(u64 alignment) {
+   if (alignment == 0)
+     return 0;
+@@ -44,7 +52,20 @@ InputSection<E>::InputSection(Context<E> &ctx, ObjectFile<E> &file, i64 shndx,
+   }
+ 
+   if (shdr().sh_flags & SHF_COMPRESSED) {
++    // ch_type/ch_size/ch_addralign come straight from the (attacker-
++    // controlled) file. The section must be at least large enough to
++    // hold the header before we dereference it, and ch_size must not be
++    // allowed to drive `new u8[sh_size]` in uncompress() with an
++    // implausible value - that allocation happens unconditionally,
++    // before any real decompression or size-consistency check runs.
++    if (shdr().sh_size < sizeof(ElfChdr<E>))
++      Fatal(ctx) << *this << ": corrupted compressed section";
++
+     ElfChdr<E> &chdr = *(ElfChdr<E> *)contents;
++    if (chdr.ch_size > MAX_UNCOMPRESSED_SIZE)
++      Fatal(ctx) << *this << ": corrupted compressed section: "
++                 << "ch_size is unreasonably large";
++
+     sh_size = chdr.ch_size;
+     p2align = to_p2align(chdr.ch_addralign);
+   } else {

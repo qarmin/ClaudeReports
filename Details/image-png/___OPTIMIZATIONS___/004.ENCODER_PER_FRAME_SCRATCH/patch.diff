@@ -1,0 +1,71 @@
+diff --git a/src/encoder.rs b/src/encoder.rs
+index 4bddf3d..6fbc49d 100644
+--- a/src/encoder.rs
++++ b/src/encoder.rs
+@@ -482,6 +482,10 @@ pub struct Writer<W: Write> {
+     /// A flag to note when the IEND chunk was already added.
+     /// This is only set on code paths that drop `Self` to control the destructor.
+     iend_written: bool,
++    /// Row-sized scratch buffers reused by `write_image_data` across calls (once per animation
++    /// frame), instead of allocating fresh ones every call.
++    zero_row_scratch: Vec<u8>,
++    current_row_scratch: Vec<u8>,
+ }
+ 
+ /// Contains the subset of attributes of [Info] needed for [Writer] to function
+@@ -575,6 +579,8 @@ impl<W: Write> Writer<W> {
+             images_written: 0,
+             animation_written: 0,
+             iend_written: false,
++            zero_row_scratch: Vec::new(),
++            current_row_scratch: Vec::new(),
+         }
+     }
+ 
+@@ -826,8 +832,12 @@ impl<W: Write> Writer<W> {
+             ));
+         }
+ 
+-        let prev = vec![0; in_len];
+-        let mut prev = prev.as_slice();
++        // Reused across calls (once per animation frame) instead of allocating fresh scratch
++        // buffers from zero every time - see `Writer`'s fields.
++        self.zero_row_scratch.resize(in_len, 0);
++        let mut prev: &[u8] = &self.zero_row_scratch;
++        self.current_row_scratch.resize(in_len + 1, 0);
++        let current = &mut self.current_row_scratch;
+ 
+         let bpp = self.info.bpp_in_prediction();
+         let filter_method = self.options.filter;
+@@ -845,12 +855,11 @@ impl<W: Write> Writer<W> {
+             DeflateCompression::FdeflateUltraFast => {
+                 let mut compressor = fdeflate::Compressor::new(std::io::Cursor::new(Vec::new()))?;
+ 
+-                let mut current = vec![0; in_len + 1];
+                 for line in data.chunks(in_len) {
+                     let filter_type = filter(filter_method, bpp, prev, line, &mut current[1..]);
+ 
+                     current[0] = filter_type as u8;
+-                    compressor.write_data(&current)?;
++                    compressor.write_data(current)?;
+                     prev = line;
+                 }
+ 
+@@ -874,15 +883,13 @@ impl<W: Write> Writer<W> {
+                 }
+             }
+             DeflateCompression::Level(level) => {
+-                let mut current = vec![0; in_len];
+-
+                 let mut zlib =
+                     ZlibEncoder::new(Vec::new(), flate2::Compression::new(u32::from(level)));
+                 for line in data.chunks(in_len) {
+-                    let filter_type = filter(filter_method, bpp, prev, line, &mut current);
++                    let filter_type = filter(filter_method, bpp, prev, line, &mut current[1..]);
+ 
+                     zlib.write_all(&[filter_type as u8])?;
+-                    zlib.write_all(&current)?;
++                    zlib.write_all(&current[1..])?;
+                     prev = line;
+                 }
+                 zlib.finish()?

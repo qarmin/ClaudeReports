@@ -1,0 +1,79 @@
+################################################################
+# Case A1 (DWARF32): unit_length 0xFFFFFFFC ; size = len+4 wraps 0
+################################################################
+.debug_info at file_off=0xc7 size=0x124; first 4 bytes (unit_length lo) = 0x00000120
+  -> wrote DWARF32 unit_length 0xFFFFFFFC (size = unit_length+4 wraps to 0)
+Wrote evil32.o
+
+--- Baseline: unmodified real32.o (expect exit 0) ---
+==> [baseline-dwarf32] mold exited 0 -- linked cleanly
+
+--- Malformed: evil32.o ---
+CANDIDATE_OUT/repro/run.sh: line 40: 1299466 Aborted                    ( ulimit -v "$VMEM_KB"; timeout -s KILL "$TIMEOUT_S" "$MOLD" --gdb-index -o "out_$2.exe" "$CRT1" "$CRTI" "$1" -L"$LIBDIR" -lc "$CRTN" --dynamic-linker "$DYNLD" -e main )
+==> [evil-dwarf32] aborted (134) -- runaway allocation hit the 10485760KB cap (unpatched DoS)
+
+################################################################
+# Case A2 (DWARF64): unit_length 0xFFFFFFFFFFFFFFF4 ; size = len+12 wraps 0
+################################################################
+.debug_info at file_off=0xc7 size=0x197; first 4 bytes (unit_length lo) = 0xffffffff
+  -> wrote DWARF64 unit_length 0xfffffffffffffff4 (size -> 0 (size = unit_length+12 wraps to 0))
+Wrote evil64z.o
+
+--- Malformed: evil64z.o ---
+CANDIDATE_OUT/repro/run.sh: line 40: 1299507 Aborted                    ( ulimit -v "$VMEM_KB"; timeout -s KILL "$TIMEOUT_S" "$MOLD" --gdb-index -o "out_$2.exe" "$CRT1" "$CRTI" "$1" -L"$LIBDIR" -lc "$CRTN" --dynamic-linker "$DYNLD" -e main )
+==> [evil-dwarf64-zero] aborted (134) -- runaway allocation hit the 10485760KB cap (unpatched DoS)
+
+################################################################
+# Case A3 (secondary): DWARF64 unit_length 0x8000000000000000
+#   -> negative i64 stride; loop exits early recording a CORRUPT
+#   CU (offset 0, size ~ -9.2e18) into the output .gdb_index CU list.
+#   Unpatched mold exits 0 silently (no hang); patched mold Fatals.
+################################################################
+.debug_info at file_off=0xc7 size=0x197; first 4 bytes (unit_length lo) = 0xffffffff
+  -> wrote DWARF64 unit_length 0x8000000000000000 (size -> negative i64)
+Wrote evil64n.o
+
+--- Malformed: evil64n.o ---
+==> [evil-dwarf64-neg] mold exited 0 -- linked cleanly
+
+================================================================
+==================== PATCHED BUILD (after fix) =================
+================================================================
+################################################################
+# Case A1 (DWARF32): unit_length 0xFFFFFFFC ; size = len+4 wraps 0
+################################################################
+.debug_info at file_off=0xc7 size=0x124; first 4 bytes (unit_length lo) = 0x00000120
+  -> wrote DWARF32 unit_length 0xFFFFFFFC (size = unit_length+4 wraps to 0)
+Wrote evil32.o
+
+--- Baseline: unmodified real32.o (expect exit 0) ---
+==> [baseline-dwarf32] mold exited 0 -- linked cleanly
+
+--- Malformed: evil32.o ---
+mold: fatal: evil32.o: --gdb-index: corrupted .debug_info: invalid compile unit length
+==> [evil-dwarf32] mold exited 1 -- (patched build: clean Fatal(), or bad_alloc)
+
+################################################################
+# Case A2 (DWARF64): unit_length 0xFFFFFFFFFFFFFFF4 ; size = len+12 wraps 0
+################################################################
+.debug_info at file_off=0xc7 size=0x197; first 4 bytes (unit_length lo) = 0xffffffff
+  -> wrote DWARF64 unit_length 0xfffffffffffffff4 (size -> 0 (size = unit_length+12 wraps to 0))
+Wrote evil64z.o
+
+--- Malformed: evil64z.o ---
+mold: fatal: evil64z.o: --gdb-index: corrupted .debug_info: invalid compile unit length
+==> [evil-dwarf64-zero] mold exited 1 -- (patched build: clean Fatal(), or bad_alloc)
+
+################################################################
+# Case A3 (secondary): DWARF64 unit_length 0x8000000000000000
+#   -> negative i64 stride; loop exits early recording a CORRUPT
+#   CU (offset 0, size ~ -9.2e18) into the output .gdb_index CU list.
+#   Unpatched mold exits 0 silently (no hang); patched mold Fatals.
+################################################################
+.debug_info at file_off=0xc7 size=0x197; first 4 bytes (unit_length lo) = 0xffffffff
+  -> wrote DWARF64 unit_length 0x8000000000000000 (size -> negative i64)
+Wrote evil64n.o
+
+--- Malformed: evil64n.o ---
+mold: fatal: evil64n.o: --gdb-index: corrupted .debug_info: invalid compile unit length
+==> [evil-dwarf64-neg] mold exited 1 -- (patched build: clean Fatal(), or bad_alloc)

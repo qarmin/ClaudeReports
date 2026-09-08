@@ -1,0 +1,23 @@
+diff --git a/src/filetype.cc b/src/filetype.cc
+index 2867cec4..26960fdc 100644
+--- a/src/filetype.cc
++++ b/src/filetype.cc
+@@ -15,7 +15,18 @@ static bool is_text_file(MappedFile *mf) {
+ template <typename E>
+ static bool is_gcc_lto_obj(MappedFile *mf, bool has_gcc_plugin) {
+   const char *data = mf->get_contents().data();
++  i64 size = mf->get_contents().size();
+   ElfEhdr<E> &ehdr = *(ElfEhdr<E> *)data;
++
++  // e_shoff/e_shnum/e_shstrndx come straight from an untrusted file.
++  // Validate that the section header table actually fits in the mapped
++  // file before dereferencing anything through it (sh_begin->sh_link is
++  // read below whenever e_shstrndx is SHN_XINDEX, even if e_shnum is 0).
++  u64 shoff = ehdr.e_shoff;
++  i64 need = std::max<i64>(ehdr.e_shnum, ehdr.e_shstrndx == SHN_XINDEX ? 1 : 0);
++  if (shoff > (u64)size || need > ((i64)size - (i64)shoff) / (i64)sizeof(ElfShdr<E>))
++    return false;
++
+   ElfShdr<E> *sh_begin = (ElfShdr<E> *)(data + ehdr.e_shoff);
+   std::span<ElfShdr<E>> shdrs{(ElfShdr<E> *)(data + ehdr.e_shoff), ehdr.e_shnum};
+ 

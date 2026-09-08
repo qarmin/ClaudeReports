@@ -1,0 +1,160 @@
+All output below is genuine, captured from real runs against the real `mold` binary built in this
+session, at base commit c340272e6376f9a8e5b5cd6f6634f925f6d54e5c ("Fix CI").
+
+=====================================================================
+1. Repro generation
+=====================================================================
+
+$ python3 repro/gen_evil_elf.py /tmp/evil.o
+wrote /tmp/evil.o
+
+$ readelf -s /tmp/evil.o
+Symbol table '.symtab' contains 2 entries:
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND
+     1: 0000000000000000     0 NOTYPE  GLOBAL DEFAULT    1 <corrupt>
+
+(readelf itself already flags symbol 1's name as <corrupt> - st_name is 0x40000000, far past the
+6-byte .strtab.)
+
+=====================================================================
+2. BEFORE fix - build-plain (-DCMAKE_BUILD_TYPE=Debug), unpatched, commit c340272e
+=====================================================================
+
+$ ./build-plain/mold -o /tmp/out.exe /tmp/evil.o
+Segmentation fault (core dumped)
+$ echo $?
+139
+
+Repeated 9 times total across this session (2 separate invocation batches + 1 gdb run), all 9/9
+segfault identically:
+
+=== repeat runs against build-plain/mold (unpatched, commit c340272e) ===
+run 1 exit status: 139
+run 2 exit status: 139
+run 3 exit status: 139
+run 4 exit status: 139
+run 5 exit status: 139
+(plus 4 earlier runs in the same session, also all exit 139 - one of them captured under gdb,
+see section 3 below)
+
+=====================================================================
+3. gdb backtrace (build-plain, unpatched) - confirms exact fault location
+=====================================================================
+
+Command used (per this project's fork_child gotcha - mold forks a child to do the actual link):
+  gdb -q -ex "set follow-fork-mode child" -ex "set detach-on-fork on" -ex run -ex "bt 10" \
+      -ex quit --args ./build-plain/mold -o /tmp/out_gdb2.exe /tmp/evil_1.o
+
+Reading symbols from ./build-plain/mold...
+Starting program: .../build-plain/mold -o /tmp/out_gdb2.exe /tmp/evil_1.o
+[Attaching after Thread ... fork to child process ...]
+[New inferior 2 (process ...)]
+[Detaching after fork from parent process ...]
+
+Thread 2.1 "mold" received signal SIGSEGV, Segmentation fault.
+[Switching to Thread ...]
+__strlen_evex () at ../sysdeps/x86_64/multiarch/strlen-evex-base.S:81
+#0  __strlen_evex () at ../sysdeps/x86_64/multiarch/strlen-evex-base.S:81
+#1  0x00005d0d459e6309 in mold::InputFile<mold::X86_64>::populate_symbol_name_lengths (this=0x7d22b400a830)
+    at src/input-files.cc:120
+#2  0x00005d0d459e6942 in mold::ObjectFile<mold::X86_64>::parse_symbols (
+    this=0x7d22b400a830, ctx=...)
+    at src/input-files.cc:1121
+#3  0x00005d0d45eb0473 in mold::new_object_file<mold::X86_64> (ctx=...,
+    rctx=..., mf=0x7d24b4100200, archive_name="")
+    at src/main.cc:39
+#4  0x00005d0d45eab981 in mold::read_file<mold::X86_64> (ctx=..., rctx=...,
+    mf=0x7d24b4100200)
+    at src/main.cc:110
+#5  ... (TBB parallel_for_each machinery, src/main.cc:269 read_input_files) ...
+
+Line 120 is exactly:
+    const char *p = symbol_strtab.data() + esym.st_name;
+    symname_lens.emplace_back(strlen(p));   // <-- crash here, strlen() on a wild pointer
+
+Line 1121 is the unconditional call site in parse_symbols():
+    this->populate_symbol_name_lengths();
+
+=====================================================================
+4. BEFORE fix - build-asan (-DMOLD_USE_ASAN=ON, g++), unpatched, commit c340272e
+=====================================================================
+
+$ ./build-asan/mold -o /tmp/out.exe /tmp/evil.o
+Segmentation fault
+$ echo $?
+139
+
+Repeated 4 times total, all 4/4 identical exit 139, SIGSEGV. No `AddressSanitizer:` diagnostic was
+printed on any of the 4 runs - this matches this project's own known quirk (candidate 009's
+lesson, ___BUGHUNT___/README.md): the crash happens inside a oneTBB worker thread
+(read_input_files()'s parallel_for_each), and ASAN does not always print a report for a genuine
+SIGSEGV delivered in a worker thread. The exit code (139 = 128+SIGSEGV) and the plain-build gdb
+backtrace above are the confirmation for this case, not an ASAN report.
+
+=====================================================================
+5. Project test suite - BEFORE fix (build-asan, unpatched)
+=====================================================================
+
+$ ctest --test-dir build-asan -j4
+...
+99% tests passed, 1 tests failed out of 476
+Total Test time (real) = ~159 sec
+The following tests FAILED:
+        323 - x86_64-run-clang (Failed)
+
+(This single failure is pre-existing and unrelated to this bug - confirmed in prior sessions,
+see ___BUGHUNT___/README.md: mold's own mold-wrapper.so LD_PRELOAD trick collides with ASAN's own
+preload requirement on this host, independent of any source change.)
+
+=====================================================================
+6. AFTER fix - build-plain, patched
+=====================================================================
+
+Patch applied (see patch.diff): validate every esym.st_name < symbol_strtab.size() in
+parse_symbols() before calling populate_symbol_name_lengths().
+
+$ ./build-plain/mold -o /tmp/out_p1.exe /tmp/evil_p1.o
+mold: fatal: /tmp/evil_p1.o: symbol name offset is out of range
+$ echo $?
+1
+
+Repeated 3 times, 3/3 identical clean Fatal-diagnostic exit (no crash).
+
+Boundary-value check (CONFIRMATION.md section 7 - not just the original triggering magnitude):
+st_name set to exactly symbol_strtab.size() (one-past-the-end, not a huge 1GiB offset):
+$ ./build-plain/mold -o /tmp/out_boundary.exe /tmp/evil_boundary.o
+mold: fatal: /tmp/evil_boundary.o: symbol name offset is out of range
+$ echo $?
+1
+
+Legitimate-input regression check: st_name pointing at a real, valid, null-terminated name ("evil")
+inside .strtab:
+$ ./build-plain/mold -o /tmp/out_legit.exe /tmp/legit.o
+mold: warning: entry symbol is not defined: _start
+$ echo $?
+0
+(exit 0 - the object links fine, only the expected "no _start" warning; the fix does not reject
+legitimate objects)
+
+=====================================================================
+7. AFTER fix - build-asan, patched
+=====================================================================
+
+$ ./build-asan/mold -o /tmp/out_asan_after.exe /tmp/evil_p1.o
+mold: fatal: /tmp/evil_p1.o: symbol name offset is out of range
+$ echo $?
+1
+
+=====================================================================
+8. Project test suite - AFTER fix (build-asan, patched)
+=====================================================================
+
+$ ctest --test-dir build-asan -j4
+...
+99% tests passed, 1 tests failed out of 476
+The following tests FAILED:
+        323 - x86_64-run-clang (Failed)
+
+Identical to the BEFORE run (section 5) - same single pre-existing failure, no new failures
+introduced by the fix.

@@ -1,0 +1,48 @@
+# Self-contained reproduction for candidate 013.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# `bench/` is a standalone crate (`png = { path = "../clone", features = ["benchmarks"] }`)
+# because the project has no existing bench that reaches `UnfilteringBuffer` at a controlled
+# row width/height/filter - see RESULT.md for why that matters here.
+
+repo_url := "https://github.com/image-rs/image-png.git"
+base_commit := "05ccdb9c8ae7fc50f4787ba2888a1c515adad944"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd bench && cargo build --release
+    cp bench/target/release/bench_013 ./bin_baseline
+
+build-patched:
+    cd bench && cargo build --release
+    cp bench/target/release/bench_013 ./bin_patched
+
+# Note: `just` runs each recipe line as its own separate shell invocation, so `ulimit -c 0` is
+# prefixed onto each line that actually executes the binary rather than set once on its own line.
+bench:
+    @echo "=== baseline (before patch): single-core, W=8192 (row_bytes=32768), Paeth filter ==="
+    ulimit -c 0 && env BENCH_WIDTH=8192 taskset -c 0 ./bin_baseline single 200 2 4 16 128 1024
+    @echo "=== patched (after patch): same ==="
+    ulimit -c 0 && env BENCH_WIDTH=8192 taskset -c 0 ./bin_patched single 200 2 4 16 128 1024
+    @echo "=== baseline: row_only microbenchmark (isolates the exact mechanism) ==="
+    ulimit -c 0 && taskset -c 0 ./bin_baseline row_only 200000 4096
+    @echo "=== patched: row_only microbenchmark (identical either build - src/filter/mod.rs is unpatched; shown for reference) ==="
+    ulimit -c 0 && taskset -c 0 ./bin_patched row_only 200000 4096
+    @echo "=== baseline: multi-core throughput, W=8192 H=4 Paeth, 12 threads x 3s ==="
+    ulimit -c 0 && env BENCH_WIDTH=8192 ./bin_baseline multi 12 3 4
+    @echo "=== patched: multi-core throughput, same config ==="
+    ulimit -c 0 && env BENCH_WIDTH=8192 ./bin_patched multi 12 3 4
+
+clean:
+    rm -rf clone bin_baseline bin_patched bench/target

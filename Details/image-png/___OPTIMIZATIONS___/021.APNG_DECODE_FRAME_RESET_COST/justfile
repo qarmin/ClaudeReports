@@ -1,0 +1,42 @@
+# Self-contained reproduction for this candidate.
+#
+# Pure measurement/characterization - no patch.diff (see RESULT.md: ZlibStream::reset and
+# UnfilteringBuffer::start_frame measured at 0.00% self time in a 138,594-sample profile, nothing
+# to patch). This candidate's harness is `___OPTIMIZATIONS___/harness/encoder_bench` (built by an
+# earlier session, not tracked in the main repo) - self-contained given the whole
+# `___OPTIMIZATIONS___` folder kept together, not as a fully isolated subfolder. `just test`
+# clones the repo at base_commit, copies the harness in, builds it, and runs the same
+# `decode-apng` measurement this candidate's RESULT.md reports. `just profile` additionally
+# reproduces the `perf record`/`perf report` evidence (needs `perf` with
+# `perf_event_paranoid <= 1`).
+
+repo_url := "https://github.com/image-rs/image-png.git"
+base_commit := "05ccdb9c8ae7fc50f4787ba2888a1c515adad944"
+harness_dir := "../harness/encoder_bench"
+
+test: clone build bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/encoder_bench
+    rm -rf clone/encoder_bench/target
+    sed -i 's|path = "[^"]*"|path = ".."|' clone/encoder_bench/Cargo.toml
+
+build:
+    cd clone/encoder_bench && cargo build --release
+
+bench:
+    @echo "=== decode-apng: 8 frames of 512x512 RGBA, taskset -c 0, n=200 ==="
+    ulimit -c 0 && taskset -c 0 ./clone/encoder_bench/target/release/encoder_bench --mode decode-apng --size 512 --frames 8 --iters 200
+    @echo "=== apng (encode, same image, for the encode-vs-decode comparison) ==="
+    ulimit -c 0 && taskset -c 0 ./clone/encoder_bench/target/release/encoder_bench --mode apng --size 512 --frames 8 --iters 200
+
+# Reproduces the perf evidence behind this candidate's "0.00% self time" claim.
+profile: clone build
+    perf record -F 4000 -g -o decode_apng.perf.data -- ./clone/encoder_bench/target/release/encoder_bench --mode decode-apng --size 512 --frames 8 --iters 2000
+    perf report -i decode_apng.perf.data --stdio -g none | grep -i "reset\|start_frame\|Decompressor::new\|zlibstream\|unfiltering_buffer\|fdeflate::decompress::Decompressor>::read"
+
+clean:
+    rm -rf clone decode_apng.perf.data

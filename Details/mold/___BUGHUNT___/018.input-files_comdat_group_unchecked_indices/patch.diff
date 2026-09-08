@@ -1,0 +1,89 @@
+diff --git a/src/input-files.cc b/src/input-files.cc
+index 2844c98d..ea272eb3 100644
+--- a/src/input-files.cc
++++ b/src/input-files.cc
+@@ -314,6 +314,10 @@ void ObjectFile<E>::read_section_metadata(Context<E> &ctx) {
+     if (entries[0] != GRP_COMDAT)
+       Fatal(ctx) << *this << ": unsupported SHT_GROUP format";
+ 
++    for (U32<E> member : entries.subspan(1))
++      if (member >= this->elf_sections.size())
++        Fatal(ctx) << *this << ": invalid section index in SHT_GROUP";
++
+     // Ordinary global signatures already have a Symbol. Local, section and
+     // versioned signatures use the same symbol table through their full name.
+     Symbol<E> *signature;
+@@ -1140,7 +1144,7 @@ void ObjectFile<E>::parse_sections(Context<E> &ctx,
+     comdat_discarded.resize(sections.size());
+     for (ComdatGroupRef<E> &ref : comdat_groups)
+       if (!ref.is_owner)
+-        for (u32 i : ref.members(*this))
++        for (u32 i : ref.members(ctx, *this))
+           comdat_discarded[i] = true;
+   }
+ 
+diff --git a/src/mold.h b/src/mold.h
+index a8d3ed1f..85fc8a9f 100644
+--- a/src/mold.h
++++ b/src/mold.h
+@@ -1763,7 +1763,7 @@ struct ComdatGroupRef {
+     : sect_idx(sect_idx), signature_arena_idx(ctx.arena.get_index(sym)) {}
+ 
+   Symbol<E> *signature(Context<E> &ctx) const;
+-  std::span<U32<E>> members(ObjectFile<E> &file) const;
++  std::span<U32<E>> members(Context<E> &ctx, ObjectFile<E> &file) const;
+ 
+   i32 sect_idx;
+ 
+@@ -3465,12 +3465,11 @@ std::string_view MergeableSection<E>::get_contents(i64 i) {
+ 
+ template <typename E>
+ std::span<U32<E>>
+-ComdatGroupRef<E>::members(ObjectFile<E> &file) const {
++ComdatGroupRef<E>::members(Context<E> &ctx, ObjectFile<E> &file) const {
+   const ElfShdr<E> &shdr = file.elf_sections[sect_idx];
+-  std::span<U32<E>> entries(
+-    (U32<E> *)(file.mf->data + shdr.sh_offset),
+-    (i64)(shdr.sh_size / sizeof(U32<E>)));
+-  assert(!entries.empty());
++  std::span<U32<E>> entries = file.template get_data<U32<E>>(ctx, shdr);
++  if (entries.empty())
++    Fatal(ctx) << file << ": empty SHT_GROUP";
+   return entries.subspan(1);
+ }
+ 
+diff --git a/src/passes.cc b/src/passes.cc
+index 7b6269e3..f087a41f 100644
+--- a/src/passes.cc
++++ b/src/passes.cc
+@@ -390,7 +390,7 @@ static void parse_input_sections(Context<E> &ctx) {
+   tbb::parallel_for_each(ctx.objs, [&](ObjectFile<E> *file) {
+     if (file->is_reachable)
+       for (ComdatGroupRef<E> &ref : file->comdat_groups)
+-        for (u32 i : ref.members(*file))
++        for (u32 i : ref.members(ctx, *file))
+           if (InputSection<E> *isec = file->sections[i])
+             isec->is_alive = ref.is_owner;
+   });
+@@ -3694,7 +3694,7 @@ void show_stats(Context<E> &ctx) {
+     static Counter removed_comdats("removed_comdat_mem");
+     for (ComdatGroupRef<E> &ref : obj->comdat_groups)
+       if (!ref.is_owner)
+-        removed_comdats += ref.members(*obj).size();
++        removed_comdats += ref.members(ctx, *obj).size();
+ 
+     static Counter unique_comdats("unique_comdats");
+     for (ComdatGroupRef<E> &ref : obj->comdat_groups)
+diff --git a/src/relocatable.cc b/src/relocatable.cc
+index 53856f9a..f95e2b92 100644
+--- a/src/relocatable.cc
++++ b/src/relocatable.cc
+@@ -83,7 +83,7 @@ static void create_comdat_group_sections(Context<E> &ctx) {
+       assert(sym);
+ 
+       std::vector<Chunk<E> *> members;
+-      for (u32 j : ref.members(file)) {
++      for (u32 j : ref.members(ctx, file)) {
+         const ElfShdr<E> &shdr = file.elf_sections[j];
+         if (shdr.sh_type == (E::is_rela ? SHT_RELA : SHT_REL)) {
+           InputSection<E> &isec = *file.sections[shdr.sh_info];

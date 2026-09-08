@@ -1,0 +1,40 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# NOTE: -j4, not -j$(nproc) - this session ran alongside 2 sibling candidates building
+# concurrently on the same host; raise this if you know your machine has headroom.
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+
+test: clone build-before reproduce-before apply build-after reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-before:
+    mkdir -p clone/build
+    cd clone/build && cmake -DCMAKE_BUILD_TYPE=Debug .. && cmake --build . -j4 --target mold
+
+# Should abort (SIGABRT, exit 134) - mimalloc's mi_try_new_handler aborting on a failed
+# `new u8[0xFFFFFFFFFFFF0000]` inside InputSection::uncompress(), src/input-sections.cc.
+reproduce-before:
+    ./repro/run.sh clone/build/mold
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-after:
+    cd clone/build && cmake --build . -j4 --target mold
+
+# Should no longer crash - mold now exits 1 with "corrupted compressed section: ch_size is
+# unreasonably large" (or "corrupted compressed section" for a too-short header).
+reproduce-after:
+    ./repro/run.sh clone/build/mold
+
+clean:
+    rm -rf clone

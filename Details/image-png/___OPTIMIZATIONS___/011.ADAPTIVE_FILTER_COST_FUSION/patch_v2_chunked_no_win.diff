@@ -1,0 +1,191 @@
+diff --git a/src/filter/mod.rs b/src/filter/mod.rs
+index 389baa8..68811f7 100644
+--- a/src/filter/mod.rs
++++ b/src/filter/mod.rs
+@@ -364,6 +364,25 @@ fn filter_internal(
+     current: &[u8],
+     output: &mut [u8],
+ ) -> RowFilter {
++    // `|_| 0` makes every `cost +=` below a provably-dead computation once monomorphized, so this
++    // costs nothing extra over the previous hand-written, cost-free version of this function.
++    filter_internal_with_cost(method, bpp, len, previous, current, output, |_| 0).0
++}
++
++/// Same row-filtering logic as the former `filter_internal`, but folds an optional per-byte
++/// additive cost into the same write loop that produces `output`, so a caller that needs both
++/// (`adaptive_filter_sum`) does not need a second full traversal of `output` afterwards to compute
++/// it. `cost_of` is applied to each output byte as it is written; the total is returned alongside
++/// the chosen filter. Passing `|_| 0` (see `filter_internal` above) costs nothing once inlined.
++fn filter_internal_with_cost(
++    method: RowFilter,
++    bpp: usize,
++    len: usize,
++    previous: &[u8],
++    current: &[u8],
++    output: &mut [u8],
++    cost_of: impl Fn(u8) -> u64,
++) -> (RowFilter, u64) {
+     use self::RowFilter::*;
+ 
+     // This value was chosen experimentally based on what achieved the best performance. The
+@@ -371,7 +390,9 @@ fn filter_internal(
+     // the fastest code when doing so.
+     const CHUNK_SIZE: usize = 32;
+ 
+-    match method {
++    let mut cost: u64 = 0;
++
++    let method = match method {
+         NoFilter => {
+             output.copy_from_slice(current);
+             NoFilter
+@@ -385,6 +406,9 @@ fn filter_internal(
+                 for i in 0..CHUNK_SIZE {
+                     out[i] = cur[i].wrapping_sub(prev[i]);
+                 }
++                for i in 0..CHUNK_SIZE {
++                    cost += cost_of(out[i]);
++                }
+             }
+ 
+             for ((out, cur), &prev) in out_chunks
+@@ -394,9 +418,13 @@ fn filter_internal(
+                 .zip(prev_chunks.remainder())
+             {
+                 *out = cur.wrapping_sub(prev);
++                cost += cost_of(*out);
+             }
+ 
+             output[..bpp].copy_from_slice(&current[..bpp]);
++            for &b in &output[..bpp] {
++                cost += cost_of(b);
++            }
+             Sub
+         }
+         Up => {
+@@ -408,6 +436,9 @@ fn filter_internal(
+                 for i in 0..CHUNK_SIZE {
+                     out[i] = cur[i].wrapping_sub(prev[i]);
+                 }
++                for i in 0..CHUNK_SIZE {
++                    cost += cost_of(out[i]);
++                }
+             }
+ 
+             for ((out, cur), &prev) in out_chunks
+@@ -417,6 +448,7 @@ fn filter_internal(
+                 .zip(prev_chunks.remainder())
+             {
+                 *out = cur.wrapping_sub(prev);
++                cost += cost_of(*out);
+             }
+             Up
+         }
+@@ -441,6 +473,9 @@ fn filter_internal(
+                         (cur_minus_bpp[i] & prev[i]) + ((cur_minus_bpp[i] ^ prev[i]) >> 1),
+                     );
+                 }
++                for i in 0..CHUNK_SIZE {
++                    cost += cost_of(out[i]);
++                }
+             }
+ 
+             for (((out, cur), &cur_minus_bpp), &prev) in out_chunks
+@@ -451,10 +486,12 @@ fn filter_internal(
+                 .zip(prev_chunks.remainder())
+             {
+                 *out = cur.wrapping_sub((cur_minus_bpp & prev) + ((cur_minus_bpp ^ prev) >> 1));
++                cost += cost_of(*out);
+             }
+ 
+             for i in 0..bpp {
+                 output[i] = current[i].wrapping_sub(previous[i] / 2);
++                cost += cost_of(output[i]);
+             }
+             Avg
+         }
+@@ -474,6 +511,9 @@ fn filter_internal(
+                 for i in 0..CHUNK_SIZE {
+                     out[i] = cur[i].wrapping_sub(paeth::filter_paeth_fpnge(a[i], b[i], c[i]));
+                 }
++                for i in 0..CHUNK_SIZE {
++                    cost += cost_of(out[i]);
++                }
+             }
+ 
+             for ((((out, cur), &a), &b), &c) in out_chunks
+@@ -485,14 +525,18 @@ fn filter_internal(
+                 .zip(c_chunks.remainder())
+             {
+                 *out = cur.wrapping_sub(paeth::filter_paeth_fpnge(a, b, c));
++                cost += cost_of(*out);
+             }
+ 
+             for i in 0..bpp {
+                 output[i] = current[i].wrapping_sub(paeth::filter_paeth_fpnge(0, previous[i], 0));
++                cost += cost_of(output[i]);
+             }
+             Paeth
+         }
+-    }
++    };
++
++    (method, cost)
+ }
+ 
+ fn adaptive_filter(
+@@ -525,6 +569,45 @@ fn adaptive_filter(
+     filter_choice
+ }
+ 
++/// Same selection logic as [`adaptive_filter`], specialized for a per-byte additive cost (the
++/// `sum_buffer` heuristic used by [`Filter::Adaptive`]). Unlike `adaptive_filter`, the cost of
++/// each candidate row is accumulated while `filter_internal_with_cost` writes `output`, instead
++/// of a second full traversal of `output` afterwards - `sum_buffer`'s cost is exactly the sum of
++/// a per-byte function, so it can be folded into the write loop without changing the result.
++fn adaptive_filter_sum(
++    bpp: usize,
++    len: usize,
++    previous: &[u8],
++    current: &[u8],
++    output: &mut [u8],
++) -> RowFilter {
++    use RowFilter::*;
++
++    #[inline(always)]
++    fn byte_cost(b: u8) -> u64 {
++        u64::from((b as i8).unsigned_abs())
++    }
++
++    let mut min_cost: u64 = u64::MAX;
++    let mut filter_choice = RowFilter::NoFilter;
++    for &filter in [Up, Sub, Avg, Paeth].iter() {
++        let (_, cost) =
++            filter_internal_with_cost(filter, bpp, len, previous, current, output, byte_cost);
++        if cost <= min_cost {
++            min_cost = cost;
++            filter_choice = filter;
++
++            if cost == 0 {
++                return filter_choice;
++            }
++        }
++    }
++    if filter_choice != Paeth {
++        filter_internal(filter_choice, bpp, len, previous, current, output);
++    }
++    filter_choice
++}
++
+ pub(crate) fn filter(
+     method: Filter,
+     bpp: BytesPerPixel,
+@@ -536,7 +619,7 @@ pub(crate) fn filter(
+     let len = current.len();
+ 
+     match method {
+-        Filter::Adaptive => adaptive_filter(sum_buffer, bpp, len, previous, current, output),
++        Filter::Adaptive => adaptive_filter_sum(bpp, len, previous, current, output),
+         Filter::MinEntropy => adaptive_filter(entropy, bpp, len, previous, current, output),
+         _ => {
+             let filter = RowFilter::from_method(method).unwrap();

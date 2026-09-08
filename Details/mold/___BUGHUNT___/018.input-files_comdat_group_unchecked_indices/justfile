@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# A plain -DCMAKE_BUILD_TYPE=Debug build is sufficient (no ASAN needed): this project's own
+# CMakeLists.txt adds -D_GLIBCXX_ASSERTIONS for Debug builds, and that's what turns the
+# out-of-bounds std::vector<bool>::operator[] write into a deterministic, easy-to-read SIGABRT
+# instead of silent heap corruption.
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+
+test: clone build-before reproduce-before apply build-after reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-before:
+    mkdir -p clone/build
+    cd clone/build && cmake -DCMAKE_BUILD_TYPE=Debug .. && cmake --build . -j4 --target mold
+
+# Should abort (exit 134, SIGABRT from libstdc++'s hardened std::vector<bool>::operator[]
+# assertion catching the out-of-bounds write).
+reproduce-before:
+    chmod +x repro/run.sh
+    ./repro/run.sh clone/build/mold; test $? -eq 134
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-after:
+    cd clone/build && cmake --build . -j4 --target mold
+
+# Should no longer crash - mold now exits cleanly with 1 ("invalid section index in SHT_GROUP"
+# fatal error) instead of aborting with 134.
+reproduce-after:
+    chmod +x repro/run.sh
+    ./repro/run.sh clone/build/mold; test $? -eq 1
+
+clean:
+    rm -rf clone

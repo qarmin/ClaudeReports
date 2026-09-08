@@ -1,0 +1,63 @@
+diff --git a/src/input-files.cc b/src/input-files.cc
+index 97bc5ec5..bb4b7c0c 100644
+--- a/src/input-files.cc
++++ b/src/input-files.cc
+@@ -149,23 +149,47 @@ ObjectFile<E>::parse_note_gnu_property(Context<E> &ctx, const ElfShdr<E> &shdr)
+   std::string_view data = this->get_string(ctx, shdr);
+ 
+   while (!data.empty()) {
++    // `data` comes straight from an untrusted section; every size field
++    // below is attacker-controlled, so each advance must be bounds-checked
++    // against what's actually left before slicing. A plain std::string_view
++    // ::substr(pos) throws std::out_of_range if pos > size(), and this
++    // pipeline has no top-level exception handler, so an unchecked slice
++    // here would abort the whole process instead of failing gracefully.
++    if (data.size() < sizeof(ElfNhdr<E>))
++      Fatal(ctx) << *this << ": corrupted .note.gnu.property";
++
+     ElfNhdr<E> &hdr = *(ElfNhdr<E> *)data.data();
+     data = data.substr(sizeof(hdr));
+ 
++    u64 namesz = align_to(hdr.n_namesz, 4);
++    if (hdr.n_namesz == 0 || namesz > data.size())
++      Fatal(ctx) << *this << ": corrupted .note.gnu.property";
++
+     std::string_view name = data.substr(0, hdr.n_namesz - 1);
+-    data = data.substr(align_to(hdr.n_namesz, 4));
++    data = data.substr(namesz);
++
++    u64 descsz = align_to(hdr.n_descsz, sizeof(Word<E>));
++    if (descsz > data.size())
++      Fatal(ctx) << *this << ": corrupted .note.gnu.property";
+ 
+     std::string_view desc = data.substr(0, hdr.n_descsz);
+-    data = data.substr(align_to(hdr.n_descsz, sizeof(Word<E>)));
++    data = data.substr(descsz);
+ 
+     if (hdr.n_type != NT_GNU_PROPERTY_TYPE_0 || name != "GNU")
+       continue;
+ 
+     while (!desc.empty()) {
++      if (desc.size() < 8)
++        Fatal(ctx) << *this << ": corrupted .note.gnu.property";
++
+       u32 type = *(U32<E> *)desc.data();
+       u32 size = *(U32<E> *)(desc.data() + 4);
+       desc = desc.substr(8);
+ 
++      u64 size_aligned = align_to(size, sizeof(Word<E>));
++      if (size_aligned > desc.size())
++        Fatal(ctx) << *this << ": corrupted .note.gnu.property";
++
+       // The majority of currently defined .note.gnu.property
+       // use 32-bit values.
+       // We don't know how to handle anything else, so if we encounter
+@@ -176,7 +200,7 @@ ObjectFile<E>::parse_note_gnu_property(Context<E> &ctx, const ElfShdr<E> &shdr)
+       // - GNU_PROPERTY_NO_COPY_ON_PROTECTED
+       if (size == 4)
+         gnu_properties[type] |= *(U32<E> *)desc.data();
+-      desc = desc.substr(align_to(size, sizeof(Word<E>)));
++      desc = desc.substr(size_aligned);
+     }
+   }
+ }

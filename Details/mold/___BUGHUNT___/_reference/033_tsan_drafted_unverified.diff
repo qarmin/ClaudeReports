@@ -1,0 +1,37 @@
+diff --git a/src/input-files.cc b/src/input-files.cc
+index 2844c98d..b8ed64da 100644
+--- a/src/input-files.cc
++++ b/src/input-files.cc
+@@ -1736,11 +1736,16 @@ void SharedFile<E>::resolve_symbols(Context<E> &ctx) {
+     Symbol<E> &sym = *this->symbols[i];
+     const ElfSym<E> &esym = this->elf_syms[i];
+ 
+-    if (esym.is_undef() || sym.skip_dso)
++    if (esym.is_undef())
+       continue;
+ 
+     std::scoped_lock lock(sym.mu);
+ 
++    // skip_dso is a one-bit bitfield, so it shares a memory location with
++    // the flags written below. It must be read under the same lock.
++    if (sym.skip_dso)
++      continue;
++
+     if (get_rank(this, esym, false) < get_rank(sym)) {
+       sym.file = this;
+       sym.origin = nullptr;
+diff --git a/src/mold.h b/src/mold.h
+index a8d3ed1f..4c07e220 100644
+--- a/src/mold.h
++++ b/src/mold.h
+@@ -2766,7 +2766,9 @@ struct Context {
+   std::vector<DynamicPattern> dynamic_list_patterns;
+   i64 default_version = VER_NDX_UNSPECIFIED;
+   i64 page_size = E::page_size;
+-  bool has_error = false;
++
++  // Set by Error/Warn, which are constructed from TBB worker threads.
++  Atomic<bool> has_error = false;
+ 
+   // Reader context
+   i64 file_priority = 10000;

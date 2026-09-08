@@ -1,0 +1,43 @@
+# Self-contained reproduction for this candidate.
+#
+# Shape 3 (see templates/candidate_justfile): reuses the shared ___OPTIMIZATIONS___/harness/encoder_bench/.
+#
+# This tests patch.diff (the literal candidate: fuse per-byte cost into filter_internal's write
+# loop) - the one found to be a Strong regression. See RESULT.md for why, and for the second,
+# vectorization-preserving variant (patch_v2_chunked_no_win.diff, not wired into this justfile -
+# apply it by hand instead of patch.diff to reproduce the "no change" result).
+
+repo_url := "https://github.com/image-rs/image-png.git"
+base_commit := "05ccdb9c8ae7fc50f4787ba2888a1c515adad944"
+harness_dir := "../harness/encoder_bench"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/encoder_bench
+    sed -i 's|path = "../../.."|path = ".."|' clone/encoder_bench/Cargo.toml
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/encoder_bench && cargo build --release
+    cp clone/encoder_bench/target/release/encoder_bench ./bin_baseline
+
+build-patched:
+    cd clone/encoder_bench && cargo build --release
+    cp clone/encoder_bench/target/release/encoder_bench ./bin_patched
+
+bench:
+    @echo "=== baseline (before patch) ==="
+    ulimit -c 0 && ./bin_baseline --mode filter --input clone/tests/benches/kodim02.png --compression fdeflate --only Adaptive --iters 60
+    @echo "=== patched (after patch) - expect ~2.6x SLOWER, this is the regression being documented ==="
+    ulimit -c 0 && ./bin_patched --mode filter --input clone/tests/benches/kodim02.png --compression fdeflate --only Adaptive --iters 60
+    @echo "=== paired timing ==="
+    RUNS=11 "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- --mode filter --input clone/tests/benches/kodim02.png --compression fdeflate --only Adaptive --iters 60
+
+clean:
+    rm -rf clone bin_baseline bin_patched

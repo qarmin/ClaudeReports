@@ -1,0 +1,35 @@
+diff --git a/src/mold.h b/src/mold.h
+index a8d3ed1f..bcea10a1 100644
+--- a/src/mold.h
++++ b/src/mold.h
+@@ -3543,11 +3543,26 @@ inline i64 ObjectFile<E>::get_shndx(const ElfSym<E> &esym) {
+   assert(&this->elf_syms[0] <= &esym);
+   assert(&esym <= &this->elf_syms[this->elf_syms.size() - 1]);
+ 
+-  if (esym.st_shndx == SHN_XINDEX)
+-    return symtab_shndx_sec[&esym - &this->elf_syms[0]];
+-  if (esym.st_shndx >= SHN_LORESERVE)
++  i64 shndx;
++  if (esym.st_shndx == SHN_XINDEX) {
++    i64 idx = &esym - &this->elf_syms[0];
++    if (idx >= (i64)symtab_shndx_sec.size())
++      return 0;
++    shndx = symtab_shndx_sec[idx];
++  } else if (esym.st_shndx >= SHN_LORESERVE) {
++    return 0;
++  } else {
++    shndx = esym.st_shndx;
++  }
++
++  // st_shndx (or its SHT_SYMTAB_SHNDX-resolved value) is fully
++  // attacker-controlled; every caller uses the result as a raw index into
++  // elf_sections/sections, so validate it here once instead of at each call
++  // site. 0 (the null section) is already treated as "no section" by every
++  // caller, same as the SHN_LORESERVE case above.
++  if (shndx >= (i64)this->elf_sections.size())
+     return 0;
+-  return esym.st_shndx;
++  return shndx;
+ }
+ 
+ template <typename E>

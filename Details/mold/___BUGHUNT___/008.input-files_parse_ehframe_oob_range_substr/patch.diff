@@ -1,0 +1,25 @@
+diff --git a/src/input-files.cc b/src/input-files.cc
+index 2844c98d..fb63a457 100644
+--- a/src/input-files.cc
++++ b/src/input-files.cc
+@@ -658,10 +658,20 @@ void ObjectFile<E>::parse_ehframe(Context<E> &ctx) {
+     i64 rel_idx = 0;
+ 
+     for (std::string_view data = contents; !data.empty();) {
++      if (data.size() < 4)
++        Fatal(ctx) << *isec << ": corrupted CIE/FDE record: too short";
++
+       i64 size = *(U32<E> *)data.data();
+       if (size == 0)
+         break;
+ 
++      // `size` is the untrusted record length straight from the file;
++      // reject it before it's used to slice past the section's own bounds
++      // (a std::string_view::substr(pos) with pos > size() throws
++      // std::out_of_range, which would otherwise propagate uncaught).
++      if (data.size() < 8 || (u64)size + 4 > (u64)data.size())
++        Fatal(ctx) << *isec << ": corrupted CIE/FDE record: bad length";
++
+       i64 begin_offset = data.data() - contents.data();
+       i64 end_offset = begin_offset + size + 4;
+       i64 id = *(U32<E> *)(data.data() + 4);

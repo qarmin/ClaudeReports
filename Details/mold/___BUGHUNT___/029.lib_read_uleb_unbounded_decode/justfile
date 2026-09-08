@@ -1,0 +1,43 @@
+# Self-contained reproduction for candidate 029: unbounded read_uleb() decode
+# (lib/lib.h) reached via mold's --gdb-index .debug_abbrev parser.
+#
+# The bug only manifests as a precise, caught fault under an ASAN build (the
+# overrun is off a heap buffer -- `new u8[sh_size]` in CompressedSection, only
+# populated when BOTH --gdb-index and --compress-debug-sections are given).
+# So this justfile builds mold with -DMOLD_USE_ASAN=ON (g++, per the project's
+# toolchain notes -- clang++ can't link ASAN on this host).
+#
+# `just test` clones pristine, builds ASAN mold, shows the crash, applies the
+# fix, rebuilds, shows it's gone.
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+
+test: clone build reproduce-before apply build reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build mold with ASAN+UBSAN (g++). ~2-4 min; caps parallelism to stay within RAM.
+build:
+    cmake -S clone -B clone/build-asan -DCMAKE_BUILD_TYPE=Debug \
+        -DMOLD_USE_ASAN=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+    cmake --build clone/build-asan -j4
+
+# Corrupted .debug_abbrev -> read_uleb walks off the heap buffer.
+# Unpatched: ASAN heap-buffer-overflow READ in mold::read_uleb.
+reproduce-before:
+    bash repro/run.sh clone/build-asan/mold
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same inputs, patched build: a clean `mold: fatal: --gdb-index: .debug_abbrev
+# does not contain a record ...` (exit 1), no ASAN/UBSAN error.
+reproduce-after:
+    bash repro/run.sh clone/build-asan/mold
+
+clean:
+    rm -rf clone

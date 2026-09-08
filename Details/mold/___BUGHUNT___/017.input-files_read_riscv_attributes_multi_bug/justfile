@@ -1,0 +1,39 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone build-before reproduce-before apply build-after reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-before:
+    cmake -S clone -B clone/build-plain -DCMAKE_BUILD_TYPE=Debug
+    cmake --build clone/build-plain -j4
+
+# Should crash (SIGBUS)/abort (SIGABRT)/hang (killed by timeout) - bug present.
+reproduce-before:
+    ulimit -c 0 && bash repro/run.sh clone/build-plain/mold
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-after:
+    cmake --build clone/build-plain -j4
+
+# Same repro again, now against the patched clone - should no longer crash/abort/hang.
+reproduce-after:
+    ulimit -c 0 && bash repro/run.sh clone/build-plain/mold
+
+clean:
+    rm -rf clone

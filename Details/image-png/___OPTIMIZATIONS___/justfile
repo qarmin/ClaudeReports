@@ -1,0 +1,99 @@
+# Root justfile for ___OPTIMIZATIONS___/. Run from inside this folder.
+#
+# This does NOT auto-generate SUMMARY.md - table formatting stays a manual/agent step by
+# design (a generic parser across arbitrary bench output formats isn't reliable). What this
+# gives you instead: (1) whether each candidate's patch.diff still applies to the CURRENT
+# state of the main project, and (2) fresh raw numbers dumped to a text file per candidate,
+# to compare by eye against what's already written in that candidate's RESULT.md.
+#
+# project_path defaults to the main project two levels up (___OPTIMIZATIONS___/.. is the
+# project root) - override it if this folder was moved.
+
+# zip -x patterns for OS/profiling-tool debug litter (a crashing baseline/patched binary's core
+# dump, valgrind's vgcore.*/cachegrind.out.*/callgrind.out.* left in the current dir when a COMMANDS.md
+# invocation omitted an explicit -o/--*-out-file, perf.data if `perf record` wasn't redirected to
+# /tmp) - never part of the deliverable, fully regenerable by re-running the candidate, and can
+# silently balloon a pack zip past GitHub's attachment limit. Applied to `pack` below; `clean` also
+# deletes them outright.
+debug_litter_excludes := '-x "*/core" -x "core" -x "*/core.[0-9]*" -x "core.[0-9]*" -x "*/vgcore.*" -x "vgcore.*" -x "*/perf.data" -x "*/perf.data.old" -x "*/cachegrind.out.*" -x "cachegrind.out.*" -x "*/callgrind.out.*" -x "callgrind.out.*" -x "*/massif.out.*" -x "massif.out.*"'
+
+# Check every candidate's patch.diff still applies cleanly. Reports STALE ones without
+# touching the project tree (uses `git apply --check`, which never writes).
+verify-patches project_path="..":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for d in */; do
+      d="${d%/}"
+      [ -f "$d/patch.diff" ] || continue
+      if git -C "{{project_path}}" apply --check "{{justfile_directory()}}/$d/patch.diff" 2>/dev/null; then
+        echo "OK      $d"
+      else
+        echo "STALE   $d  (no longer applies cleanly - project moved on since this candidate was made)"
+      fi
+    done
+
+# Re-run one candidate against the MAIN project tree (reuses its target/, unlike the
+# candidate's own clone-based justfile - see that file for the fully standalone version).
+# Adapt the build+bench lines below to the project. Always reverts afterwards.
+rerun candidate project_path="..":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'git -C "{{project_path}}" checkout -- .' EXIT
+    git -C "{{project_path}}" apply "{{justfile_directory()}}/{{candidate}}/patch.diff"
+    # --- adapt below: build + bench command for this project ---
+    ( cd "{{project_path}}" && cargo build --release )
+    OUT="{{justfile_directory()}}/{{candidate}}/rerun_$(date +%Y%m%d_%H%M%S).txt"
+    echo "REPLACE with the actual bench invocation and its output" | tee "$OUT"
+    # --- end adapt ---
+    echo "raw output -> $OUT (compare by hand against RESULT.md, then update it if it drifted)"
+
+# Re-run every candidate that has a patch.diff, one at a time.
+rerun-all project_path="..":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for d in */; do
+      d="${d%/}"
+      [ -f "$d/patch.diff" ] || continue
+      just rerun "$d" "{{project_path}}"
+    done
+
+# Pack the workspace's own contents (not wrapped in a ___OPTIMIZATIONS___/ prefix - the zip's
+# root is this folder's contents directly) into a zip named after the main project, written
+# INSIDE this folder, for sharing/attaching (e.g. to a GitHub issue). Excludes clone/ and target/
+# dirs at any depth, and any previous pack zip so re-running doesn't nest old archives into new
+# ones. A candidate's clone/ is a full git checkout and any target/ (its own bench/'s, or a
+# harness/*/'s) a full build cache - both large, both fully regenerable (clone/ from
+# repo_url+base_commit, target/ from a plain `cargo build`), and if either got zipped by accident
+# the archive would be too big to attach anywhere. Run `just clean` first if you want a guarantee
+# neither exists rather than relying on the exclude patterns alone.
+pack:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="{{justfile_directory()}}"
+    name="$(basename "$(dirname "$dir")")"
+    proj="$(printf '%s' "$name" | tr -c 'A-Za-z0-9' '_')"
+    out="${proj}_optimizations_$(date +%Y%m%d_%H%M%S).zip"
+    cd "$dir"
+    zip -rq "$out" . \
+        -x "*/clone/*" -x "*/clone" \
+        -x "*/target/*" -x "*/target" \
+        -x "*/issues_raw/*" -x "*/issues_raw" \
+        -x "*.zip" \
+        {{debug_litter_excludes}}
+    echo "wrote $dir/$out"
+    du -h "$out"
+
+# Remove every candidate's clone/ dir and any target/ dir (its own bench/'s, or a harness/*/'s),
+# plus any stray core dump/vgcore/perf.data/callgrind/cachegrind/massif profiling litter (see
+# debug_litter_excludes above for why these appear), to reclaim disk space - safe any time, all
+# fully regenerable (clone/ via that candidate's own justfile, target/ via a plain rebuild, litter
+# via re-running the candidate). Run this before `just pack` for a guaranteed-clean archive.
+clean:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    find "{{justfile_directory()}}" -type d \( -name clone -o -name target \) -prune -exec rm -rf {} +
+    find "{{justfile_directory()}}" -type f \
+        \( -name core -o -regex '.*/core\.[0-9]+' -o -name 'vgcore.*' -o -name 'perf.data' -o -name 'perf.data.old' \
+           -o -name 'cachegrind.out.*' -o -name 'callgrind.out.*' -o -name 'massif.out.*' \) \
+        -delete -print
+    echo "removed all clone/ and target/ dirs, and any core dump/profiling litter, under {{justfile_directory()}}"

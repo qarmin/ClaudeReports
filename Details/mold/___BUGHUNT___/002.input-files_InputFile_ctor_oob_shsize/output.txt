@@ -1,0 +1,28 @@
+=== after-fix (patched), same input, 5/5 runs exit 1 cleanly (this is run 1's output; the
+UBSAN "downcast" note is an unrelated pre-existing warning from Fatal()'s own error-printing
+path, see RESULT.md "What's not done") ===
+/home/rafal/Projekty/Obce/mold/src/input-files.cc:1508:24: runtime error: downcast of address 0x77d27d80a830 which does not point to an object of type 'ObjectFile'
+0x77d27d80a830: note: object is of type 'mold::InputFile<mold::X86_64>'
+ 00 00 00 00  b0 94 22 aa d3 55 00 00  70 01 3e 85 44 78 00 00  00 00 00 00 00 00 00 00  00 00 00 00
+              ^~~~~~~~~~~~~~~~~~~~~~~
+              vptr for 'mold::InputFile<mold::X86_64>'
+mold: fatal: /tmp/bad_shnum0.o: e_shoff is out of range
+
+=== before-fix crash (ASAN, captured via gdb backtrace since ASAN's own report didn't flush across mold's own fork()) ===
+Thread 2.1 "mold" received signal SIGSEGV, Segmentation fault.
+0x0000612672c3e45b in mold::Integer<unsigned long, true, 8>::operator unsigned long (this=0x74482c1fd020) at /home/rafal/Projekty/Obce/mold/src/../lib/integers.h:68
+68	      memcpy(&v, buf, size);
+#0  0x0000612672c3e45b in mold::Integer<unsigned long, true, 8>::operator unsigned long (this=0x74482c1fd020) at /home/rafal/Projekty/Obce/mold/src/../lib/integers.h:68
+#1  0x00006126762bba34 in mold::InputFile<mold::X86_64>::InputFile (this=0x7445a480a830, ctx=..., mf=0x74b7ac3e0170) at /home/rafal/Projekty/Obce/mold/src/input-files.cc:95
+#2  0x00006126762c241b in mold::ObjectFile<mold::X86_64>::ObjectFile (this=0x7445a480a830, ctx=..., mf=0x74b7ac3e0170, archive_name="") at /home/rafal/Projekty/Obce/mold/src/mold.h:1985
+#3  ... (ArenaResource::make -> new_object_file -> read_file -> read_input_files -> mold_main -> main)
+
+Note: mold forks a child process to do the actual linking work (src/subprocess-unix.cc
+fork_child(), "Exiting from a program with large memory usage is slow"). The crash happens in
+that forked child; the parent process only sees a normal SIGSEGV-terminated child and re-raises
+the same signal itself (subprocess-unix.cc:47), so `gdb --args mold ...` alone (or a plain
+`mold ...` run whose stderr is captured) attaches/reports against the PARENT, not the process
+that actually faulted. Reproducing needs `set follow-fork-mode child` in gdb (or, for a plain
+run, just observing the exit status/signal - the parent's own re-raise still terminates the whole
+process group with SIGSEGV, so `mold ...; echo $?` alone is sufficient to detect the crash even
+without gdb).

@@ -1,0 +1,59 @@
+# Self-contained reproduction for candidate 031 (filetype_nested_as_needed_misparse).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# mold is C++20/CMake (not Rust/cargo). This is a logic bug (mold rejects a linker script GNU
+# ld accepts), not a crash, so the "does it reproduce" signal is repro/run.sh's exit status:
+# it links a set of AS_NEEDED-nesting shapes with BOTH mold and the system GNU ld and exits
+# non-zero if mold diverges from ld on any of them. Build type does not matter (Debug is used
+# for consistency with the rest of this workspace's candidates).
+#
+# Requirements on the host: a working `cc` (builds the trivial .o/.so the scripts reference),
+# `readelf`, and GNU `ld` at /usr/bin/ld (pass a different path as run.sh's 2nd argument).
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone build-before reproduce-before apply build-after reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-before:
+    cmake -S clone -B clone/build-plain -DCMAKE_BUILD_TYPE=Debug
+    cmake --build clone/build-plain -j4
+
+# Should demonstrate the bug: 6 of the 8 shapes fail under mold with
+# `library not found: AS_NEEDED` while GNU ld links all 8. Expected to exit non-zero here.
+reproduce-before:
+    bash repro/run.sh clone/build-plain/mold
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-after:
+    cmake --build clone/build-plain -j4
+
+# Same repro against the patched clone: mold now accepts every shape and agrees with GNU ld
+# on the resulting DT_NEEDED set. Expected to exit 0 here.
+reproduce-after:
+    bash repro/run.sh clone/build-plain/mold
+
+# Wider set of same-bug-class inputs: nesting depths 10/100/500/5000, seven degenerate or
+# truncated nestings that must still be rejected cleanly, and an i386-only nested script that
+# proves the machine-type inference this function exists for now works through the nesting.
+# Run it against clone/build-plain/mold before and after `apply` to compare.
+extra:
+    bash repro/extra_checks.sh clone/build-plain/mold
+
+# Run the project's own test suite (476 tests here; the patch extends
+# test/linker-script-group-as-needed.sh with the nested case, which fails without the fix).
+ctest:
+    ctest --test-dir clone/build-plain -j4
+
+clean:
+    rm -rf clone repro/work repro/extra-work

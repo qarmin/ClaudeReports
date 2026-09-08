@@ -1,0 +1,236 @@
+==============================================================================
+candidate 030.sparc64_large_plt_size_mismatch -- Not reproducible
+==============================================================================
+
+$ git rev-parse HEAD
+c340272e6376f9a8e5b5cd6f6634f925f6d54e5c
+[exit 0]
+
+$ git status --short -- src lib
+
+[exit 0]
+
+
+==============================================================================
+1. The constants the audit finding got wrong (src/elf.h, src/mold.h)
+==============================================================================
+$ grep -n 'plt_hdr_size\|plt_size' src/elf.h | sed -n '/2163\|2164/p'
+2163:  static constexpr u32 plt_hdr_size = 128;
+2164:  static constexpr u32 plt_size = 32;
+[exit 0]
+
+$ sed -n '2156,2166p' src/elf.h
+struct SPARC64 {
+  static constexpr std::string_view name = "sparc64";
+  static constexpr bool is_64 = true;
+  static constexpr bool is_le = false;
+  static constexpr bool is_rela = true;
+  static constexpr u32 page_size = 8192;
+  static constexpr u32 e_machine = EM_SPARC64;
+  static constexpr u32 plt_hdr_size = 128;
+  static constexpr u32 plt_size = 32;
+  static constexpr u32 pltgot_size = 32;
+  static constexpr u8 trap[] = { 0x91, 0xd0, 0x20, 0x05 }; // ta 5
+[exit 0]
+
+$ sed -n '3712,3740p' src/mold.h
+// On SPARC, .plt uses 32-byte "small" entries until it grows past 0x100000
+// bytes (the reach of a small entry's branch to the resolver), after which
+// it switches to a "large" entry format. This is how many small entries fit.
+constexpr i64 sparc_num_small_plt =
+  (0x100000 - SPARC64::plt_hdr_size) / SPARC64::plt_size;
+
+template <typename E>
+inline u64 to_plt_offset(i32 pltidx) {
+  if constexpr (is_ppc64v1<E>) {
+    // The PPC64 ELFv1 ABI requires PLT entries to vary in size
+    // depending on their indices. For entries whose PLT index is
+    // less than 32768, the entry size is 8 bytes. Other entries are
+    // 12 bytes long.
+    if (pltidx < 0x8000)
+      return E::plt_hdr_size + pltidx * 8;
+    return E::plt_hdr_size + 0x8000 * 8 + (pltidx - 0x8000) * 12;
+  } else if constexpr (is_sparc<E>) {
+    // SPARC large PLT entries are grouped into blocks of 160, each holding
+    // 160 24-byte code stubs followed by 160 8-byte data pointers (so a
+    // stub's `ldx` reaches its pointer within a signed 13-bit offset). This
+    // returns the offset of pltidx's code stub.
+    if (pltidx < sparc_num_small_plt)
+      return E::plt_hdr_size + pltidx * E::plt_size;
+    i64 i = pltidx - sparc_num_small_plt;
+    return 0x100000 + (i / 160) * 5120 + (i % 160) * 24;
+  } else {
+    return E::plt_hdr_size + pltidx * E::plt_size;
+  }
+}
+[exit 0]
+
+$ sed -n '1890,1898p' src/output-chunks.cc
+template <typename E>
+void PltSection<E>::update_shdr(Context<E> &ctx) {
+  if (symbols.empty())
+    this->shdr.sh_size = 0;
+  else if constexpr (is_sparc<E>)
+    this->shdr.sh_size = E::plt_hdr_size + symbols.size() * E::plt_size;
+  else
+    this->shdr.sh_size = to_plt_offset<E>(symbols.size());
+}
+[exit 0]
+
+$ sed -n '81,89p' src/arch-sparc64.cc
+// Returns the byte offset within .plt of the data pointer for a large SPARC
+// PLT entry. See write_plt_entry below for the block layout this assumes.
+i64 sparc_plt_ptr_offset(Context<E> &ctx, i64 pltidx) {
+  i64 i = pltidx - sparc_num_small_plt;
+  i64 block = i / 160;
+  i64 nlarge = (i64)ctx.plt->symbols.size() - sparc_num_small_plt;
+  i64 nstub = std::min<i64>(160, nlarge - block * 160);
+  return 0x100000 + block * 5120 + nstub * 24 + (i % 160) * 8;
+}
+[exit 0]
+
+
+==============================================================================
+2. Arithmetic model of to_plt_offset / sparc_plt_ptr_offset / update_shdr
+==============================================================================
+$ python3 repro/plt_math.py
+sparc_num_small_plt = 32764
+hdr + NSMALL*plt_size = 0x100000
+cases checked: 414
+overflowing cases: [] total 0
+max (need - size) over all cases: 0
+nlarge=     1 nsyms=32765 sized=1048608 (0x100020) last_end=1048608 (0x100020) delta=0
+nlarge=    10 nsyms=32774 sized=1048896 (0x100140) last_end=1048896 (0x100140) delta=0
+nlarge=   160 nsyms=32924 sized=1053696 (0x101400) last_end=1053696 (0x101400) delta=0
+nlarge=   161 nsyms=32925 sized=1053728 (0x101420) last_end=1053728 (0x101420) delta=0
+nlarge=  1000 nsyms=33764 sized=1080576 (0x107d00) last_end=1080576 (0x107d00) delta=0
+nlarge= 65600 nsyms=98364 sized=3147776 (0x300800) last_end=3147776 (0x300800) delta=0
+[exit 0]
+
+
+==============================================================================
+3. Real end-to-end links, plain Debug build (build-plain, gcc)
+==============================================================================
+$ bash repro/run.sh ./build-plain/mold      # run 1
+==============================================================================
+   captured output (run 1)
+==============================================================================
+mold: mold 2.42.0 (c340272e6376f9a8e5b5cd6f6634f925f6d54e5c; compatible with GNU ld)
+
+nsyms=100 (large=0): link OK, highest byte written by the layout = 3328 (0xd00); sh_size = 3328 -> OK (fits)
+nsyms=32763 (large=0): link OK, highest byte written by the layout = 1048544 (0xfffe0); sh_size = 1048544 -> OK (fits)
+nsyms=32764 (large=0): link OK, highest byte written by the layout = 1048576 (0x100000); sh_size = 1048576 -> OK (fits)
+nsyms=32765 (large=1): link OK, highest byte written by the layout = 1048608 (0x100020); sh_size = 1048608 -> OK (fits)
+nsyms=32766 (large=2): link OK, highest byte written by the layout = 1048640 (0x100040); sh_size = 1048640 -> OK (fits)
+nsyms=32923 (large=159): link OK, highest byte written by the layout = 1053664 (0x1013e0); sh_size = 1053664 -> OK (fits)
+nsyms=32924 (large=160): link OK, highest byte written by the layout = 1053696 (0x101400); sh_size = 1053696 -> OK (fits)
+nsyms=32925 (large=161): link OK, highest byte written by the layout = 1053728 (0x101420); sh_size = 1053728 -> OK (fits)
+nsyms=33083 (large=319): link OK, highest byte written by the layout = 1058784 (0x1027e0); sh_size = 1058784 -> OK (fits)
+nsyms=33084 (large=320): link OK, highest byte written by the layout = 1058816 (0x102800); sh_size = 1058816 -> OK (fits)
+nsyms=33085 (large=321): link OK, highest byte written by the layout = 1058848 (0x102820); sh_size = 1058848 -> OK (fits)
+nsyms=33100 (large=336): link OK, highest byte written by the layout = 1059328 (0x102a00); sh_size = 1059328 -> OK (fits)
+nsyms=34000 (large=1236): link OK, highest byte written by the layout = 1088128 (0x109a80); sh_size = 1088128 -> OK (fits)
+
+RESULT: no out-of-bounds write reproduced; .plt sh_size covers the layout exactly in every case.
+
+$ bash repro/run.sh ./build-plain/mold      # run 2 (repeatability)
+==============================================================================
+   captured output (run 2)
+==============================================================================
+mold: mold 2.42.0 (c340272e6376f9a8e5b5cd6f6634f925f6d54e5c; compatible with GNU ld)
+
+nsyms=100 (large=0): link OK, highest byte written by the layout = 3328 (0xd00); sh_size = 3328 -> OK (fits)
+nsyms=32763 (large=0): link OK, highest byte written by the layout = 1048544 (0xfffe0); sh_size = 1048544 -> OK (fits)
+nsyms=32764 (large=0): link OK, highest byte written by the layout = 1048576 (0x100000); sh_size = 1048576 -> OK (fits)
+nsyms=32765 (large=1): link OK, highest byte written by the layout = 1048608 (0x100020); sh_size = 1048608 -> OK (fits)
+nsyms=32766 (large=2): link OK, highest byte written by the layout = 1048640 (0x100040); sh_size = 1048640 -> OK (fits)
+nsyms=32923 (large=159): link OK, highest byte written by the layout = 1053664 (0x1013e0); sh_size = 1053664 -> OK (fits)
+nsyms=32924 (large=160): link OK, highest byte written by the layout = 1053696 (0x101400); sh_size = 1053696 -> OK (fits)
+nsyms=32925 (large=161): link OK, highest byte written by the layout = 1053728 (0x101420); sh_size = 1053728 -> OK (fits)
+nsyms=33083 (large=319): link OK, highest byte written by the layout = 1058784 (0x1027e0); sh_size = 1058784 -> OK (fits)
+nsyms=33084 (large=320): link OK, highest byte written by the layout = 1058816 (0x102800); sh_size = 1058816 -> OK (fits)
+nsyms=33085 (large=321): link OK, highest byte written by the layout = 1058848 (0x102820); sh_size = 1058848 -> OK (fits)
+nsyms=33100 (large=336): link OK, highest byte written by the layout = 1059328 (0x102a00); sh_size = 1059328 -> OK (fits)
+nsyms=34000 (large=1236): link OK, highest byte written by the layout = 1088128 (0x109a80); sh_size = 1088128 -> OK (fits)
+
+RESULT: no out-of-bounds write reproduced; .plt sh_size covers the layout exactly in every case.
+
+$ diff -q scratch/run1.txt scratch/run2.txt && echo 'run1 and run2 are byte-identical'
+run1 and run2 are byte-identical
+[exit 0]
+
+
+==============================================================================
+4. Same links under ASAN + UBSAN (build-asan, g++, -DMOLD_USE_ASAN=ON)
+==============================================================================
+$ bash repro/run.sh ./build-asan/mold
+==============================================================================
+   captured output (ASAN/UBSAN)
+==============================================================================
+mold: mold 2.42.0 (c340272e6376f9a8e5b5cd6f6634f925f6d54e5c; compatible with GNU ld)
+
+nsyms=100 (large=0): link OK, highest byte written by the layout = 3328 (0xd00); sh_size = 3328 -> OK (fits)
+nsyms=32763 (large=0): link OK, highest byte written by the layout = 1048544 (0xfffe0); sh_size = 1048544 -> OK (fits)
+nsyms=32764 (large=0): link OK, highest byte written by the layout = 1048576 (0x100000); sh_size = 1048576 -> OK (fits)
+nsyms=32765 (large=1): link OK, highest byte written by the layout = 1048608 (0x100020); sh_size = 1048608 -> OK (fits)
+nsyms=32766 (large=2): link OK, highest byte written by the layout = 1048640 (0x100040); sh_size = 1048640 -> OK (fits)
+nsyms=32923 (large=159): link OK, highest byte written by the layout = 1053664 (0x1013e0); sh_size = 1053664 -> OK (fits)
+nsyms=32924 (large=160): link OK, highest byte written by the layout = 1053696 (0x101400); sh_size = 1053696 -> OK (fits)
+nsyms=32925 (large=161): link OK, highest byte written by the layout = 1053728 (0x101420); sh_size = 1053728 -> OK (fits)
+nsyms=33083 (large=319): link OK, highest byte written by the layout = 1058784 (0x1027e0); sh_size = 1058784 -> OK (fits)
+nsyms=33084 (large=320): link OK, highest byte written by the layout = 1058816 (0x102800); sh_size = 1058816 -> OK (fits)
+nsyms=33085 (large=321): link OK, highest byte written by the layout = 1058848 (0x102820); sh_size = 1058848 -> OK (fits)
+nsyms=33100 (large=336): link OK, highest byte written by the layout = 1059328 (0x102a00); sh_size = 1059328 -> OK (fits)
+nsyms=34000 (large=1236): link OK, highest byte written by the layout = 1088128 (0x109a80); sh_size = 1088128 -> OK (fits)
+
+RESULT: no out-of-bounds write reproduced; .plt sh_size covers the layout exactly in every case.
+
+$ grep -c 'AddressSanitizer\|runtime error\|SUMMARY:' scratch/run_asan.txt || true
+0
+[exit 0]
+
+
+==============================================================================
+5. Detailed per-entry validation of one linked output (33100 syms, 336 large)
+==============================================================================
+$ python3 repro/gen_sparc64_plt.py 33100 scratch/big.o
+wrote scratch/big.o: 33100 undefined syms (336 large PLT entries)
+[exit 0]
+
+$ ./build-plain/mold -shared -o scratch/big.so scratch/big.o
+
+[exit 0]
+
+$ python3 repro/check_plt.py scratch/big.so
+.plt      addr=0x27c900 off=0x276900 size=0x102a00 (1059328) align=256
+.rela.plt entries=33100  (sparc_num_small_plt=32764, large=336)
+expected sh_size = 128 + 33100*32 = 1059328 (0x102a00)  -> MATCH
+highest byte written by the layout = 1059328 (0x102a00); sh_size = 1059328 -> OK (fits)
+
+all PLT layout checks passed
+[exit 0]
+
+$ readelf -S scratch/big.so | grep -A1 '\.plt\|\.rela.plt'
+  [ 5] .rela.plt         RELA             0000000000194360  00194360
+       00000000000c1f20  0000000000000018   A       3     0     8
+--
+  [12] .plt              PROGBITS         000000000027c900  00276900
+       0000000000102a00  0000000000000000 WAX       0     0     256
+[exit 0]
+
+
+==============================================================================
+6. Project test suite (pristine tree, no patch applied)
+==============================================================================
+$ ctest -j4 2>&1 | grep -E '% tests passed|Total Test time'
+100% tests passed, 0 tests failed out of 476
+Total Test time (real) =  31.79 sec
+[exit 0]
+
+$ ctest -N 2>&1 | grep -ci sparc
+0
+[exit 1]
+
+(0 SPARC64 tests register on this host: test/CMakeLists.txt:169 needs both
+ qemu-sparc64 AND sparc64-linux-gnu-gcc; only qemu-sparc64 is installed.)
+

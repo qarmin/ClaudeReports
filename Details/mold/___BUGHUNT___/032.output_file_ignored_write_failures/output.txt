@@ -1,0 +1,182 @@
+Candidate 032 - output_file_ignored_write_failures
+mold @ c340272e6376f9a8e5b5cd6f6634f925f6d54e5c, Debug build (build-plain), gcc, Linux x86_64
+GNU ld (GNU Binutils for Ubuntu) 2.46 used as the differential reference
+
+=================================================================
+1. repro/run.sh against the PRISTINE tree  ->  BUG PRESENT
+=================================================================
+
+mold:   /home/rafal/Projekty/Obce/mold/.claude/worktrees/agent-a88542a385a1d596f/build-plain/mold
+mold 2.42.0 (c340272e6376f9a8e5b5cd6f6634f925f6d54e5c; compatible with GNU ld)
+
+baseline: a good link writes 3360 bytes
+
+== 1. mold -o /dev/full  (MallocOutputFile: every write fails, ENOSPC) ==
+   mold exit status : 0
+   bytes landed     : 0 (the whole link output was dropped)
+   -> SILENT FAILURE: reported success, produced nothing
+/usr/bin/x86_64-linux-gnu-ld.bfd: final link failed: No space left on device
+   GNU ld exit status: 1  (reference behaviour)
+
+== 2. mold -o -  with RLIMIT_FSIZE=1024 (MallocOutputFile: short write, EFBIG) ==
+   mold exit status : 0
+   output file size : 1024 bytes (should be 3360)
+   -> SILENT FAILURE: reported success, wrote a truncated ELF
+
+== 3. mold -o -  with RLIMIT_FSIZE=1024, output padded past stdio's buffer ==
+   mold exit status : 0
+   output file size : 1024 bytes (should be 203480)
+   -> SILENT FAILURE: reported success, wrote a truncated ELF
+
+== 4. control: mold -o <regular file> with RLIMIT_FSIZE=1024 (MemoryMappedOutputFile) ==
+mold: fatal: ftruncate failed: File too large
+   mold exit status : 1  (expected non-zero both before and after the fix)
+
+-----------------------------------------------------------------
+VERDICT: BUG PRESENT - mold exited 0 while the output was truncated/absent
+
+
+=================================================================
+2. repro/run.sh against the PATCHED tree (patch.diff applied)  ->  BUG ABSENT
+=================================================================
+
+mold:   /home/rafal/Projekty/Obce/mold/.claude/worktrees/agent-a88542a385a1d596f/build-plain/mold
+mold 2.42.0 (c340272e6376f9a8e5b5cd6f6634f925f6d54e5c; compatible with GNU ld)
+
+baseline: a good link writes 3360 bytes
+
+== 1. mold -o /dev/full  (MallocOutputFile: every write fails, ENOSPC) ==
+mold: fatal: cannot write to /dev/full: No space left on device
+   mold exit status : 1
+   bytes landed     : 0 (the whole link output was dropped)
+   -> error reported, exit status non-zero
+/usr/bin/x86_64-linux-gnu-ld.bfd: final link failed: No space left on device
+   GNU ld exit status: 1  (reference behaviour)
+
+== 2. mold -o -  with RLIMIT_FSIZE=1024 (MallocOutputFile: short write, EFBIG) ==
+mold: fatal: cannot write to -: File too large
+   mold exit status : 1
+   output file size : 1024 bytes (should be 3360)
+   -> error reported, exit status non-zero
+
+== 3. mold -o -  with RLIMIT_FSIZE=1024, output padded past stdio's buffer ==
+mold: fatal: cannot write to -: File too large
+   mold exit status : 1
+   output file size : 1024 bytes (should be 203480)
+   -> error reported, exit status non-zero
+
+== 4. control: mold -o <regular file> with RLIMIT_FSIZE=1024 (MemoryMappedOutputFile) ==
+mold: fatal: ftruncate failed: File too large
+   mold exit status : 1  (expected non-zero both before and after the fix)
+
+-----------------------------------------------------------------
+VERDICT: BUG ABSENT - every write failure was reported with a non-zero exit
+
+=================================================================
+3. Which OutputFile subclass is actually reached for a non-regular
+   output path (gdb, debug build, pristine tree)
+=================================================================
+
+$ gdb -batch -ex "set follow-fork-mode child" -ex "set detach-on-fork on" \
+      -ex "break mold::MallocOutputFile<mold::X86_64>::close" -ex run -ex bt \
+      --args build-plain/mold -o /dev/full -e _start scratch/mini.o
+
+Thread 2.1 "mold" hit Breakpoint 1, mold::MallocOutputFile<mold::X86_64>::close (this=0x20000ab0320, ctx=...) at src/mold.h:1701
+1701	  void close(Context<E> &ctx) override {
+#0  mold::MallocOutputFile<mold::X86_64>::close (this=0x20000ab0320, ctx=...) at src/mold.h:1701
+#1  0x00006554ddf8f69a in mold::mold_main<mold::X86_64> (argc=6, argv=0x7ffe9eab27d8) at src/main.cc:750
+#2  0x00006554dfcc0e7d in main (argc=6, argv=0x7ffe9eab27d8) at src/entry.cc:42
+
+
+=================================================================
+4. Realistic end-to-end case: the gcc driver using mold as its
+   linker, writing a full glibc-linked PIE to a size-capped stdout
+   (pristine tree)
+=================================================================
+
+$ gcc -B build-plain -o - scratch/hello.o > scratch/gcc_stdout_ref.bin
+gcc+mold -o - exit=0
+-rw-r--r-- 1 rafal rafal 8280 Sep  5 15:29 scratch/gcc_stdout_ref.bin
+
+$ python3 scratch/limit.py 4096 scratch/real_trunc.bin gcc -B build-plain -o - scratch/hello.o
+exit=0 size=4096 (full size 8280)
+
+$ file scratch/real_trunc.bin
+scratch/real_trunc.bin: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, missing section headers at 8088
+
+$ python3 scratch/limit.py 4096 scratch/real_ld.bin gcc -fuse-ld=bfd -o - scratch/hello.o
+/usr/bin/x86_64-linux-gnu-ld.bfd: final link failed: File too large
+collect2: error: ld returned 1 exit status
+exit=1 size=0
+
+-> mold: exit 0, a 4096-byte truncated PIE that `file` already reports as
+   corrupt ("missing section headers at 8088").
+   GNU ld: exit 1, error message, nothing written.
+
+
+=================================================================
+5. Both new checks are load-bearing: which branch fires depends on
+   the output size vs. stdio's buffer (patched build, temporarily
+   instrumented with branch markers, then reverted)
+=================================================================
+
+$ build-plain/mold -o /dev/full -e _start scratch/mini.o          # 3360 bytes
+mold: fatal: [fclose-branch] cannot write to /dev/full: No space left on device
+exit=1
+
+$ python3 scratch/limit.py 1024 scratch/b1.bin build-plain/mold -o - -e _start scratch/mini.o
+mold: fatal: [fclose-branch] cannot write to -: File too large
+exit=1
+
+$ python3 scratch/limit.py 4096 scratch/b2.bin gcc -B build-plain -o - scratch/hello.o   # 8280 bytes
+mold: fatal: [fwrite-branch] cannot write to -: File too large
+collect2: error: ld returned 1 exit status
+exit=1
+
+-> An output smaller than stdio's buffer is fully absorbed by fwrite (which
+   therefore returns success); the error only surfaces from fclose's flush.
+   A check on fwrite alone would have left every small-output case silent.
+
+
+=================================================================
+6. Repeatability of the full repro against the pristine build
+=================================================================
+
+$ for i in 1 2 3 4; do MOLD=.../build-plain/mold CANDIDATE_OUT/repro/run.sh | grep VERDICT; done
+VERDICT: BUG PRESENT - mold exited 0 while the output was truncated/absent
+VERDICT: BUG PRESENT - mold exited 0 while the output was truncated/absent
+VERDICT: BUG PRESENT - mold exited 0 while the output was truncated/absent
+VERDICT: BUG PRESENT - mold exited 0 while the output was truncated/absent
+
+(plus the run captured in section 1 above = 5/5)
+
+
+=================================================================
+7. Project test suite, pristine vs. patched (build-plain, Debug)
+=================================================================
+
+BEFORE (pristine c340272e, mold binary built 15:26:57, sources untouched):
+$ ctest --test-dir build-plain -j4
+100% tests passed, 0 tests failed out of 476
+Total Test time (real) =  24.46 sec
+(16 tests skipped by ctest's own feature gating: apx/ifunc-export/incompatible-libs/
+ sframe-unwind/z-rewrite-endbr3/zstd/compressed-debug-info/dead-debug-sections/hwasan)
+
+AFTER (patch.diff applied, rebuilt):
+$ ctest --test-dir build-plain -j4
+100% tests passed, 0 tests failed out of 476
+Total Test time (real) =  29.93 sec
+
+No new failures, no newly skipped tests.
+
+
+=================================================================
+8. Sanity: normal links are unaffected by the patch
+=================================================================
+
+$ build-plain/mold -o scratch/ok.bin -e _start scratch/mini.o
+exit=0 size=3360
+$ build-plain/mold -o - -e _start scratch/mini.o > scratch/ok2.bin
+stdout exit=0 size=3360
+$ gcc -B build-plain -o scratch/hello_bin scratch/hello.o && scratch/hello_bin
+hello

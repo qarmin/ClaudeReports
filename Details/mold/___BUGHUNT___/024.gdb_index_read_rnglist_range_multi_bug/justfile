@@ -1,0 +1,42 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# Requires: gcc, readelf, python3 (no external pip packages), and a glibc dev environment
+# providing /usr/lib/x86_64-linux-gnu/{crt1,crti,crtn}.o + libc.so (standard on any
+# x86_64 Linux dev box with gcc installed) - repro/run.sh invokes the built mold binary
+# directly (not via gcc -fuse-ld=) so it always exercises the exact binary under test.
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cmake -S clone -B clone/build-plain -DCMAKE_BUILD_TYPE=Debug
+    cmake --build clone/build-plain -j4
+
+# Build+run the standalone repro against the pristine clone - should segfault (bug A) and
+# should silently accept a corrupted opcode with no diagnostic (bug B).
+reproduce-before:
+    bash repro/run.sh clone/build-plain/mold
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cmake --build clone/build-plain -j4
+
+# Same repro again, now against the patched clone - should no longer segfault, and should
+# reject the corrupted opcode with a clean `mold: fatal:` diagnostic instead.
+reproduce-after:
+    bash repro/run.sh clone/build-plain/mold
+
+clean:
+    rm -rf clone

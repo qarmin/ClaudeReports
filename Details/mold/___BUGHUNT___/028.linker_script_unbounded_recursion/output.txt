@@ -1,0 +1,303 @@
+Candidate 028 - linker_script_parser_token_indexing
+Genuine captured output. Real `mold` binary, plain Debug build (-DCMAKE_BUILD_TYPE=Debug,
+g++ 15.2.0, x86_64), base commit c340272e6376f9a8e5b5cd6f6634f925f6d54e5c.
+
+================================================================================
+PART 0 - the assigned suspect (out-of-range tok[N] indexing): NOT found
+================================================================================
+
+Sweep of 62 truncated/malformed scripts against the pristine build (re-runnable via
+repro/sweep_token_indexing.sh). Every one produced a
+clean `mold: fatal:` diagnostic and exit 1 - no out-of-range span index, no SIGABRT
+from _GLIBCXX_ASSERTIONS, no SIGSEGV.
+
+  $ bash scratch/sweep.sh      # original ad-hoc sweep, 33 shapes, linker-script entry point
+  empty                    rc=1    mold: fatal: s.ld: unknown file type
+  only-ws                  rc=0    mold: warning: entry symbol is not defined: _start
+  only-comment             rc=0    mold: warning: entry symbol is not defined: _start
+  GROUP-open               rc=1    mold: fatal: s.ld: expected ')', but got EOF
+  GROUP-a                  rc=1    mold: fatal: s.ld:1: GROUP(a ^ library not found: a
+  GROUP-bare               rc=1    mold: fatal: s.ld: expected '(', but got EOF
+  INPUT-bare               rc=1    mold: fatal: s.ld: expected '(', but got EOF
+  INPUT-open               rc=1    mold: fatal: s.ld: expected ')', but got EOF
+  OUTPUT_FORMAT-bare       rc=1    mold: fatal: s.ld: expected '(', but got EOF
+  OUTPUT_FORMAT-open       rc=1    mold: fatal: s.ld: expected ')', but got EOF
+  OUTPUT_FORMAT-ox         rc=1    mold: fatal: s.ld: expected ')', but got EOF
+  VERSION-bare             rc=1    mold: fatal: s.ld: expected '{', but got EOF
+  VERSION-brace            rc=1    mold: fatal: s.ld: expected '}', but got EOF
+  VERSION-brace2           rc=1    mold: fatal: s.ld: expected '}', but got EOF
+  VERSION-brace3           rc=1    mold: fatal: s.ld: expected '}', but got EOF
+  VERSION-brace4           rc=1    mold: fatal: s.ld: expected ';', but got EOF
+  VERSION-brace5           rc=1    mold: fatal: s.ld: expected '}', but got EOF
+  VERSION-brace6           rc=1    mold: fatal: s.ld: expected ';', but got EOF
+  VERSION-extern           rc=1    mold: fatal: s.ld: expected '"C++"', but got EOF
+  VERSION-externC          rc=1    mold: fatal: s.ld: expected '{', but got EOF
+  VERSION-externC2         rc=1    mold: fatal: s.ld: expected '}', but got EOF
+  AS_NEEDED-open           rc=1    mold: fatal: s.ld: expected ')', but got EOF
+  AS_NEEDED-bare           rc=1    mold: fatal: s.ld: expected '(', but got EOF
+  defsym-trunc             rc=1    mold: fatal: s.ld:1: a = b ^ unknown linker script token
+  defsym-full              rc=1    mold: error: --defsym: undefined symbol: b
+  (short inputs such as "(" / ")" / ";" / "{" / "}" / "*" were reported as
+   "unknown file type" because filetype.cc's is_text_file() needs >= 4 printable
+   bytes; they were re-run padded in sweep2.sh and also produced clean diagnostics)
+
+  $ bash scratch/sweep2.sh     # same shapes through --version-script / --dynamic-list
+  === version-script entry (--version-script) ===
+  empty                      rc=0
+  brace                      rc=1    mold: fatal: v.ver: expected '}', but got EOF
+  v-brace                    rc=1    mold: fatal: v.ver: expected '}', but got EOF
+  global                     rc=1    mold: fatal: v.ver: expected '}', but got EOF
+  sym                        rc=1    mold: fatal: v.ver: expected ';', but got EOF
+  extern                     rc=1    mold: fatal: v.ver: expected '"C++"', but got EOF
+  externC                    rc=1    mold: fatal: v.ver: expected '{', but got EOF
+  externCpp                  rc=1    mold: fatal: v.ver: expected '{', but got EOF
+  star                       rc=1    mold: fatal: v.ver: expected '{', but got EOF
+  === dynamic-list entry (--dynamic-list) ===
+  empty                      rc=1    mold: fatal: d.lst: expected '{', but got EOF
+  brace                      rc=1    mold: fatal: d.lst: expected '}', but got EOF
+  sym                        rc=1    mold: fatal: d.lst: expected ';', but got EOF
+  semi                       rc=1    mold: fatal: d.lst: expected '}', but got EOF
+  closed                     rc=1    mold: fatal: d.lst: expected ';', but got EOF
+  extern                     rc=1    mold: fatal: d.lst: expected '"C++"', but got EOF
+  externC                    rc=1    mold: fatal: d.lst: expected '{', but got EOF
+
+
+  --- consolidated re-runnable version of the same sweep (62 cases, all three entry
+  --- points), verbatim output against the pristine build:
+  $ bash repro/sweep_token_indexing.sh build-plain/mold ; echo "EXIT=$?"
+  === linker-script entry point (parse_linker_script) ===
+    empty                      rc=1    mold: fatal: s.ld: unknown file type
+    only-ws                    rc=0    mold: warning: entry symbol is not defined: _start
+    only-comment               rc=0    mold: warning: entry symbol is not defined: _start
+    GROUP-open                 rc=1    mold: fatal: s.ld: expected ')', but got EOF
+    GROUP-a                    rc=1    mold: fatal: s.ld:1: GROUP(a
+    GROUP-bare                 rc=1    mold: fatal: s.ld: expected '(', but got EOF
+    GROUP-rparen               rc=1    mold: fatal: s.ld:1: GROUP)  
+    INPUT-bare                 rc=1    mold: fatal: s.ld: expected '(', but got EOF
+    INPUT-open                 rc=1    mold: fatal: s.ld: expected ')', but got EOF
+    OUTPUT_FORMAT-bare         rc=1    mold: fatal: s.ld: expected '(', but got EOF
+    OUTPUT_FORMAT-open         rc=1    mold: fatal: s.ld: expected ')', but got EOF
+    OUTPUT_FORMAT-arg          rc=1    mold: fatal: s.ld: expected ')', but got EOF
+    AS_NEEDED-open             rc=1    mold: fatal: s.ld: expected ')', but got EOF
+    AS_NEEDED-bare             rc=1    mold: fatal: s.ld: expected '(', but got EOF
+    bare-lparen                rc=1    mold: fatal: s.ld:1: (       
+    bare-rparen                rc=1    mold: fatal: s.ld:1: )       
+    semi                       rc=0    mold: warning: entry symbol is not defined: _start
+    brace-only                 rc=1    mold: fatal: s.ld:1: {       
+    close-brace                rc=1    mold: fatal: s.ld:1: }       
+    star                       rc=1    mold: fatal: s.ld:1: *       
+    eq-only                    rc=1    mold: fatal: s.ld:1: =       
+    colon                      rc=1    mold: fatal: s.ld:1: :       
+    quoted-only                rc=1    mold: fatal: s.ld:1: "x"     
+    defsym-trunc               rc=1    mold: fatal: s.ld:1: a = b
+    defsym-trunc2              rc=1    mold: fatal: s.ld:1: a =     
+    defsym-full                rc=1    mold: error: --defsym: undefined symbol: b
+    defsym-quoted              rc=1    mold: fatal: s.ld:1: a = "b" 
+    VERSION-bare               rc=1    mold: fatal: s.ld: expected '{', but got EOF
+    VERSION-brace              rc=1    mold: fatal: s.ld: expected '}', but got EOF
+    VERSION-brace2             rc=1    mold: fatal: s.ld: expected '}', but got EOF
+    VERSION-brace3             rc=1    mold: fatal: s.ld: expected '}', but got EOF
+    VERSION-brace4             rc=1    mold: fatal: s.ld: expected ';', but got EOF
+    VERSION-brace5             rc=1    mold: fatal: s.ld: expected '}', but got EOF
+    VERSION-brace6             rc=1    mold: fatal: s.ld: expected ';', but got EOF
+    VERSION-extern             rc=1    mold: fatal: s.ld: expected '"C++"', but got EOF
+    VERSION-externC            rc=1    mold: fatal: s.ld: expected '{', but got EOF
+    VERSION-externC2           rc=1    mold: fatal: s.ld: expected '}', but got EOF
+    VERSION-externC3           rc=1    mold: fatal: s.ld:1: VERSION { v { extern "C" } ; }
+    VERSION-star               rc=0    mold: warning: entry symbol is not defined: _start
+    VERSION-label              rc=1    mold: fatal: s.ld: expected ';', but got EOF
+  === version-script entry point (parse_version_script) ===
+    empty                      rc=0    
+    brace                      rc=1    mold: fatal: v.ver: expected '}', but got EOF
+    v-brace                    rc=1    mold: fatal: v.ver: expected '}', but got EOF
+    global                     rc=1    mold: fatal: v.ver: expected '}', but got EOF
+    sym                        rc=1    mold: fatal: v.ver: expected ';', but got EOF
+    extern                     rc=1    mold: fatal: v.ver: expected '"C++"', but got EOF
+    externC                    rc=1    mold: fatal: v.ver: expected '{', but got EOF
+    externCpp                  rc=1    mold: fatal: v.ver: expected '{', but got EOF
+    star                       rc=1    mold: fatal: v.ver: expected '{', but got EOF
+    rbrace                     rc=1    mold: fatal: v.ver:1: }
+    semi                       rc=1    mold: fatal: v.ver: expected '{', but got EOF
+    closepair                  rc=0    
+    label-only                 rc=1    mold: fatal: v.ver: expected '{', but got EOF
+    label-2tok                 rc=1    mold: fatal: v.ver:1: global :
+  === dynamic-list entry point (parse_dynamic_list) ===
+    empty                      rc=1    mold: fatal: d.lst: expected '{', but got EOF
+    brace                      rc=1    mold: fatal: d.lst: expected '}', but got EOF
+    sym                        rc=1    mold: fatal: d.lst: expected ';', but got EOF
+    semi                       rc=1    mold: fatal: d.lst: expected '}', but got EOF
+    closed                     rc=1    mold: fatal: d.lst: expected ';', but got EOF
+    extern                     rc=1    mold: fatal: d.lst: expected '"C++"', but got EOF
+    externC                    rc=1    mold: fatal: d.lst: expected '{', but got EOF
+    rbrace                     rc=1    mold: fatal: d.lst:1: }
+
+  RESULT: no crashes - every truncated input produced a clean diagnostic
+  EXIT=0
+
+================================================================================
+PART 1 - what was found instead: unbounded parser recursion -> SIGSEGV
+================================================================================
+
+--- BEFORE (pristine c340272e), repro/run.sh, 3 consecutive runs, all identical ---
+
+=== 1. Script<E>::read_group - nested AS_NEEDED( ===
+  GROUP( + 200000x AS_NEEDED(              rc=139  CRASH (signal 11)
+=== 2. Script<E>::get_script_output_type - self-including script ===
+  INPUT(self.ld) naming itself             rc=139  CRASH (signal 11)
+=== 3. same cycle, two mutually-including scripts ===
+  a.ld INPUT(b.ld), b.ld INPUT(a.ld)       rc=139  CRASH (signal 11)
+=== 4. Script<E>::read_version_script_commands - nested extern "C" { ===
+  --version-script, 200000x extern "C" {   rc=139  CRASH (signal 11)
+=== 5. Script<E>::read_dynamic_list_commands - nested extern "C" { ===
+  --dynamic-list, 200000x extern "C" {     rc=139  CRASH (signal 11)
+
+=== valid scripts must keep working (fix must not over-reject) ===
+  GROUP(obj.o)                             rc=0    mold: warning: entry symbol is not defined: _start
+  GROUP(AS_NEEDED(obj.o))                  rc=0    mold: warning: entry symbol is not defined: _start
+  OUTPUT_FORMAT(...) + GROUP(obj.o)        rc=0    mold: warning: entry symbol is not defined: _start
+  normal version script                    rc=0
+  version script with extern "C++"         rc=0
+  normal dynamic list                      rc=0
+  998x closed AS_NEEDED around a real .o   rc=0    mold: warning: entry symbol is not defined: _start
+
+RESULT: at least one input crashed mold (bug present)
+SCRIPT_EXIT=1
+
+The self-including script that produces case 2 is 15 bytes:
+
+  $ cat self.ld
+  INPUT(self.ld)
+
+and it crashed 5/5 in a separate dedicated repeat run:
+
+  run 1: rc=139
+  run 2: rc=139
+  run 3: rc=139
+  run 4: rc=139
+  run 5: rc=139
+
+--- backtraces (gdb, following the forked child) ---
+
+Case 1, nested AS_NEEDED - a solid column of Script<E>::read_group frames
+(2997 of them in the first 3000 frames gdb printed):
+
+  Thread 2.1 "mold" received signal SIGSEGV, Segmentation fault.
+  #27 0x000055e2988a5a50 in mold::Script<mold::X86_64>::read_group
+  #28 0x000055e2988a5a50 in mold::Script<mold::X86_64>::read_group
+  #29 0x000055e2988a5a50 in mold::Script<mold::X86_64>::read_group
+  #30 0x000055e2988a5a50 in mold::Script<mold::X86_64>::read_group
+  #31 0x000055e2988a5a50 in mold::Script<mold::X86_64>::read_group
+  #32 0x000055e2988a5a50 in mold::Script<mold::X86_64>::read_group
+  #33 0x000055e2988a5a50 in mold::Script<mold::X86_64>::read_group
+  #34 0x000055e2988a5a50 in mold::Script<mold::X86_64>::read_group
+  #35 0x000055e2988a5a50 in mold::Script<mold::X86_64>::read_group
+    read_group frame count in first 3000: 2997
+
+Case 4, nested extern "C" { in a version script:
+
+  Program received signal SIGSEGV, Segmentation fault.
+  #20 0x00005580014b4f26 in mold::Script<mold::X86_64>::read_version_script_commands
+  #21 0x00005580014b4f26 in mold::Script<mold::X86_64>::read_version_script_commands
+  #22 0x00005580014b4f26 in mold::Script<mold::X86_64>::read_version_script_commands
+  ...
+    read_version_script_commands frame count: 2992
+
+Case 2, the 15-byte self-including script - note the cycle alternates between
+linker-script.cc and filetype.cc, i.e. it is a *mutual* recursion, not a
+self-recursive function:
+
+  Thread 2.1 "mold" received signal SIGSEGV, Segmentation fault.
+  #0  ... in mi_rotl (x=<error reading variable: Cannot access memory at address
+      0x7ffd79a36fe8>, r=<error reading variable: Cannot access memory at address
+      0x7ffd79a36fe0>) at third-party/mimalloc/include/mimalloc/bits.h:323
+  ...
+  #40 0x000064576d68f97b in mold::get_machine_type<mold::X86_64>
+  #41 0x000064576e1cf541 in mold::Script<mold::X86_64>::get_script_output_type
+  #42 0x000064576d68f97b in mold::get_machine_type<mold::X86_64>
+  #43 0x000064576e1cf541 in mold::Script<mold::X86_64>::get_script_output_type
+  #44 0x000064576d68f97b in mold::get_machine_type<mold::X86_64>
+  #45 0x000064576e1cf541 in mold::Script<mold::X86_64>::get_script_output_type
+  ...
+  #404 0x000064576d68f97b in mold::get_machine_type<mold::X86_64>
+
+(the fault surfaces inside mimalloc because that is simply whatever ran out of
+ stack first; "Cannot access memory at address 0x7ffd79a36fe8", just below the
+ stack pointer, is the stack-exhaustion signature)
+
+--- crash threshold, AS_NEEDED nesting, this Debug build ---
+
+  n=500    rc=1
+  n=1000   rc=1
+  n=2000   rc=1
+  n=4000   rc=1
+  n=8000   rc=1
+  n=12000  rc=1
+  n=16000  rc=139   <- first crashing depth
+
+--- comparison: GNU ld 2.46 (/usr/bin/ld.bfd) on the same inputs ---
+
+  200000x nested AS_NEEDED:
+    /usr/bin/x86_64-linux-gnu-ld.bfd: deep.ld: file format not recognized; treating as linker script
+    /usr/bin/x86_64-linux-gnu-ld.bfd: deep.ld:1: memory exhausted
+    gnu ld rc=1          <- clean error + exit 1, no crash
+
+  self-including script / mutually-including scripts:
+    gnu ld rc=124        <- killed by `timeout 60`; GNU ld does not crash but does
+                            not terminate either, so both linkers mishandle this
+                            shape (differently)
+
+--- AFTER (patch.diff applied, same build dir rebuilt), repro/run.sh ---
+
+=== 1. Script<E>::read_group - nested AS_NEEDED( ===
+  GROUP( + 200000x AS_NEEDED(              rc=1    mold: fatal: deep.ld: linker script is nested too deeply
+=== 2. Script<E>::get_script_output_type - self-including script ===
+  INPUT(self.ld) naming itself             rc=1    mold: fatal: self.ld: linker script is nested too deeply
+=== 3. same cycle, two mutually-including scripts ===
+  a.ld INPUT(b.ld), b.ld INPUT(a.ld)       rc=1    mold: fatal: a.ld: linker script is nested too deeply
+=== 4. Script<E>::read_version_script_commands - nested extern "C" { ===
+  --version-script, 200000x extern "C" {   rc=1    mold: fatal: deep.ver: version script is nested too deeply
+=== 5. Script<E>::read_dynamic_list_commands - nested extern "C" { ===
+  --dynamic-list, 200000x extern "C" {     rc=1    mold: fatal: deep.lst: dynamic list is nested too deeply
+
+=== valid scripts must keep working (fix must not over-reject) ===
+  GROUP(obj.o)                             rc=0    mold: warning: entry symbol is not defined: _start
+  GROUP(AS_NEEDED(obj.o))                  rc=0    mold: warning: entry symbol is not defined: _start
+  OUTPUT_FORMAT(...) + GROUP(obj.o)        rc=0    mold: warning: entry symbol is not defined: _start
+  normal version script                    rc=0
+  version script with extern "C++"         rc=0
+  normal dynamic list                      rc=0
+  998x closed AS_NEEDED around a real .o   rc=0    mold: warning: entry symbol is not defined: _start
+
+RESULT: no crashes; every malformed input was rejected with a clean error (bug fixed)
+SCRIPT_EXIT=0
+
+Extra "same bug class, different input" checks against the patched build
+(CONFIRMATION.md section 7) - all rejected cleanly, none crashed:
+
+  AS_NEEDED x16000                   rc=1    mold: fatal: g16000.ld: linker script is nested too deeply
+  AS_NEEDED x100000                  rc=1    mold: fatal: g100000.ld: linker script is nested too deeply
+  AS_NEEDED x400000                  rc=1    mold: fatal: g400000.ld: linker script is nested too deeply
+  version extern x100000             rc=1    mold: fatal: v100000.ver: version script is nested too deeply
+  version extern x300000             rc=1    mold: fatal: v300000.ver: version script is nested too deeply
+  version extern C++ x60000          rc=1    mold: fatal: deep2.ver: version script is nested too deeply
+  dynlist extern x100000             rc=1    mold: fatal: l100000.lst: dynamic list is nested too deeply
+  self-include via AS_NEEDED         rc=1    mold: fatal: self2.ld: linker script is nested too deeply
+  self-include, no obj (-m x86_64)   rc=1    mold: fatal: self3.ld: linker script is nested too deeply
+  1200-deep INPUT chain              rc=1    mold: fatal: c1000.ld: linker script is nested too deeply
+
+and legal deep nesting just under the cap still links:
+
+  closed AS_NEEDED x2   (-m given) rc=0
+  closed AS_NEEDED x500 (-m given) rc=0
+  closed AS_NEEDED x998 (-m given) rc=0
+
+================================================================================
+PART 2 - project test suite (ctest, build-plain, -j4)
+================================================================================
+
+BEFORE (pristine c340272e):
+  100% tests passed, 0 tests failed out of 476
+  Total Test time (real) =  26.16 sec
+
+AFTER (patch.diff applied):
+  100% tests passed, 0 tests failed out of 476

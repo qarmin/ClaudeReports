@@ -1,0 +1,51 @@
+# Self-contained reproduction for candidate 020.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# `bench/` is a standalone crate (`png = { path = "../clone", features = ["benchmarks"] }`)
+# because the project has no existing bench that reaches the non-paletted transform functions
+# (`expand_gray_u8*`, `expand_trns_line*`, `expand_trns_and_strip_line16`) at a controlled row
+# width - see RESULT.md for why that matters here. `benches/expand_paletted.rs` only covers the
+# indexed-color path.
+
+repo_url := "https://github.com/image-rs/image-png.git"
+base_commit := "05ccdb9c8ae7fc50f4787ba2888a1c515adad944"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd bench && cargo build --release
+    cp bench/target/release/bench_020 ./bin_baseline
+
+build-patched:
+    cd bench && cargo build --release
+    cp bench/target/release/bench_020 ./bin_patched
+
+# Note: `just` runs each recipe line as its own separate shell invocation, so `ulimit -c 0` is
+# prefixed onto each line that actually executes a binary rather than set once on its own line.
+#
+# `all` mode sweeps 6 configurations (bit-depth expansion, 16-bit stripping, tRNS application,
+# plus one unchanged control) across 7 row widths; iters=5000 with an internal batch of 200 calls
+# per sample (needed because a single call is a few ns at width=1, close to the timer's own
+# resolution - see RESULT.md).
+bench:
+    @echo "=== baseline (before patch): single-core ==="
+    ulimit -c 0 && taskset -c 3 ./bin_baseline all 5000 1 4 16 64 256 1024 4096
+    @echo "=== patched (after patch): single-core ==="
+    ulimit -c 0 && taskset -c 3 ./bin_patched all 5000 1 4 16 64 256 1024 4096
+    @echo "=== baseline: unpinned (multi-core-realistic) ==="
+    ulimit -c 0 && ./bin_baseline all 5000 1 4 16 64 256 1024 4096
+    @echo "=== patched: unpinned (multi-core-realistic) ==="
+    ulimit -c 0 && ./bin_patched all 5000 1 4 16 64 256 1024 4096
+
+clean:
+    rm -rf clone bin_baseline bin_patched bench/target

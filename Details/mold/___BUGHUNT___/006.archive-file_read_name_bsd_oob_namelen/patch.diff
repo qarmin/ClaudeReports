@@ -1,0 +1,40 @@
+diff --git a/src/archive-file.cc b/src/archive-file.cc
+index 916a0076..66d34aa4 100644
+--- a/src/archive-file.cc
++++ b/src/archive-file.cc
+@@ -49,10 +49,15 @@ struct ArHdr {
+     return starts_with("/ ") || starts_with("/SYM64/ ");
+   }
+ 
+-  std::string read_name(std::string_view strtab, u8 *&ptr) const {
++  template <typename E>
++  std::string read_name(Context<E> &ctx, std::string_view mf_name, u8 *mapping_end,
++                         std::string_view strtab, u8 *&ptr) const {
+     // BSD-style long filename
+     if (starts_with("#1/")) {
+-      int namelen = atoi(ar_name + 3);
++      i64 namelen = atoi(ar_name + 3);
++      if (namelen < 0 || (u8 *)ptr + namelen > mapping_end)
++        Fatal(ctx) << mf_name << ": archive member filename length out of range";
++
+       std::string name{(char *)ptr, (size_t)namelen};
+       ptr += namelen;
+ 
+@@ -108,7 +113,7 @@ read_thin_archive_members(Context<E> &ctx, MappedFile *mf) {
+     if (!hdr.starts_with("#1/") && !hdr.starts_with("/"))
+       Fatal(ctx) << mf->name << ": filename is not stored as a long filename";
+ 
+-    std::string name = hdr.read_name(strtab, body);
++    std::string name = hdr.read_name(ctx, mf->name, begin + mf->size, strtab, body);
+ 
+     // Skip if symbol table
+     if (name == "__.SYMDEF" || name == "__.SYMDEF SORTED")
+@@ -151,7 +156,7 @@ read_fat_archive_members(Context<E> &ctx, MappedFile *mf) {
+       continue;
+ 
+     // Read the name field
+-    std::string name = hdr.read_name(strtab, body);
++    std::string name = hdr.read_name(ctx, mf->name, begin + mf->size, strtab, body);
+ 
+     // Skip if symbol table
+     if (name == "__.SYMDEF" || name == "__.SYMDEF SORTED")

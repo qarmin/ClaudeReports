@@ -1,0 +1,46 @@
+# Self-contained reproduction for candidate 032 - output_file_ignored_write_failures.
+#
+# Everything this needs is either already in this folder or fetched by `just clone` into
+# ./clone (gitignored) - nothing here reaches outside the folder it lives in, so the whole
+# folder can be copied anywhere (or attached to an issue) and `just test` still works.
+#
+# Needs: git, cmake, a C++20 compiler, python3, and (optionally) GNU ld for the differential.
+# The two full mold builds dominate the runtime (~7 min each at -j4 on the host this was
+# found on).
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+jobs := "4"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone build-pristine reproduce-before apply build-patched reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-pristine:
+    cmake -S clone -B clone/build -DCMAKE_BUILD_TYPE=Debug
+    cmake --build clone/build -j{{jobs}}
+
+# Should print "VERDICT: BUG PRESENT" - mold exits 0 with truncated/absent output.
+reproduce-before:
+    MOLD="{{justfile_directory()}}/clone/build/mold" ./repro/run.sh
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cmake --build clone/build -j{{jobs}}
+
+# Should print "VERDICT: BUG ABSENT" - every write failure now reported, exit status non-zero.
+reproduce-after:
+    MOLD="{{justfile_directory()}}/clone/build/mold" ./repro/run.sh
+
+# Optional: the project's own test suite, before/after the patch (476 tests, ~30 s at -j4).
+tests:
+    ctest --test-dir clone/build -j{{jobs}}
+
+clean:
+    rm -rf clone

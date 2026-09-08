@@ -1,0 +1,89 @@
+diff --git a/src/gdb-index.cc b/src/gdb-index.cc
+index 251d125f..d1f7d6be 100644
+--- a/src/gdb-index.cc
++++ b/src/gdb-index.cc
+@@ -440,25 +440,46 @@ read_debug_range(Word<E> *range, u64 base) {
+ // Read a range list from .debug_rnglists starting at the given offset.
+ template <typename E>
+ static void
+-read_rnglist_range(std::vector<std::pair<u64, u64>> &vec, u8 *p,
+-                   Word<E> *addrx, u64 base) {
++read_rnglist_range(Context<E> &ctx, std::vector<std::pair<u64, u64>> &vec,
++                   u8 *p, u8 *end, Word<E> *addrx, u64 base) {
++  // addrx points somewhere into ctx.debug_addr (offset by this compunit's
++  // DW_AT_addr_base); an indexed opcode with no DW_AT_addr_base leaves
++  // addrx null, and the ULEB-decoded index itself is otherwise unbounded.
++  u64 addrx_max = 0;
++  if (addrx)
++    addrx_max = (&ctx.debug_addr[0] + ctx.debug_addr.size() - (u8 *)addrx) /
++                sizeof(Word<E>);
++
++  auto read_addrx = [&](u64 idx) -> u64 {
++    if (!addrx || idx >= addrx_max)
++      Fatal(ctx) << "--gdb-index: DW_RLE_* opcode references an "
++                    "out-of-range or missing .debug_addr entry";
++    return addrx[idx];
++  };
++
+   for (;;) {
+-    switch (*p++) {
++    if (p >= end)
++      Fatal(ctx) << "--gdb-index: .debug_rnglists range list runs past "
++                    "the end of the section";
++
++    u8 opcode = *p++;
++    switch (opcode) {
+     case DW_RLE_end_of_list:
+       return;
+     case DW_RLE_base_addressx:
+-      base = addrx[read_uleb(&p)];
++      base = read_addrx(read_uleb(&p));
+       break;
+     case DW_RLE_startx_endx: {
+       u64 val1 = read_uleb(&p);
+       u64 val2 = read_uleb(&p);
+-      vec.emplace_back(addrx[val1], addrx[val2]);
++      vec.emplace_back(read_addrx(val1), read_addrx(val2));
+       break;
+     }
+     case DW_RLE_startx_length: {
+       u64 val1 = read_uleb(&p);
+       u64 val2 = read_uleb(&p);
+-      vec.emplace_back(addrx[val1], addrx[val1] + val2);
++      u64 addr = read_addrx(val1);
++      vec.emplace_back(addr, addr + val2);
+       break;
+     }
+     case DW_RLE_offset_pair: {
+@@ -489,6 +510,9 @@ read_rnglist_range(std::vector<std::pair<u64, u64>> &vec, u8 *p,
+       vec.emplace_back(val1, val1 + val2);
+       break;
+     }
++    default:
++      Fatal(ctx) << "--gdb-index: unknown DW_RLE_* opcode in "
++                    ".debug_rnglists: 0x" << std::hex << (u32)opcode;
+     }
+   }
+ }
+@@ -564,16 +588,19 @@ read_address_ranges(Context<E> &ctx, const Compunit &cu) {
+ 
+     std::vector<std::pair<u64, u64>> vec;
+     u8 *buf = &ctx.debug_rnglists[0];
++    u8 *buf_end = buf + ctx.debug_rnglists.size();
+ 
+     if (ranges.form == DW_FORM_sec_offset) {
+-      read_rnglist_range<E>(vec, buf + ranges.value, addrx, low_pc.value);
++      read_rnglist_range<E>(ctx, vec, buf + ranges.value, buf_end, addrx,
++                            low_pc.value);
+     } else {
+       if (rnglists_base == -1)
+         Fatal(ctx) << "--gdb-index: missing DW_AT_rnglists_base";
+ 
+       u8 *base = buf + rnglists_base;
+       Offset *offsets = (Offset *)base;
+-      read_rnglist_range<E>(vec, base + offsets[ranges.value], addrx, low_pc.value);
++      read_rnglist_range<E>(ctx, vec, base + offsets[ranges.value], buf_end,
++                            addrx, low_pc.value);
+     }
+     return vec;
+   }

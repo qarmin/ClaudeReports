@@ -1,0 +1,69 @@
+diff --git a/src/decoder/stream.rs b/src/decoder/stream.rs
+index b8a5488..3fba0ac 100644
+--- a/src/decoder/stream.rs
++++ b/src/decoder/stream.rs
+@@ -1128,6 +1128,39 @@ impl StreamingDecoder {
+         Ok(State::ReadChunkData(type_str))
+     }
+ 
++    /// Chunk types that `parse_chunk`'s dispatch below routes to their own dedicated parser
++    /// (which reads `self.current_chunk.raw_bytes` itself, after `parse_captured` has already
++    /// run for a captured chunk). Anything else falls through to the `_ if is_captured => Ok(())`
++    /// arm, meaning `parse_captured` is the only reader of `raw_bytes` for that chunk.
++    fn has_specific_parser(type_str: ChunkType) -> bool {
++        matches!(
++            type_str,
++            IHDR
++                | chunk::PLTE
++                | chunk::IEND
++                | chunk::IDAT
++                | chunk::fdAT
++                | chunk::sBIT
++                | chunk::tRNS
++                | chunk::pHYs
++                | chunk::oFFs
++                | chunk::gAMA
++                | chunk::acTL
++                | chunk::fcTL
++                | chunk::cHRM
++                | chunk::sRGB
++                | chunk::cICP
++                | chunk::mDCV
++                | chunk::cLLI
++                | chunk::bKGD
++                | chunk::eXIf
++                | chunk::iCCP
++                | chunk::tEXt
++                | chunk::zTXt
++                | chunk::iTXt
++        )
++    }
++
+     fn parse_chunk(&mut self, type_str: ChunkType) -> Result<Decoded, DecodingError> {
+         let is_captured = self.decode_options.is_captured(type_str);
+         if is_captured {
+@@ -1814,13 +1847,23 @@ impl StreamingDecoder {
+     fn parse_captured(&mut self, type_str: ChunkType) -> Result<(), DecodingError> {
+         self.limits
+             .reserve_bytes(self.current_chunk.raw_bytes.len())?;
++        // If `type_str` has no specific parser below it in `parse_chunk`'s dispatch, nothing
++        // reads `raw_bytes` after this returns, so the bytes can be moved out instead of cloned.
++        let data = if Self::has_specific_parser(type_str) {
++            self.current_chunk.raw_bytes.clone()
++        } else {
++            std::mem::replace(
++                &mut self.current_chunk.raw_bytes,
++                Vec::with_capacity(CHUNK_BUFFER_SIZE),
++            )
++        };
+         self.info
+             .as_mut()
+             .unwrap()
+             .captured_chunks
+             .push(CapturedChunk {
+                 name: type_str,
+-                data: self.current_chunk.raw_bytes.clone(),
++                data,
+             });
+         Ok(())
+     }

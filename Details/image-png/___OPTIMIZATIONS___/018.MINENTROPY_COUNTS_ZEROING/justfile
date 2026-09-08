@@ -1,0 +1,52 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in,
+# EXCEPT for the shared `___OPTIMIZATIONS___/harness/encoder_bench` copy referenced below (this
+# project's own benchmark harness is untracked in the main repo, since the project ships no
+# encoder benchmark of its own - see SKILL.md's "Bench harnesses: grow a few, don't multiply" and
+# this workspace's own README.md). This candidate is self-contained *given the whole
+# ___OPTIMIZATIONS___ folder kept together*, not as a fully isolated single subfolder.
+#
+# repo_url/base_commit read via `git remote get-url origin` / `git rev-parse HEAD` in the main
+# project at the moment patch.diff was captured.
+
+repo_url := "git@github.com:image-rs/image-png.git"
+base_commit := "05ccdb9c8ae7fc50f4787ba2888a1c515adad944"
+harness_dir := "../harness/encoder_bench"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/encoder_bench
+    sed -i 's|path = "../../.."|path = ".."|' clone/encoder_bench/Cargo.toml
+    rm -rf clone/encoder_bench/target
+
+build-baseline:
+    cd clone/encoder_bench && cargo build --release
+    cp clone/encoder_bench/target/release/encoder_bench ./bin_baseline
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    cd clone/encoder_bench && cargo build --release
+    cp clone/encoder_bench/target/release/encoder_bench ./bin_patched
+
+# Note: `just` runs each recipe line as its own separate shell invocation, so `ulimit -c 0` is
+# prefixed onto each line that actually executes the binary rather than set once on its own line.
+bench:
+    @echo "=== baseline (before patch): synthetic 1024x1024 RGBA, MinEntropy filter only ==="
+    cd clone/encoder_bench && ulimit -c 0 && ../../bin_baseline --mode filter --size 1024 --iters 30 --only MinEntropy
+    @echo "=== baseline (before patch): tests/benches/paletted-zune.png (indexed, MinEntropy's best size win) ==="
+    cd clone/encoder_bench && ulimit -c 0 && ../../bin_baseline --mode filter --input ../tests/benches/paletted-zune.png --iters 30 --only MinEntropy
+    @echo "=== patched (after patch): synthetic 1024x1024 RGBA, MinEntropy filter only ==="
+    cd clone/encoder_bench && ulimit -c 0 && ../../bin_patched --mode filter --size 1024 --iters 30 --only MinEntropy
+    @echo "=== patched (after patch): tests/benches/paletted-zune.png ==="
+    cd clone/encoder_bench && ulimit -c 0 && ../../bin_patched --mode filter --input ../tests/benches/paletted-zune.png --iters 30 --only MinEntropy
+
+clean:
+    rm -rf clone bin_baseline bin_patched

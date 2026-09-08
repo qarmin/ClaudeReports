@@ -1,0 +1,39 @@
+# Self-contained check for candidate 030.sparc64_large_plt_size_mismatch.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing here reaches outside the folder it lives in.
+#
+# This candidate is **Not reproducible**: the hypothesised out-of-bounds write does not exist,
+# so there is no patch.diff and no before/after pair. `just test` builds pristine mold and runs
+# the check that would have caught the bug; it exits 0 because the layout is correct.
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+
+# Full cycle: pure arithmetic check, then a real end-to-end link with a freshly built mold.
+test: arithmetic clone build reproduce
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build:
+    cmake -S clone -B clone/build-plain -DCMAKE_BUILD_TYPE=Debug
+    cmake --build clone/build-plain -j4
+
+# Standalone model of mold's own to_plt_offset() / sparc_plt_ptr_offset() /
+# PltSection::update_shdr() sizing. Prints the byte the layout writes last vs the size the
+# section is given, for many PLT-entry counts. Every delta is 0.
+arithmetic:
+    python3 repro/plt_math.py
+
+# Real end-to-end links: synthesise SPARC64 ET_REL objects with N undefined function symbols
+# each referenced by R_SPARC_WPLT30, link them with `mold -shared`, then verify against the
+# produced .so that every PLT stub, every large-entry data pointer, every `ldx` displacement
+# and every R_SPARC_JMP_SLOT relocation lands inside .plt's sh_size.
+reproduce:
+    ulimit -c 0 && bash repro/run.sh "$PWD/clone/build-plain/mold"
+
+clean:
+    rm -rf clone

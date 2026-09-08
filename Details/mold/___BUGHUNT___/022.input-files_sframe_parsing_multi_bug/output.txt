@@ -1,0 +1,42 @@
+== Unpatched build (5x repeat, all identical) ==
+$ ulimit -c 0 && ./build-plain/mold -o /tmp/out.exe evil.o
+Segmentation fault
+exit: 139
+
+Repeated 5/5 runs: identical SIGSEGV, exit 139 every time.
+
+Confounded-fix check: reverted the patch and rebuilt - crash reproduces identically:
+Segmentation fault
+exit: 139
+
+== gdb backtrace (unpatched, real fault location) ==
+Thread 2.1 "mold" received signal SIGSEGV, Segmentation fault.
+mold::Integer<unsigned short, true, 2>::operator unsigned short (this=0x71d9f7c1e05c)
+    at lib/integers.h:68
+68        memcpy(&v, buf, size);
+#0  mold::Integer<unsigned short, true, 2>::operator unsigned short (...) at lib/integers.h:68
+#1  mold::sframe_fre_block_size<mold::X86_64> (data=..., offset=4294967308)
+    at src/input-files.cc:749
+#2  ObjectFile<X86_64>::parse_sframe (this=..., ctx=...) at src/input-files.cc:827
+#3  mold::parse_sframe_sections<X86_64>(...)::{lambda(...)}::operator()(...) at src/passes.cc:512
+#4  ... (TBB parallel_for_each machinery) ...
+#5  mold::parse_sframe_sections<X86_64>(mold::Context<X86_64>&) at src/passes.cc:511
+#6  mold::mold_main<X86_64> (argc=4, argv=...) at src/main.cc:432
+#7  main (argc=4, argv=...) at src/entry.cc:42
+
+offset=4294967308 (~4GB) confirms the read walked far past the mmap'd input file exactly as
+predicted: freoff=0xFFFFFFF0 in the crafted .sframe header, added to hdr_len=28, produces a
+~4.29GB fre_off that sframe_fre_block_size() dereferences with no bounds check.
+
+== Patched build (3x repeat, all identical) ==
+$ ulimit -c 0 && ./build-plain/mold -o /tmp/out.exe evil.o
+mold: fatal: evil.o:(.sframe): corrupted .sframe section
+exit: 1
+
+Repeated 3/3 runs: identical clean Fatal() diagnostic, exit 1 every time. Also re-verified once
+more after the confounded-fix revert/re-apply cycle: same clean exit 1.
+
+== Test suite ==
+ctest --test-dir build-plain -j4
+Before patch: 100% tests passed, 0 tests failed out of 476
+After patch:  100% tests passed, 0 tests failed out of 476

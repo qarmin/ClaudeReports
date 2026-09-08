@@ -1,0 +1,89 @@
+diff --git a/src/linker-script.cc b/src/linker-script.cc
+index f85852fe..8c8247fd 100644
+--- a/src/linker-script.cc
++++ b/src/linker-script.cc
+@@ -9,6 +9,23 @@
+ 
+ namespace mold {
+ 
++// Our linker script parser is recursive descent, and both the script
++// language and the file inclusion it performs allow unbounded nesting,
++// so we cap the nesting depth to keep a malformed script from
++// exhausting the stack. Real scripts nest only a few levels deep.
++static constexpr i64 MAX_SCRIPT_DEPTH = 1000;
++
++namespace {
++class ScopedDepth {
++public:
++  ScopedDepth(i64 &depth) : depth(depth) { depth++; }
++  ~ScopedDepth() { depth--; }
++
++private:
++  i64 &depth;
++};
++}
++
+ static std::string_view get_line(std::string_view input, const char *pos) {
+   assert(input.data() <= pos);
+   assert(pos < input.data() + input.size());
+@@ -188,6 +205,10 @@ MappedFile *Script<E>::resolve_path(std::string_view tok, bool check_target) {
+ template <typename E>
+ std::span<std::string_view>
+ Script<E>::read_group(std::span<std::string_view> tok) {
++  ScopedDepth d(rctx.script_depth);
++  if (rctx.script_depth > MAX_SCRIPT_DEPTH)
++    Fatal(ctx) << mf->name << ": linker script is nested too deeply";
++
+   tok = skip(tok, "(");
+ 
+   while (!tok.empty() && tok[0] != ")") {
+@@ -239,6 +260,10 @@ void Script<E>::parse_linker_script() {
+ 
+ template <typename E>
+ std::string_view Script<E>::get_script_output_type() {
++  ScopedDepth d(rctx.script_depth);
++  if (rctx.script_depth > MAX_SCRIPT_DEPTH)
++    Fatal(ctx) << mf->name << ": linker script is nested too deeply";
++
+   std::call_once(once, [&] { tokenize(); });
+   std::span<std::string_view> tok = tokens;
+ 
+@@ -277,6 +302,10 @@ std::span<std::string_view>
+ Script<E>::read_version_script_commands(std::span<std::string_view> tok,
+                                         std::string_view ver_str, u16 ver_idx,
+                                         bool is_global, bool is_cpp) {
++  ScopedDepth d(rctx.script_depth);
++  if (rctx.script_depth > MAX_SCRIPT_DEPTH)
++    Fatal(ctx) << mf->name << ": version script is nested too deeply";
++
+   while (!tok.empty() && tok[0] != "}") {
+     if (read_label(tok, "global")) {
+       is_global = true;
+@@ -368,6 +397,10 @@ std::span<std::string_view>
+ Script<E>::read_dynamic_list_commands(std::span<std::string_view> tok,
+                                       std::vector<DynamicPattern> &result,
+                                       bool is_cpp) {
++  ScopedDepth d(rctx.script_depth);
++  if (rctx.script_depth > MAX_SCRIPT_DEPTH)
++    Fatal(ctx) << mf->name << ": dynamic list is nested too deeply";
++
+   while (!tok.empty() && tok[0] != "}") {
+     if (tok[0] == "extern") {
+       tok = tok.subspan(1);
+diff --git a/src/mold.h b/src/mold.h
+index a8d3ed1f..c7ef30a2 100644
+--- a/src/mold.h
++++ b/src/mold.h
+@@ -2130,6 +2130,12 @@ struct ReaderContext {
+   // The number of files found so far in the current file.
+   u32 num_children = 0;
+ 
++  // How deeply the linker script parser is currently nested. The parser
++  // is recursive descent, and a script can nest directives or include
++  // other scripts without bound, so we cap this to keep a malformed
++  // script from exhausting the stack.
++  i64 script_depth = 0;
++
+   // Returns a context for the next file found inside the current file.
+   ReaderContext next_child() {
+     ReaderContext child = *this;

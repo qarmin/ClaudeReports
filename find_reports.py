@@ -14,6 +14,8 @@ Per-project rules:
     - identical content already here -> skip (never overwrite)
     - older version(s) here          -> delete them, copy the new one in
     - newer version already here     -> skip (don't downgrade)
+    - a file listed in a project's `keep` in projects.toml is never deleted:
+      some older reports are linked to from outside this repo
 
 Usage:
     find_reports.py <source-folder>
@@ -23,6 +25,7 @@ import hashlib
 import re
 import shutil
 import sys
+import tomllib
 from datetime import datetime
 from pathlib import Path
 
@@ -46,6 +49,20 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def pinned() -> set[str]:
+    """Report file names that must survive, from projects.toml `keep` lists."""
+    path = REPO_DIR / "projects.toml"
+    if not path.exists():
+        return set()
+    try:
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return set()
+    return {name for entry in data.values() if isinstance(entry, dict)
+            for name in entry.get("keep", [])}
+
+
 def existing_versions(project: str) -> list[tuple[Path, str]]:
     versions = []
     for path in REPO_DIR.glob("*.html"):
@@ -56,6 +73,7 @@ def existing_versions(project: str) -> list[tuple[Path, str]]:
 
 
 def collect(source_root: Path) -> None:
+    keep = pinned()
     reports = sorted(source_root.rglob(SOURCE_NAME))
     if not reports:
         print(f"No {SOURCE_NAME} files found under {source_root}")
@@ -80,6 +98,9 @@ def collect(source_root: Path) -> None:
 
         for p, d in versions:
             if d < date:
+                if p.name in keep:
+                    print(f"kept (pinned): {p.name}")
+                    continue
                 p.unlink()
                 print(f"removed older: {p.name}")
 

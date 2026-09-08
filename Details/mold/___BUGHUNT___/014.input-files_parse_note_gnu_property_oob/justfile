@@ -1,0 +1,51 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# NOTE: -j4, not -j$(nproc) - this session ran alongside two other candidates building
+# concurrently on the same host; raise if you know your machine has headroom.
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+
+test: clone build-before reproduce-before reproduce-before-variant2 apply build-after reproduce-after reproduce-after-variant2
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-before:
+    mkdir -p clone/build
+    cd clone/build && cmake -DCMAKE_BUILD_TYPE=Debug .. && cmake --build . -j4 --target mold
+
+# Should crash (uncaught std::out_of_range -> SIGABRT) - huge, fabricated n_namesz.
+reproduce-before:
+    ./repro/run.sh clone/build/mold
+
+# Second input in the same bug class (huge, fabricated n_descsz instead of n_namesz) - should
+# also crash on unpatched code (exit >= 128, an uncaught std::out_of_range -> SIGABRT), per
+# CONFIRMATION.md section 7 (a fix must be checked against more than the one input that first
+# triggered it).
+reproduce-before-variant2:
+    python3 repro/gen_evil_elf_variant2_descsz.py /tmp/mold-candidate014-variant2.o
+    bash -c 'set +e; clone/build/mold -m elf_x86_64 --thread-count 5 -shared -o /tmp/mold-candidate014-variant2.so /tmp/mold-candidate014-variant2.o; s=$?; echo "exit: $s"; [ "$s" -ge 128 ]'
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-after:
+    cd clone/build && cmake --build . -j4 --target mold
+
+# Should no longer crash - mold now exits 1 with "fatal: ...: corrupted .note.gnu.property".
+reproduce-after:
+    ./repro/run.sh clone/build/mold
+
+# Should no longer crash - mold now exits 1 with "fatal: ...: corrupted .note.gnu.property".
+reproduce-after-variant2:
+    python3 repro/gen_evil_elf_variant2_descsz.py /tmp/mold-candidate014-variant2.o
+    bash -c 'set +e; clone/build/mold -m elf_x86_64 --thread-count 5 -shared -o /tmp/mold-candidate014-variant2.so /tmp/mold-candidate014-variant2.o; s=$?; echo "exit: $s"; [ "$s" -eq 1 ]'
+
+clean:
+    rm -rf clone

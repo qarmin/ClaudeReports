@@ -1,0 +1,43 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+
+# Full cycle: clone pristine, build, prove the bug exists, apply the fix, rebuild, prove it's gone.
+test: clone build-before reproduce-before apply build-after reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-before:
+    cd clone && cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+    cd clone && cmake --build build -j4
+
+# Should segfault (SIGSEGV / exit 139) - strlen() walks off the mmap'd input file because an
+# unchecked ELF symbol's st_name (string-table byte offset) is huge and out-of-range.
+reproduce-before:
+    ulimit -c 0 && python3 repro/gen_evil_elf.py /tmp/mold_candidate012_evil.o
+    ulimit -c 0 && ./clone/build/mold -o /tmp/mold_candidate012_out.exe /tmp/mold_candidate012_evil.o; test $? -eq 139
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-after:
+    cd clone && cmake --build build -j4
+
+# Should now exit 1 with a clean "fatal: ... symbol name offset is out of range" diagnostic,
+# not crash.
+reproduce-after:
+    ulimit -c 0 && python3 repro/gen_evil_elf.py /tmp/mold_candidate012_evil2.o
+    ulimit -c 0 && ./clone/build/mold -o /tmp/mold_candidate012_out2.exe /tmp/mold_candidate012_evil2.o; test $? -eq 1
+
+clean:
+    rm -rf clone

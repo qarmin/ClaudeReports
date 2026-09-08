@@ -1,0 +1,35 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+
+test: clone build-before reproduce-before apply build-after reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build-before:
+    mkdir -p clone/build
+    cd clone/build && cmake -DCMAKE_BUILD_TYPE=Debug -DMOLD_USE_ASAN=ON .. && make -j$(nproc) mold
+
+# Should crash (SIGSEGV in InputFile<E>::InputFile, src/input-files.cc:95).
+reproduce-before:
+    ./repro/run.sh clone/build/mold
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-after:
+    cd clone/build && make -j$(nproc) mold
+
+# Should no longer crash - mold now exits cleanly with "e_shoff is out of range".
+reproduce-after:
+    ./repro/run.sh clone/build/mold
+
+clean:
+    rm -rf clone

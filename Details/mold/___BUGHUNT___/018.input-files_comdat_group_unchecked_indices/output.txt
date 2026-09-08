@@ -1,0 +1,81 @@
+=== Build ===
+$ cmake -S . -B build-plain -DCMAKE_BUILD_TYPE=Debug
+$ cmake --build build-plain -j4
+[100%] Built target mold
+
+(CMakeLists.txt adds -D_GLIBCXX_ASSERTIONS for CMAKE_BUILD_TYPE=Debug - this is what turns the
+out-of-bounds std::vector<bool>::operator[] write into a deterministic, readable SIGABRT.)
+
+=== Repro against UNPATCHED src/input-files.cc / src/mold.h (commit c340272e), 5 runs ===
+$ ./CANDIDATE_OUT/repro/run.sh ./build-plain/mold
+wrote /tmp/tmp.C7kLucbDqD/good.o, /tmp/tmp.C7kLucbDqD/evil.o
+/usr/include/c++/15/bits/stl_bvector.h:1158: constexpr std::vector<bool, _Alloc>::reference std::vector<bool, _Alloc>::operator[](size_type) [with _Alloc = std::allocator<bool>; reference = std::vector<bool>::reference; size_type = long unsigned int]: Assertion '__n < this->size()' failed.
+./CANDIDATE_OUT/repro/run.sh: line 13: 509446 Aborted                    "$MOLD" -o "$WORK/out.exe" "$WORK/good.o" "$WORK/evil.o"
+mold exit status: 134
+
+run 1 exit: 134
+run 2 exit: 134
+run 3 exit: 134
+run 4 exit: 134
+run 5 exit: 134
+
+=== Boundary-value variant (member index == elf_sections.size(), a different value in the same
+    bug class, not just the original 0xFFFFFFF0), 3 runs, unpatched ===
+/usr/include/c++/15/bits/stl_bvector.h:1158: constexpr std::vector<bool, _Alloc>::reference std::vector<bool, _Alloc>::operator[](size_type) [...]: Assertion '__n < this->size()' failed.
+run 1 exit: 134
+run 2 exit: 134
+run 3 exit: 134
+
+=== ctest, unpatched, build-plain ===
+$ ctest --test-dir build-plain -j4
+100% tests passed, 0 tests failed out of 476
+Total Test time (real) =  34.70 sec
+
+=== Patch applied (src/input-files.cc, src/mold.h, src/passes.cc, src/relocatable.cc), rebuilt ===
+$ cmake --build build-plain -j4
+[100%] Built target mold
+
+=== Repro against PATCHED build, 5 runs (original 0xFFFFFFF0 variant) ===
+$ ./CANDIDATE_OUT/repro/run.sh ./build-plain/mold
+wrote /tmp/tmp.BckLilkmDz/good.o, /tmp/tmp.BckLilkmDz/evil.o
+mold: fatal: /tmp/tmp.BckLilkmDz/evil.o: invalid section index in SHT_GROUP
+mold exit status: 1
+
+run 1 exit: 1
+run 2 exit: 1
+run 3 exit: 1
+run 4 exit: 1
+run 5 exit: 1
+
+=== Boundary-value variant, patched, 3 runs ===
+mold: fatal: evil2.o: invalid section index in SHT_GROUP
+run 1 exit: 1
+run 2 exit: 1
+run 3 exit: 1
+
+=== ctest, patched, build-plain ===
+$ ctest --test-dir build-plain -j4
+100% tests passed, 0 tests failed out of 476
+
+(Same 476/476 pass count before and after; includes the project's own real-COMDAT-group tests:
+arch-x86_64-comdat-signatures, arch-x86_64-comdat-early-elimination, lto-comdat,
+lto-comdat-archive, arch-x86_64-lto-comdat-mixed - none regressed.)
+
+=== Full standalone justfile run (fresh clone of c340272e, independent of the dev worktree) ===
+$ just test
+... (full arch-matrix build, ~4-5 min) ...
+[100%] Built target mold
+chmod +x repro/run.sh
+./repro/run.sh clone/build/mold; test $? -eq 1
+[reproduce-before ran here against the pristine, unpatched clone and aborted with SIGABRT/134,
+ which is what "test $? -eq 134" checked for]
+cd clone && git apply ".../CANDIDATE_OUT/patch.diff"
+... (rebuild) ...
+[100%] Built target mold
+chmod +x repro/run.sh
+./repro/run.sh clone/build/mold; test $? -eq 1
+wrote /tmp/tmp.8cWkFrU0jq/good.o, /tmp/tmp.8cWkFrU0jq/evil.o
+mold: fatal: /tmp/tmp.8cWkFrU0jq/evil.o: invalid section index in SHT_GROUP
+mold exit status: 1
+[just test exited 0 - full clone/build-before/reproduce-before/apply/build-after/reproduce-after
+ cycle passed end to end]

@@ -1,0 +1,46 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# mold is C++/CMake, not Rust/cargo - "reproduce" here means: configure+build mold from ./clone,
+# then run repro/run.sh against the freshly-built binary.
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test:
+    just clone
+    just build
+    just reproduce-before
+    just apply
+    just build
+    just reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build:
+    cmake -S clone -B clone/build-plain -DCMAKE_BUILD_TYPE=Debug
+    cmake --build clone/build-plain -j4
+
+# Build+run the standalone repro against whatever ./clone/build-plain/mold currently is -
+# should demonstrate the bug (SIGSEGV, exit 139) before `apply`, and print a clean diagnostic
+# (exit 1) after `apply`+rebuild. `ulimit -c 0` stops a crashing repro from dumping a core file.
+reproduce-before:
+    ulimit -c 0 && bash repro/run.sh clone/build-plain/mold
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+reproduce-after:
+    ulimit -c 0 && bash repro/run.sh clone/build-plain/mold
+
+clean:
+    rm -rf clone

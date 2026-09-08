@@ -1,0 +1,129 @@
+Candidate 034.output_layout_size_vs_write_sweep - captured output
+mold @ c340272e6376f9a8e5b5cd6f6634f925f6d54e5c, x86_64 host, gcc 15.2.0
+
+
+### 1. repro/run.sh against the pristine Debug build (build-plain, -DCMAKE_BUILD_TYPE=Debug)
+### mold bundles mimalloc, whose own heap-integrity check catches the smashed block
+### when the vector is later reallocated.
+
+mold under test: /home/rafal/Projekty/Obce/mold/.claude/worktrees/agent-a42929268233bf3e4/build-plain/mold
+mold 2.42.0 (c340272e6376f9a8e5b5cd6f6634f925f6d54e5c; compatible with GNU ld)
+
+N=1   allocated=64   written=48   exit=0
+N=2   allocated=96   written=96   exit=0
+N=3   allocated=128  written=144  exit=134
+N=4   allocated=160  written=192  exit=134  mimalloc: assertion failed: at "/home/rafal/Projekty/Obce/mold/.claude/worktrees/agent-a42
+N=8   allocated=288  written=384  exit=134  mimalloc: assertion failed: at "/home/rafal/Projekty/Obce/mold/.claude/worktrees/agent-a42
+N=16  allocated=544  written=768  exit=134  mimalloc: assertion failed: at "/home/rafal/Projekty/Obce/mold/.claude/worktrees/agent-a42
+
+RESULT: mold aborted on at least one input -> bug is PRESENT
+run.sh exit status: 1
+
+(The `allocated` / `written` columns are the closed-form values from the source:
+ allocated = (sizeof(ElfVerneed) + sizeof(ElfVernaux)) * (nsyms + 1) = 32*(N+1)
+ written   = sizeof(ElfVerneed)*G + sizeof(ElfVernaux)*(G_glibc + G + W) = 48*N here.
+ The crash starts at exactly the first N where written > allocated.)
+
+
+### 2. gdb backtrace of the N=8 abort, plain Debug build
+### (the OOB writes themselves are silent; mimalloc trips when contents.resize(384)
+###  at output-chunks.cc:3144 frees the 288-byte block whose tail was overwritten)
+
+mimalloc: assertion failed at third-party/mimalloc/src/free.c:566, mi_page_usable_size_of
+  assertion: "ok"
+
+ #5  _mi_assert_fail (assertion="ok", ..., func="mi_page_usable_size_of")
+ #6  mi_page_usable_size_of (page=..., block=0x20000a51540, is_guarded=false) at free.c:566
+ #9  mi_free_size (p=0x20000a51540, size=288) at free.c:458
+ #10 std::__new_allocator<unsigned char>::deallocate (this=..., __p=0x20000a51540, __n=288)
+ #15 std::vector<unsigned char>::_M_default_append (this=..., __n=96) at vector.tcc:891
+ #16 std::vector<unsigned char>::resize (this=..., __new_size=384) at stl_vector.h:1146
+ #17 mold::VerneedSection<mold::X86_64>::construct (this=..., ctx=...)
+       at src/output-chunks.cc:3144
+ #18 mold::mold_main<mold::X86_64> (argc=15, argv=...) at src/main.cc:624
+ #19 main (argc=15, argv=...) at src/entry.cc:42
+
+
+### 3. Same N=8 input under ASAN+UBSAN (build-asan, -DMOLD_USE_ASAN=ON, g++ 15.2.0)
+### ASAN names the exact write and the exact allocation.
+
+=================================================================
+==2011883==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x765befbe02e0 at pc 0x60f7e7d976e3 bp 0x7ffe09232de0 sp 0x7ffe09232dd0
+WRITE of size 2 at 0x765befbe02e0 thread T0
+    #0 0x60f7e7d976e2 in mold::Integer<unsigned short, true, 2>::Integer(unsigned short) src/../lib/integers.h:57
+    #1 0x60f7e7d87787 in mold::Integer<unsigned short, true, 2>::operator=(unsigned short) src/../lib/integers.h:73
+    #2 0x60f7ee089540 in mold::VerneedSection<mold::X86_64>::construct(mold::Context<mold::X86_64>&)::{lambda(mold::SharedFile<mold::X86_64>&)#1}::operator()(mold::SharedFile<mold::X86_64>&) const src/output-chunks.cc:3123
+    #3 0x60f7ee05c4db in mold::VerneedSection<mold::X86_64>::construct(mold::Context<mold::X86_64>&) src/output-chunks.cc:3135
+    #4 0x60f7ecc21d13 in int mold::mold_main<mold::X86_64>(int, char**) src/main.cc:624
+    #5 0x60f7f764aa08 in main src/entry.cc:42
+    #6 0x793bf07d6600 in __libc_start_call_main ../sysdeps/nptl/libc_start_call_main.h:59
+    #7 0x793bf07d6717 in __libc_start_main_impl ../csu/libc-start.c:360
+    #8 0x60f7e7d665e4 in _start
+
+0x765befbe02e0 is located 0 bytes after 288-byte region [0x765befbe01c0,0x765befbe02e0)
+allocated by thread T0 here:
+    #0 0x793bf15ed73f in operator new(unsigned long) asan_new_delete.cpp:109
+    #5 0x60f7e7da3e4a in std::vector<unsigned char>::_M_default_append(unsigned long) vector.tcc:845
+    #6 0x60f7e7d95833 in std::vector<unsigned char>::resize(unsigned long) stl_vector.h:1146
+    #7 0x60f7ee05bbd4 in mold::VerneedSection<mold::X86_64>::construct(mold::Context<mold::X86_64>&) src/output-chunks.cc:3092
+    #8 0x60f7ecc21d13 in int mold::mold_main<mold::X86_64>(int, char**) src/main.cc:624
+    #9 0x60f7f764aa08 in main src/entry.cc:42
+
+SUMMARY: AddressSanitizer: heap-buffer-overflow src/../lib/integers.h:57 in mold::Integer<unsigned short, true, 2>::Integer(unsigned short)
+Shadow bytes around the buggy address:
+  0x765befbe0200: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x765befbe0280: 00 00 00 00 00 00 00 00 00 00 00 00[fa]fa fa fa
+  0x765befbe0300: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+
+  src/output-chunks.cc:3092 == contents.resize((sizeof(ElfVerneed<E>)+sizeof(ElfVernaux<E>)) * (syms.size()+1))
+  src/output-chunks.cc:3123 == verneed->vn_version = 1;   (inside start_group)
+  src/output-chunks.cc:3135 == start_group(*syms[i]->file->to_dso());
+
+
+### 4. Repeatability and controls, ASAN build, N=8
+
+run1: heap-buffer-overflow, exit=1
+run2: heap-buffer-overflow, exit=1
+run3: heap-buffer-overflow, exit=1
+run4: heap-buffer-overflow, exit=1
+run5: heap-buffer-overflow, exit=1
+ASAN heap-buffer-overflow reported in 5/5 runs (N=8)
+--- control: N=2 (written == allocated) ---
+N=2 exit=0
+--- control: N=8 without -z pack-relative-relocs ---
+no-relr exit=0
+
+
+### 5. Same repro after applying patch.diff (plain Debug build rebuilt)
+
+N=1 exit=0
+N=2 exit=0
+N=3 exit=0
+N=4 exit=0
+N=6 exit=0
+N=8 exit=0
+
+Plus a mixed input in the same class (4 "libc.so.*" DSOs with two GLIBC_2.* versions
+each + 3 ordinary versioned DSOs with two versions each, 14 versioned symbols):
+
+mixed exit=0
+Version needs section '.gnu.version_r' contains 7 entries:
+ Addr: 0x00000000000005ec  Offset: 0x000005ec  Link: 5 (.dynstr)
+  000000: Version: 1  File: libc.so.2  Cnt: 3
+  0x0010:   Name: GLIBC_ABI_DT_RELR  Flags: none  Version: 2
+  0x0020:   Name: GLIBC_2.1  Flags: none  Version: 3
+  0x0030:   Name: GLIBC_2.2  Flags: none  Version: 4
+  0x0040: Version: 1  File: libc.so.3  Cnt: 3
+  ...
+  0x0160: Version: 1  File: libother2.so.1  Cnt: 2
+  0x0170:   Name: OTHER_1.0  Flags: none  Version: 18
+  0x0180:   Name: OTHER_2.0  Flags: none  Version: 19
+
+(readelf parses the produced .gnu.version_r cleanly, so the fix does not change
+ the section's contents - only how much scratch space is reserved for building it.)
+
+
+### 6. Project test suite, plain Debug build, `ctest --test-dir build-plain -j4`
+
+before patch: 100% tests passed, 0 tests failed out of 476
+after  patch: 100% tests passed, 0 tests failed out of 476

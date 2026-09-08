@@ -1,0 +1,51 @@
+diff --git a/src/mold.h b/src/mold.h
+index a8d3ed1f..65e170cc 100644
+--- a/src/mold.h
++++ b/src/mold.h
+@@ -1718,10 +1718,20 @@ public:
+ #else
+       fp = fdopen(fd, "w");
+ #endif
++      if (!fp)
++        Fatal(ctx) << "cannot open " << this->path << ": " << errno_string();
++    }
++
++    if (this->filesize && fwrite(this->buf, this->filesize, 1, fp) != 1) {
++      // fclose clobbers errno, so save the reason before closing.
++      std::string msg = errno_string();
++      fclose(fp);
++      Fatal(ctx) << "cannot write to " << this->path << ": " << msg;
+     }
+ 
+-    fwrite(this->buf, this->filesize, 1, fp);
+-    fclose(fp);
++    // Buffered data is flushed by fclose, so a write error may surface here.
++    if (fclose(fp) == EOF)
++      Fatal(ctx) << "cannot write to " << this->path << ": " << errno_string();
+   }
+ 
+ private:
+diff --git a/src/output-file-unix.cc b/src/output-file-unix.cc
+index d0ba0ee7..ba62c3a7 100644
+--- a/src/output-file-unix.cc
++++ b/src/output-file-unix.cc
+@@ -141,7 +141,8 @@ public:
+ 
+     if (!this->is_unmapped)
+       munmap(this->buf, vasize);
+-    ::close(this->fd);
++    if (::close(this->fd) == -1)
++      Fatal(ctx) << this->path << ": close failed: " << errno_string();
+ 
+     // If an output file already exists, open a file and then remove it.
+     // This is the fastest way to unlink a file, as it does not make the
+@@ -265,7 +266,8 @@ template <typename E>
+ void LockingOutputFile<E>::close(Context<E> &ctx) {
+   if (!this->is_unmapped)
+     munmap(this->buf, vasize);
+-  ::close(this->fd);
++  if (::close(this->fd) == -1)
++    Fatal(ctx) << this->path << ": close failed: " << errno_string();
+ }
+ 
+ using E = MOLD_TARGET;

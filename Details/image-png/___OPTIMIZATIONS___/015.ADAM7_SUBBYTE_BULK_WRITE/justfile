@@ -1,0 +1,31 @@
+# Self-contained reproduction for this candidate.
+#
+# Uses the project's own existing criterion benchmark (benches/adam7.rs, feature `benchmarks`) -
+# no standalone bench crate needed. `just test` clones the repo at base_commit, builds+runs the
+# benchmark before the patch, applies patch.diff, builds+runs it again, and prints both.
+
+repo_url := "https://github.com/image-rs/image-png.git"
+base_commit := "05ccdb9c8ae7fc50f4787ba2888a1c515adad944"
+
+test: clone bench-baseline apply bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Only bpp=1,2,4 are touched by this patch (the sub-byte expansion paths); the filter
+# regex `bpp=[124]$` also happens to include bpp=1/2/4's 3 sizes each = 9 benchmarks.
+bench-baseline:
+    @echo "=== baseline (before patch) ==="
+    cd clone && cargo bench --bench adam7 --features benchmarks -- 'bpp=[124]$' --save-baseline candidate_base
+
+bench-patched:
+    @echo "=== patched (after patch) ==="
+    cd clone && cargo bench --bench adam7 --features benchmarks -- 'bpp=[124]$' --baseline candidate_base
+
+clean:
+    rm -rf clone

@@ -1,0 +1,40 @@
+# Self-contained reproduction for candidate 027
+# (gdb_index_compunit_header_unchecked_length).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored). The folder can be copied anywhere and `just test` still works.
+#
+# This is a C++/CMake project (mold linker), not Rust - the repro drives the built `mold`
+# binary directly via repro/run.sh.
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+
+# Full cycle: clone pristine, build, prove the DoS exists, apply the fix, rebuild, prove it's gone.
+test: clone build reproduce-before apply build reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build:
+    cmake -S clone -B clone/build-plain -DCMAKE_BUILD_TYPE=Debug
+    cmake --build clone/build-plain -j4
+
+# Build the crafted DWARF objects and link them with the pristine mold under --gdb-index.
+# Unpatched: the malformed unit_length makes read_compunits() loop forever pushing Compunits;
+# run.sh runs each link under `timeout` + a 10GiB `ulimit -v` so the runaway aborts quickly.
+reproduce-before:
+    bash repro/run.sh clone/build-plain/mold
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro against the patched clone - malformed inputs now produce a clean Fatal, baseline
+# still links.
+reproduce-after:
+    bash repro/run.sh clone/build-plain/mold
+
+clean:
+    rm -rf clone

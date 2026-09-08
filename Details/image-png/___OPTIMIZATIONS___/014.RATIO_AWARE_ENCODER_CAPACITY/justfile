@@ -1,0 +1,51 @@
+# Self-contained reproduction for this candidate.
+#
+# Shape 3 (see templates/candidate_justfile): the repo has no encoder benchmark of its own, so
+# this workspace built one (___OPTIMIZATIONS___/harness/encoder_bench/). This candidate is
+# therefore self-contained given the WHOLE ___OPTIMIZATIONS___ folder kept together (harness_dir
+# below reaches into the sibling harness/ folder), not as a fully isolated single subfolder.
+#
+# `just test` clones repo_url at base_commit, copies the harness in, builds a baseline binary,
+# applies patch.diff, builds a patched binary, then runs both against the real corpus in
+# tests/benches/ and prints both results.
+
+repo_url := "https://github.com/image-rs/image-png.git"
+base_commit := "05ccdb9c8ae7fc50f4787ba2888a1c515adad944"
+harness_dir := "../harness/encoder_bench"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/encoder_bench
+    rm -rf clone/encoder_bench/target
+    sed -i 's|path = "../../.."|path = ".."|' clone/encoder_bench/Cargo.toml
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd clone/encoder_bench && cargo build --release
+    cp clone/encoder_bench/target/release/encoder_bench ./bin_baseline
+
+build-patched:
+    cd clone/encoder_bench && cargo build --release
+    cp clone/encoder_bench/target/release/encoder_bench ./bin_patched
+
+# Note: `just` runs each recipe line as its own separate shell invocation, so `ulimit -c 0` is
+# prefixed onto each line that actually executes the binary rather than set once on its own line.
+bench:
+    @echo "=== baseline (before patch): reallocs/alloc_MiB are the headline numbers, see RESULT.md ==="
+    ulimit -c 0 && ./bin_baseline --mode corpus --corpus clone/tests/benches --iters 15
+    @echo "=== patched (after patch) ==="
+    ulimit -c 0 && ./bin_patched --mode corpus --corpus clone/tests/benches --iters 15
+    @echo "=== paired single-core timing on representative files (see RESULT.md) ==="
+    @echo "Exoplanet_Phase_Curve_(Diagram).png (highest ratio, where a real +6-7% regression was measured):"
+    RUNS=15 "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- --mode corpus --corpus clone/tests/benches --only "Exoplanet_Phase_Curve_(Diagram).png" --iters 15
+    @echo "kodim02.png (low ratio, control - expected NOT consistent):"
+    RUNS=15 "{{justfile_directory()}}/../tools/paired.sh" ./bin_baseline ./bin_patched -- --mode corpus --corpus clone/tests/benches --only kodim02.png --iters 15
+
+clean:
+    rm -rf clone bin_baseline bin_patched

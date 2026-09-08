@@ -1,0 +1,45 @@
+# Self-contained reproduction for candidate 012 (Paeth unfiltering: i16 -> i32 widening in
+# src/filter/paeth.rs's filter_paeth_stbi, the x86_64 stable-formulation Paeth predictor).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff is a diff against base_commit below, touching ONLY src/filter/paeth.rs.
+
+repo_url := "git@github.com:image-rs/image-png.git"
+base_commit := "05ccdb9c8ae7fc50f4787ba2888a1c515adad944"
+
+# Full cycle: clone at the pinned commit, apply a harness-only compatibility shim (see
+# `fixup-harness` below - unrelated to this candidate's own patch), run+save the BASELINE
+# benchmark, apply patch.diff, run the PATCHED benchmark - criterion prints the "change:" vs.
+# the saved baseline for every bpp automatically.
+test: clone fixup-harness bench-baseline apply bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# `benches/unfilter.rs` (needed by both baseline and patched builds, unrelated to this
+# candidate's own patch) does `use rand::TryRngCore;`, which does not exist in ANY published
+# `rand 0.10.x` release (checked 0.10.0/0.10.1/0.10.2 directly against the registry source) since
+# this crate does not commit a Cargo.lock - a fresh `cargo` always resolves the latest `rand`,
+# which re-exports `TryRng`/`TryCryptoRng` but not `TryRngCore` from its crate root. Without this
+# shim, `just test` fails to build the bench at all, on baseline OR patched, regardless of this
+# candidate's own patch - see RESULT.md's "Incidental finding" section.
+fixup-harness:
+    sed -i 's/use rand::TryRngCore;/use rand::TryRng;/' clone/benches/unfilter.rs
+
+bench-baseline:
+    @echo "=== baseline (before patch) ==="
+    cd clone && taskset -c 0 cargo bench --bench unfilter --features benchmarks -- 'filter=Paeth' --noplot
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+bench-patched:
+    @echo "=== patched (after patch) - 'change:' lines below compare against the baseline run above ==="
+    cd clone && taskset -c 0 cargo bench --bench unfilter --features benchmarks -- 'filter=Paeth' --noplot
+
+clean:
+    rm -rf clone

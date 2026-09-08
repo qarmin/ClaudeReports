@@ -1,0 +1,51 @@
+# Self-contained reproduction for candidate 026
+# (input_files_ctor_ubsan_invalid_downcast).
+#
+# UNUSUAL SHAPE vs. the template: this candidate's bug is triggered by TWO different
+# Fatal(ctx) << *this call sites in InputFile<E>::InputFile() (src/input-files.cc):
+#   1. Two calls that are PART OF PRISTINE base_commit ("file too small" /
+#      "not an ELF file") - reproduce-before triggers these directly, no patch needed.
+#   2. A third call added by candidate 002's patch.diff (a separate, already-Confirmed
+#      candidate in ___BUGHUNT___/002.input-files_InputFile_ctor_oob_shsize/), which
+#      is NOT part of pristine base_commit and is never actually applied to the real
+#      codebase - included here only to demonstrate the same hazard would resurface
+#      the moment that (valid) fix is ever adopted for real. candidate_002_patch.diff
+#      in repro/ is a bundled copy so this folder is standalone-reproducible without
+#      needing candidate 002's own folder.
+#
+# This candidate's own fix (patch.diff, this directory) targets ONLY the two
+# pristine call sites - it does not touch/depend on candidate 002's patch at all.
+#
+# repro/run.sh does both scenarios A (pristine, no patch) and B (002's patch
+# applied+reverted temporarily, for context) in one script - see comments there.
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Runs both Scenario A (pristine "file too small"/"not an ELF file" Fatal(ctx) << *this
+# calls) and Scenario B (002's patch applied+reverted temporarily) against the pristine
+# clone - both should show the UBSan invalid-downcast diagnostic.
+reproduce-before:
+    ulimit -c 0 && bash repro/run.sh clone
+
+# Applies ONLY this candidate's own fix (not 002's) to the clone.
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Re-run Scenario A against the now-patched clone - the UBSan diagnostic should be
+# gone while the "file too small" Fatal error message is unchanged. Scenario B will
+# still show the diagnostic (unfixed on purpose, since 002's own added Fatal call
+# was never part of pristine base_commit or this candidate's own patch.diff) - this
+# is expected, not a bug in the verification.
+reproduce-after:
+    ulimit -c 0 && bash repro/run.sh clone
+
+clean:
+    rm -rf clone

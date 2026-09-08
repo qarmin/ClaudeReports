@@ -1,0 +1,135 @@
+diff --git a/lib/lib.h b/lib/lib.h
+index 96e9bffb..cf804114 100644
+--- a/lib/lib.h
++++ b/lib/lib.h
+@@ -392,6 +392,26 @@ inline u64 read_uleb(u8 *buf) {
+   return read_uleb(&tmp);
+ }
+ 
++// Bounds-checked variant for untrusted input (e.g. DWARF from object files).
++// A crafted LEB128 run whose continuation bit never clears must not walk past
++// the end of its buffer, so stop at `end`; also cap `shift` below 64 so an
++// overlong encoding can't shift by an out-of-range amount (which is UB).
++inline u64 read_uleb(u8 **buf, u8 *end) {
++  u64 val = 0;
++  u8 shift = 0;
++  u8 byte = 0;
++  while (*buf < end) {
++    byte = *(*buf)++;
++    if (shift < 64) {
++      val |= (u64)(byte & 0x7f) << shift;
++      shift += 7;
++    }
++    if (!(byte & 0x80))
++      break;
++  }
++  return val;
++}
++
+ inline i64 read_sleb(u8 **buf) {
+   u64 val = 0;
+   u8 shift = 0;
+@@ -409,6 +429,23 @@ inline i64 read_sleb(u8 *buf) {
+   return read_sleb(&tmp);
+ }
+ 
++// Bounds-checked variant, see the read_uleb(u8 **, u8 *) overload above.
++inline i64 read_sleb(u8 **buf, u8 *end) {
++  u64 val = 0;
++  u8 shift = 0;
++  u8 byte = 0;
++  while (*buf < end) {
++    byte = *(*buf)++;
++    if (shift < 64) {
++      val |= (u64)(byte & 0x7f) << shift;
++      shift += 7;
++    }
++    if (!(byte & 0x80))
++      break;
++  }
++  return sign_extend(val, shift);
++}
++
+ inline u64 read_uleb(std::string_view *str) {
+   u8 *start = (u8 *)str->data();
+   u8 *ptr = start;
+diff --git a/src/gdb-index.cc b/src/gdb-index.cc
+index 251d125f..1934e1bd 100644
+--- a/src/gdb-index.cc
++++ b/src/gdb-index.cc
+@@ -312,22 +312,24 @@ u8 *find_cu_abbrev(Context<E> &ctx, u8 **p, const CuHdr &hdr) {
+     }
+   }
+ 
+-  i64 abbrev_code = read_uleb(p);
++  u8 *info_end = ctx.debug_info.data() + ctx.debug_info.size();
++  i64 abbrev_code = read_uleb(p, info_end);
+ 
+   // Find a .debug_abbrev record corresponding to the .debug_info record.
+   // We assume the .debug_info record at a given offset is of
+   // DW_TAG_compile_unit which describes a compunit.
+   u8 *abbrev = &ctx.debug_abbrev[0] + hdr.abbrev_offset;
++  u8 *abbrev_end = ctx.debug_abbrev.data() + ctx.debug_abbrev.size();
+ 
+   for (;;) {
+-    u32 code = read_uleb(&abbrev);
++    u32 code = read_uleb(&abbrev, abbrev_end);
+     if (code == 0)
+       Fatal(ctx) << "--gdb-index: .debug_abbrev does not contain"
+                  << " a record for the first .debug_info record";
+ 
+     if (code == abbrev_code) {
+       // Found a record
+-      u64 abbrev_tag = read_uleb(&abbrev);
++      u64 abbrev_tag = read_uleb(&abbrev, abbrev_end);
+       if (abbrev_tag != DW_TAG_compile_unit && abbrev_tag != DW_TAG_skeleton_unit)
+         Fatal(ctx) << "--gdb-index: the first entry's tag is not"
+                    << " DW_TAG_compile_unit/DW_TAG_skeleton_unit but 0x"
+@@ -336,15 +338,15 @@ u8 *find_cu_abbrev(Context<E> &ctx, u8 **p, const CuHdr &hdr) {
+     }
+ 
+     // Skip an uninteresting record
+-    read_uleb(&abbrev); // tag
++    read_uleb(&abbrev, abbrev_end); // tag
+     abbrev++; // has_children byte
+     for (;;) {
+-      u64 name = read_uleb(&abbrev);
+-      u64 form = read_uleb(&abbrev);
++      u64 name = read_uleb(&abbrev, abbrev_end);
++      u64 form = read_uleb(&abbrev, abbrev_end);
+       if (name == 0 && form == 0)
+         break;
+       if (form == DW_FORM_implicit_const)
+-        read_uleb(&abbrev);
++        read_uleb(&abbrev, abbrev_end);
+     }
+   }
+ 
+@@ -412,7 +414,7 @@ u64 read_scalar(Context<E> &ctx, u8 **p, u64 form) {
+   case DW_FORM_ref_udata:
+   case DW_FORM_loclistx:
+   case DW_FORM_rnglistx:
+-    return read_uleb(p);
++    return read_uleb(p, ctx.debug_info.data() + ctx.debug_info.size());
+   case DW_FORM_string:
+     *p += strlen((char *)*p) + 1;
+     return 0;
+@@ -510,6 +512,7 @@ read_address_ranges(Context<E> &ctx, const Compunit &cu) {
+   p += sizeof(hdr);
+ 
+   u8 *abbrev = find_cu_abbrev(ctx, &p, hdr);
++  u8 *abbrev_end = ctx.debug_abbrev.data() + ctx.debug_abbrev.size();
+ 
+   // Now, read debug info records.
+   struct Record {
+@@ -527,8 +530,8 @@ read_address_ranges(Context<E> &ctx, const Compunit &cu) {
+ 
+   // Read all interesting debug records.
+   for (;;) {
+-    u64 name = read_uleb(&abbrev);
+-    u64 form = read_uleb(&abbrev);
++    u64 name = read_uleb(&abbrev, abbrev_end);
++    u64 form = read_uleb(&abbrev, abbrev_end);
+     if (name == 0 && form == 0)
+       break;
+ 

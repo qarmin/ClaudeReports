@@ -1,0 +1,46 @@
+# Self-contained reproduction for candidate 034.output_layout_size_vs_write_sweep.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing here reaches outside the folder it lives in. The whole
+# folder can be copied anywhere and `just test` still works.
+#
+# Requires: gcc (to build the input DSOs/objects), cmake, git, python3-free.
+
+repo_url := "https://github.com/rui314/mold.git"
+base_commit := "c340272e6376f9a8e5b5cd6f6634f925f6d54e5c"
+
+# Full cycle: clone pristine, show the crash, apply the fix, show it's gone.
+test: clone build reproduce-before apply build reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build:
+    cmake -S clone -B clone/build-plain -DCMAKE_BUILD_TYPE=Debug
+    cmake --build clone/build-plain -j4
+
+# Should print "bug is PRESENT" and exit non-zero: mold aborts for N >= 3.
+reproduce-before:
+    ulimit -c 0 && ! bash repro/run.sh "$PWD/clone/build-plain/mold"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Should print "bug is ABSENT" and exit 0.
+reproduce-after:
+    ulimit -c 0 && bash repro/run.sh "$PWD/clone/build-plain/mold"
+
+# Optional: same repro under ASAN+UBSAN, which reports the overflow directly
+# ("heap-buffer-overflow ... WRITE of size 4" inside VerneedSection::construct).
+build-asan:
+    cmake -S clone -B clone/build-asan -DCMAKE_BUILD_TYPE=Debug -DMOLD_USE_ASAN=ON \
+        -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+    cmake --build clone/build-asan -j4
+
+reproduce-asan:
+    ulimit -c 0 && ! bash repro/run.sh "$PWD/clone/build-asan/mold"
+
+clean:
+    rm -rf clone

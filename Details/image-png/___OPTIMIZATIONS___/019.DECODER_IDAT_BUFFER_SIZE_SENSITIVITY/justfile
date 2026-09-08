@@ -1,0 +1,35 @@
+# Self-contained reproduction for this candidate.
+#
+# Pure measurement/characterization - no patch.diff, no vendored/standalone harness needed:
+# this reuses the project's OWN existing `benches/decoder.rs` (`generated-noncompressed-*-idat`
+# groups), which was already present at base_commit but had never actually been run.
+#
+# Gotcha (see RESULT.md): the compiled criterion binary defaults to `Mode::Test` (a single
+# correctness pass, no timing) unless `--bench` is passed explicitly - `cargo bench` adds this
+# for you, but invoking the binary directly (as this justfile does) must pass it too.
+
+repo_url := "https://github.com/image-rs/image-png.git"
+base_commit := "05ccdb9c8ae7fc50f4787ba2888a1c515adad944"
+
+test: clone build bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build:
+    cd clone && cargo build --release --bench decoder
+
+# Runs the three IDAT-chunking-granularity groups (`generated-noncompressed-{4k,64k,2g}-idat`)
+# single-core (representative for ranking) - takes ~2 minutes total, including the two 576 MB
+# `-2g-idat`/`-4k-idat`/`-64k-idat` 12288x12288 cases.
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    BIN=$(ls "$PWD"/clone/target/release/deps/decoder-* | grep -v '\.d$' | head -1)
+    ulimit -c 0
+    cd clone && taskset -c 0 "$BIN" --bench 'generated-noncompressed' --noplot
+
+clean:
+    rm -rf clone

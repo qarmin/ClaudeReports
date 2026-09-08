@@ -1,0 +1,116 @@
+diff --git a/src/adam7.rs b/src/adam7.rs
+index fd6321c..8016c36 100644
+--- a/src/adam7.rs
++++ b/src/adam7.rs
+@@ -345,6 +345,70 @@ fn expand_adam7_bytes(
+ ///     0, 0, 0, 0, 0, 0, 0, 0,
+ /// ]);
+ /// ```
++/// Writes a full row of sub-byte (1/2/4 bpp) samples into `img`, combining every group of samples
++/// that lands in the same output byte into a single `|=` write instead of one write per sample.
++///
++/// This relies on an invariant of the Adam7 pass table: `x_offset < x_sampling` for every pass, so
++/// whenever `x_sampling * bits_pp < 8` (i.e. more than one sample packs into a byte), the samples
++/// align exactly on byte boundaries - no partial/spilling byte at the start of a row. See the
++/// derivation in the corresponding perf-optimize candidate for the full proof.
++fn expand_subbyte_pass_grouped(
++    img: &mut [u8],
++    img_row_stride: usize,
++    interlace_info: &Adam7Info,
++    bits_per_pixel: u8,
++    mut values: impl Iterator<Item = u8>,
++) {
++    let pass = interlace_info.pass_constants();
++    let samp_mul = u64::from(pass.x_sampling);
++    let samp_off = u64::from(pass.x_offset);
++    let bpp = u64::from(bits_per_pixel);
++    let stride_bits = samp_mul * bpp;
++
++    let line_mul = usize::from(pass.y_sampling);
++    let line_off = usize::from(pass.y_offset);
++    let prog_line = line_mul * interlace_info.line as usize + line_off;
++    let byte_start = prog_line * img_row_stride;
++
++    let samples = u64::from(interlace_info.samples);
++
++    if stride_bits >= 8 {
++        // No two samples share a byte; fall back to one bounds-checked write per sample.
++        let mut i = 0u64;
++        while i < samples {
++            let pos = (i * samp_mul + samp_off) * bpp;
++            let byte = byte_start + (pos / 8) as usize;
++            let bit = (pos % 8) as u8;
++            let shift = 8 - bits_per_pixel - bit;
++            let px = values.next().unwrap();
++            img[byte] |= px << shift;
++            i += 1;
++        }
++        return;
++    }
++
++    // `samp_off < samp_mul` (an Adam7 pass-table invariant) implies `base_bit < stride_bits <= 8`,
++    // so every group of `n` consecutive samples fills exactly one output byte with no spillover.
++    let n = 8 / stride_bits;
++    let base_bit = samp_off * bpp;
++
++    let mut i = 0u64;
++    let mut byte = byte_start;
++    while i < samples {
++        let count = n.min(samples - i);
++        let mut combined = 0u8;
++        for r in 0..count {
++            let bit = base_bit + r * stride_bits;
++            let shift = 8 - bits_per_pixel - bit as u8;
++            let px = values.next().unwrap();
++            combined |= px << shift;
++        }
++        img[byte] |= combined;
++        byte += 1;
++        i += count;
++    }
++}
++
+ pub fn expand_pass(
+     img: &mut [u8],
+     img_row_stride: usize,
+@@ -353,34 +417,20 @@ pub fn expand_pass(
+     bits_per_pixel: u8,
+ ) {
+     match bits_per_pixel {
+-        // Note: for 1, 2, 4 multiple runs through the iteration will access the same byte in `img`
+-        // so we can not iterate over `&mut u8` values. A better strategy would write multiple bit
+-        // groups in one go. This would then also not be as bounds-check heavy?
+         1 => {
+             const BIT_POS_1: [u8; 8] = [7, 6, 5, 4, 3, 2, 1, 0];
+-            let bit_indices = expand_adam7_bits(img_row_stride, interlace_info, 1);
+-            for (pos, px) in bit_indices.zip(subbyte_values(interlaced_row, BIT_POS_1, 0b1)) {
+-                let shift = 8 - bits_per_pixel - pos.bit;
+-                img[pos.byte] |= px << shift;
+-            }
++            let values = subbyte_values(interlaced_row, BIT_POS_1, 0b1);
++            expand_subbyte_pass_grouped(img, img_row_stride, interlace_info, 1, values);
+         }
+         2 => {
+             const BIT_POS_2: [u8; 4] = [6, 4, 2, 0];
+-            let bit_indices = expand_adam7_bits(img_row_stride, interlace_info, 2);
+-
+-            for (pos, px) in bit_indices.zip(subbyte_values(interlaced_row, BIT_POS_2, 0b11)) {
+-                let shift = 8 - bits_per_pixel - pos.bit;
+-                img[pos.byte] |= px << shift;
+-            }
++            let values = subbyte_values(interlaced_row, BIT_POS_2, 0b11);
++            expand_subbyte_pass_grouped(img, img_row_stride, interlace_info, 2, values);
+         }
+         4 => {
+             const BIT_POS_4: [u8; 2] = [4, 0];
+-            let bit_indices = expand_adam7_bits(img_row_stride, interlace_info, 4);
+-
+-            for (pos, px) in bit_indices.zip(subbyte_values(interlaced_row, BIT_POS_4, 0b1111)) {
+-                let shift = 8 - bits_per_pixel - pos.bit;
+-                img[pos.byte] |= px << shift;
+-            }
++            let values = subbyte_values(interlaced_row, BIT_POS_4, 0b1111);
++            expand_subbyte_pass_grouped(img, img_row_stride, interlace_info, 4, values);
+         }
+         // While caught by the below loop, we special case this for codegen. The effects are
+         // massive when the compiler uses the constant chunk size in particular for this case where

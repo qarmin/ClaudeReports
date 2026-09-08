@@ -1,0 +1,43 @@
+diff --git a/src/input-files.cc b/src/input-files.cc
+index 2844c98d..017cfceb 100644
+--- a/src/input-files.cc
++++ b/src/input-files.cc
+@@ -194,8 +194,19 @@ static void read_riscv_attributes(Context<E> &ctx, ObjectFile<E> &file,
+   data = data.substr(1);
+ 
+   while (!data.empty()) {
++    // Every field below is attacker-controlled (this comes straight from an
++    // untrusted section), so each advance must be bounds-checked against
++    // what's actually left before slicing. A plain std::string_view::substr
++    // (pos) throws std::out_of_range if pos > size(), and this pipeline has
++    // no top-level exception handler, so an unchecked slice here would abort
++    // the whole process. `sz` also must be rejected outright if < 4: `sz - 4`
++    // is computed as an unsigned size_t, so a too-small sz underflows into a
++    // ~2^64-byte view instead of a bounds-check failure.
++    if (data.size() < 4)
++      Fatal(ctx) << file << ": corrupted .riscv.attributes section";
++
+     i64 sz = *(U32<E> *)data.data();
+-    if (data.size() < sz)
++    if (sz < 4 || data.size() < (u64)sz)
+       Fatal(ctx) << file << ": corrupted .riscv.attributes section";
+ 
+     std::string_view p(data.data() + 4, sz - 4);
+@@ -205,7 +216,7 @@ static void read_riscv_attributes(Context<E> &ctx, ObjectFile<E> &file,
+       continue;
+     p = p.substr(6);
+ 
+-    if (!p.starts_with(ELF_TAG_FILE))
++    if (p.size() < 5 || !p.starts_with(ELF_TAG_FILE))
+       Fatal(ctx) << file << ": corrupted .riscv.attributes section";
+     p = p.substr(5); // skip the tag and the sub-sub-section size
+ 
+@@ -218,6 +229,8 @@ static void read_riscv_attributes(Context<E> &ctx, ObjectFile<E> &file,
+         break;
+       case ELF_TAG_RISCV_ARCH: {
+         i64 pos = p.find_first_of('\0');
++        if (pos == (i64)p.npos)
++          Fatal(ctx) << file << ": corrupted .riscv.attributes section";
+         file.extra.arch = p.substr(0, pos);
+         p = p.substr(pos + 1);
+         break;

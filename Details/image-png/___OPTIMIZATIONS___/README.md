@@ -45,7 +45,9 @@ cargo build --release
 Modes: `filter` (one run per `Filter` variant), `compress` (one per `DeflateCompression`), `color`
 (one per color type/bit depth), `apng` (`--frames` frames via `write_image_data`), `stream`
 (`StreamWriter` at several buffer sizes), `decode-apng` (the one decode path `benches/decoder.rs`
-does not cover), `corpus` (re-encode every `*.png` in a directory).
+does not cover), `corpus` (re-encode every `*.png` in a directory), `memory` (one per
+`DeflateCompression`, encoding into `std::io::sink()` instead of a `Vec` - added for candidate 017;
+see "Measuring the encoder's *own* peak RSS" below before using this one).
 
 What each line reports: wall time (min/p50/mean/p95/max, first 10% of iterations discarded as
 warmup), encoded size and ratio, throughput, **allocation count, reallocation count and total
@@ -65,6 +67,18 @@ Things to know before trusting a number from it:
   say so rather than assuming the counter is invisible.
 - **`peak_rss_MiB` is a process-wide high-water mark**, so it only distinguishes configurations
   when the harness runs one at a time - use `--only <substring>` for that.
+- **Measuring the encoder's *own* peak RSS needs `--mode memory`, not `compress`/`apng`.** Every
+  other mode encodes into a `Vec<u8>` (needed for the hash/roundtrip check), so the harness's own
+  output sink ends up holding the whole encoded PNG in memory regardless of whether `png::Writer`
+  itself streamed its compressed output or buffered it internally - this fully masked candidate
+  017's own encoder-internal buffering change (`compress --only Level6` reported the *same*
+  `peak_rss_MiB` before and after a patch that measurably changed the encoder's own peak RSS by
+  ~40% at 4096x4096). `memory` mode encodes into `std::io::sink()` instead, so its `peak_rss_MiB`
+  reflects only what the encoder itself holds. Always pass `--skip-verify` with it: `memory`
+  mode's own correctness check normally does one `Vec`-sink encode first, which - since RSS is a
+  monotonic high-water mark for the whole process - permanently sets the peak before the
+  sink-based measurement loop even runs. Verify correctness separately, in its own process, via
+  `compress`/`apng` mode on the same configuration instead.
 - **The synthetic `photo` pattern is not a stand-in for a real image.** On it, flate2 `Level1`
   produced a *smaller* file than `Level3` (717,652 vs 745,843 B) - an artifact of that pattern's
   structure, not a `png` bug; the same comparison on `kodim02.png` is monotonic as expected. Use

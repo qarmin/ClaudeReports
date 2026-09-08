@@ -1,0 +1,109 @@
+diff --git a/src/decoder/transform.rs b/src/decoder/transform.rs
+index f2b6654..a0927a8 100644
+--- a/src/decoder/transform.rs
++++ b/src/decoder/transform.rs
+@@ -51,21 +51,37 @@ pub fn create_transform_fn(
+             }
+         }
+         ColorType::Grayscale | ColorType::GrayscaleAlpha if bit_depth < 8 && expand => {
+-            Ok(Box::new(if trns {
+-                expand_gray_u8_with_trns
++            // `scaling_factor` only depends on `bit_depth`, which is fixed for the
++            // whole decode - precompute it once here instead of on every row.
++            let scaling_factor = (255) / ((1u16 << bit_depth) - 1) as u8;
++            Ok(if trns {
++                Box::new(move |row: &[u8], buffer: &mut [u8], info: &Info| {
++                    expand_gray_u8_with_trns(row, buffer, info, bit_depth, scaling_factor)
++                })
+             } else {
+-                expand_gray_u8
+-            }))
++                Box::new(move |row: &[u8], buffer: &mut [u8], _info: &Info| {
++                    expand_gray_u8(row, buffer, bit_depth, scaling_factor)
++                })
++            })
+         }
+         ColorType::Grayscale | ColorType::Rgb if expand && trns => {
+-            Ok(Box::new(if bit_depth == 8 {
+-                expand_trns_line
++            // `channels` only depends on `color_type`, which is fixed for the whole
++            // decode - precompute it once here instead of on every row.
++            let channels = color_type.samples();
++            Ok(if bit_depth == 8 {
++                Box::new(move |row: &[u8], buffer: &mut [u8], info: &Info| {
++                    expand_trns_line(row, buffer, info, channels)
++                })
+             } else if strip16 {
+-                expand_trns_and_strip_line16
++                Box::new(move |row: &[u8], buffer: &mut [u8], info: &Info| {
++                    expand_trns_and_strip_line16(row, buffer, info, channels)
++                })
+             } else {
+                 assert_eq!(bit_depth, 16);
+-                expand_trns_line16
+-            }))
++                Box::new(move |row: &[u8], buffer: &mut [u8], info: &Info| {
++                    expand_trns_line16(row, buffer, info, channels)
++                })
++            })
+         }
+         ColorType::Grayscale | ColorType::GrayscaleAlpha | ColorType::Rgb | ColorType::Rgba
+             if strip16 =>
+@@ -134,8 +150,7 @@ where
+     }
+ }
+ 
+-fn expand_trns_line(input: &[u8], output: &mut [u8], info: &Info) {
+-    let channels = info.color_type.samples();
++fn expand_trns_line(input: &[u8], output: &mut [u8], info: &Info, channels: usize) {
+     let trns = info.trns.as_deref();
+     for (input, output) in input
+         .chunks_exact(channels)
+@@ -146,8 +161,7 @@ fn expand_trns_line(input: &[u8], output: &mut [u8], info: &Info) {
+     }
+ }
+ 
+-fn expand_trns_line16(input: &[u8], output: &mut [u8], info: &Info) {
+-    let channels = info.color_type.samples();
++fn expand_trns_line16(input: &[u8], output: &mut [u8], info: &Info, channels: usize) {
+     let trns = info.trns.as_deref();
+     for (input, output) in input
+         .chunks_exact(channels * 2)
+@@ -164,8 +178,7 @@ fn expand_trns_line16(input: &[u8], output: &mut [u8], info: &Info) {
+     }
+ }
+ 
+-fn expand_trns_and_strip_line16(input: &[u8], output: &mut [u8], info: &Info) {
+-    let channels = info.color_type.samples();
++fn expand_trns_and_strip_line16(input: &[u8], output: &mut [u8], info: &Info, channels: usize) {
+     let trns = info.trns.as_deref();
+     for (input, output) in input
+         .chunks_exact(channels * 2)
+@@ -178,17 +191,21 @@ fn expand_trns_and_strip_line16(input: &[u8], output: &mut [u8], info: &Info) {
+     }
+ }
+ 
+-fn expand_gray_u8(row: &[u8], buffer: &mut [u8], info: &Info) {
+-    let scaling_factor = (255) / ((1u16 << info.bit_depth as u8) - 1) as u8;
+-    unpack_bits(row, buffer, 1, info.bit_depth as u8, |val, chunk| {
++fn expand_gray_u8(row: &[u8], buffer: &mut [u8], bit_depth: u8, scaling_factor: u8) {
++    unpack_bits(row, buffer, 1, bit_depth, |val, chunk| {
+         chunk[0] = val * scaling_factor
+     });
+ }
+ 
+-fn expand_gray_u8_with_trns(row: &[u8], buffer: &mut [u8], info: &Info) {
+-    let scaling_factor = (255) / ((1u16 << info.bit_depth as u8) - 1) as u8;
++fn expand_gray_u8_with_trns(
++    row: &[u8],
++    buffer: &mut [u8],
++    info: &Info,
++    bit_depth: u8,
++    scaling_factor: u8,
++) {
+     let trns = info.trns.as_deref();
+-    unpack_bits(row, buffer, 2, info.bit_depth as u8, |pixel, chunk| {
++    unpack_bits(row, buffer, 2, bit_depth, |pixel, chunk| {
+         chunk[1] = if let Some(trns) = trns {
+             if pixel == trns[0] {
+                 0

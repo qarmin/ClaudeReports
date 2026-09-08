@@ -1,0 +1,44 @@
+$ python3 repro/gen_evil_elf.py evil.o
+wrote evil.o
+
+=== plain (build-plain, non-ASAN) build, 5 repeat runs ===
+$ for i in 1 2 3 4 5; do build-plain/mold -o out.exe evil.o >/dev/null 2>&1; echo "run $i exit: $?"; done
+run 1 exit: 139
+run 2 exit: 139
+run 3 exit: 139
+run 4 exit: 139
+run 5 exit: 139
+
+=== gdb backtrace (real crash site, real second-thread confusion worked around per README's
+    fork_child gotcha - mold's link step forks a child; follow-fork-mode child gets the real
+    backtrace) ===
+$ gdb -batch -ex "set follow-fork-mode child" -ex "set detach-on-fork on" -ex run -ex bt \
+    --args build-plain/mold -o out.exe evil.o
+
+Thread 2.1 "mold" received signal SIGSEGV, Segmentation fault.
+0x0000556b39afa488 in mold::InputSectionTable<mold::X86_64>::operator[](long) ()
+#0  0x0000556b39afa488 in mold::InputSectionTable<mold::X86_64>::operator[](long) ()
+#1  0x0000556b39afe8f7 in mold::ObjectFile<mold::X86_64>::initialize_sections(mold::Context<mold::X86_64>&) ()
+#2  0x0000556b39aff7bc in mold::ObjectFile<mold::X86_64>::parse_sections(mold::Context<mold::X86_64>&, bool) ()
+
+=== ASAN/UBSAN build (build-asan, g++, libstdc++ _GLIBCXX_ASSERTIONS enabled) ===
+$ build-asan/mold -o out.exe evil.o
+/usr/include/c++/15/bits/stl_vector.h:1263: constexpr std::vector<_Tp, _Alloc>::reference
+std::vector<_Tp, _Alloc>::operator[](size_type) [with _Tp = unsigned int; _Alloc =
+std::allocator<unsigned int>; reference = unsigned int&; size_type = long unsigned int]:
+Assertion '__n < this->size()' failed.
+$ echo $?
+134   (SIGABRT)
+
+=== after patch.diff applied, both builds, 3 repeat runs each ===
+$ build-plain/mold -o out.exe evil.o ; echo $?
+mold: warning: entry symbol is not defined: _start
+0
+mold: warning: entry symbol is not defined: _start
+0
+mold: warning: entry symbol is not defined: _start
+0
+
+$ build-asan/mold -o out.exe evil.o ; echo $?
+mold: warning: entry symbol is not defined: _start
+0

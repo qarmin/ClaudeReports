@@ -1,0 +1,35 @@
+diff --git a/src/input-files.cc b/src/input-files.cc
+index 2844c98d..d0f59902 100644
+--- a/src/input-files.cc
++++ b/src/input-files.cc
+@@ -361,6 +361,8 @@ void ObjectFile<E>::initialize_sections(Context<E> &ctx) {
+       break;
+     case SHT_CREL:
+       decoded_crel.resize(i + 1);
++      if (shdr.sh_info >= this->elf_sections.size())
++        Fatal(ctx) << *this << ": SHT_CREL section has an out-of-range sh_info";
+       if ((this->elf_sections[shdr.sh_info].sh_flags & SHF_ALLOC) ||
+           ctx.arg.relocatable || ctx.arg.emit_relocs)
+         decoded_crel[i] = decode_crel(ctx, *this, shdr);
+@@ -509,8 +511,9 @@ void ObjectFile<E>::initialize_sections(Context<E> &ctx) {
+   // Attach relocation sections to their target sections.
+   for (i64 i = 0; i < this->elf_sections.size(); i++) {
+     const ElfShdr<E> &shdr = this->elf_sections[i];
+-    if (shdr.sh_type == (E::is_rela ? SHT_RELA : SHT_REL) ||
+-        shdr.sh_type == SHT_CREL) {
++    if ((shdr.sh_type == (E::is_rela ? SHT_RELA : SHT_REL) ||
++         shdr.sh_type == SHT_CREL) &&
++        shdr.sh_info < this->elf_sections.size()) {
+       if (InputSection<E> *target = sections[shdr.sh_info]) {
+         assert(target->relsec_idx == -1);
+         target->relsec_idx = i;
+@@ -521,7 +524,8 @@ void ObjectFile<E>::initialize_sections(Context<E> &ctx) {
+   // Attach .arm.exidx sections to their corresponding sections
+   if constexpr (is_arm32<E>)
+     for (InputSection<E> *isec : this->sections)
+-      if (isec && isec->shdr().sh_type == SHT_ARM_EXIDX)
++      if (isec && isec->shdr().sh_type == SHT_ARM_EXIDX &&
++          isec->shdr().sh_link < this->elf_sections.size())
+         if (InputSection<E> *target = sections[isec->shdr().sh_link])
+           target->extra.exidx = isec;
+ }
