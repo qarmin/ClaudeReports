@@ -8,20 +8,20 @@ holding per-candidate `RESULT.md`, `patch.diff`, `repro/`, and a `justfile` that
 reproduces the finding from a fresh clone.
 
 Usage:
-    find_details.py <source-folder> [--dry-run] [--max-file-size 100k]
+    scripts/find_details.py <source-folder> [--dry-run] [--max-file-size 100k]
 
     # everything under ~/Projekty/Obce
-    find_details.py ~/Projekty/Obce
+    scripts/find_details.py ~/Projekty/Obce
     # a single project
-    find_details.py ~/Projekty/Obce/hayro
+    scripts/find_details.py ~/Projekty/Obce/hayro
 
 Layout:
-    Source folders are mirrored under `Details/` by their path relative to
+    Source folders are mirrored under `investigations/` by their path relative to
     <source-folder>, so nested workspaces keep their context and cannot collide:
 
-        <src>/hayro/___BUGHUNT___          -> Details/hayro/___BUGHUNT___
-        <src>/hayro/vello/___OPTIMIZATIONS___ -> Details/hayro/vello/___OPTIMIZATIONS___
-        <src>/vello/___OPTIMIZATIONS___    -> Details/vello/___OPTIMIZATIONS___
+        <src>/hayro/___BUGHUNT___          -> investigations/hayro/___BUGHUNT___
+        <src>/hayro/vello/___OPTIMIZATIONS___ -> investigations/hayro/vello/___OPTIMIZATIONS___
+        <src>/vello/___OPTIMIZATIONS___    -> investigations/vello/___OPTIMIZATIONS___
 
     When <source-folder> is itself a project (or a workspace folder), its own
     name is used as the leading component, so the project name is never lost.
@@ -54,7 +54,7 @@ Updating:
     fresh, so renamed and dropped candidates are reflected instead of piling up.
     Only the (project, workspace) pairs actually found in the source are touched,
     so running against a narrower source folder never deletes the rest of
-    Details/. A destination that already matches its source is left alone.
+    investigations/. A destination that already matches its source is left alone.
 """
 
 import argparse
@@ -63,8 +63,8 @@ import shutil
 import sys
 from pathlib import Path
 
-REPO_DIR = Path(__file__).resolve().parent
-DEST_DIR = REPO_DIR / "Details"
+REPO_DIR = Path(__file__).resolve().parent.parent
+DEST_DIR = REPO_DIR / "investigations"
 
 KIND_DIRS = ("___BUGHUNT___", "___OPTIMIZATIONS___")
 
@@ -239,7 +239,7 @@ def sync(workspace: Path, dest: Path, max_file_size: int, dry_run: bool) -> tupl
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Collect ___BUGHUNT___ / ___OPTIMIZATIONS___ workspaces into Details/."
+        description="Collect ___BUGHUNT___ / ___OPTIMIZATIONS___ workspaces into investigations/."
     )
     parser.add_argument("source", help="folder to search for workspaces")
     parser.add_argument(

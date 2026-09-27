@@ -18,7 +18,7 @@ Per-project rules:
       some older reports are linked to from outside this repo
 
 Usage:
-    find_reports.py <source-folder>
+    scripts/find_reports.py <source-folder>
 """
 
 import hashlib
@@ -29,7 +29,7 @@ import tomllib
 from datetime import datetime
 from pathlib import Path
 
-REPO_DIR = Path(__file__).resolve().parent
+REPO_DIR = Path(__file__).resolve().parent.parent
 SOURCE_NAME = "findings-interactive.html"
 # Canonical repo file: <name>_<YYYYMMDD>.html. The name may itself contain
 # underscores (e.g. ik_llama.cpp), so the date anchors the split at the end.

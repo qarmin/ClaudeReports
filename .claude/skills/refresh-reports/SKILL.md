@@ -21,7 +21,7 @@ Scope, deliberately narrow:
   completed, HTML re-rendered in the current format.
 - **Out of scope:** re-judging whether a finding is a false positive, adding new
   findings (that is a fresh `code-audit-structured` run), and everything under
-  `Details/` (bug-hunt and optimization workspaces have their own tooling).
+  `investigations/` (bug-hunt and optimization workspaces have their own tooling).
 
 ## Cost model - read this before deviating
 
@@ -189,6 +189,6 @@ git_url = "https://gitlab.winehq.org/wine/wine.git"
 keep = ["wine_20260823.html"]
 ```
 
-`find_reports.py` honours the same list, so collecting a fresh audit does not
+`scripts/find_reports.py` honours the same list, so collecting a fresh audit does not
 remove a pinned file either. A pinned file is never used as the source of a
 refresh: the newest report for the project is.

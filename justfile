@@ -1,8 +1,8 @@
 sync:
-    python3 find_reports.py ~/test || true
-    python3 find_details.py ~/test || true
-    python3 find_reports.py ~/Projekty/Obce || true
-    python3 find_details.py ~/Projekty/Obce || true
+    python3 scripts/find_reports.py ~/test || true
+    python3 scripts/find_details.py ~/test || true
+    python3 scripts/find_reports.py ~/Projekty/Obce || true
+    python3 scripts/find_details.py ~/Projekty/Obce || true
 
 # Re-check the next batch of reports against the projects' current code.
 refresh limit="10":

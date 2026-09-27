@@ -7,7 +7,8 @@ looking for bugs, panics, logic errors, performance issues, dead code, and archi
 
 <div align="center"><img src="https://github.com/user-attachments/assets/f1cfecc2-59e5-4931-b9ea-6d4a3f233cd6" alt="Item" width="600" /></div>
 
-To see the report, you need to only download certain html file, and open it on your any web browser.
+Browse reports online at [qarmin.github.io/ClaudeReports](https://qarmin.github.io/ClaudeReports/),
+or download a single `.html` file and open it in any web browser.
 
 <div align="center"><img src="https://github.com/user-attachments/assets/1b075207-c2df-4112-a957-39e109be0054" alt="Item" width="600" /></div>
 
@@ -55,7 +56,7 @@ The date means when the report was generated.
 A project normally keeps one file, the newest. A few older reports are kept
 alongside it because they are linked to from outside this repo and those links
 should not break - they are listed under `keep` in `projects.toml`, and both
-`find_reports.py` and the refresh skill leave them alone.
+`scripts/find_reports.py` and the refresh skill leave them alone.
 
 ## Format
 
@@ -89,13 +90,17 @@ is how old reports end up in the same format as new ones.
 
 ## Collecting reports
 
-`find_reports.py` gathers the audit output into this repo. It recursively searches a
+`scripts/find_reports.py` gathers the audit output into this repo. It recursively searches a
 source folder for `findings-interactive.html` files (the output of the code-audit pass)
 and copies each one here under the canonical `ProjectName_YYYYMMDD.html` name.
 
 ```
-python3 find_reports.py <source-folder>      # e.g. python3 find_reports.py ~/test
+python3 scripts/find_reports.py <source-folder>      # e.g. python3 scripts/find_reports.py ~/test
 ```
+
+`scripts/find_details.py` gathers the supporting `___BUGHUNT___` / `___OPTIMIZATIONS___`
+workspaces behind those reports (per-candidate `RESULT.md`, `patch.diff`, `repro/`) into
+`investigations/`.
 
 How names are resolved:
 
