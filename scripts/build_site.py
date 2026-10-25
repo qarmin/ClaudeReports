@@ -217,25 +217,25 @@ def main(src: Path, out: Path) -> None:
         return projects.setdefault(name.lower(), {"name": name, "pages": []})
 
     reports = defaultdict(list)
-    for f in src.glob("*.html"):
+    for f in [*src.glob("*.html"), *(src / "reports").glob("*.html")]:
         m = REPORT_RE.match(f.name)
         if m:
             shutil.copy2(f, out / f.name)
-            reports[m["name"]].append((m["date"], f.name, f.stat().st_size))
+            reports[m["name"]].append((m["date"], f.name, f.stat().st_size, f))
     for name, files in reports.items():
-        files.sort(reverse=True)
-        date, fname, size = files[0]
+        files.sort(key=lambda r: r[:3], reverse=True)
+        date, fname, size, _ = files[0]
         (out / "latest" / f"{name}.html").write_text(
             f'<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=../{fname}">'
             f'<link rel="canonical" href="../{fname}"><a href="../{fname}">{html.escape(fname)}</a>\n')
         entry = project(name)
         entry["name"] = name
-        audit = audit_data(src / fname)
+        audit = audit_data(files[0][3])
         info = audit.pop("info")
         entry.update(desc=info["description"], repo=info["repo_url"], commit=info)
         entry["audit"] = {
             "url": fname, "date": f"{date[:4]}-{date[4:6]}-{date[6:]}", "kb": round(size / 1024),
-            "older": [{"url": f, "date": f"{d[:4]}-{d[4:6]}-{d[6:]}"} for d, f, _ in files[1:]], **audit,
+            "older": [{"url": f, "date": f"{d[:4]}-{d[4:6]}-{d[6:]}"} for d, f, _, _ in files[1:]], **audit,
         }
 
     base = src / "investigations"

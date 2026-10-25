@@ -44,7 +44,7 @@ import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, timedelta, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -63,6 +63,14 @@ BATCH_SIZE = 50
 class Ctx:
     repo: Path
     renderer: Path = DEFAULT_RENDERER
+
+    @property
+    def reports_dir(self) -> Path:
+        return self.repo / "reports"
+
+    def report_files(self) -> list[Path]:
+        """Reports live in reports/; pinned old ones (projects.toml `keep`) stay in the repo root."""
+        return sorted([*self.repo.glob("*.html"), *self.reports_dir.glob("*.html")])
 
     @property
     def tmp(self) -> Path:
@@ -145,7 +153,7 @@ def set_status(ctx: Ctx, state: dict, name: str, status: str, **fields) -> None:
 def reports(ctx: Ctx) -> dict[str, tuple[Path, str]]:
     """name -> (newest report path, its date as YYYY-MM-DD)."""
     found: dict[str, tuple[Path, str]] = {}
-    for path in sorted(ctx.repo.glob("*.html")):
+    for path in ctx.report_files():
         m = REPORT_RE.match(path.name)
         if not m:
             continue
@@ -257,13 +265,14 @@ def install(ctx: Ctx, name: str, html: Path | None, keep: list[str] | None = Non
     linked to from outside this repo, so replacing them would break those links.
     """
     protected = set(keep or ())
-    for old in ctx.repo.glob("*.html"):
+    for old in ctx.report_files():
         m = REPORT_RE.match(old.name)
         if m and m.group("name") == name and old.name not in protected:
             old.unlink()
     if html is None:
         return None
-    target = ctx.repo / f"{name}_{date.today().strftime('%Y%m%d')}.html"
+    ctx.reports_dir.mkdir(exist_ok=True)
+    target = ctx.reports_dir / f"{name}_{date.today().strftime('%Y%m%d')}.html"
     shutil.copy2(html, target)
     return target.name
 
@@ -498,10 +507,11 @@ def _self_test() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ctx = Ctx(repo=Path(tmp))
         (ctx.repo / "tmp").mkdir()
+        ctx.reports_dir.mkdir()
 
-        for name in ("weezl_20260521.html", "weezl_20260101.html", "Zed_20260901.html",
+        for name in ("weezl_20260521.html", "weezl_20260101.html", f"Zed_{(date.today() - timedelta(days=5)).strftime('%Y%m%d')}.html",
                      "alpha_20260301.html", "not-a-report.html"):
-            (ctx.repo / name).write_text("x", encoding="utf-8")
+            (ctx.reports_dir / name).write_text("x", encoding="utf-8")
 
         found = reports(ctx)
         assert set(found) == {"weezl", "Zed", "alpha"}, found
@@ -532,10 +542,10 @@ def _self_test() -> None:
         html.write_text("<html>fresh</html>", encoding="utf-8")
         installed = install(ctx, "weezl", html)
         assert installed == f"weezl_{date.today().strftime('%Y%m%d')}.html", installed
-        assert (ctx.repo / installed).read_text() == "<html>fresh</html>"
-        assert not (ctx.repo / "weezl_20260521.html").exists()
-        assert not (ctx.repo / "weezl_20260101.html").exists()
-        assert (ctx.repo / "alpha_20260301.html").exists(), "other projects untouched"
+        assert (ctx.reports_dir / installed).read_text() == "<html>fresh</html>"
+        assert not (ctx.reports_dir / "weezl_20260521.html").exists()
+        assert not (ctx.reports_dir / "weezl_20260101.html").exists()
+        assert (ctx.reports_dir / "alpha_20260301.html").exists(), "other projects untouched"
 
         # An unanswered batch must block finalizing, or its findings quietly
         # render at the default difficulty.
@@ -557,7 +567,7 @@ def _self_test() -> None:
             "https://gitlab.gnome.org/GNOME/glib.git"
         assert normalize_git_url("https://github.com/owner/repo.git") == \
             "https://github.com/owner/repo.git"
-        assert not (ctx.repo / "alpha_20260301.html").exists()
+        assert not (ctx.reports_dir / "alpha_20260301.html").exists()
 
     print("refresh.py: self-test OK")
 

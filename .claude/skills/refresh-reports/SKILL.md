@@ -56,7 +56,7 @@ Each project comes back with one of these statuses:
 
 | Status | Meaning | What you do |
 |---|---|---|
-| `done` | rendered and installed as `Project_<today>.html` | nothing |
+| `done` | rendered and installed as `reports/Project_<today>.html` | nothing |
 | `done-empty` | every finding was fixed upstream, report removed from the repo | nothing |
 | `awaiting-difficulty` | verified, waiting on the LLM pass | step 2 |
 | `needs-url` | report predates embedded metadata and no URL is on file | step 3 |

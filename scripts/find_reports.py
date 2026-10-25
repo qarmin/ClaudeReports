@@ -30,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent.parent
+REPORTS_DIR = REPO_DIR / "reports"
 SOURCE_NAME = "findings-interactive.html"
 # Canonical repo file: <name>_<YYYYMMDD>.html. The name may itself contain
 # underscores (e.g. ik_llama.cpp), so the date anchors the split at the end.
@@ -65,7 +66,7 @@ def pinned() -> set[str]:
 
 def existing_versions(project: str) -> list[tuple[Path, str]]:
     versions = []
-    for path in REPO_DIR.glob("*.html"):
+    for path in [*REPO_DIR.glob("*.html"), *REPORTS_DIR.glob("*.html")]:
         m = REPO_RE.match(path.name)
         if m and m.group("name") == project:
             versions.append((path, m.group("date")))
@@ -82,7 +83,7 @@ def collect(source_root: Path) -> None:
     for report in reports:
         project = project_name(report)
         date = report_date(report)
-        target = REPO_DIR / f"{project}_{date}.html"
+        target = REPORTS_DIR / f"{project}_{date}.html"
         new_hash = sha256(report)
         versions = existing_versions(project)
 
@@ -104,6 +105,7 @@ def collect(source_root: Path) -> None:
                 p.unlink()
                 print(f"removed older: {p.name}")
 
+        REPORTS_DIR.mkdir(exist_ok=True)
         shutil.copy2(report, target)
         print(f"added: {target.name}  <- {report}")
 
