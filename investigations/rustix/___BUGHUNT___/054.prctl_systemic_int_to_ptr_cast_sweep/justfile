@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# This candidate's bug only manifests under Miri's strict-provenance check,
+# not as a real crash on real hardware - the "before"/"after" comparison is
+# Miri's own diagnostic output, not a process exit code. Each of the 3 repro
+# binaries exercises a different real public API function reaching a
+# different affected call site (process/prctl.rs:141, thread/prctl.rs:497,
+# thread/prctl.rs:757) - Miri aborts the whole process on its first
+# unsupported-operation error, so each site needs its own binary/run.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Forces the libc backend (Miri can't execute linux_raw's inline-asm
+# syscalls at all) and Miri's strict-provenance checker, which is what
+# turns the integer-to-pointer cast into a hard error. Runs all 3 sites;
+# each is expected to print a "-Zmiri-strict-provenance" error.
+reproduce-before:
+    cd repro && for bin in site_a_process_set_dumpable site_b_thread_capbset_drop site_c_thread_ambient_set; do \
+        echo "--- $bin ---"; \
+        RUSTFLAGS="--cfg rustix_no_linux_raw" MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri run --bin $bin || true; \
+    done
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same 3 sites again, now against the patched clone - the strict-provenance
+# error should be gone, replaced by a separate pre-existing Miri limitation
+# ("Miri does not support `prctl` syscall with op=N") one level deeper.
+reproduce-after:
+    cd repro && for bin in site_a_process_set_dumpable site_b_thread_capbset_drop site_c_thread_ambient_set; do \
+        echo "--- $bin ---"; \
+        RUSTFLAGS="--cfg rustix_no_linux_raw" MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri run --bin $bin || true; \
+    done
+
+clean:
+    rm -rf clone

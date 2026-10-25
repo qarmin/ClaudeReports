@@ -1,0 +1,48 @@
+# Self-contained reproduction for candidate 035 (tcgetpgrp_pid_zero_unsound_bsd_macos).
+#
+# `before`/`after` do NOT call rustix's real `tcgetpgrp` function directly - they can't: the bug
+# is only reachable when compiled for a non-Linux (`not(linux_kernel)`) target (macOS/BSD), and
+# this repro runs on Linux (no macOS/BSD hardware/toolchain available - see RESULT.md's "Fully
+# reproducible: No" justification). Instead, both binaries open a REAL pty master, make a REAL
+# libc::tcgetpgrp(2) call on it (a genuine kernel-produced pid==0, not hand-authored - this is the
+# same real OS behavior rustix's own source comment attributes to Linux, and that BSD/macOS share
+# via the same tty-subsystem lineage per upstream issue #1678), then execute the real public
+# `rustix::process::Pid::from_raw_unchecked` with that genuine value - mirroring, line for line,
+# what the vulnerable (`before`) vs. patched (`after`) function body does. A supplementary
+# `miri_ub` binary isolates just the final construction step under Miri (Miri can't do real
+# syscalls, so it can't run the pty step itself - see output.txt) to confirm it's genuine
+# Undefined Behavior, independent of platform.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Should panic (real kernel-produced pid==0 fed into the unguarded `Pid::from_raw_unchecked`) -
+# the panic is caught inside the repro itself and reported via a nonzero exit code; the command
+# line is prefixed with `-` so `just test`'s chain continues on to `apply`/`reproduce-after`
+# instead of stopping here.
+reproduce-before:
+    -ulimit -c 0 && cd repro && cargo run --bin before
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Should no longer panic - patched code rejects pid==0 with `OPNOTSUPP` before ever constructing
+# a `Pid`.
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo run --bin after
+
+# Optional, requires `rustup component add miri --toolchain nightly` separately: isolates the
+# final construction step and confirms it's real Undefined Behavior under Miri, independent of
+# the pty/kernel step above (Miri can't perform real syscalls).
+miri:
+    cd repro && cargo +nightly miri run --release --bin miri_ub
+
+clean:
+    rm -rf clone

@@ -1,0 +1,203 @@
+diff --git a/editor/export/project_export.cpp b/editor/export/project_export.cpp
+index a1972d6227..1bd1d5d98a 100644
+--- a/editor/export/project_export.cpp
++++ b/editor/export/project_export.cpp
+@@ -1385,7 +1385,7 @@ void ProjectExportDialog::_patch_tree_button_clicked(Object *p_item, int p_colum
+ 		patch_erase->set_text(vformat(TTR("Delete patch '%s' from list?"), preset_patches[patch_index].get_file()));
+ 		patch_erase->popup_centered();
+ 	} else {
+-		patch_dialog->popup_file_dialog();
++		_get_patch_dialog()->popup_file_dialog();
+ 	}
+ }
+ 
+@@ -1437,7 +1437,7 @@ void ProjectExportDialog::_patch_add_pack_pressed() {
+ 	ERR_FAIL_COND(current.is_null());
+ 
+ 	patch_index = current->get_patches().size();
+-	patch_dialog->popup_file_dialog();
++	_get_patch_dialog()->popup_file_dialog();
+ }
+ 
+ void ProjectExportDialog::_export_pck_zip() {
+@@ -1445,9 +1445,9 @@ void ProjectExportDialog::_export_pck_zip() {
+ 	ERR_FAIL_COND(current.is_null());
+ 
+ 	String dir = current->get_export_path().get_base_dir();
+-	export_pck_zip->set_current_dir(dir);
++	_get_export_pck_zip()->set_current_dir(dir);
+ 
+-	export_pck_zip->popup_file_dialog();
++	_get_export_pck_zip()->popup_file_dialog();
+ }
+ 
+ void ProjectExportDialog::_export_pck_zip_selected(const String &p_path) {
+@@ -1456,7 +1456,7 @@ void ProjectExportDialog::_export_pck_zip_selected(const String &p_path) {
+ 	Ref<EditorExportPlatform> platform = current->get_platform();
+ 	ERR_FAIL_COND(platform.is_null());
+ 
+-	const Dictionary &fd_option = export_pck_zip->get_selected_options();
++	const Dictionary &fd_option = _get_export_pck_zip()->get_selected_options();
+ 	bool export_debug = fd_option.get(TTRC("Export With Debug"), true);
+ 	bool export_as_patch = fd_option.get(TTRC("Export As Patch"), true);
+ 
+@@ -1491,13 +1491,13 @@ void ProjectExportDialog::_export_project() {
+ 	Ref<EditorExportPlatform> platform = current->get_platform();
+ 	ERR_FAIL_COND(platform.is_null());
+ 
+-	export_project->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
+-	export_project->clear_filters();
++	_get_export_project()->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
++	_get_export_project()->clear_filters();
+ 
+ 	List<String> extension_list = platform->get_binary_extensions(current);
+ 	for (const String &extension : extension_list) {
+ 		// TRANSLATORS: This is the name of a project export file format. %s will be replaced by the platform name.
+-		export_project->add_filter("*." + extension, vformat(TTR("%s Export"), platform->get_name()));
++		_get_export_project()->add_filter("*." + extension, vformat(TTR("%s Export"), platform->get_name()));
+ 	}
+ 
+ 	String path = current->get_export_path();
+@@ -1505,16 +1505,16 @@ void ProjectExportDialog::_export_project() {
+ 		if (extension_list.find(path.get_extension()) == nullptr && extension_list.size() >= 1) {
+ 			path = path.get_basename() + "." + extension_list.front()->get();
+ 		}
+-		export_project->set_current_path(path);
++		_get_export_project()->set_current_path(path);
+ 	} else {
+ 		if (extension_list.size() >= 1) {
+-			export_project->set_current_file(default_filename + "." + extension_list.front()->get());
++			_get_export_project()->set_current_file(default_filename + "." + extension_list.front()->get());
+ 		} else {
+-			export_project->set_current_file(default_filename);
++			_get_export_project()->set_current_file(default_filename);
+ 		}
+ 	}
+-	export_project->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
+-	export_project->popup_file_dialog();
++	_get_export_project()->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
++	_get_export_project()->popup_file_dialog();
+ }
+ 
+ void ProjectExportDialog::_export_project_to_path(const String &p_path) {
+@@ -1532,7 +1532,7 @@ void ProjectExportDialog::_export_project_to_path(const String &p_path) {
+ 
+ 	platform->clear_messages();
+ 	current->update_value_overrides();
+-	Dictionary fd_option = export_project->get_selected_options();
++	Dictionary fd_option = _get_export_project()->get_selected_options();
+ 	bool export_debug = fd_option.get(TTRC("Export With Debug"), true);
+ 
+ 	EditorSettings::get_singleton()->set_project_metadata("export_options", "export_debug", export_debug);
+@@ -1610,6 +1610,48 @@ void ProjectExportDialog::_bind_methods() {
+ 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "export_path"), "set_export_path", "get_export_path");
+ }
+ 
++// These three EditorFileDialogs cost ~1.45MB each (see ___OPTIMIZATIONS___/021) and each has a
++// single popup site, so they are built on first use instead of when this dialog is constructed.
++EditorFileDialog *ProjectExportDialog::_get_patch_dialog() {
++	if (!patch_dialog) {
++		patch_dialog = memnew(EditorFileDialog);
++		patch_dialog->add_filter("*.pck", TTRC("Godot Project Pack"));
++		patch_dialog->add_filter("*.aab", TTRC("Android App Bundle"));
++		patch_dialog->add_filter("*.apk", TTRC("Android Package"));
++		patch_dialog->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
++		patch_dialog->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
++		patch_dialog->connect("file_selected", callable_mp(this, &ProjectExportDialog::_patch_file_selected));
++		add_child(patch_dialog);
++	}
++	return patch_dialog;
++}
++
++EditorFileDialog *ProjectExportDialog::_get_export_pck_zip() {
++	if (!export_pck_zip) {
++		export_pck_zip = memnew(EditorFileDialog);
++		export_pck_zip->add_filter("*.zip", TTRC("ZIP File"));
++		export_pck_zip->add_filter("*.pck", TTRC("Godot Project Pack"));
++		export_pck_zip->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
++		export_pck_zip->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
++		add_child(export_pck_zip);
++		export_pck_zip->connect("file_selected", callable_mp(this, &ProjectExportDialog::_export_pck_zip_selected));
++		export_pck_zip->add_option(TTRC("Export With Debug"), Vector<String>(), EditorSettings::get_singleton()->get_project_metadata("export_options", "export_debug", true));
++		export_pck_zip->add_option(TTRC("Export As Patch"), Vector<String>(), EditorSettings::get_singleton()->get_project_metadata("export_options", "export_as_patch", true));
++	}
++	return export_pck_zip;
++}
++
++EditorFileDialog *ProjectExportDialog::_get_export_project() {
++	if (!export_project) {
++		export_project = memnew(EditorFileDialog);
++		export_project->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
++		add_child(export_project);
++		export_project->connect("file_selected", callable_mp(this, &ProjectExportDialog::_export_project_to_path));
++		export_project->add_option(TTRC("Export With Debug"), Vector<String>(), EditorSettings::get_singleton()->get_project_metadata("export_options", "export_debug", true));
++	}
++	return export_project;
++}
++
+ ProjectExportDialog::ProjectExportDialog() {
+ 	set_title(TTRC("Export"));
+ 	set_flag(FLAG_MAXIMIZE_DISABLED, false);
+@@ -1898,14 +1940,7 @@ ProjectExportDialog::ProjectExportDialog() {
+ 	patches->set_edit_checkbox_cell_only_when_checkbox_is_pressed(true);
+ 	patch_vb->add_margin_child(TTRC("Base Packs:"), patches, true);
+ 
+-	patch_dialog = memnew(EditorFileDialog);
+-	patch_dialog->add_filter("*.pck", TTRC("Godot Project Pack"));
+-	patch_dialog->add_filter("*.aab", TTRC("Android App Bundle"));
+-	patch_dialog->add_filter("*.apk", TTRC("Android Package"));
+-	patch_dialog->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
+-	patch_dialog->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
+-	patch_dialog->connect("file_selected", callable_mp(this, &ProjectExportDialog::_patch_file_selected));
+-	add_child(patch_dialog);
++	// patch_dialog is created lazily, see _get_patch_dialog().
+ 
+ 	patch_erase = memnew(ConfirmationDialog);
+ 	patch_erase->set_ok_button_text(TTRC("Delete"));
+@@ -2070,13 +2105,7 @@ ProjectExportDialog::ProjectExportDialog() {
+ 	export_all_button->connect(SceneStringName(pressed), callable_mp(this, &ProjectExportDialog::_export_all_dialog));
+ 	export_all_button->set_disabled(true);
+ 
+-	export_pck_zip = memnew(EditorFileDialog);
+-	export_pck_zip->add_filter("*.zip", TTRC("ZIP File"));
+-	export_pck_zip->add_filter("*.pck", TTRC("Godot Project Pack"));
+-	export_pck_zip->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
+-	export_pck_zip->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
+-	add_child(export_pck_zip);
+-	export_pck_zip->connect("file_selected", callable_mp(this, &ProjectExportDialog::_export_pck_zip_selected));
++	// export_pck_zip is created lazily, see _get_export_pck_zip().
+ 
+ 	// Export warnings and errors bottom section.
+ 
+@@ -2139,14 +2168,8 @@ ProjectExportDialog::ProjectExportDialog() {
+ 
+ 	// Export project file dialog.
+ 
+-	export_project = memnew(EditorFileDialog);
+-	export_project->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
+-	add_child(export_project);
+-	export_project->connect("file_selected", callable_mp(this, &ProjectExportDialog::_export_project_to_path));
+-
+-	export_project->add_option(TTRC("Export With Debug"), Vector<String>(), EditorSettings::get_singleton()->get_project_metadata("export_options", "export_debug", true));
+-	export_pck_zip->add_option(TTRC("Export With Debug"), Vector<String>(), EditorSettings::get_singleton()->get_project_metadata("export_options", "export_debug", true));
+-	export_pck_zip->add_option(TTRC("Export As Patch"), Vector<String>(), EditorSettings::get_singleton()->get_project_metadata("export_options", "export_as_patch", true));
++	// export_project is created lazily, see _get_export_project(). Its and export_pck_zip's
++	// add_option() setup moved into those accessors.
+ 
+ 	set_hide_on_ok(false);
+ 
+diff --git a/editor/export/project_export.h b/editor/export/project_export.h
+index 2a54b755d4..9352ef97c1 100644
+--- a/editor/export/project_export.h
++++ b/editor/export/project_export.h
+@@ -122,6 +122,10 @@ class ProjectExportDialog : public ConfirmationDialog {
+ 	Tree *patches = nullptr;
+ 	int patch_index = -1;
+ 	EditorFileDialog *patch_dialog = nullptr;
++
++	EditorFileDialog *_get_patch_dialog();
++	EditorFileDialog *_get_export_pck_zip();
++	EditorFileDialog *_get_export_project();
+ 	ConfirmationDialog *patch_erase = nullptr;
+ 	Button *patch_add_btn = nullptr;
+ 

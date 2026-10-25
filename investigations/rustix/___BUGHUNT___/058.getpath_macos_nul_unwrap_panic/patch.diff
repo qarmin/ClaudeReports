@@ -1,0 +1,25 @@
+diff --git a/src/backend/libc/fs/syscalls.rs b/src/backend/libc/fs/syscalls.rs
+index c95eaf56..aec4d28f 100644
+--- a/src/backend/libc/fs/syscalls.rs
++++ b/src/backend/libc/fs/syscalls.rs
+@@ -2204,10 +2204,19 @@ pub(crate) fn getpath(fd: BorrowedFd<'_>) -> io::Result<CString> {
+         ret(c::fcntl(borrowed_fd(fd), c::F_GETPATH, buf.as_mut_ptr()))?;
+     }
+ 
+-    let l = buf.iter().position(|&c| c == 0).unwrap();
++    // `F_GETPATH`'s own contract only guarantees the buffer is large enough to hold the path
++    // plus its NUL terminator; it doesn't guarantee the kernel always leaves room to spare, so
++    // don't assume a NUL is always present somewhere in `buf` if the path itself is at or near
++    // `PATH_MAX` in length.
++    let l = match buf.iter().position(|&c| c == 0) {
++        Some(l) => l,
++        None => return Err(io::Errno::NAMETOOLONG),
++    };
+     buf.truncate(l);
+     buf.shrink_to_fit();
+ 
++    // `buf[..l]` contains no `0` byte by construction (`l` is the position of the first one),
++    // so this can never fail.
+     Ok(CString::new(buf).unwrap())
+ }
+ 

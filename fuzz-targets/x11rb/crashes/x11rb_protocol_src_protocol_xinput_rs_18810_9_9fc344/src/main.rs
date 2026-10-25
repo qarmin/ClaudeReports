@@ -1,0 +1,7 @@
+use x11rb_protocol::protocol::xinput::Fp3232;
+use x11rb_protocol::protocol::xinput::RawTouchBeginEvent;
+use x11rb_protocol::protocol::xinput::TouchEventFlags;
+
+fn main() {
+    <x11rb_protocol::protocol::xinput::RawTouchBeginEvent as x11rb_protocol::x11_utils::Serialize>::serialize_into(&RawTouchBeginEvent { response_type: 0u8, extension: 0u8, sequence: 0u16, length: 0u32, event_type: 0u16, deviceid: 0u16, time: 0u32, detail: 0u32, sourceid: 0u16, flags: TouchEventFlags::from(0u16), valuator_mask: vec![], axisvalues: vec![Fp3232::default()], axisvalues_raw: vec![] }, &mut vec![]);
+}

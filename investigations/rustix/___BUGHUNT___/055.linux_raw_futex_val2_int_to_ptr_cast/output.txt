@@ -1,0 +1,117 @@
+=== BEFORE fix, strict provenance (hard error), fresh clone + enable-miri-linux-raw.patch ===
+$ MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri run
+(repro/Cargo.toml depends on ../clone, features = ["std", "thread"] -> default backend
+selection on this host is linux_raw, which enable-miri-linux-raw.patch lets actually run
+under Miri instead of being silently swapped for the libc backend)
+
+error: unsupported operation: integer-to-pointer casts and `ptr::with_exposed_provenance` are not supported with `-Zmiri-strict-provenance`
+   --> /tmp/055_repro_scratch/clone/src/backend/linux_raw/thread/syscalls.rs:222:19
+    |
+222 |     let timeout = val2 as usize as *const Timespec;
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsupported operation occurred here
+    |
+    = help: use Strict Provenance APIs (https://doc.rust-lang.org/nightly/std/ptr/index.html#strict-provenance, https://crates.io/crates/sptr) instead
+    = note: stack backtrace:
+            0: rustix::backend::thread::syscalls::futex_val2
+                at /tmp/055_repro_scratch/clone/src/backend/linux_raw/thread/syscalls.rs:222:19: 222:51
+            1: rustix::thread::futex::requeue
+                at /tmp/055_repro_scratch/clone/src/thread/futex.rs:133:14: 133:80
+            2: main
+                at src/main.rs:12:13: 12:64
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error
+
+Reproduced deterministically 3/3 runs (also re-confirmed independently in the working
+worktree before this scratch-clone validation), same file:line every time - this is a
+compile-time-shape issue, not data/layout-dependent.
+
+Default (permissive) Miri provenance mode on the same code (working worktree, not
+re-captured in this fresh-clone run) emits a warning instead of a hard error, at the
+same line:
+
+warning: integer-to-pointer cast
+   --> src/backend/linux_raw/thread/syscalls.rs:222:19
+    |
+222 |     let timeout = val2 as usize as *const Timespec;
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ integer-to-pointer cast
+    |
+    = help: this program is using integer-to-pointer casts or (equivalently) `ptr::with_exposed_provenance`, which means that Miri might miss pointer bugs in this program
+    = help: see https://doc.rust-lang.org/nightly/std/ptr/fn.with_exposed_provenance.html for more details on that operation
+    = help: to ensure that Miri does not miss bugs in your program, use Strict Provenance APIs (https://doc.rust-lang.org/nightly/std/ptr/index.html#strict-provenance, https://crates.io/crates/sptr) instead
+    = help: you can then set `MIRIFLAGS=-Zmiri-strict-provenance` to ensure you are not relying on `with_exposed_provenance` semantics
+    = help: alternatively, `MIRIFLAGS=-Zmiri-permissive-provenance` disables this warning
+
+Default permissive-Miri execution then proceeds past this warning and dies later at the
+first real `asm!` block (src/backend/linux_raw/arch/x86_64.rs), confirming independently
+that linux_raw's inline-asm syscalls are indeed not Miri-executable at all, exactly as
+candidate 004 stated (now empirically verified rather than assumed):
+
+error: unsupported operation: inline assembly is not supported
+   --> src/backend/linux_raw/arch/x86_64.rs:253:5
+    |
+253 | /     asm!(
+254 | |         "syscall",
+255 | |         inlateout("rax") nr.to_asm() => r0,
+...   |
+264 | |         options(nostack, preserves_flags)
+265 | |     );
+    | |_____^ unsupported operation occurred here
+
+=== AFTER fix (patch.diff applied on top of enable-miri-linux-raw.patch), same command, same fresh clone ===
+$ MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri run
+
+error: unsupported operation: integer-to-pointer casts and `ptr::with_exposed_provenance` are not supported with `-Zmiri-strict-provenance`
+   --> /tmp/055_repro_scratch/clone/src/backend/linux_raw/conv.rs:105:13
+    |
+105 |     raw_arg(t as *mut _)
+    |             ^^^^^^^^^^^ unsupported operation occurred here
+    |
+    = help: use Strict Provenance APIs (https://doc.rust-lang.org/nightly/std/ptr/index.html#strict-provenance, https://crates.io/crates/sptr) instead
+    = note: stack backtrace:
+            0: rustix::backend::conv::pass_usize::<'_, rustix::backend::reg::A1>
+                at /tmp/055_repro_scratch/clone/src/backend/linux_raw/conv.rs:105:13: 105:24
+            1: rustix::backend::conv::c_uint::<'_, rustix::backend::reg::A1>
+                at /tmp/055_repro_scratch/clone/src/backend/linux_raw/conv.rs:256:5: 256:27
+            2: rustix::backend::conv::<impl std::convert::From<(rustix::backend::thread::futex::Operation, rustix::thread::futex::Flags)> for rustix::backend::reg::ArgReg<'_, rustix::backend::reg::A1>>::from
+                at /tmp/055_repro_scratch/clone/src/backend/linux_raw/conv.rs:800:9: 800:46
+            3: rustix::backend::thread::syscalls::futex_val2
+                at /tmp/055_repro_scratch/clone/src/backend/linux_raw/arch/mod.rs:131:13: 131:23
+            4: rustix::thread::futex::requeue
+                at /tmp/055_repro_scratch/clone/src/thread/futex.rs:133:14: 133:80
+            5: main
+                at src/main.rs:12:13: 12:64
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error
+
+The targeted error at src/backend/linux_raw/thread/syscalls.rs:222 is gone - confirming
+the fix. Miri now proceeds further into the same call and hits a separate, pre-existing,
+out-of-scope integer-to-pointer cast in conv.rs's `pass_usize` (used for every plain
+integer syscall argument across the whole linux_raw backend, not just futex - see
+RESULT.md's "What's not done" section). This is expected and does not indicate the fix
+failed; it indicates the fix is narrowly scoped to the one suspect line, as intended.
+
+=== Real (non-Miri) syscall smoke test, fix applied, real Linux hardware ===
+$ cargo run --example miri_futex_linux_raw --features "std,thread"
+(same repro body, run normally instead of under Miri; default build.rs/Cargo.toml
+selection, i.e. no enable-miri-linux-raw.patch involved - this is the real production
+code path, unaffected by the #[cfg(miri)] gate)
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.79s
+     Running `target/debug/examples/miri_futex_linux_raw`
+done
+
+=== Project test suite, before vs. after fix ===
+$ cargo test --workspace --features "std,all-apis" --no-fail-fast
+BEFORE: 413 passed, 1 failed (ioctl::test_int_setter - pre-existing sandbox limitation,
+  "No such file or directory", unrelated to this change; same failure candidate 004 noted)
+AFTER:  413 passed, 1 failed (identical single failure, identical test)
+The 5 real futex tests (test_lock_unlock_pi, test_wait_wake, test_wait_timeout,
+test_waitv_wake, test_waitv_timeout) all pass before and after, via the real linux_raw
+backend on real Linux hardware. None of these built-in tests actually exercise
+requeue/cmp_requeue/wake_op with a nonzero val2 (grepped tests/thread/futex.rs for
+"requeue|wake_op|cmp_requeue|val2": no matches) - the real-syscall smoke test above
+covers that gap directly.

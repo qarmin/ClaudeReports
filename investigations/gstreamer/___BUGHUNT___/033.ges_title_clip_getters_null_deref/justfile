@@ -1,0 +1,59 @@
+# Self-contained reproduction for candidate 033 (ges_title_clip getters NULL deref).
+#
+# Everything needed is either in this folder or fetched by `just clone` into ./clone (gitignored).
+# `meson`/`ninja` must be on PATH (e.g. `uv tool install meson && uv tool install ninja`), and
+# `clang` with ASAN/UBSAN runtimes must be available.
+#
+# The build enables gst-editing-services plus enough of gst-plugins-base/good (playback, pango,
+# compositor, typefind, tools) for GESTitleClip's getters to actually succeed end-to-end after the
+# fix (not just stop crashing) - see RESULT.md's "What was tried" for why the narrower ges-only
+# build isn't enough post-fix (the fallback path this candidate's fix uses,
+# `ges_title_source_new()`, needs a real compositor/colorconvert/textrender element to fully
+# resolve, which is also true of the already-shipped `ges_title_clip_get_property()` that this fix
+# mirrors).
+
+repo_url := "git@github.com:GStreamer/gstreamer.git"
+base_commit := "65b9547519cdafce691e65777d4178280bf10808"
+
+test: clone reproduce-before apply rebuild reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && \
+    PATH="$HOME/.local/bin:$PATH" meson setup build-ges \
+        --buildtype=debug \
+        --wrap-mode=nodownload \
+        -Dges=enabled \
+        -Dbase=enabled \
+        -Dgood=enabled \
+        -Dugly=disabled \
+        -Dbad=disabled \
+        -Dlibav=disabled \
+        -Drtsp_server=disabled \
+        -Ddevtools=disabled \
+        -Ddoc=disabled \
+        -Dexamples=disabled \
+        -Dintrospection=disabled \
+        -Dges:tests=enabled
+    cd clone && PATH="$HOME/.local/bin:$PATH" ninja -C build-ges
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug (SEGV
+# reading self->priv->track_titles->data inside ges_title_clip_get_text, ges-title-clip.c:541).
+reproduce-before:
+    ulimit -c 0 && BUILD_DIR="{{justfile_directory()}}/clone/build-ges" bash "{{justfile_directory()}}/repro/run.sh"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+rebuild:
+    cd clone && PATH="$HOME/.local/bin:$PATH" ninja -C build-ges
+
+# Same repro again, now against the patched+rebuilt clone - all 8 getters should return sane
+# default values without crashing.
+reproduce-after:
+    ulimit -c 0 && BUILD_DIR="{{justfile_directory()}}/clone/build-ges" bash "{{justfile_directory()}}/repro/run.sh"
+
+clean:
+    rm -rf clone repro/bin

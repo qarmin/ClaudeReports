@@ -1,0 +1,115 @@
+diff --git a/crates/zune-png/src/apng.rs b/crates/zune-png/src/apng.rs
+index 85ba1be2..8455243c 100644
+--- a/crates/zune-png/src/apng.rs
++++ b/crates/zune-png/src/apng.rs
+@@ -119,12 +119,12 @@ impl SingleFrame {
+ 
+ /// ERROR:
+ ///
+-/// #use  [post_process_image_apng]
++/// #use  [ApngContext::process_frame]
+ ///
+ /// This function had the wrong signature for post processing an APNG image, but due
+ /// to backward compatibility could not be entirely removed
+ #[deprecated(
+-    note = "This function signature was wrong, but maintained for backwards compatibility, use post_process_image_apng instead"
++    note = "This function signature was wrong, but maintained for backwards compatibility, use ApngContext::process_frame instead"
+ )]
+ #[allow(unused_variables, unused_mut)]
+ pub fn post_process_image(
+@@ -132,7 +132,7 @@ pub fn post_process_image(
+     prev_frame: Option<&[u8]>, output: &mut [u8], gamma: Option<f32>,
+ ) -> Result<(), PngDecodeErrors> {
+     Err(PngDecodeErrors::GenericStatic(
+-        "Wrong function signature, use post_process_image_apng",
++        "Wrong function signature, use ApngContext::process_frame",
+     ))
+ }
+ 
+diff --git a/crates/zune-png/src/decoder.rs b/crates/zune-png/src/decoder.rs
+index d3de019e..d742f9df 100644
+--- a/crates/zune-png/src/decoder.rs
++++ b/crates/zune-png/src/decoder.rs
+@@ -60,7 +60,7 @@
+ //! 2. **Blending**: The *current* frame is drawn onto the canvas using its blend operation.
+ //!
+ //! To correctly decode an APNG, you must maintain the state of the main canvas and a backup canvas
+-//! across iterations. The `post_process_image_apng` utility function correctly abstracts the math and
++//! across iterations. The [`ApngContext`] utility correctly abstracts the math and
+ //! state management needed for handling `DisposeOp` and `BlendOp` across both `u8` and `u16` depths.
+ //!
+ //! ## Example: Decoding an APNG
+@@ -68,7 +68,7 @@
+ //! ```no_run
+ //! use zune_core::bytestream::ZCursor;
+ //! use zune_core::result::DecodingResult;
+-//! use zune_png::{PngDecoder, FrameInfo, post_process_image_apng};
++//! use zune_png::{PngDecoder, FrameInfo, ApngContext};
+ //!
+ //! let file_data = std::fs::read("animated.png").unwrap();
+ //! let mut decoder = PngDecoder::new(ZCursor::new(&file_data));
+@@ -80,43 +80,30 @@
+ //!     let colorspace = decoder.colorspace().unwrap();
+ //!     let components = colorspace.num_components();
+ //!
+-//!     // 1. Allocate buffers for the entire canvas size
++//!     // 1. Allocate the main output canvas
+ //!     let buffer_size = info.width * info.height * components;
+ //!     let mut output_canvas = vec![0u8; buffer_size];
+-//!     let mut backup_canvas = vec![0u8; buffer_size];
+ //!
+-//!     // 2. Track the previous frame's rules for proper disposal
+-//!     let mut prev_frame_info: Option<FrameInfo> = None;
++//!     // 2. Initialize the APNG context BEFORE the loop; it owns the backup
++//!     //    canvas and gamma tables needed for DisposeOp/BlendOp handling.
++//!     let mut ctx = ApngContext::<u8>::new(&info, colorspace);
+ //!
+ //!     // 3. Loop through all frames
+ //!     while decoder.more_frames() {
+ //!         decoder.decode_headers().unwrap();
+ //!
+-//!         // Clone the current frame info so we can store it at the end of the loop
+ //!         let frame = decoder.frame_info().unwrap().clone();
+ //!
+ //!         match decoder.decode().unwrap() {
+ //!             DecodingResult::U8(frame_pixels) => {
+ //!                 // 4. Run the compositing lifecycle
+-//!                 post_process_image_apng(
+-//!                     &info,
+-//!                     colorspace,
+-//!                     &frame,
+-//!                     prev_frame_info.as_ref(), // Pass previous rules for disposal
+-//!                     &frame_pixels,
+-//!                     &mut backup_canvas,       // Used internally for DisposeOp::Previous
+-//!                     &mut output_canvas,       // The main rendering surface
+-//!                     None                      // Optional gamma override
+-//!                 ).unwrap();
++//!                 ctx.process_frame(&frame, &frame_pixels, &mut output_canvas).unwrap();
+ //!
+ //!                 // `output_canvas` now contains the fully composited current frame!
+ //!                 // You can save it, display it, or push it to a video encoder here.
+-//!
+-//!                 // 5. Save current frame info to act as disposal instructions for the next loop
+-//!                 prev_frame_info = Some(frame);
+ //!             }
+ //!             DecodingResult::U16(_) => {
+-//!                 // post_process_image_apng is generic and supports U16 as well!
++//!                 // ApngContext is generic and supports U16 as well - use ApngContext::<u16>.
+ //!                 // (Implementation omitted for brevity)
+ //!             }
+ //!             _ => {}
+@@ -505,7 +492,13 @@ impl<T: ZByteReaderTrait> PngDecoder<T> {
+     ///
+     /// # Example
+     /// ```no_run
+-    /// // Assuming decoder is initialized and headers are decoded
++    /// use zune_core::bytestream::ZCursor;
++    /// use zune_png::PngDecoder;
++    ///
++    /// let file_data = std::fs::read("animated.png").unwrap();
++    /// let mut decoder = PngDecoder::new(ZCursor::new(&file_data));
++    /// decoder.decode_headers().unwrap();
++    ///
+     /// while decoder.more_frames() {
+     ///     decoder.decode_headers().unwrap();
+     ///     let current_frame_info = decoder.frame_info().unwrap();

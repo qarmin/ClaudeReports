@@ -1,0 +1,156 @@
+=== 1a. uname() under Miri, cross-interpreting --target x86_64-apple-darwin ===
+      Adding rustix v1.1.5 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050)
+      Adding windows-link v0.2.1
+      Adding windows-sys v0.61.2
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-apple-darwin/debug/repro`
+error: Undefined Behavior: constructing invalid value of type libc::unix::bsd::utsname: at .sysname[5], encountered uninitialized memory, but expected an integer
+  --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050/src/backend/libc/system/syscalls.rs:38:9
+   |
+38 |         uname.assume_init()
+   |         ^^^^^^^^^^^^^^^^^^^ Undefined Behavior occurred here
+   |
+   = help: this indicates a bug in the program: it performed an invalid operation, and caused Undefined Behavior
+   = help: see https://doc.rust-lang.org/nightly/reference/behavior-considered-undefined.html for further information
+   = note: stack backtrace:
+           0: rustix::backend::system::syscalls::uname
+               at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050/src/backend/libc/system/syscalls.rs:38:9: 38:28
+           1: rustix::system::uname
+               at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050/src/system.rs:54:11: 54:45
+           2: main
+               at src/main.rs:2:13: 2:36
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error
+
+
+=== 1b. uname() under Miri, native x86_64-unknown-linux-gnu (no --target) ===
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-unknown-linux-gnu/debug/repro`
+error: Undefined Behavior: constructing invalid value of type libc::unix::linux_like::utsname: at .sysname[5], encountered uninitialized memory, but expected an integer
+  --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050/src/backend/libc/system/syscalls.rs:38:9
+   |
+38 |         uname.assume_init()
+   |         ^^^^^^^^^^^^^^^^^^^ Undefined Behavior occurred here
+   |
+   = help: this indicates a bug in the program: it performed an invalid operation, and caused Undefined Behavior
+   = help: see https://doc.rust-lang.org/nightly/reference/behavior-considered-undefined.html for further information
+   = note: stack backtrace:
+           0: rustix::backend::system::syscalls::uname
+               at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050/src/backend/libc/system/syscalls.rs:38:9: 38:28
+           1: rustix::system::uname
+               at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050/src/system.rs:54:11: 54:45
+           2: main
+               at src/main.rs:2:13: 2:36
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error
+
+=== 2. Real (non-Miri) poison-byte verification: does the real Linux syscall fully initialize the whole struct? ===
+--- run 1 ---
+   Compiling repro v0.1.0 (/tmp/rustix_termios_miri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s
+     Running `target/debug/repro`
+uname():    size=390, any 0xAA poison byte remaining: false
+sysinfo():  size=112, any 0xAA poison byte remaining: false
+getrlimit(): size=16, any 0xAA poison byte remaining: false
+--- run 2 ---
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running `target/debug/repro`
+uname():    size=390, any 0xAA poison byte remaining: false
+sysinfo():  size=112, any 0xAA poison byte remaining: false
+getrlimit(): size=16, any 0xAA poison byte remaining: false
+--- run 3 ---
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running `target/debug/repro`
+uname():    size=390, any 0xAA poison byte remaining: false
+sysinfo():  size=112, any 0xAA poison byte remaining: false
+getrlimit(): size=16, any 0xAA poison byte remaining: false
+=== 3. socketpair() under Miri: native Linux and cross-interpreted apple-darwin ===
+--- native linux ---
+      Adding rustix v1.1.5 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050)
+      Adding windows-link v0.2.1
+      Adding windows-sys v0.61.2
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-unknown-linux-gnu/debug/repro`
+socketpair ok
+--- apple-darwin ---
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-apple-darwin/debug/repro`
+socketpair ok
+=== 4. tcgetattr() non-Linux generic path (MaybeUninit::<Termios>::uninit() -> c::tcgetattr -> assume_init()), cross-interpreted for QNX (target_os=nto, has a genuine __reserved field) ===
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-pc-nto-qnx710/debug/repro`
+error: unsupported operation: can't call foreign function `tcgetattr` on OS `nto`
+   --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050/src/backend/libc/termios/syscalls.rs:106:13
+    |
+106 |         ret(c::tcgetattr(borrowed_fd(fd), result.as_mut_ptr().cast()))?;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsupported operation occurred here
+    |
+    = help: this means the program tried to do something Miri does not support; it does not indicate a bug in the program
+    = note: stack backtrace:
+            0: rustix::backend::termios::syscalls::tcgetattr
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050/src/backend/libc/termios/syscalls.rs:106:13: 106:70
+            1: rustix::termios::tcgetattr::<rustix::fd::BorrowedFd<'_>>
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050/src/termios/tc.rs:31:5: 31:54
+            2: main
+                at src/main.rs:3:11: 3:41
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error
+
+=== 5. BSD kqueue()/kevent() cross-interpreted for apple-darwin: no Miri shim for kqueue() itself ===
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-apple-darwin/debug/repro`
+error: unsupported operation: can't call foreign function `kqueue` on OS `macos`
+  --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050/src/backend/libc/event/syscalls.rs:91:27
+   |
+91 |     unsafe { ret_owned_fd(c::kqueue()) }
+   |                           ^^^^^^^^^^^ unsupported operation occurred here
+   |
+   = help: this means the program tried to do something Miri does not support; it does not indicate a bug in the program
+   = note: stack backtrace:
+           0: rustix::backend::event::syscalls::kqueue
+               at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050/src/backend/libc/event/syscalls.rs:91:27: 91:38
+           1: rustix::event::kqueue::kqueue
+               at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050/src/event/kqueue.rs:396:5: 396:23
+           2: main
+               at src/main.rs:2:14: 2:45
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error
+
+=== 6. Solaris/illumos port_create()/port_get() cross-interpreted for x86_64-unknown-illumos: no Miri shim for port_create() ===
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-unknown-illumos/debug/repro`
+error: unsupported operation: can't call foreign function `port_create` on OS `illumos`
+   --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050/src/backend/libc/event/syscalls.rs:340:27
+    |
+340 |     unsafe { ret_owned_fd(c::port_create()) }
+    |                           ^^^^^^^^^^^^^^^^ unsupported operation occurred here
+    |
+    = help: this means the program tried to do something Miri does not support; it does not indicate a bug in the program
+    = note: stack backtrace:
+            0: rustix::backend::event::syscalls::port_create
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050/src/backend/libc/event/syscalls.rs:340:27: 340:43
+            1: rustix::event::port::create
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/050/src/event/port.rs:71:5: 71:28
+            2: main
+                at src/main.rs:2:16: 2:45
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error
+

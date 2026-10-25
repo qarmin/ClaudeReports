@@ -1,0 +1,46 @@
+use kurbo::Affine;
+use kurbo::Arc;
+use kurbo::Cap;
+use kurbo::CircleSegment;
+use kurbo::CuspType;
+use kurbo::Diagonal2;
+use kurbo::Join;
+use kurbo::LineIntersection;
+use kurbo::MAX_EXTREMA;
+use kurbo::PathEl;
+use kurbo::PathSeg;
+use kurbo::Point;
+use kurbo::Rect;
+use kurbo::RoundedRect;
+use kurbo::RoundedRectRadii;
+use kurbo::Stroke;
+use kurbo::StrokeCtx;
+use kurbo::Vec2;
+
+fn main() {
+    let _ = PathEl::MoveTo(RoundedRect::default().origin());
+    let line_intersection = LineIntersection { line_t: 10000000000.0f64, segment_t: f64::MAX };
+    let _ = line_intersection.is_finite();
+    let _ = MAX_EXTREMA;
+    let rect = Rect::new(1.0f64, 0.0f64, 207249957868.58365f64, f64::MAX);
+    let ellipse = rect.to_ellipse();
+    let point = ellipse.center();
+    let _ = CuspType::Loop;
+    let _ = CuspType::DoubleInflection;
+    let _ = Stroke::default();
+    let rounded_rect_radii = RoundedRectRadii::from((-35.8f64, -33.0f64, -40.4f64, 7.954071908978831e29f64));
+    let _ = StrokeCtx::default();
+    let affine = Affine::new([0.991f64, 81.0f64, 10000000000.0f64, 6.36503106460998e-230f64, 10000000000.0f64, 577.0f64]);
+    let affine2 = affine.pre_scale_non_uniform(-0.0f64, -0.0f64);
+    let _ = affine2.transform_rect_bbox(rect.expand());
+    let rounded_rect = <kurbo::BezPath as kurbo::Shape>::as_rounded_rect(&<kurbo::CircleSegment as kurbo::Shape>::into_path(CircleSegment::new(point, -1e300f64, f64::NEG_INFINITY, 173.0f64, 0.222f64), 2.2250738585072014e-308f64)).unwrap();
+    let _ = <kurbo::PathSeg as kurbo::ParamCurve>::subdivide(&PathSeg::Line(<kurbo::RoundedRect as kurbo::Shape>::as_line(&rounded_rect).unwrap()));
+    let _ = Diagonal2::new(1e-310f64, 1.1946697462982718e140f64);
+    let _ = rounded_rect_radii.as_single_radius();
+    let affine3 = affine2.pre_scale_non_uniform(50.5f64, f64::MIN);
+    let _ = affine3.with_translation(ellipse.with_center(Point::from((1.0000001f32, f32::NEG_INFINITY))).radii().rotate_scale(Vec2::new(34.8f64, 340.0f64)));
+    let _ = Cap::Butt;
+    let _ = Join::Bevel;
+    let bez_path = <kurbo::BezPath as kurbo::Shape>::into_path(<kurbo::Arc as kurbo::Shape>::into_path(Arc { center: point, radii: Vec2 { x: f64::MAX, y: 2.2250738585072014e-308f64 }, start_angle: 5.9068586614308054e-229f64, sweep_angle: 2.2250738585072014e-308f64, x_rotation: f64::NAN }, 0.0f64), -1e300f64);
+    let _ = bez_path.is_finite();
+}

@@ -1,0 +1,92 @@
+diff --git a/subprojects/gst-plugins-bad/ext/aes/gstaesdec.c b/subprojects/gst-plugins-bad/ext/aes/gstaesdec.c
+index 9386b94c01..730f365aaa 100644
+--- a/subprojects/gst-plugins-bad/ext/aes/gstaesdec.c
++++ b/subprojects/gst-plugins-bad/ext/aes/gstaesdec.c
+@@ -290,7 +290,7 @@ gst_aes_dec_set_property (GObject * object, guint prop_id,
+     case PROP_KEY:
+     {
+       guint hex_len = gst_aes_hexstring2bytearray (GST_ELEMENT (filter),
+-          g_value_get_string (value), filter->key);
++          g_value_get_string (value), filter->key, sizeof (filter->key));
+ 
+       if (!hex_len) {
+         GST_ERROR_OBJECT (filter, "invalid key");
+@@ -303,7 +303,7 @@ gst_aes_dec_set_property (GObject * object, guint prop_id,
+     {
+       gchar iv_string[2 * GST_AES_BLOCK_SIZE + 1];
+       guint hex_len = gst_aes_hexstring2bytearray (GST_ELEMENT (filter),
+-          g_value_get_string (value), filter->iv);
++          g_value_get_string (value), filter->iv, sizeof (filter->iv));
+ 
+       if (hex_len != GST_AES_BLOCK_SIZE) {
+         GST_ERROR_OBJECT (filter, "invalid initialization vector");
+diff --git a/subprojects/gst-plugins-bad/ext/aes/gstaesenc.c b/subprojects/gst-plugins-bad/ext/aes/gstaesenc.c
+index 1fa82d5ffc..e036a8a1e4 100644
+--- a/subprojects/gst-plugins-bad/ext/aes/gstaesenc.c
++++ b/subprojects/gst-plugins-bad/ext/aes/gstaesenc.c
+@@ -284,7 +284,7 @@ gst_aes_enc_set_property (GObject * object, guint prop_id,
+     case PROP_KEY:
+     {
+       guint hex_len = gst_aes_hexstring2bytearray (GST_ELEMENT (filter),
+-          g_value_get_string (value), filter->key);
++          g_value_get_string (value), filter->key, sizeof (filter->key));
+ 
+       if (!hex_len) {
+         GST_ERROR_OBJECT (filter, "invalid key");
+@@ -297,7 +297,7 @@ gst_aes_enc_set_property (GObject * object, guint prop_id,
+     {
+       gchar iv_string[2 * GST_AES_BLOCK_SIZE + 1];
+       guint hex_len = gst_aes_hexstring2bytearray (GST_ELEMENT (filter),
+-          g_value_get_string (value), filter->iv);
++          g_value_get_string (value), filter->iv, sizeof (filter->iv));
+ 
+       if (hex_len != GST_AES_BLOCK_SIZE) {
+         GST_ERROR_OBJECT (filter, "invalid initialization vector");
+diff --git a/subprojects/gst-plugins-bad/ext/aes/gstaeshelper.c b/subprojects/gst-plugins-bad/ext/aes/gstaeshelper.c
+index 663593a464..b530093e0f 100644
+--- a/subprojects/gst-plugins-bad/ext/aes/gstaeshelper.c
++++ b/subprojects/gst-plugins-bad/ext/aes/gstaeshelper.c
+@@ -133,13 +133,15 @@ gst_aes_bytearray2hexstring (const guchar * in, gchar * const out,
+  *
+  * @param filter calling element
+  * @param in input hex string
+- * @param allocated byte array for output
++ * @param out allocated byte array for output
++ * @param out_size size in bytes of the @out buffer; the conversion stops
++ *   (without writing past it) once @out_size bytes have been written
+  *
+- * @return output byte array
++ * @return number of bytes written to @out
+  */
+ guint
+ gst_aes_hexstring2bytearray (GstElement * filter, const gchar * in,
+-    guchar * out)
++    guchar * out, gsize out_size)
+ {
+   gchar byte_val;
+   guint hex_count = 0;
+@@ -149,6 +151,11 @@ gst_aes_hexstring2bytearray (GstElement * filter, const gchar * in,
+   g_return_val_if_fail (in && out, 0);
+ 
+   while (*in != 0) {
++    if (hex_count >= out_size) {
++      GST_ERROR_OBJECT (filter, "hex string too long for destination buffer "
++          "(max %" G_GSIZE_FORMAT " bytes)", out_size);
++      return 0;
++    }
+     /* Compute fist half-byte */
+     if (*in >= 'A' && *in <= 'F') {
+       byte_val = (*in - 55) << 4;
+diff --git a/subprojects/gst-plugins-bad/ext/aes/gstaeshelper.h b/subprojects/gst-plugins-bad/ext/aes/gstaeshelper.h
+index 46288f2537..f2b1f04fdd 100644
+--- a/subprojects/gst-plugins-bad/ext/aes/gstaeshelper.h
++++ b/subprojects/gst-plugins-bad/ext/aes/gstaeshelper.h
+@@ -98,7 +98,7 @@ gst_aes_bytearray2hexstring (const guchar * in, gchar * const out,
+     const gushort len);
+ guint
+ gst_aes_hexstring2bytearray (GstElement * filter, const gchar * in,
+-    guchar * out);
++    guchar * out, gsize out_size);
+ 
+ G_END_DECLS
+ #endif /* __GST_AES_HELPER_H__ */

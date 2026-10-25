@@ -1,0 +1,177 @@
+diff --git a/crates/zune-imageprocs/src/composite.rs b/crates/zune-imageprocs/src/composite.rs
+index d445eee8..0583b2a5 100644
+--- a/crates/zune-imageprocs/src/composite.rs
++++ b/crates/zune-imageprocs/src/composite.rs
+@@ -185,18 +185,40 @@ fn composite_two_images(
+                 .map(|ch| ch.reinterpret_as().unwrap())
+                 .collect();
+ 
+-            dst_image.par_process_regions::<u8, _>(false, |region| {
+-                composite_region::<u8>(
+-                    region,
+-                    &src_channels,
+-                    src_width,
+-                    src_height,
+-                    start_x,
+-                    start_y,
+-                    method,
+-                    has_alpha,
+-                );
+-            })?;
++            // Over/Multiply/Screen are the hottest blend methods and, for u8, are an
++            // "associated alpha" scaling problem exactly like premul_alpha.rs already solves
++            // (see that module's doc comment) - use the same fixed-point integer path instead
++            // of a per-pixel f32 convert/multiply/clamp/round/convert-back round trip.
++            if matches!(
++                method,
++                CompositeMethod::Over | CompositeMethod::Multiply | CompositeMethod::Screen
++            ) {
++                dst_image.par_process_regions::<u8, _>(false, |region| {
++                    composite_region_u8_fast(
++                        region,
++                        &src_channels,
++                        src_width,
++                        src_height,
++                        start_x,
++                        start_y,
++                        method,
++                        has_alpha,
++                    );
++                })?;
++            } else {
++                dst_image.par_process_regions::<u8, _>(false, |region| {
++                    composite_region::<u8>(
++                        region,
++                        &src_channels,
++                        src_width,
++                        src_height,
++                        start_x,
++                        start_y,
++                        method,
++                        has_alpha,
++                    );
++                })?;
++            }
+         }
+         BitType::U16 => {
+             // Safely extract all immutable source channels upfront
+@@ -404,6 +426,119 @@ fn composite_region<T>(
+         }
+     }
+ }
++/// Integer approximation of `round(x / 255)` for `x` in `0..=65025` (i.e. `255 * 255`), using
++/// reciprocal-multiply-and-shift instead of a division - the same "div255" bit trick
++/// `premul_alpha.rs`'s `premultiply_u8` already relies on (`temp = a*b + 0x80; (temp + (temp >>
++/// 8)) >> 8`), generalized here to also cover a weighted sum of two products (the `Over` color
++/// blend below), not just a single product.
++#[inline(always)]
++fn div255(x: u32) -> u32 {
++    let y = x + 128;
++    (y + (y >> 8)) >> 8
++}
++
++/// Fixed-point integer implementation of [`composite_region`] specialized for `u8`, covering
++/// only `CompositeMethod::Over`, `Multiply` and `Screen` - the three blend modes whose float
++/// formula in `composite_region` is a pure "associated alpha" scaling (`a*c_src +
++/// (1-a)*c_dst`-shaped), which `div255` reproduces bit-exactly without any `f32` round trip.
++/// Other methods keep using the generic float path in [`composite_region`].
++#[allow(clippy::too_many_arguments)]
++fn composite_region_u8_fast(
++    region: &mut PlanarRegionMut<'_, u8>, src_channels: &[&[u8]], src_width: usize,
++    src_height: usize, start_x: usize, start_y: usize, method: CompositeMethod, has_alpha: bool,
++) {
++    // 1. Calculate Y-axis intersection
++    let r_start_y = region.y_offset;
++    let r_end_y = region.y_offset + region.height;
++
++    let overlap_start_y = r_start_y.max(start_y);
++    let overlap_end_y = r_end_y.min(start_y + src_height);
++
++    if overlap_start_y >= overlap_end_y {
++        return;
++    }
++
++    // 2. Calculate X-axis intersection
++    let overlap_start_x = start_x.min(region.width);
++    let overlap_end_x = (start_x + src_width).min(region.width);
++    let overlap_width = overlap_end_x.saturating_sub(overlap_start_x);
++
++    if overlap_width == 0 {
++        return;
++    }
++
++    let num_color_channels =
++        if has_alpha { region.channels.len() - 1 } else { region.channels.len() };
++    let alpha_idx = if has_alpha { Some(region.channels.len() - 1) } else { None };
++
++    macro_rules! process_overlap {
++        (|$s_idx:ident, $d_idx:ident| $body:block) => {
++            for y in overlap_start_y..overlap_end_y {
++                let src_y = y - start_y;
++                let dst_local_y = y - r_start_y;
++
++                let src_row_start = src_y * src_width;
++                let dst_row_start = dst_local_y * region.width + overlap_start_x;
++
++                for x in 0..overlap_width {
++                    let $s_idx = src_row_start + x;
++                    let $d_idx = dst_row_start + x;
++                    $body
++                }
++            }
++        };
++    }
++
++    match method {
++        CompositeMethod::Over => {
++            if let Some(a_idx) = alpha_idx {
++                process_overlap!(|s_idx, d_idx| {
++                    let a_src = u32::from(src_channels[a_idx][s_idx]);
++                    let a_dst = u32::from(region.channels[a_idx][d_idx]);
++                    let inv_a_src = 255 - a_src;
++
++                    // Blend colors: C_out = a_src * C_src + (1 - a_src) * C_dst
++                    for c in 0..num_color_channels {
++                        let c_src = u32::from(src_channels[c][s_idx]);
++                        let c_dst = u32::from(region.channels[c][d_idx]);
++                        region.channels[c][d_idx] = div255(a_src * c_src + inv_a_src * c_dst) as u8;
++                    }
++
++                    // Blend alpha: A_out = A_src + A_dst * (1 - A_src)
++                    // a_src is an integer, so a_src + round(x) == round(a_src + x) exactly.
++                    region.channels[a_idx][d_idx] = (a_src + div255(a_dst * inv_a_src)) as u8;
++                });
++            } else {
++                // If there is no alpha, `Over` behaves exactly like `Src`
++                process_overlap!(|s_idx, d_idx| {
++                    for c in 0..num_color_channels {
++                        region.channels[c][d_idx] = src_channels[c][s_idx];
++                    }
++                });
++            }
++        }
++        CompositeMethod::Multiply => {
++            process_overlap!(|s_idx, d_idx| {
++                for c in 0..num_color_channels {
++                    let s = u32::from(src_channels[c][s_idx]);
++                    let d = u32::from(region.channels[c][d_idx]);
++                    region.channels[c][d_idx] = div255(s * d) as u8;
++                }
++            });
++        }
++        CompositeMethod::Screen => {
++            process_overlap!(|s_idx, d_idx| {
++                for c in 0..num_color_channels {
++                    let s = 255 - u32::from(src_channels[c][s_idx]);
++                    let d = 255 - u32::from(region.channels[c][d_idx]);
++                    region.channels[c][d_idx] = (255 - div255(s * d)) as u8;
++                }
++            });
++        }
++        _ => unreachable!("composite_region_u8_fast only handles Over/Multiply/Screen"),
++    }
++}
++
+ // ─── Tests ────────────────────────────────────────────────────────────────────
+ 
+ #[cfg(test)]

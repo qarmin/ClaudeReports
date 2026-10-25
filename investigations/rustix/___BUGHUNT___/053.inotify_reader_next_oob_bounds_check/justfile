@@ -1,0 +1,36 @@
+# Self-contained reproduction for candidate 053.
+#
+# `repro/` drives the real, public `rustix::fs::inotify::Reader::next()` API
+# with a real pipe fd and a real short `read()` - see repro/src/main.rs for
+# why this needs no kernel/inotify fd at all to trigger: `Reader` is generic
+# over any `Fd: AsFd`.
+#
+# Using the `https://` clone URL, not `git@github.com:...` SSH, per this
+# project's own recorded gotcha (___BUGHUNT___/projects/rustix.md,
+# 2026-09-18): SSH clone fails in a sandbox with no agent/known_hosts set up.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should print
+# "BUG: ..." and exit 1, with garbage (uninitialized-memory) event fields.
+reproduce-before:
+    -cd repro && cargo run --release
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should print "FIXED: ..."
+# (Err(Errno::INVAL)) and exit 0.
+reproduce-after:
+    cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

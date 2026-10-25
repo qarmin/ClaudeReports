@@ -1,0 +1,41 @@
+# Self-contained reproduction for candidate 008 (zune-qoi QOI encode: buffer into a local
+# Vec<u8> instead of writing one opcode byte at a time through the generic ZWriter/
+# ZByteWriterTrait abstraction).
+#
+# `bench/` is a standalone crate (no suitable existing benchmark covered QOI *encode* in this
+# project - only decode had one, at benchmarks/benches/decode_qoi.rs) that depends on
+# `{ path = "../clone/crates/zune-qoi" }`, the clone `just clone` creates below.
+#
+# repo_url/base_commit are pinned to the exact commit patch.diff was captured against.
+
+repo_url := "https://github.com/etemesi254/zune-image.git"
+base_commit := "533296caf9a6783691d42b2dfbc623029216cbaf"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-baseline:
+    cd bench && cargo build --release
+    cp bench/target/release/qoi_encode_bench ./bin_baseline
+
+build-patched:
+    cd bench && cargo build --release
+    cp bench/target/release/qoi_encode_bench ./bin_patched
+
+# Note: `just` runs each recipe line as its own separate shell invocation, so `ulimit -c 0` is
+# prefixed onto each line that actually executes the binary rather than set once on its own line.
+bench:
+    @echo "=== baseline (before patch) ==="
+    ulimit -c 0 && ./bin_baseline testdata/wikipedia_008.qoi 60
+    @echo "=== patched (after patch) ==="
+    ulimit -c 0 && ./bin_patched testdata/wikipedia_008.qoi 60
+
+clean:
+    rm -rf clone bin_baseline bin_patched bench/target

@@ -1,0 +1,179 @@
+diff --git a/editor/file_system/dependency_editor.cpp b/editor/file_system/dependency_editor.cpp
+index 8daf389a0e..92c444ab64 100644
+--- a/editor/file_system/dependency_editor.cpp
++++ b/editor/file_system/dependency_editor.cpp
+@@ -102,6 +102,16 @@ void DependencyEditor::_searched(const String &p_path) {
+ 	_update_file();
+ }
+ 
++EditorFileDialog *DependencyEditor::_ensure_search_dialog() {
++	if (!search) {
++		search = memnew(EditorFileDialog);
++		search->connect("file_selected", callable_mp(this, &DependencyEditor::_searched));
++		search->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
++		add_child(search);
++	}
++	return search;
++}
++
+ void DependencyEditor::_load_pressed(Object *p_item, int p_cell, int p_button, MouseButton p_mouse_button) {
+ 	if (p_mouse_button != MouseButton::LEFT) {
+ 		return;
+@@ -109,8 +119,9 @@ void DependencyEditor::_load_pressed(Object *p_item, int p_cell, int p_button, M
+ 	TreeItem *ti = Object::cast_to<TreeItem>(p_item);
+ 	replacing = ti->get_text((int)Column::PATH);
+ 
+-	_setup_search_file_dialog(search, replacing, ti->get_metadata(0));
+-	search->popup_file_dialog();
++	EditorFileDialog *dialog = _ensure_search_dialog();
++	_setup_search_file_dialog(dialog, replacing, ti->get_metadata(0));
++	dialog->popup_file_dialog();
+ }
+ 
+ void DependencyEditor::_fix_and_find(EditorFileSystemDirectory *efsd, HashMap<String, HashMap<String, String>> &candidates) {
+@@ -433,10 +444,6 @@ DependencyEditor::DependencyEditor() {
+ 	vb->add_child(warning_label);
+ 
+ 	set_title(TTR("Dependency Editor"));
+-	search = memnew(EditorFileDialog);
+-	search->connect("file_selected", callable_mp(this, &DependencyEditor::_searched));
+-	search->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
+-	add_child(search);
+ }
+ 
+ /////////////////////////////////////
+diff --git a/editor/file_system/dependency_editor.h b/editor/file_system/dependency_editor.h
+index 63950a1fc0..a9b6b36969 100644
+--- a/editor/file_system/dependency_editor.h
++++ b/editor/file_system/dependency_editor.h
+@@ -69,6 +69,7 @@ class DependencyEditor : public AcceptDialog {
+ 	MenuButton *menu_sort = nullptr;
+ 
+ 	EditorFileDialog *search = nullptr;
++	EditorFileDialog *_ensure_search_dialog();
+ 
+ 	DependencyEditorSortBy sort_by = DependencyEditorSortBy::PATH;
+ 	String replacing;
+diff --git a/editor/import/3d/scene_import_settings.cpp b/editor/import/3d/scene_import_settings.cpp
+index 3bad35d4cc..b986b7d51e 100644
+--- a/editor/import/3d/scene_import_settings.cpp
++++ b/editor/import/3d/scene_import_settings.cpp
+@@ -1406,25 +1406,58 @@ void SceneImportSettingsDialog::_notification(int p_what) {
+ 	}
+ }
+ 
++// `external_extension_type` lives inside save_path's own vbox, so it exists exactly when save_path
++// does; `_save_dir_callback()` reads it and only runs via save_path's `dir_selected` signal.
++EditorFileDialog *SceneImportSettingsDialog::_ensure_save_path() {
++	if (!save_path) {
++		save_path = memnew(EditorFileDialog);
++		save_path->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_DIR);
++		HBoxContainer *extension_hb = memnew(HBoxContainer);
++		save_path->get_vbox()->add_child(extension_hb);
++		extension_hb->add_spacer();
++		extension_hb->add_child(memnew(Label(TTR("Save Extension:"))));
++		external_extension_type = memnew(OptionButton);
++		extension_hb->add_child(external_extension_type);
++		external_extension_type->add_item(TTR("Text: *.tres"));
++		external_extension_type->add_item(TTR("Binary: *.res"));
++		add_child(save_path);
++		save_path->connect("dir_selected", callable_mp(this, &SceneImportSettingsDialog::_save_dir_callback));
++	}
++	return save_path;
++}
++
++EditorFileDialog *SceneImportSettingsDialog::_ensure_item_save_path() {
++	if (!item_save_path) {
++		item_save_path = memnew(EditorFileDialog);
++		item_save_path->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
++		item_save_path->add_filter("*.tres", TTR("Text Resource"));
++		item_save_path->add_filter("*.res", TTR("Binary Resource"));
++		add_child(item_save_path);
++		item_save_path->connect("file_selected", callable_mp(this, &SceneImportSettingsDialog::_save_path_changed));
++	}
++	return item_save_path;
++}
++
+ void SceneImportSettingsDialog::_menu_callback(int p_id) {
++	EditorFileDialog *dialog = _ensure_save_path();
+ 	switch (p_id) {
+ 		case ACTION_EXTRACT_MATERIALS: {
+-			save_path->set_title(TTR("Select folder to extract material resources"));
++			dialog->set_title(TTR("Select folder to extract material resources"));
+ 			external_extension_type->select(0);
+ 		} break;
+ 		case ACTION_CHOOSE_MESH_SAVE_PATHS: {
+-			save_path->set_title(TTR("Select folder where mesh resources will save on import"));
++			dialog->set_title(TTR("Select folder where mesh resources will save on import"));
+ 			external_extension_type->select(1);
+ 		} break;
+ 		case ACTION_CHOOSE_ANIMATION_SAVE_PATHS: {
+-			save_path->set_title(TTR("Select folder where animations will save on import"));
++			dialog->set_title(TTR("Select folder where animations will save on import"));
+ 			external_extension_type->select(1);
+ 		} break;
+ 	}
+ 
+-	save_path->set_current_dir(base_path.get_base_dir());
++	dialog->set_current_dir(base_path.get_base_dir());
+ 	current_action = p_id;
+-	save_path->popup_centered_ratio();
++	dialog->popup_centered_ratio();
+ }
+ 
+ void SceneImportSettingsDialog::_save_path_changed(const String &p_path) {
+@@ -1450,10 +1483,11 @@ void SceneImportSettingsDialog::_browse_save_callback(Object *p_item, int p_colu
+ 
+ 	String path = item->get_text(1);
+ 
+-	item_save_path->set_current_file(path);
++	EditorFileDialog *dialog = _ensure_item_save_path();
++	dialog->set_current_file(path);
+ 	save_path_item = item;
+ 
+-	item_save_path->popup_centered_ratio();
++	dialog->popup_centered_ratio();
+ }
+ 
+ void SceneImportSettingsDialog::_save_dir_callback(const String &p_path) {
+@@ -1969,27 +2003,7 @@ SceneImportSettingsDialog::SceneImportSettingsDialog() {
+ 	external_path_tree->set_column_expand(2, false);
+ 	external_path_tree->set_column_custom_minimum_width(2, 200 * EDSCALE);
+ 	external_path_tree->set_column_title(2, TTR("Status"));
+-	save_path = memnew(EditorFileDialog);
+-	save_path->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_DIR);
+-	HBoxContainer *extension_hb = memnew(HBoxContainer);
+-	save_path->get_vbox()->add_child(extension_hb);
+-	extension_hb->add_spacer();
+-	extension_hb->add_child(memnew(Label(TTR("Save Extension:"))));
+-	external_extension_type = memnew(OptionButton);
+-	extension_hb->add_child(external_extension_type);
+-	external_extension_type->add_item(TTR("Text: *.tres"));
+-	external_extension_type->add_item(TTR("Binary: *.res"));
+ 	external_path_tree->set_hide_root(true);
+-	add_child(save_path);
+-
+-	item_save_path = memnew(EditorFileDialog);
+-	item_save_path->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
+-	item_save_path->add_filter("*.tres", TTR("Text Resource"));
+-	item_save_path->add_filter("*.res", TTR("Binary Resource"));
+-	add_child(item_save_path);
+-	item_save_path->connect("file_selected", callable_mp(this, &SceneImportSettingsDialog::_save_path_changed));
+-
+-	save_path->connect("dir_selected", callable_mp(this, &SceneImportSettingsDialog::_save_dir_callback));
+ 
+ 	update_view_timer = memnew(Timer);
+ 	update_view_timer->set_wait_time(0.2);
+diff --git a/editor/import/3d/scene_import_settings.h b/editor/import/3d/scene_import_settings.h
+index 842c5c1c94..21282637c4 100644
+--- a/editor/import/3d/scene_import_settings.h
++++ b/editor/import/3d/scene_import_settings.h
+@@ -215,6 +215,8 @@ class SceneImportSettingsDialog : public ConfirmationDialog {
+ 	ConfirmationDialog *external_paths = nullptr;
+ 	Tree *external_path_tree = nullptr;
+ 	EditorFileDialog *save_path = nullptr;
++	EditorFileDialog *_ensure_save_path();
++	EditorFileDialog *_ensure_item_save_path();
+ 	OptionButton *external_extension_type = nullptr;
+ 
+ 	EditorFileDialog *item_save_path = nullptr;

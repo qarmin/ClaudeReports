@@ -1,0 +1,65 @@
+diff --git a/src/fs/inotify.rs b/src/fs/inotify.rs
+index ad03dfa6..4f7cabf7 100644
+--- a/src/fs/inotify.rs
++++ b/src/fs/inotify.rs
+@@ -185,24 +185,54 @@ impl<'buf, Fd: AsFd> Reader<'buf, Fd> {
+             }
+         }
+ 
++        // `Reader` is generic over any `Fd: AsFd`, not just a real inotify
++        // fd, so a short/malformed `read` (e.g. a non-inotify fd, or a
++        // misbehaving kernel) must not be trusted to contain a full struct -
++        // check before casting instead of relying solely on the SAFETY
++        // comment below.
++        let remaining = self.initialized - self.offset;
++        if remaining < size_of::<inotify_event>() {
++            return Err(Errno::INVAL);
++        }
++
+         let ptr = self.buf[self.offset..].as_ptr();
+ 
+         // SAFETY:
+-        // - This data is initialized by the check above.
+-        //   - Assumption: the kernel will not give us partial structs.
++        // - This data is initialized: checked above (header) and below
++        //   (name, via `entry_len <= remaining`).
+         // - Assumption: the kernel uses proper alignment between structs.
+         // - The starting pointer is aligned (performed in `Reader::new`).
+         let event = unsafe { &*ptr.cast::<inotify_event>() };
+ 
+-        self.offset += size_of::<inotify_event>() + usize::try_from(event.len).unwrap();
++        let name_len = usize::try_from(event.len).unwrap();
++        let entry_len = size_of::<inotify_event>()
++            .checked_add(name_len)
++            .filter(|&entry_len| entry_len <= remaining)
++            .ok_or(Errno::INVAL)?;
++
++        self.offset += entry_len;
+ 
+         Ok(Event {
+             wd: event.wd,
+             events: ReadFlags::from_bits_retain(event.mask),
+             cookie: event.cookie,
+-            file_name: if event.len > 0 {
+-                // SAFETY: The kernel guarantees a NUL-terminated string.
+-                Some(unsafe { CStr::from_ptr(event.name.as_ptr().cast()) })
++            file_name: if name_len > 0 {
++                let name_bytes = {
++                    let ptr = self.buf[self.offset - name_len..self.offset]
++                        .as_ptr()
++                        .cast::<u8>();
++                    // SAFETY: `entry_len <= remaining` above guarantees this
++                    // whole range was actually filled in by the `read` call.
++                    unsafe { core::slice::from_raw_parts(ptr, name_len) }
++                };
++                // Bound the NUL search to the name's own region instead of
++                // trusting the kernel to have placed one there (an
++                // unbounded `CStr::from_ptr` would read past `name_bytes`,
++                // and potentially past the whole buffer, if it didn't).
++                name_bytes
++                    .iter()
++                    .position(|&b| b == 0)
++                    .and_then(|nul_pos| CStr::from_bytes_with_nul(&name_bytes[..=nul_pos]).ok())
+             } else {
+                 None
+             },

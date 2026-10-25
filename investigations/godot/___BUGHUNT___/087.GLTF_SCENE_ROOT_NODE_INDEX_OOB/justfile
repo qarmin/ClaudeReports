@@ -1,0 +1,30 @@
+# Self-contained reproduction: clones the repo, builds an ASan editor, runs repro/ before and after patch.diff.
+# NOTE: each `build` is a full scons build (tens of minutes, several GB of disk).
+
+repo_url := "https://github.com/qarmin/godot.git"
+base_commit := "b8420aa3a60689572a745c0f8a85c9df62d4cbfb"
+bin := "clone/bin/godot.linuxbsd.editor.x86_64.san"
+
+test: clone build reproduce-before apply build reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build:
+    cd clone && scons platform=linuxbsd target=editor use_asan=yes debug_symbols=yes -j12
+
+# Expected: FATAL: Index p_index = 0 is out of bounds (size() = 0), exit code 134 in GLTFDocument::generate_scene (`|| true` keeps the chain going)
+reproduce-before:
+    ulimit -c 0 && (./repro/run.sh "{{justfile_directory()}}/{{bin}}" || true)
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Expected: ERROR: glTF: A scene refers to a node that does not exist., append_from_buffer returned: Parse error, exit code 0
+reproduce-after:
+    ulimit -c 0 && ./repro/run.sh "{{justfile_directory()}}/{{bin}}"
+
+clean:
+    rm -rf clone

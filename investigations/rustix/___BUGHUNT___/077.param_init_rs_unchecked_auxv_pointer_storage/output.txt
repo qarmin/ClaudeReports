@@ -1,0 +1,64 @@
+=== 1. `just test` (clone at base_commit 287214b889865d8e1406a0ee71cc409b6f6191c8, fresh clone) ===
+
+ulimit -c 0 && cd repro && cargo run
+    Updating crates.io index
+     Locking 7 packages to latest compatible versions
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+   Compiling rustix v1.1.5 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/077.param_init_rs_unchecked_auxv_pointer_storage/clone)
+   Compiling bitflags v2.13.2
+   Compiling linux-raw-sys v0.12.1
+   Compiling repro077 v0.1.0 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/077.param_init_rs_unchecked_auxv_pointer_storage/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.72s
+     Running `target/debug/repro077`
+about to call linux_execfn() with a corrupted AT_EXECFN pointer...
+Segmentation fault
+error: recipe `reproduce-before` failed on line 23 with exit code 139
+
+=== 2. Repeat-run the compiled binary directly, 4 more times (5/5 total including above) ===
+
+$ for i in 1 2 3 4; do ulimit -c 0; ./target/debug/repro077 >/dev/null 2>&1; echo "run $i exit=$?"; done
+run 1 exit=139
+run 2 exit=139
+run 3 exit=139
+run 4 exit=139
+
+=== 3. Miri attempt (dead end - see RESULT.md "What was tried") ===
+
+$ cd ___BUGHUNT___/_reference/077_dig && MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri run
+...
+error[E0425]: cannot find function `init` in module `rustix::param`
+  --> main.rs:30:24
+   |
+30 |         rustix::param::init(buf.as_mut_ptr().cast());
+   |                        ^^^^ not found in `rustix::param`
+   |
+note: found an item that was configured out
+  --> .../src/param/mod.rs:10:5
+   |
+ 9 | #[cfg(all(feature = "use-explicitly-provided-auxv", not(libc)))]
+   |                                                        ------ the item is gated here
+10 | mod init;
+   |     ^^^^
+note: found an item that was configured out
+  --> .../src/param/mod.rs:14:15
+   |
+13 | #[cfg(all(feature = "use-explicitly-provided-auxv", not(libc)))]
+   |                                                        ------ the item is gated here
+14 | pub use init::init;
+
+(build.rs forces the libc backend whenever CARGO_CFG_MIRI is set - src/backend/linux_raw/param/
+init.rs, candidate 077's own subject file, is in backend/linux_raw/param/ and is therefore never
+compiled at all under Miri; `not(libc)` in the cfg gate above is false under Miri.)
+
+=== 4. Real-kernel AT_EXECFN probing (execveat(AT_EMPTY_PATH) via memfd, vs. normal exec) ===
+
+$ /tmp/execfn_probe              # execveat(mfd, "", argv, environ, AT_EMPTY_PATH)
+child: AT_EXECFN=0x7ffcf4182fee value="/dev/fd/3"
+
+$ /tmp/execfn_probe2             # normal execve() for comparison
+normal: AT_EXECFN=0x7ffe08788fe5 value="/tmp/execfn_probe2"
+
+Both real-kernel exec paths produce a valid, non-null, in-bounds AT_EXECFN string - no invalid
+value observed, consistent with candidate 034's earlier (PR_GET_AUXV / qemu-user) real-kernel
+probing of the same auxv surface.

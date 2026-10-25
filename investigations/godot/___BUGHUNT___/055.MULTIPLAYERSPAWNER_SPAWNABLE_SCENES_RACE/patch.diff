@@ -1,0 +1,68 @@
+diff --git a/modules/multiplayer/multiplayer_spawner.cpp b/modules/multiplayer/multiplayer_spawner.cpp
+index 0e8b6dfed9..dddbf112cb 100644
+--- a/modules/multiplayer/multiplayer_spawner.cpp
++++ b/modules/multiplayer/multiplayer_spawner.cpp
+@@ -103,29 +103,39 @@ void MultiplayerSpawner::add_spawnable_scene(const String &p_path) {
+ 	if (Engine::get_singleton()->is_editor_hint()) {
+ 		ERR_FAIL_COND(!ResourceLoader::exists(sc.path));
+ 	}
+-	spawnable_scenes.push_back(sc);
++	uint32_t new_size;
++	{
++		MutexLock lock(_thread_safe_);
++		spawnable_scenes.push_back(sc);
++		new_size = spawnable_scenes.size();
++	}
+ #ifdef TOOLS_ENABLED
+ 	if (Engine::get_singleton()->is_editor_hint()) {
+ 		return;
+ 	}
+ #endif
+ 	Node *node = get_spawn_node();
+-	if (spawnable_scenes.size() == 1 && node && !node->is_connected("child_entered_tree", callable_mp(this, &MultiplayerSpawner::_node_added))) {
++	if (new_size == 1 && node && !node->is_connected("child_entered_tree", callable_mp(this, &MultiplayerSpawner::_node_added))) {
+ 		node->connect("child_entered_tree", callable_mp(this, &MultiplayerSpawner::_node_added));
+ 	}
+ }
+ 
+ int MultiplayerSpawner::get_spawnable_scene_count() const {
++	MutexLock lock(_thread_safe_);
+ 	return spawnable_scenes.size();
+ }
+ 
+ String MultiplayerSpawner::get_spawnable_scene(int p_idx) const {
++	MutexLock lock(_thread_safe_);
+ 	ERR_FAIL_INDEX_V(p_idx, (int)spawnable_scenes.size(), "");
+ 	return spawnable_scenes[p_idx].path;
+ }
+ 
+ void MultiplayerSpawner::clear_spawnable_scenes() {
+-	spawnable_scenes.clear();
++	{
++		MutexLock lock(_thread_safe_);
++		spawnable_scenes.clear();
++	}
+ #ifdef TOOLS_ENABLED
+ 	if (Engine::get_singleton()->is_editor_hint()) {
+ 		return;
+@@ -138,6 +148,7 @@ void MultiplayerSpawner::clear_spawnable_scenes() {
+ }
+ 
+ Vector<String> MultiplayerSpawner::_get_spawnable_scenes() const {
++	MutexLock lock(_thread_safe_);
+ 	Vector<String> ss;
+ 	ss.resize(spawnable_scenes.size());
+ 	for (int i = 0; i < ss.size(); i++) {
+diff --git a/modules/multiplayer/multiplayer_spawner.h b/modules/multiplayer/multiplayer_spawner.h
+index 36436310aa..31d38785d7 100644
+--- a/modules/multiplayer/multiplayer_spawner.h
++++ b/modules/multiplayer/multiplayer_spawner.h
+@@ -43,6 +43,8 @@ public:
+ 	};
+ 
+ private:
++	_THREAD_SAFE_CLASS_
++
+ 	struct SpawnableScene {
+ 		String path;
+ 		Ref<PackedScene> cache;

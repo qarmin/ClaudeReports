@@ -1,0 +1,46 @@
+# Self-contained reproduction for this candidate.
+#
+# This does a full from-scratch Godot build (SCons, ~15-25 min on a modern multi-core machine) -
+# there is no lighter way to get a `--test`-capable binary from a pristine clone. `just test` runs
+# the whole cycle: clone pristine at base_commit, build, prove the crash exists, apply the fix,
+# rebuild, prove it's gone.
+
+repo_url := "git@github.com:godotengine/godot.git"
+base_commit := "9552dfb6859a1aaba1e570b8e0ef5c599b830f19"
+
+test: clone build reproduce-before apply rebuild reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# scons isn't preinstalled on a fresh machine/container - pip-install it if missing.
+build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v scons >/dev/null 2>&1 || pip3 install scons --break-system-packages
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+
+# Should SIGSEGV (see repro/run.sh for exactly how the unwritable dir is simulated).
+reproduce-before:
+    bash repro/run.sh clone/bin/godot.linuxbsd.editor.x86_64 || true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+rebuild:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+
+# Should exit cleanly (real test failures, no crash) now.
+reproduce-after:
+    bash repro/run.sh clone/bin/godot.linuxbsd.editor.x86_64
+
+clean:
+    rm -rf clone

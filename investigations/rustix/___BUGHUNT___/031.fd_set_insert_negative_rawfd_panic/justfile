@@ -1,0 +1,25 @@
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should panic (exit 1) on the
+# negative/out-of-range RawFd cases.
+reproduce-before:
+    ulimit -c 0 && cd repro && cargo run --release; echo "exit: $?"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer panic (exit 0).
+reproduce-after:
+    ulimit -c 0 && cd repro && touch src/main.rs && cargo run --release; echo "exit: $?"
+
+clean:
+    rm -rf clone repro/target

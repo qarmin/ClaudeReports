@@ -1,0 +1,38 @@
+glibc malloc-arena sweep, empty-project editor startup, pristine HEAD 9552dfb685 + the
+memstat instrumentation only (no engine patch). Peak RSS via /proc/<pid>/status VmHWM.
+Machine: 24 cores, glibc 2.43 (Ubuntu GLIBC 2.43-2ubuntu2.4). All runs exit 0.
+
+MALLOC_ARENA_MAX  peak RSS (kB), 8 runs                                                    time (ms), 4 runs
+default (=8*24)   716936 718068 716408 716084 716216 716036 717688 716504                  2496 2495 2496 2496
+1                 659352 659188 659292 655972 659792 655764 659588 658816                  2673 2773 2583 2687
+2                 716044 717048 715888 716864 658744 713840 716760 659664                  2675 2674 2673 2493
+3                 717036 659012 716508 716792 713696 658900 660088 716960                  2502 2498 2676 2674
+4 (earlier, 6 runs) 714440 716764 658456 714436 716564 716548                              -
+
+means:
+  default : 716742.5 kB (700.0 MB), 2495.75 ms
+  arena=1 : 658470.5 kB (643.0 MB), 2679.00 ms   -> -57.0 MB (-8.13%), +183 ms (+7.34%)
+  arena=2 : 713856.5 kB, 2628.75 ms  (6 of 8 runs high, 2 low)
+  arena=3 : 698624.0 kB, 2587.50 ms  (5 of 8 runs high, 3 low)
+
+Reading: the ~57MB saving is essentially binary, not proportional to the arena cap. It appears
+reliably only at MALLOC_ARENA_MAX=1; at 2-4 the same run-to-run bimodality shows up with ~57MB
+amplitude (whether the extra arenas get created at all depends on thread timing), and at 8+ /
+default it never appears. There is therefore no intermediate "sweet spot": every setting that
+sometimes avoids the arenas also costs startup time, and only 1 avoids them every time.
+
+Godot's own tracked counters are byte-identical across all settings
+(usage=91165395 max=448283037), confirming none of this memory is engine allocation - it is glibc
+per-thread arena space, invisible to Memory::get_mem_usage()/get_mem_max_usage().
+
+Single-threaded runtime benches (harness/gdbench, 3 interleaved pairs each, ms) are unaffected,
+as expected when only one thread allocates:
+  array_append   default 315/315/317   arena=1 319/316/316
+  dict_insert    default 410/413/410   arena=1 410/320/408
+  node_instance  default 226/227/224   arena=1 224/226/226
+  string_concat  default 408/414/411   arena=1 410/412/412
+
+In-engine equivalence check (patch.diff's mallopt(M_ARENA_MAX, 1) vs the env var, 3 runs each):
+  patched binary        660932 655448 662060 kB
+  pristine + env=1      659552 658400 655928 kB
+  pristine default      716504 716136 717164 kB

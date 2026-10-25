@@ -1,0 +1,55 @@
+=== Approach 1: linux_raw backend (default), real sockets, sweep of every generic getsockopt<T> call reachable without elevated privileges ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running `target/debug/sockopt_sweep`
+socket_type: Ok-ish -> Ok(SocketType(1))
+socket_linger: Ok-ish -> Ok(None)
+socket_error: Ok-ish -> Ok(Ok(()))
+socket_domain: Ok-ish -> Ok(AddressFamily(2))
+socket_protocol: Ok-ish -> Ok(Some(Protocol(6)))
+socket_cookie: Ok-ish -> Ok(90114)
+socket_incoming_cpu: Ok-ish -> Ok(4294967295)
+socket_recv_timeout: Ok-ish -> Ok(None)
+ip_ttl: Ok-ish -> Ok(64)
+ipv6_v6only(udp): Ok-ish -> Err(Os { code: 95, kind: Unsupported, message: "Operation not supported" })
+tcp_nodelay: Ok-ish -> Ok(false)
+tcp_keepcnt: Ok-ish -> Ok(9)
+tcp_keepidle: Ok-ish -> Ok(7200s)
+tcp_keepintvl: Ok-ish -> Ok(75s)
+tcp_user_timeout: Ok-ish -> Ok(0)
+unix_peercred: Ok-ish -> Err(Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" })
+AF_XDP socket() failed: Operation not permitted (os error 1) (expected without CAP_NET_RAW)
+Sweep complete, no unexpected panics above = all current real-kernel getsockopt sizes match.
+
+=== Approach 2: libc backend (RUSTFLAGS=--cfg rustix_use_libc), same sweep ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running `target/debug/sockopt_sweep`
+socket_type: Ok-ish -> Ok(SocketType(1))
+socket_linger: Ok-ish -> Ok(None)
+socket_error: Ok-ish -> Ok(Ok(()))
+socket_domain: Ok-ish -> Ok(AddressFamily(2))
+socket_protocol: Ok-ish -> Ok(Some(Protocol(6)))
+socket_cookie: Ok-ish -> Ok(61447)
+socket_incoming_cpu: Ok-ish -> Ok(4294967295)
+socket_recv_timeout: Ok-ish -> Ok(None)
+ip_ttl: Ok-ish -> Ok(64)
+ipv6_v6only(udp): Ok-ish -> Err(Os { code: 95, kind: Unsupported, message: "Operation not supported" })
+tcp_nodelay: Ok-ish -> Ok(false)
+tcp_keepcnt: Ok-ish -> Ok(9)
+tcp_keepidle: Ok-ish -> Ok(7200s)
+tcp_keepintvl: Ok-ish -> Ok(75s)
+tcp_user_timeout: Ok-ish -> Ok(0)
+unix_peercred: Ok-ish -> Err(Os { code: -1, kind: Uncategorized, message: "Unknown error -1" })
+AF_XDP socket() failed: Operation not permitted (os error 1) (expected without CAP_NET_RAW)
+Sweep complete, no unexpected panics above = all current real-kernel getsockopt sizes match.
+
+=== Approach 3: attempt to exercise the privileged XDP_STATISTICS / XDP_MMAP_OFFSETS getsockopt fallback paths via a real AF_XDP socket ===
+--- 3a: plain socket(AF_XDP, SOCK_RAW, 0) via a standalone C program, current privileges ---
+socket() failed: Operation not permitted (errno 1)
+exit: 1
+--- 3b: same, inside unshare -Ur (user+net namespace, to self-grant CAP_NET_RAW) ---
+exit: 1
+--- 3c: no_new_privs / effective capabilities in this sandbox ---
+CapEff:	0000000000000000
+NoNewPrivs:	1
+
+uname -r: 7.0.0-34-generic

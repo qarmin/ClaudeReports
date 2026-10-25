@@ -1,0 +1,36 @@
+# Self-contained reproduction for candidate 045.
+#
+# This finding is a static-analysis (dead-code lint) result, not a runtime crash/logic bug, so
+# there is no separate downstream crate calling rustix's public API - the "real affected entry
+# point" is `cargo clippy` run directly on rustix's own source tree, cross-compiled for Android.
+# `repro/run_repro.sh` does exactly that against whatever checkout is passed to it.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    rustup target add aarch64-linux-android
+
+# Run clippy against the pristine clone cross-compiled for Android - should show the
+# preadv64v2/pwritev64v2 "never used" warnings (the bug).
+reproduce-before:
+    ./repro/run_repro.sh clone present
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same check again, now against the patched clone - the warnings should be gone.
+reproduce-after:
+    ./repro/run_repro.sh clone absent
+
+clean:
+    rm -rf clone

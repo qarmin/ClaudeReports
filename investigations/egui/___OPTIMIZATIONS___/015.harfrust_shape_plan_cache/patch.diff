@@ -1,0 +1,134 @@
+diff --git a/crates/epaint/src/text/font_face.rs b/crates/epaint/src/text/font_face.rs
+index d0666592c..b38b2dea7 100644
+--- a/crates/epaint/src/text/font_face.rs
++++ b/crates/epaint/src/text/font_face.rs
+@@ -1,9 +1,7 @@
+ #![expect(clippy::mem_forget)]
+ 
+-#[cfg(feature = "color_fonts")]
+-use alloc::sync::Arc;
+-
+ use ahash::HashMap;
++use alloc::sync::Arc;
+ use ecolor::Color32;
+ use emath::{GuiRounding as _, OrderedFloat, vec2};
+ use self_cell::self_cell;
+@@ -321,6 +319,17 @@ impl skrifa::outline::OutlinePen for VelloPen<'_> {
+     }
+ }
+ 
++/// What a compiled `harfrust` shape plan depends on (besides the face itself).
++#[derive(Clone, PartialEq, Eq, Hash)]
++pub(crate) struct ShapePlanKey {
++    pub direction: harfrust::Direction,
++    pub script: harfrust::Script,
++    pub language: Option<harfrust::Language>,
++
++    /// Hash of the variation coordinates the shaper instance was built with.
++    pub variations_hash: u64,
++}
++
+ /// A specific font face.
+ /// The interface uses points as the unit for everything.
+ pub struct FontFace {
+@@ -333,6 +342,9 @@ pub struct FontFace {
+     /// `ShaperData` is `Copy` — lives outside the `self_cell`.
+     shaper_data: harfrust::ShaperData,
+ 
++    /// Compiled `harfrust` shape plans (OpenType feature maps), so they are not rebuilt for every run.
++    shape_plans: crate::mutex::Mutex<HashMap<ShapePlanKey, Arc<harfrust::ShapePlan>>>,
++
+     /// Location-independent: `char → GlyphId | Invisible`.
+     ///
+     /// Only depends on the font's charmap + `FontTweak`. A miss means the char
+@@ -417,6 +429,7 @@ impl FontFace {
+             tweak,
+             subpixel_binning,
+             shaper_data,
++            shape_plans: Default::default(),
+             glyph_id_cache: Default::default(),
+             advance_width_cache: Default::default(),
+         })
+@@ -639,6 +652,22 @@ impl FontFace {
+         &self.shaper_data
+     }
+ 
++    /// The cached shape plan for `key`, compiled by `make` on first use.
++    pub(crate) fn shape_plan(
++        &self,
++        key: ShapePlanKey,
++        make: impl FnOnce() -> harfrust::ShapePlan,
++    ) -> Arc<harfrust::ShapePlan> {
++        // Animated variation axes make a new key for every distinct value, so don't grow forever:
++        const MAX_PLANS: usize = 64;
++
++        let mut plans = self.shape_plans.lock();
++        if MAX_PLANS <= plans.len() && !plans.contains_key(&key) {
++            plans.clear();
++        }
++        Arc::clone(plans.entry(key).or_insert_with(|| Arc::new(make())))
++    }
++
+     /// Whether to render this face at up to four sub-pixel offsets.
+     #[inline]
+     pub(crate) fn subpixel_binning(&self) -> bool {
+diff --git a/crates/epaint/src/text/text_layout.rs b/crates/epaint/src/text/text_layout.rs
+index 3482c80f8..c85e92384 100644
+--- a/crates/epaint/src/text/text_layout.rs
++++ b/crates/epaint/src/text/text_layout.rs
+@@ -21,7 +21,7 @@ use super::{
+     ByteRangeExt as _, Galley, Glyph, LayoutJob, LayoutSection, PlacedRow, Row, RowVisuals,
+     VariationCoords,
+     family::FamilyKey,
+-    font_face::{FontFace, GlyphInfo, ShapedGlyph},
++    font_face::{FontFace, GlyphInfo, ShapePlanKey, ShapedGlyph},
+     glyph_atlas::{GlyphAllocation, OutlineGlyph, RasterGlyphAllocation},
+ };
+ 
+@@ -1564,6 +1564,12 @@ fn segment_into_runs(
+     }
+ }
+ 
++fn variations_hash(variations: &[harfrust::Variation]) -> u64 {
++    variations.iter().fold(0, |hash, variation| {
++        crate::util::hash((hash, variation.tag.to_be_bytes(), variation.value.to_bits()))
++    })
++}
++
+ /// Shape a text run and return the raw [`harfrust::GlyphBuffer`].
+ ///
+ /// The caller should iterate `glyph_infos()` / `glyph_positions()` (both
+@@ -1584,6 +1590,8 @@ fn shape_text(
+         .map(|&(tag, value)| harfrust::Variation { tag, value })
+         .collect();
+ 
++    let variations_hash = variations_hash(&variations);
++
+     let instance = if variations.is_empty() {
+         None
+     } else {
+@@ -1602,7 +1610,23 @@ fn shape_text(
+     buffer.push_str(text);
+     buffer.guess_segment_properties();
+ 
+-    shaper.shape(buffer, harfrust::ShapeOptions::new())
++    let key = ShapePlanKey {
++        direction: buffer.direction(),
++        script: buffer.script(),
++        language: buffer.language(),
++        variations_hash,
++    };
++    let plan = font_face.shape_plan(key, || {
++        harfrust::ShapePlan::new(
++            &shaper,
++            buffer.direction(),
++            Some(buffer.script()),
++            buffer.language().as_ref(),
++            &[],
++        )
++    });
++
++    shaper.shape(buffer, harfrust::ShapeOptions::new().plan(Some(&plan)))
+ }
+ 
+ // ----------------------------------------------------------------------------

@@ -3,6 +3,12 @@ sync:
     python3 scripts/find_details.py ~/test || true
     python3 scripts/find_reports.py ~/Projekty/Obce || true
     python3 scripts/find_details.py ~/Projekty/Obce || true
+    python3 scripts/find_targets.py || true
+
+# Build the GitHub Pages site into tmp/site and open it in the browser.
+site:
+    python3 scripts/build_site.py . tmp/site
+    xdg-open tmp/site/index.html || echo "open $(pwd)/tmp/site/index.html"
 
 # Re-check the next batch of reports against the projects' current code.
 refresh limit="10":

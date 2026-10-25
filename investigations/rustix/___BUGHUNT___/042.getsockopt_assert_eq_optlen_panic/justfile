@@ -1,0 +1,28 @@
+# Self-contained reproduction for candidate 042.
+#
+# Status is "Not reproducible" (see RESULT.md) - there is no patch.diff. This justfile
+# only runs repro/ (the real-kernel getsockopt sweep) against a pristine clone at
+# base_commit, to show the evidence the "Not reproducible" conclusion rests on: every
+# currently-reachable generic getsockopt<T> call site matches size_of::<T>() exactly
+# on the real kernel, and the privileged AF_XDP-specific fallback paths can't even be
+# reached in a sandbox without CAP_NET_RAW.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone sweep against the pristine clone (linux_raw backend).
+# No panic is expected - that's the point being demonstrated.
+reproduce-before:
+    ulimit -c 0 && cd repro && cargo run --release
+    @echo "--- now forcing the libc backend ---"
+    ulimit -c 0 && cd repro && RUSTFLAGS="--cfg rustix_use_libc" cargo run --release
+
+clean:
+    rm -rf clone repro/target

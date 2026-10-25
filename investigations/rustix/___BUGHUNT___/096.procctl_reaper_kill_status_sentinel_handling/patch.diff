@@ -1,0 +1,23 @@
+diff --git a/src/process/procctl.rs b/src/process/procctl.rs
+index 24d55302..f4e42476 100644
+--- a/src/process/procctl.rs
++++ b/src/process/procctl.rs
+@@ -442,7 +442,17 @@ pub fn reaper_kill(
+     unsafe { procctl(PROC_REAP_KILL, process, as_mut_ptr(&mut req).cast())? };
+     Ok(KillResult {
+         killed: req.rk_killed as _,
+-        first_failed: Pid::from_raw(req.rk_fpid),
++        // The kernel uses `-1` as the "no process failed to be signalled"
++        // sentinel for `rk_fpid` (it sets `rk_fpid = -1` unconditionally
++        // before attempting any signal delivery, only overwriting it with a
++        // real pid on failure), not `0` - `Pid::from_raw` cannot accept a
++        // negative value, so it must be special-cased the same way
++        // `get_reaper_status`'s `rs_pid` is above.
++        first_failed: if req.rk_fpid == -1 {
++            None
++        } else {
++            Pid::from_raw(req.rk_fpid)
++        },
+     })
+ }
+ 

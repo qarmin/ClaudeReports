@@ -1,0 +1,49 @@
+# Self-contained reproduction for this candidate.
+#
+# Per this project's repro policy (2026-10-05), this candidate has ONLY a
+# GDScript-level repro (repro/) - no standalone C++ mirror. Re-running it from
+# scratch means building a real Godot editor binary with ASan (~1-20 min
+# depending on how much is cached).
+#
+# NOTE: patch.diff here is an unmodified copy of candidate 039's own patch
+# (touches scene/gui/label.cpp/.h, NOT dialogs.cpp) - this candidate's crash
+# is ConfirmationDialog/AcceptDialog calling straight through into Label's
+# already-confirmed-and-fixed race, not a distinct bug of its own. See
+# RESULT.md.
+#
+# Build parallelism is deliberately capped (-j12, not -j$(nproc)) - a full
+# -j$(nproc) use_asan=yes build on a 24-core/29GB box was observed to risk
+# OOM when stacked with other concurrent work in this workspace.
+
+repo_url := "https://github.com/qarmin/godot.git"
+base_commit := "b8420aa3a60689572a745c0f8a85c9df62d4cbfb"
+
+test: clone verify-patch
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Cheap sanity check: does patch.diff still apply cleanly to the commit this
+# candidate was recorded against? Does NOT build or run anything.
+verify-patch:
+    cd clone && git apply --check "{{justfile_directory()}}/patch.diff"
+    @echo "patch.diff applies cleanly."
+
+# The real thing: builds a fresh ASan editor binary from the clone, runs
+# repro/ against it unpatched (expect a crash - the same ASan heap-use-after-free
+# as candidate 039, reproduces reliably), applies the fix (candidate 039's
+# Label patch), rebuilds, and runs it again (expect a clean "survived" exit).
+build-and-run: clone
+    cd clone && python3 -m venv .venv 2>/dev/null; . .venv/bin/activate 2>/dev/null; pip install scons -q 2>/dev/null || true
+    cd clone && scons platform=linuxbsd target=editor use_asan=yes tests=yes debug_symbols=yes -j12
+    @echo "=== unfixed: running repro/, expect a crash ==="
+    (cd clone && ASAN_OPTIONS=detect_leaks=0 timeout -k 5 30 ./bin/godot.linuxbsd.editor.x86_64.san --headless --path "{{justfile_directory()}}/repro" || true)
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && scons platform=linuxbsd target=editor use_asan=yes tests=yes debug_symbols=yes -j12
+    @echo "=== fixed: running repro/, expect clean ==="
+    cd clone && ASAN_OPTIONS=detect_leaks=0 timeout -k 5 30 ./bin/godot.linuxbsd.editor.x86_64.san --headless --path "{{justfile_directory()}}/repro"
+
+clean:
+    rm -rf clone

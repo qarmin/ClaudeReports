@@ -1,0 +1,110 @@
+=== BEFORE: repro/add_test.patch applied, patch.diff NOT applied ===
+$ cargo test --lib --features time,stdio,fs -- test_vdso_missing_symbol_then_hard_assert_panics
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (target/debug/deps/rustix-b55395c74bd6d617)
+
+running 1 test
+test backend::vdso::tests::test_vdso_missing_symbol_then_hard_assert_panics ... FAILED
+
+failures:
+
+---- backend::vdso::tests::test_vdso_missing_symbol_then_hard_assert_panics stdout ----
+
+thread 'backend::vdso::tests::test_vdso_missing_symbol_then_hard_assert_panics' (227149) panicked at src/backend/linux_raw/vdso.rs:620:13:
+assertion failed: !ptr.is_null()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    backend::vdso::tests::test_vdso_missing_symbol_then_hard_assert_panics
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+
+Repeated 5/5 debug-build runs: panics every time (pid differs, same assertion/location).
+Repeated 1/1 release-build run (`cargo test --release --lib ...`): same panic,
+same location (src/backend/linux_raw/vdso.rs:620:13), same message - confirms
+this is a real `assert!`, not a debug-assertion-only artifact:
+
+thread 'backend::vdso::tests::test_vdso_missing_symbol_then_hard_assert_panics' (229687) panicked at src/backend/linux_raw/vdso.rs:620:13:
+assertion failed: !ptr.is_null()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+failures:
+    backend::vdso::tests::test_vdso_missing_symbol_then_hard_assert_panics
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+
+=== AFTER: patch.diff applied on top (real fix) ===
+$ cargo test --lib --features time,stdio,fs -- vdso_sym_is_ok
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
+     Running unittests src/lib.rs (target/debug/deps/rustix-b55395c74bd6d617)
+
+running 1 test
+test backend::vdso_wrappers::tests::vdso_sym_is_ok_rejects_null_and_accepts_nonnull ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.00s
+
+This second test calls the REAL, patched `vdso_sym_is_ok` function `init()`
+itself now routes every call site through (not a frozen copy), directly
+confirming a null pointer is now rejected instead of being hardcoded
+"trusted" on 64-bit architectures.
+
+(Note: `test_vdso_missing_symbol_then_hard_assert_panics`, from
+repro/add_test.patch, still fails if re-run after patch.diff - this is
+expected and documented in repro/README.md: it's a frozen snapshot of the
+*pre-patch* code shape, applied only to demonstrate the original bug on a
+pristine clone, and was never meant to track the live source. It is not
+part of patch.diff and is not applied to the main project's working tree as
+part of the fix.)
+
+
+=== Full project test suite, pristine tree (no patches at all) ===
+$ cargo test --lib --features time,stdio,fs --no-fail-fast
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+=== Full project test suite, patch.diff applied (the real fix only) ===
+$ cargo test --lib --features time,stdio,fs --no-fail-fast
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+(The one new test is vdso_sym_is_ok_rejects_null_and_accepts_nonnull, bundled
+directly in patch.diff alongside the fix.)
+
+Pre-existing, unrelated failures present identically before and after (not
+touched by this fix, matches this project's previously-recorded baseline in
+projects/rustix.md and candidate 036's own RESULT.md):
+- `tests/io`'s `ioctl::test_int_setter`: ENOENT, this sandbox has no real tty
+  device.
+- Two doctests (`timespec::Timespec::checked_add`/`checked_sub`): need the
+  `event` feature, not included in the `time,stdio,fs` feature set used here.
+
+
+=== Real end-to-end sanity check (patched tree, real kernel vDSO, real public API) ===
+A separate throwaway crate depending on this patched tree's `rustix` as a
+path dependency (features = ["time", "thread"]):
+
+fn main() {
+    let ts = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    println!("clock_gettime(MONOTONIC) = {:?}", ts);
+    let cpu = rustix::thread::sched_getcpu();
+    println!("sched_getcpu() = {}", cpu);
+}
+
+$ cargo run --release
+clock_gettime(MONOTONIC) = Timespec { tv_sec: 26513, tv_nsec: 141618510 }
+sched_getcpu() = 12
+
+Confirms the fix does not disturb the normal (symbol-present) case on this
+host's real kernel vDSO: both the real public clock_gettime and sched_getcpu
+APIs still resolve through the vDSO fast path and return correct-looking
+values.
+
+
+=== cargo clippy --lib --features time,stdio,fs (patched tree) ===
+No new warnings in vdso_wrappers.rs or vdso.rs. Two pre-existing, unrelated
+warnings only (present identically on the pristine tree): a `build.rs`
+`clippy::manual_filter` lint, and a `clippy::wrong_self_convention` lint on
+`Timespec::to_sec_usec` in src/timespec.rs.

@@ -1,0 +1,54 @@
+# Self-contained reproduction for this candidate.
+#
+# repro/repro.cpp and repro/repro_fixed.cpp reuse Godot's REAL
+# core/templates/local_vector.h, core/os/mutex.h and core/os/memory.cpp
+# verbatim (compiled directly from a fresh clone, no reimplementation) plus a
+# minimal class (MiniCallQueue) mirroring the relevant members and methods of
+# the real CallQueue (core/object/message_queue.h/.cpp) byte-for-byte for the
+# bug's shape: a Mutex-guarded LocalVector<Page*>/LocalVector<uint32_t> grown
+# under lock, read back with NO lock by has_messages()/get_max_buffer_usage().
+#
+# patch.diff is the real fix applied to the actual core/object/message_queue.h/
+# .cpp - but the mirror here does NOT link against the real CallQueue class
+# (would require pulling in Object/ClassDB/Variant/the whole engine). `apply`
+# is kept for the record; the "fix verified" claim rests on repro.cpp vs.
+# repro_fixed.cpp, cross-checked against a real engine build - see RESULT.md.
+
+repo_url := "https://github.com/qarmin/godot.git"
+base_commit := "ebf68e6f024eda115c301595d9296f23f2a254eb"
+
+inc_flags := "-I./clone -I./clone/platform/linuxbsd -DASAN_ENABLED -DTHREADS_ENABLED"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    touch clone/core/profiling/profiling.gen.h
+
+# Expected (confirming) result: ASan reports a heap-use-after-free (or a fatal
+# CRASH_COND index-out-of-bounds abort - both are real manifestations of the
+# same unsynchronized read) well before the 18s timeout - `|| true` keeps this
+# from failing the `test` chain.
+reproduce-before:
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c clone/core/os/memory.cpp -o memory.o
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c repro/err_stub.cpp -o err_stub.o
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c repro/repro.cpp -o repro.o
+    g++ -std=c++17 -fsanitize=address -g -O1 repro.o err_stub.o memory.o -o repro_before -lpthread
+    ulimit -c 0 && (ASAN_OPTIONS=detect_leaks=0 timeout 18 ./repro_before || true)
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Expected result: runs the full 18s and prints "No crash within the time
+# limit" - no ASan abort.
+reproduce-after:
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c clone/core/os/memory.cpp -o memory.o
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c repro/err_stub.cpp -o err_stub.o
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c repro/repro_fixed.cpp -o repro_fixed.o
+    g++ -std=c++17 -fsanitize=address -g -O1 repro_fixed.o err_stub.o memory.o -o repro_after -lpthread
+    ulimit -c 0 && ASAN_OPTIONS=detect_leaks=0 timeout 18 ./repro_after
+
+clean:
+    rm -rf clone *.o repro_before repro_after

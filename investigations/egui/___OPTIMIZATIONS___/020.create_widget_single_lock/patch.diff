@@ -1,0 +1,453 @@
+diff --git a/crates/egui/src/context.rs b/crates/egui/src/context.rs
+index 9f6518cde..4543a15a0 100644
+--- a/crates/egui/src/context.rs
++++ b/crates/egui/src/context.rs
+@@ -1430,9 +1430,23 @@ impl Context {
+     /// The most important thing is that [`Rect::min`] is approximately correct,
+     /// because that's where the warning will be painted. If you don't know what size to pick, just pick [`Vec2::ZERO`].
+     pub fn check_for_id_clash(&self, id: Id, new_rect: Rect, what: &str) {
+-        let prev_rect = self.pass_state_mut(move |state| state.used_ids.insert(id, new_rect));
++        let (prev_rect, warn_on_id_clash) = self.write(|ctx| {
++            let prev_rect = ctx.viewport().this_pass.used_ids.insert(id, new_rect);
++            (prev_rect, ctx.memory.options.warn_on_id_clash)
++        });
++
++        self.warn_about_id_clash(id, prev_rect, warn_on_id_clash, new_rect, what);
++    }
+ 
+-        if !self.options(|opt| opt.warn_on_id_clash) {
++    fn warn_about_id_clash(
++        &self,
++        id: Id,
++        prev_rect: Option<Rect>,
++        warn_on_id_clash: bool,
++        new_rect: Rect,
++        what: &str,
++    ) {
++        if !warn_on_id_clash {
+             return;
+         }
+ 
+@@ -1522,12 +1536,13 @@ impl Context {
+     ) -> Response {
+         debug_assert!(!w.rect.any_nan(), "widget rect is NaN: {:?}", w.rect);
+ 
+-        let interested_in_focus = w.enabled
+-            && w.sense.is_focusable()
+-            && self.memory(|mem| mem.allows_interaction(w.layer_id));
++        let mut res = self.new_response(w);
++
++        // Everything that needs the context lock is done under a single acquisition:
++        let clash = self.write(|ctx| {
++            let interested_in_focus =
++                w.enabled && w.sense.is_focusable() && ctx.memory.allows_interaction(w.layer_id);
+ 
+-        // Remember this widget
+-        self.write(|ctx| {
+             let viewport = ctx.viewport();
+ 
+             // We add all widgets here, even non-interactive ones,
+@@ -1535,22 +1550,35 @@ impl Context {
+             // but also to know when we have reached the widget we are checking for cover.
+             viewport.this_pass.widgets.insert(w.layer_id, w, options);
+ 
+-            if allow_focus && interested_in_focus {
+-                ctx.memory.interested_in_focus(w.id, w.layer_id);
++            if allow_focus {
++                if interested_in_focus {
++                    ctx.memory.interested_in_focus(w.id, w.layer_id);
++                } else {
++                    // Not interested or allowed input:
++                    ctx.memory.ignore_focus(w.id);
++                }
+             }
+-        });
+ 
+-        if allow_focus && !interested_in_focus {
+-            // Not interested or allowed input:
+-            self.memory_mut(|mem| mem.ignore_focus(w.id));
+-        }
++            let clash = if w.sense.interactive() || w.sense.is_focusable() {
++                let prev_rect = ctx.viewport().this_pass.used_ids.insert(w.id, w.rect);
++                Some((prev_rect, ctx.memory.options.warn_on_id_clash))
++            } else {
++                None
++            };
+ 
+-        if w.sense.interactive() || w.sense.is_focusable() {
+-            self.check_for_id_clash(w.id, w.rect, "widget");
+-        }
++            Self::update_response(ctx, &mut res, &w);
+ 
+-        #[allow(clippy::allow_attributes, clippy::let_and_return)]
+-        let res = self.get_response(w);
++            // A `Ui` registers with `Rect::NOTHING` before its real rect is known; scrolling needs the real one.
++            if w.rect != Rect::NOTHING {
++                Self::consume_scroll_requests(ctx, &res);
++            }
++
++            clash
++        });
++
++        if let Some((prev_rect, warn_on_id_clash)) = clash {
++            self.warn_about_id_clash(w.id, prev_rect, warn_on_id_clash, w.rect, "widget");
++        }
+ 
+         #[cfg(debug_assertions)]
+         if res.contains_pointer() {
+@@ -1565,58 +1593,53 @@ impl Context {
+             self.accesskit_node_builder(w.id, |builder| res.fill_accesskit_node_common(builder));
+         }
+ 
+-        // A `Ui` registers with `Rect::NOTHING` before its real rect is known; scrolling needs the real one.
+-        if w.rect == Rect::NOTHING {
+-            return res;
+-        }
++        res
++    }
+ 
+-        self.write(|ctx| {
+-            use crate::{Align, pass_state::ScrollTarget, style::ScrollAnimation};
+-            let viewport = ctx.viewport_for(ctx.viewport_id());
+-
+-            viewport
+-                .input
+-                .consume_accesskit_action_requests(res.id, |request| {
+-                    use accesskit::Action;
+-
+-                    // TODO(lucasmerlin): Correctly handle the scroll unit:
+-                    // https://github.com/AccessKit/accesskit/blob/e639c0e0d8ccbfd9dff302d972fa06f9766d608e/common/src/lib.rs#L2621
+-                    const DISTANCE: f32 = 100.0;
+-
+-                    match &request.action {
+-                        Action::ScrollIntoView => {
+-                            viewport.this_pass.scroll_target = [
+-                                Some(ScrollTarget::new(
+-                                    res.rect.x_range(),
+-                                    Some(Align::Center),
+-                                    ScrollAnimation::none(),
+-                                )),
+-                                Some(ScrollTarget::new(
+-                                    res.rect.y_range(),
+-                                    Some(Align::Center),
+-                                    ScrollAnimation::none(),
+-                                )),
+-                            ];
+-                        }
+-                        Action::ScrollDown => {
+-                            viewport.this_pass.scroll_delta.0 += DISTANCE * Vec2::UP;
+-                        }
+-                        Action::ScrollUp => {
+-                            viewport.this_pass.scroll_delta.0 += DISTANCE * Vec2::DOWN;
+-                        }
+-                        Action::ScrollLeft => {
+-                            viewport.this_pass.scroll_delta.0 += DISTANCE * Vec2::LEFT;
+-                        }
+-                        Action::ScrollRight => {
+-                            viewport.this_pass.scroll_delta.0 += DISTANCE * Vec2::RIGHT;
+-                        }
+-                        _ => return false,
++    fn consume_scroll_requests(ctx: &mut ContextImpl, res: &Response) {
++        use crate::{Align, pass_state::ScrollTarget, style::ScrollAnimation};
++        let viewport = ctx.viewport();
++
++        viewport
++            .input
++            .consume_accesskit_action_requests(res.id, |request| {
++                use accesskit::Action;
++
++                // TODO(lucasmerlin): Correctly handle the scroll unit:
++                // https://github.com/AccessKit/accesskit/blob/e639c0e0d8ccbfd9dff302d972fa06f9766d608e/common/src/lib.rs#L2621
++                const DISTANCE: f32 = 100.0;
++
++                match &request.action {
++                    Action::ScrollIntoView => {
++                        viewport.this_pass.scroll_target = [
++                            Some(ScrollTarget::new(
++                                res.rect.x_range(),
++                                Some(Align::Center),
++                                ScrollAnimation::none(),
++                            )),
++                            Some(ScrollTarget::new(
++                                res.rect.y_range(),
++                                Some(Align::Center),
++                                ScrollAnimation::none(),
++                            )),
++                        ];
+                     }
+-                    true
+-                });
+-        });
+-
+-        res
++                    Action::ScrollDown => {
++                        viewport.this_pass.scroll_delta.0 += DISTANCE * Vec2::UP;
++                    }
++                    Action::ScrollUp => {
++                        viewport.this_pass.scroll_delta.0 += DISTANCE * Vec2::DOWN;
++                    }
++                    Action::ScrollLeft => {
++                        viewport.this_pass.scroll_delta.0 += DISTANCE * Vec2::LEFT;
++                    }
++                    Action::ScrollRight => {
++                        viewport.this_pass.scroll_delta.0 += DISTANCE * Vec2::RIGHT;
++                    }
++                    _ => return false,
++                }
++                true
++            });
+     }
+ 
+     /// Allow widgets inside `rect` to intentionally change ids during the current pass.
+@@ -1712,10 +1735,17 @@ impl Context {
+ 
+     /// Do all interaction for an existing widget, without (re-)registering it.
+     pub(crate) fn get_response(&self, widget_rect: WidgetRect) -> Response {
++        let mut res = self.new_response(widget_rect);
++        self.write(|ctx| Self::update_response(ctx, &mut res, &widget_rect));
++        res
++    }
++
++    /// The part of [`Self::get_response`] that doesn't need the context lock.
++    fn new_response(&self, widget_rect: WidgetRect) -> Response {
+         use response::Flags;
+ 
+         let WidgetRect {
+-            id,
++            id: _,
+             parent_id: _,
+             layer_id,
+             rect,
+@@ -1725,13 +1755,10 @@ impl Context {
+             visible,
+         } = widget_rect;
+ 
+-        // previous pass + "highlight next pass" == "highlight this pass"
+-        let highlighted = self.prev_pass_state(|fs| fs.highlight_next_pass.contains(&id));
+-
+         let mut res = Response {
+             ctx: self.clone(),
+             layer_id,
+-            id,
++            id: widget_rect.id,
+             rect,
+             interact_rect,
+             sense,
+@@ -1742,118 +1769,126 @@ impl Context {
+ 
+         res.flags.set(Flags::ENABLED, enabled);
+         res.flags.set(Flags::VISIBLE, visible);
+-        res.flags.set(Flags::HIGHLIGHTED, highlighted);
+ 
+-        self.write(|ctx| {
+-            let viewport = ctx.viewports.entry(ctx.viewport_id()).or_default();
++        res
++    }
+ 
+-            res.flags.set(
+-                Flags::CONTAINS_POINTER,
+-                viewport.interact_widgets.contains_pointer.contains(&id),
+-            );
++    /// The part of [`Self::get_response`] that reads and updates the context state.
++    fn update_response(ctx: &mut ContextImpl, res: &mut Response, widget_rect: &WidgetRect) {
++        use response::Flags;
+ 
+-            let input = &viewport.input;
+-            let memory = &mut ctx.memory;
++        let WidgetRect {
++            id, enabled, sense, ..
++        } = *widget_rect;
+ 
+-            if enabled
+-                && sense.senses_click()
+-                && memory.has_focus(id)
+-                && (input.key_pressed(Key::Space) || input.key_pressed(Key::Enter))
+-            {
+-                // Space/enter works like a primary click for e.g. selected buttons
+-                res.flags.set(Flags::FAKE_PRIMARY_CLICKED, true);
+-            }
++        let viewport = ctx.viewports.entry(ctx.viewport_id()).or_default();
+ 
+-            if enabled
+-                && sense.senses_click()
+-                && input.has_accesskit_action_request(id, accesskit::Action::Click)
+-            {
+-                res.flags.set(Flags::FAKE_PRIMARY_CLICKED, true);
+-            }
++        // previous pass + "highlight next pass" == "highlight this pass"
++        res.flags.set(
++            Flags::HIGHLIGHTED,
++            viewport.prev_pass.highlight_next_pass.contains(&id),
++        );
+ 
+-            if enabled && sense.senses_click() && Some(id) == viewport.interact_widgets.long_touched
+-            {
+-                res.flags.set(Flags::LONG_TOUCHED, true);
+-            }
++        res.flags.set(
++            Flags::CONTAINS_POINTER,
++            viewport.interact_widgets.contains_pointer.contains(&id),
++        );
+ 
+-            let interaction = memory.interaction();
++        let input = &viewport.input;
++        let memory = &mut ctx.memory;
+ 
+-            res.flags.set(
+-                Flags::IS_POINTER_BUTTON_DOWN_ON,
+-                interaction.potential_click_id == Some(id)
+-                    || interaction.potential_drag_id == Some(id),
+-            );
++        if enabled
++            && sense.senses_click()
++            && memory.has_focus(id)
++            && (input.key_pressed(Key::Space) || input.key_pressed(Key::Enter))
++        {
++            // Space/enter works like a primary click for e.g. selected buttons
++            res.flags.set(Flags::FAKE_PRIMARY_CLICKED, true);
++        }
+ 
+-            if res.enabled() {
+-                res.flags.set(
+-                    Flags::HOVERED,
+-                    viewport.interact_widgets.hovered.contains(&id),
+-                );
+-                res.flags.set(
+-                    Flags::DRAGGED,
+-                    Some(id) == viewport.interact_widgets.dragged,
+-                );
+-                res.flags.set(
+-                    Flags::DRAG_STARTED,
+-                    Some(id) == viewport.interact_widgets.drag_started,
+-                );
+-                res.flags.set(
+-                    Flags::DRAG_STOPPED,
+-                    Some(id) == viewport.interact_widgets.drag_stopped,
+-                );
+-            }
++        if enabled
++            && sense.senses_click()
++            && input.has_accesskit_action_request(id, accesskit::Action::Click)
++        {
++            res.flags.set(Flags::FAKE_PRIMARY_CLICKED, true);
++        }
+ 
+-            let clicked = Some(id) == viewport.interact_widgets.clicked;
+-            let mut any_press = false;
++        if enabled && sense.senses_click() && Some(id) == viewport.interact_widgets.long_touched {
++            res.flags.set(Flags::LONG_TOUCHED, true);
++        }
+ 
+-            for pointer_event in &input.pointer.pointer_events {
+-                match pointer_event {
+-                    PointerEvent::Moved(_) => {}
+-                    PointerEvent::Pressed { .. } => {
+-                        any_press = true;
+-                    }
+-                    PointerEvent::Released { click, .. } => {
+-                        if enabled && sense.senses_click() && clicked && click.is_some() {
+-                            res.flags.set(Flags::CLICKED, true);
+-                        }
++        let interaction = memory.interaction();
+ 
+-                        res.flags.set(Flags::IS_POINTER_BUTTON_DOWN_ON, false);
+-                        res.flags.set(Flags::DRAGGED, false);
+-                    }
++        res.flags.set(
++            Flags::IS_POINTER_BUTTON_DOWN_ON,
++            interaction.potential_click_id == Some(id) || interaction.potential_drag_id == Some(id),
++        );
++
++        if res.enabled() {
++            res.flags.set(
++                Flags::HOVERED,
++                viewport.interact_widgets.hovered.contains(&id),
++            );
++            res.flags.set(
++                Flags::DRAGGED,
++                Some(id) == viewport.interact_widgets.dragged,
++            );
++            res.flags.set(
++                Flags::DRAG_STARTED,
++                Some(id) == viewport.interact_widgets.drag_started,
++            );
++            res.flags.set(
++                Flags::DRAG_STOPPED,
++                Some(id) == viewport.interact_widgets.drag_stopped,
++            );
++        }
++
++        let clicked = Some(id) == viewport.interact_widgets.clicked;
++        let mut any_press = false;
++
++        for pointer_event in &input.pointer.pointer_events {
++            match pointer_event {
++                PointerEvent::Moved(_) => {}
++                PointerEvent::Pressed { .. } => {
++                    any_press = true;
+                 }
+-            }
++                PointerEvent::Released { click, .. } => {
++                    if enabled && sense.senses_click() && clicked && click.is_some() {
++                        res.flags.set(Flags::CLICKED, true);
++                    }
+ 
+-            // is_pointer_button_down_on is false when released, but we want interact_pointer_pos
+-            // to still work.
+-            let is_interacted_with = res.is_pointer_button_down_on()
+-                || res.long_touched()
+-                || clicked
+-                || res.drag_stopped();
+-            if is_interacted_with && let Some(mut pos) = input.pointer.interact_pos() {
+-                if let Some(to_global) = memory.to_global.get(&res.layer_id) {
+-                    pos = to_global.inverse() * pos;
++                    res.flags.set(Flags::IS_POINTER_BUTTON_DOWN_ON, false);
++                    res.flags.set(Flags::DRAGGED, false);
+                 }
+-                res.interact_pointer_pos_or_nan = pos;
+             }
++        }
+ 
+-            if input.pointer.any_down() && !is_interacted_with {
+-                // We don't hover widgets while interacting with *other* widgets:
+-                res.flags.set(Flags::HOVERED, false);
++        // is_pointer_button_down_on is false when released, but we want interact_pointer_pos
++        // to still work.
++        let is_interacted_with =
++            res.is_pointer_button_down_on() || res.long_touched() || clicked || res.drag_stopped();
++        if is_interacted_with && let Some(mut pos) = input.pointer.interact_pos() {
++            if let Some(to_global) = memory.to_global.get(&res.layer_id) {
++                pos = to_global.inverse() * pos;
+             }
++            res.interact_pointer_pos_or_nan = pos;
++        }
+ 
+-            let should_surrender_focus = match memory.options.input_options.surrender_focus_on {
+-                SurrenderFocusOn::Presses => any_press,
+-                SurrenderFocusOn::Clicks => input.pointer.any_click(),
+-                SurrenderFocusOn::Never => false,
+-            };
++        if input.pointer.any_down() && !is_interacted_with {
++            // We don't hover widgets while interacting with *other* widgets:
++            res.flags.set(Flags::HOVERED, false);
++        }
+ 
+-            let pointer_clicked_elsewhere = should_surrender_focus && !res.hovered();
+-            if pointer_clicked_elsewhere && memory.has_focus(id) {
+-                memory.surrender_focus(id);
+-            }
+-        });
++        let should_surrender_focus = match memory.options.input_options.surrender_focus_on {
++            SurrenderFocusOn::Presses => any_press,
++            SurrenderFocusOn::Clicks => input.pointer.any_click(),
++            SurrenderFocusOn::Never => false,
++        };
+ 
+-        res
++        let pointer_clicked_elsewhere = should_surrender_focus && !res.hovered();
++        if pointer_clicked_elsewhere && memory.has_focus(id) {
++            memory.surrender_focus(id);
++        }
+     }
+ 
+     /// This is called by [`Response::widget_info`], but can also be called directly.

@@ -1,0 +1,58 @@
+# Self-contained reproduction for this candidate. See candidate 001's justfile for the full
+# explanation of the shape (SCons, not cargo; scratch benchmark patch separate from patch.diff).
+# This candidate's patch.diff is applied on top of a PRISTINE tree (NOT candidates 001/002's fixes)
+# to isolate this change's own effect.
+
+repo_url := "https://github.com/godotengine/godot.git"
+base_commit := "9552dfb6859a1aaba1e570b8e0ef5c599b830f19"
+
+test: clone build-baseline bench-baseline apply build-patched bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git -C clone apply "{{justfile_directory()}}/bench/scratch_benchmark.patch"
+
+build-baseline:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v scons >/dev/null 2>&1 || pip3 install scons --break-system-packages
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+    cp bin/godot.linuxbsd.editor.x86_64 "{{justfile_directory()}}/bin_baseline"
+
+apply:
+    git -C clone apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+    cp bin/godot.linuxbsd.editor.x86_64 "{{justfile_directory()}}/bin_patched"
+
+bench-baseline:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{justfile_directory()}}/xdg_data"
+    export XDG_DATA_HOME="{{justfile_directory()}}/xdg_data"
+    echo "=== baseline (before patch) ==="
+    for i in 1 2 3; do
+      "{{justfile_directory()}}/bin_baseline" --headless --test --test-case="*SCRATCH syntax highlighting*"
+    done
+
+bench-patched:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{justfile_directory()}}/xdg_data"
+    export XDG_DATA_HOME="{{justfile_directory()}}/xdg_data"
+    echo "=== patched (after patch) ==="
+    for i in 1 2 3; do
+      "{{justfile_directory()}}/bin_patched" --headless --test --test-case="*SCRATCH syntax highlighting*"
+    done
+
+clean:
+    rm -rf clone bin_baseline bin_patched xdg_data

@@ -1,0 +1,35 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# Unlike most candidates in this workspace, the "repro" here is not a standalone Rust binary:
+# this bug only reproduces under the crate's own --release test profile (default 16 codegen
+# units), so the real affected entry point is `cargo test --release -p zune-jpeg --lib
+# decoder::planar_layout_helpers::set_options_refreshes_cached_dispatch` run against the clone
+# itself - see repro/repro.sh. It does NOT reproduce under a plain debug `cargo test`.
+
+repo_url := "https://github.com/etemesi254/zune-image.git"
+base_commit := "533296caf9a6783691d42b2dfbc623029216cbaf"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Should demonstrate the bug: the test panics with assert_eq! failed at decoder.rs:2783.
+reproduce-before:
+    ./repro/repro.sh clone || true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same check again, now against the patched clone - should show the test passing.
+reproduce-after:
+    ./repro/repro.sh clone
+
+clean:
+    rm -rf clone

@@ -1,0 +1,63 @@
+rm -rf clone
+git clone https://github.com/bytecodealliance/rustix.git clone
+Cloning into 'clone'...
+cd clone && git checkout 287214b889865d8e1406a0ee71cc409b6f6191c8
+Note: switching to '287214b889865d8e1406a0ee71cc409b6f6191c8'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at 287214b8 chore: Release rustix version 1.1.5
+ulimit -c 0 && cd repro && cargo build --release
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+   Compiling rustix v1.1.5 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/104.name_to_index_libc_embedded_nul_bypass/clone)
+   Compiling repro v0.1.0 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/104.name_to_index_libc_embedded_nul_bypass/repro)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.83s
+ulimit -c 0 && cd repro && echo "--- linux_raw backend (expected: rejects embedded-NUL name) ---" && ./target/release/repro
+--- linux_raw backend (expected: rejects embedded-NUL name) ---
+backend=linux_raw name_to_index("lo") = Ok(1) (real lo ifindex = 1)
+backend=linux_raw name_to_index("lo\0evil") = Err(Os { code: 19, kind: Uncategorized, message: "No such device" })
+OK: backend=linux_raw rejected the embedded-NUL name with NODEV as expected
+ulimit -c 0 && cd repro && cargo build --release --features use-libc
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+   Compiling rustix v1.1.5 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/104.name_to_index_libc_embedded_nul_bypass/clone)
+   Compiling repro v0.1.0 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/104.name_to_index_libc_embedded_nul_bypass/repro)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.82s
+--- libc backend (expected, pre-fix: WRONGLY accepts embedded-NUL name) ---
+ulimit -c 0 && cd repro && ./target/release/repro
+backend=libc name_to_index("lo") = Ok(1) (real lo ifindex = 1)
+backend=libc name_to_index("lo\0evil") = Ok(1)
+BUG: backend=libc resolved an embedded-NUL name "lo\0evil" to the real "lo" interface (index 1) instead of rejecting it
+cd clone && git apply "/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/104.name_to_index_libc_embedded_nul_bypass/patch.diff"
+ulimit -c 0 && cd repro && touch src/main.rs && cargo build --release
+   Compiling repro v0.1.0 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/104.name_to_index_libc_embedded_nul_bypass/repro)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.13s
+ulimit -c 0 && cd repro && echo "--- linux_raw backend (still rejects) ---" && ./target/release/repro
+--- linux_raw backend (still rejects) ---
+backend=linux_raw name_to_index("lo") = Ok(1) (real lo ifindex = 1)
+backend=linux_raw name_to_index("lo\0evil") = Err(Os { code: 19, kind: Uncategorized, message: "No such device" })
+OK: backend=linux_raw rejected the embedded-NUL name with NODEV as expected
+ulimit -c 0 && cd repro && touch src/main.rs && cargo build --release --features use-libc
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+   Compiling rustix v1.1.5 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/104.name_to_index_libc_embedded_nul_bypass/clone)
+   Compiling repro v0.1.0 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/104.name_to_index_libc_embedded_nul_bypass/repro)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.67s
+ulimit -c 0 && cd repro && echo "--- libc backend (now fixed, rejects too) ---" && ./target/release/repro
+--- libc backend (now fixed, rejects too) ---
+backend=libc name_to_index("lo") = Ok(1) (real lo ifindex = 1)
+backend=libc name_to_index("lo\0evil") = Err(Os { code: 19, kind: Uncategorized, message: "No such device" })
+OK: backend=libc rejected the embedded-NUL name with NODEV as expected

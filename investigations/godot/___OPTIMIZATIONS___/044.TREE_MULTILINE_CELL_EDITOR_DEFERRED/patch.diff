@@ -1,0 +1,105 @@
+diff --git a/scene/gui/tree.cpp b/scene/gui/tree.cpp
+index eb226e257e..127e464409 100644
+--- a/scene/gui/tree.cpp
++++ b/scene/gui/tree.cpp
+@@ -3515,6 +3515,19 @@ void Tree::_text_editor_gui_input(const Ref<InputEvent> &p_event) {
+ 	}
+ }
+ 
++// Only multiline string cells use this editor, so most Trees never need it - and a TextEdit is by
++// far the most expensive part of the inline cell editor (see ___OPTIMIZATIONS___/044).
++TextEdit *Tree::_ensure_text_editor() {
++	if (!text_editor) {
++		text_editor = memnew(TextEdit);
++		text_editor->set_v_size_flags(SIZE_EXPAND_FILL);
++		text_editor->hide();
++		popup_editor_vb->add_child(text_editor);
++		text_editor->connect(SceneStringName(gui_input), callable_mp(this, &Tree::_text_editor_gui_input));
++	}
++	return text_editor;
++}
++
+ void Tree::_apply_multiline_edit(bool p_hide_focus) {
+ 	if (!popup_edited_item) {
+ 		return;
+@@ -4699,7 +4712,9 @@ bool Tree::edit_selected(bool p_force_edit) {
+ 		const String &col_title = columns[col].title;
+ 		line_editor->set_accessibility_name(col_title.is_empty() ? c.text : col_title);
+ 
+-		text_editor->hide();
++		if (text_editor) {
++			text_editor->hide();
++		}
+ 
+ 		popup_editor->set_position(popup_rect.position);
+ 		popup_editor->set_size(popup_rect.size * popup_scale);
+@@ -4718,13 +4733,14 @@ bool Tree::edit_selected(bool p_force_edit) {
+ 
+ 		line_editor->hide();
+ 
+-		text_editor->clear();
+-		text_editor->set_text(c.text);
+-		text_editor->select_all();
+-		text_editor->show();
++		TextEdit *editor = _ensure_text_editor();
++		editor->clear();
++		editor->set_text(c.text);
++		editor->select_all();
++		editor->show();
+ 
+ 		const String &col_title_ml = columns[col].title;
+-		text_editor->set_accessibility_name(col_title_ml.is_empty() ? c.text : col_title_ml);
++		editor->set_accessibility_name(col_title_ml.is_empty() ? c.text : col_title_ml);
+ 
+ 		popup_editor->set_position(get_screen_position() + rect.position);
+ 		popup_editor->set_size(rect.size * popup_scale);
+@@ -4735,7 +4751,7 @@ bool Tree::edit_selected(bool p_force_edit) {
+ 		popup_editor->popup();
+ 		popup_editor->child_controls_changed();
+ 
+-		text_editor->grab_focus(hide_focus);
++		editor->grab_focus(hide_focus);
+ 
+ 		return true;
+ 	}
+@@ -4760,7 +4776,7 @@ bool Tree::is_editing() {
+ void Tree::set_editor_selection(int p_from_line, int p_to_line, int p_from_column, int p_to_column, int p_caret) {
+ 	if (p_from_column == -1 || p_to_column == -1) {
+ 		line_editor->select(p_from_line, p_to_line);
+-	} else {
++	} else if (text_editor) {
+ 		text_editor->select(p_from_line, p_from_column, p_to_line, p_to_column, p_caret);
+ 	}
+ }
+@@ -7708,10 +7724,7 @@ Tree::Tree() {
+ 	line_editor->hide();
+ 	popup_editor_vb->add_child(line_editor);
+ 
+-	text_editor = memnew(TextEdit);
+-	text_editor->set_v_size_flags(SIZE_EXPAND_FILL);
+-	text_editor->hide();
+-	popup_editor_vb->add_child(text_editor);
++	// text_editor is created lazily, see _ensure_text_editor().
+ 
+ 	h_scroll = memnew(HScrollBar);
+ 	h_scroll->set_use_parent_material(true);
+@@ -7733,7 +7746,6 @@ Tree::Tree() {
+ 	h_scroll->connect(SceneStringName(value_changed), callable_mp(this, &Tree::_scroll_moved));
+ 	v_scroll->connect(SceneStringName(value_changed), callable_mp(this, &Tree::_scroll_moved));
+ 	line_editor->connect(SceneStringName(text_submitted), callable_mp(this, &Tree::_line_editor_submit));
+-	text_editor->connect(SceneStringName(gui_input), callable_mp(this, &Tree::_text_editor_gui_input));
+ 	popup_editor->connect("popup_hide", callable_mp(this, &Tree::_text_editor_popup_modal_close));
+ 
+ 	set_notify_transform(true);
+diff --git a/scene/gui/tree.h b/scene/gui/tree.h
+index 1b3ed2348b..cad3106077 100644
+--- a/scene/gui/tree.h
++++ b/scene/gui/tree.h
+@@ -606,6 +606,7 @@ private:
+ 	void select_single_item(TreeItem *p_selected, TreeItem *p_current, int p_col, TreeItem *p_prev = nullptr, bool *r_in_range = nullptr, bool p_force_deselect = false);
+ 	int propagate_mouse_event(const Point2i &p_pos, int x_ofs, int y_ofs, int x_limit, bool p_double_click, TreeItem *p_item, MouseButton p_button, const Ref<InputEventWithModifiers> &p_mod, bool p_first_call = true, bool p_skip_children = false);
+ 	void _line_editor_submit(String p_text);
++	TextEdit *_ensure_text_editor();
+ 	void _apply_multiline_edit(bool p_hide_focus = false);
+ 	void _text_editor_popup_modal_close();
+ 	void _text_editor_gui_input(const Ref<InputEvent> &p_event);

@@ -1,0 +1,143 @@
+Candidate 029: gst_device_has_classesv() NULL deref
+=====================================================
+Build: clang, --buildtype=debugoptimized, -Db_sanitize=address,undefined, -fno-sanitize=function
+Target: gstreamer core only (subprojects/gstreamer), uninstalled meson build, run via gst-env.py
+Repro: repro/repro.c - minimal GstDevice subclass, constructed via public g_object_new() with
+       "device-class" explicitly passed as NULL, then gst_device_has_classesv() called with a
+       non-empty classes array.
+
+------------------------------------------------------------------
+NEGATIVE CONTROL: omitting "device-class" entirely from g_object_new()
+------------------------------------------------------------------
+This is the trigger originally hypothesized by the candidate description ("a GstDevice subclass
+that never explicitly sets it"). Empirically this does NOT reproduce: GObject's construction
+machinery invokes gst_device_set_property() with the property's *default* value ("" - see
+g_param_spec_string(..., "The Class of the device", "", ...) in gst_device_class_init()) for any
+G_PARAM_CONSTRUCT_ONLY property not explicitly passed to g_object_new(), exactly as it would for
+G_PARAM_CONSTRUCT. Confirmed against a minimal isolated GObject test AND against a real GstDevice
+subclass linked against system libgstreamer-1.0 1.28.2:
+
+  $ ./test_omit_device_class
+  constructed, priv device_class via getter: ''
+  calling gst_device_has_classesv...
+  result = 0 (no crash)
+  EXIT: 0
+
+------------------------------------------------------------------
+ACTUAL TRIGGER: explicit "device-class", NULL passed to g_object_new()
+------------------------------------------------------------------
+=== BEFORE (pristine gstdevice.c, HEAD 65b9547519) - repro run 1/3 ===
+../subprojects/gstreamer/gst/gstdevice.c:372:13: runtime error: null pointer passed as argument 1, which is declared to never be null
+/usr/include/string.h:378:33: note: nonnull attribute specified here
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior ../subprojects/gstreamer/gst/gstdevice.c:372:13 
+AddressSanitizer:DEADLYSIGNAL
+=================================================================
+==364169==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000 (pc 0x70e8c1b0ae1c bp 0x7ffd506a5bf0 sp 0x7ffd506a5a88 T0)
+==364169==The signal is caused by a READ memory access.
+==364169==Hint: address points to the zero page.
+    #0 0x70e8c1b0ae1c in __strchr_evex string/../sysdeps/x86_64/multiarch/strchr-evex.S:108
+    #1 0x70e8c1a1e049 in __strstr_generic string/../string/strstr.c:84:31
+    #2 0x591e2daf4acc in strstr (/tmp/gstdev_real/repro+0x49acc) (BuildId: edab72846cd11a21aa70d27e85f11dcc53f56e4e)
+    #3 0x70e8c21461d1 in gst_device_has_classesv /home/rafal/Projekty/Obce/gstreamer/___BUGHUNT___/.worktrees/029/build-029/../subprojects/gstreamer/gst/gstdevice.c:372:13
+    #4 0x591e2dbc1df5 in main /tmp/gstdev_real/repro.c:35:18
+    #5 0x70e8c198b600 in __libc_start_call_main csu/../sysdeps/nptl/libc_start_call_main.h:59:16
+    #6 0x70e8c198b717 in __libc_start_main csu/../csu/libc-start.c:360:3
+    #7 0x591e2dad8434 in _start (/tmp/gstdev_real/repro+0x2d434) (BuildId: edab72846cd11a21aa70d27e85f11dcc53f56e4e)
+
+==364169==Register values:
+rax = 0x0000000000000000  rbx = 0x0000591e2dbd6ae0  rcx = 0x0000000000000000  rdx = 0x0000000000000000  
+rdi = 0x0000000000000000  rsi = 0x0000000000000056  rbp = 0x00007ffd506a5bf0  rsp = 0x00007ffd506a5a88  
+ r8 = 0xffffff0000000000   r9 = 0x000000000000007c  r10 = 0xafffff00000fffff  r11 = 0x0000000000000246  
+r12 = 0x0000000000000056  r13 = 0x0000000000000056  r14 = 0x0000000000000000  r15 = 0x00000d9d97ed8004  
+AddressSanitizer can not provide additional info.
+SUMMARY: AddressSanitizer: SEGV string/../sysdeps/x86_64/multiarch/strchr-evex.S:108 in __strchr_evex
+==364169==ABORTING
+
+=== BEFORE - repro run 2/3 ===
+../subprojects/gstreamer/gst/gstdevice.c:372:13: runtime error: null pointer passed as argument 1, which is declared to never be null
+/usr/include/string.h:378:33: note: nonnull attribute specified here
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior ../subprojects/gstreamer/gst/gstdevice.c:372:13 
+AddressSanitizer:DEADLYSIGNAL
+=================================================================
+==364172==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000 (pc 0x75519a30ae1c bp 0x7ffc97e6df90 sp 0x7ffc97e6de28 T0)
+==364172==The signal is caused by a READ memory access.
+==364172==Hint: address points to the zero page.
+    #0 0x75519a30ae1c in __strchr_evex string/../sysdeps/x86_64/multiarch/strchr-evex.S:108
+    #1 0x75519a21e049 in __strstr_generic string/../string/strstr.c:84:31
+    #2 0x64b6c86edacc in strstr (/tmp/gstdev_real/repro+0x49acc) (BuildId: edab72846cd11a21aa70d27e85f11dcc53f56e4e)
+    #3 0x75519a9461d1 in gst_device_has_classesv /home/rafal/Projekty/Obce/gstreamer/___BUGHUNT___/.worktrees/029/build-029/../subprojects/gstreamer/gst/gstdevice.c:372:13
+    #4 0x64b6c87badf5 in main /tmp/gstdev_real/repro.c:35:18
+    #5 0x75519a18b600 in __libc_start_call_main csu/../sysdeps/nptl/libc_start_call_main.h:59:16
+    #6 0x75519a18b717 in __libc_start_main csu/../csu/libc-start.c:360:3
+    #7 0x64b6c86d1434 in _start (/tmp/gstdev_real/repro+0x2d434) (BuildId: edab72846cd11a21aa70d27e85f11dcc53f56e4e)
+
+==364172==Register values:
+rax = 0x0000000000000000  rbx = 0x000064b6c87cfae0  rcx = 0x0000000000000000  rdx = 0x0000000000000000  
+rdi = 0x0000000000000000  rsi = 0x0000000000000056  rbp = 0x00007ffc97e6df90  rsp = 0x00007ffc97e6de28  
+ r8 = 0xffffff0000000000   r9 = 0x000000000000007c  r10 = 0xafffff00000fffff  r11 = 0x0000000000000246  
+r12 = 0x0000000000000056  r13 = 0x0000000000000056  r14 = 0x0000000000000000  r15 = 0x00000e2ab2fd8004  
+AddressSanitizer can not provide additional info.
+SUMMARY: AddressSanitizer: SEGV string/../sysdeps/x86_64/multiarch/strchr-evex.S:108 in __strchr_evex
+==364172==ABORTING
+
+=== BEFORE - repro run 3/3 ===
+../subprojects/gstreamer/gst/gstdevice.c:372:13: runtime error: null pointer passed as argument 1, which is declared to never be null
+/usr/include/string.h:378:33: note: nonnull attribute specified here
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior ../subprojects/gstreamer/gst/gstdevice.c:372:13 
+AddressSanitizer:DEADLYSIGNAL
+=================================================================
+==364174==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000 (pc 0x79a83630ae1c bp 0x7ffc5eed5f70 sp 0x7ffc5eed5e08 T0)
+==364174==The signal is caused by a READ memory access.
+==364174==Hint: address points to the zero page.
+    #0 0x79a83630ae1c in __strchr_evex string/../sysdeps/x86_64/multiarch/strchr-evex.S:108
+    #1 0x79a83621e049 in __strstr_generic string/../string/strstr.c:84:31
+    #2 0x5ec1d69a0acc in strstr (/tmp/gstdev_real/repro+0x49acc) (BuildId: edab72846cd11a21aa70d27e85f11dcc53f56e4e)
+    #3 0x79a8369461d1 in gst_device_has_classesv /home/rafal/Projekty/Obce/gstreamer/___BUGHUNT___/.worktrees/029/build-029/../subprojects/gstreamer/gst/gstdevice.c:372:13
+    #4 0x5ec1d6a6ddf5 in main /tmp/gstdev_real/repro.c:35:18
+    #5 0x79a83618b600 in __libc_start_call_main csu/../sysdeps/nptl/libc_start_call_main.h:59:16
+    #6 0x79a83618b717 in __libc_start_main csu/../csu/libc-start.c:360:3
+    #7 0x5ec1d6984434 in _start (/tmp/gstdev_real/repro+0x2d434) (BuildId: edab72846cd11a21aa70d27e85f11dcc53f56e4e)
+
+==364174==Register values:
+rax = 0x0000000000000000  rbx = 0x00005ec1d6a82ae0  rcx = 0x0000000000000000  rdx = 0x0000000000000000  
+rdi = 0x0000000000000000  rsi = 0x0000000000000056  rbp = 0x00007ffc5eed5f70  rsp = 0x00007ffc5eed5e08  
+ r8 = 0xffffff0000000000   r9 = 0x000000000000007c  r10 = 0xafffff00000fffff  r11 = 0x0000000000000246  
+r12 = 0x0000000000000056  r13 = 0x0000000000000056  r14 = 0x0000000000000000  r15 = 0x00000eb5867d8004  
+AddressSanitizer can not provide additional info.
+SUMMARY: AddressSanitizer: SEGV string/../sysdeps/x86_64/multiarch/strchr-evex.S:108 in __strchr_evex
+==364174==ABORTING
+
+------------------------------------------------------------------
+AFTER FIX (patch.diff applied: NULL-check added before strstr())
+------------------------------------------------------------------
+=== AFTER (patched gstdevice.c) - repro run 1/3 ===
+result = 0 (no crash)
+
+=== AFTER - repro run 2/3 ===
+result = 0 (no crash)
+
+=== AFTER - repro run 3/3 ===
+result = 0 (no crash)
+
+------------------------------------------------------------------
+FIX VARIATION CHECK (CONFIRMATION.md section 7): a second, different input in the same
+bug class - a classes array with a leading empty-string entry (exercises the loop reaching
+strstr() on a later iteration, not just the first), plus gst_device_has_classes() (the
+"/"-joined public wrapper around has_classesv())
+------------------------------------------------------------------
+Against pristine (unpatched) build:
+../subprojects/gstreamer/gst/gstdevice.c:372:13: runtime error: null pointer passed as argument 1, which is declared to never be null
+[... same UBSan/ASAN SEGV as above, at the same gstdevice.c:372 strstr() call ...]
+
+Against patched build:
+variant result = 0 (no crash)
+has_classes result = 0 (no crash)
+
+------------------------------------------------------------------
+just test (full end-to-end cycle from a fresh clone) - verified 2026-09-15
+------------------------------------------------------------------
+reproduce-before: real ASAN/UBSan SEGV at gstdevice.c:372:13 (see above), exit code 1 (expected -
+this is the bug reproducing; the `test` recipe's chain stops here by shell semantics, same as the
+skill's own candidate_justfile template's reproduce-before for a crashing repro)
+apply + rebuild: clean
+reproduce-after: "result = 0 (no crash)"

@@ -1,0 +1,31 @@
+diff --git a/src/backend/linux_raw/io/errno.rs b/src/backend/linux_raw/io/errno.rs
+index 895a4b66..e70b11c8 100644
+--- a/src/backend/linux_raw/io/errno.rs
++++ b/src/backend/linux_raw/io/errno.rs
+@@ -87,11 +87,21 @@ impl Errno {
+         // negate them after every syscall.
+         let encoded = raw.wrapping_neg() as u16;
+
+-        // TODO: Use Range::contains, once that's `const`.
+-        assert!(encoded >= 0xf001);
+-
+-        // SAFETY: Linux syscalls return negated error values in the range
+-        // `-4095..0`, which we just asserted.
++        // This function is reachable from the public `from_raw_os_error`,
++        // so `raw` may be `0` (eg. "no error", which isn't an actual Linux
++        // errno value) or otherwise outside Linux's `1..4096` errno range
++        // (eg. arbitrary values from FFI or `std::io::Error`). We used to
++        // `assert!(encoded >= 0xf001)` here, which aborted the whole
++        // process for such inputs (see #1578); we no longer validate the
++        // range, and instead just store whatever was given. Out-of-range
++        // values may not round-trip exactly through `raw_os_error` if they
++        // don't fit in `-4095..0`, but that's harmless: they were never
++        // valid Linux errno values to begin with.
++        //
++        // SAFETY: `Self` is a `#[repr(transparent)]` wrapper around `u16`
++        // with no restricted-range invariant currently enforced on it (see
++        // the commented-out `rustc_layout_scalar_valid_range_*` attributes
++        // above), so constructing it from any `u16` is sound.
+         unsafe { Self(encoded) }
+     }
+ }

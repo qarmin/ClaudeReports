@@ -1,0 +1,55 @@
+Target: wasm32-wasip1, run under a real wasmtime 49.0.1 (installed fresh this session via
+https://wasmtime.dev/install.sh). The repro crate depends on the real, unmodified public
+`rustix::event` API (path dependency onto the checkout), compiled for wasm32-wasip1 so it hits the
+exact `#[cfg(any(windows, target_os = "wasi"))]` branch the bug lives in.
+
+=== BEFORE (unpatched tree, base_commit 287214b889865d8e1406a0ee71cc409b6f6191c8) ===
+
+$ cargo build --target wasm32-wasip1
+   Compiling rustix v1.1.5 (.../select.rs unpatched)
+   Compiling repro102 v0.1.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+
+$ wasmtime run target/wasm32-wasip1/debug/repro102.wasm
+before remove: [5, 10, 15]
+after remove(10): [5, 0]
+RESULT: BUG CONFIRMED - expected [5, 15], got [5, 0] (fd 15 dropped and/or bogus fd Some(0) introduced)
+after remove(3) [last-element case]: [1, 2]
+RESULT: CORRECT (last-element case)
+after draining to empty: [0]
+RESULT: BUG CONFIRMED (drain-to-empty case) - expected [], got [0]
+exit=1
+
+Repeated 5/5 runs of the primary scenario (remove non-last fd from a 3-member set), all identical
+and deterministic (pure array bookkeeping, no randomness/timing involved):
+
+run 1 exit=1 : RESULT: BUG CONFIRMED - expected [5, 15], got [5, 0] (fd 15 dropped and/or bogus fd Some(0) introduced)
+run 2 exit=1 : RESULT: BUG CONFIRMED - expected [5, 15], got [5, 0] (fd 15 dropped and/or bogus fd Some(0) introduced)
+run 3 exit=1 : RESULT: BUG CONFIRMED - expected [5, 15], got [5, 0] (fd 15 dropped and/or bogus fd Some(0) introduced)
+run 4 exit=1 : RESULT: BUG CONFIRMED - expected [5, 15], got [5, 0] (fd 15 dropped and/or bogus fd Some(0) introduced)
+run 5 exit=1 : RESULT: BUG CONFIRMED - expected [5, 15], got [5, 0] (fd 15 dropped and/or bogus fd Some(0) introduced)
+
+=== AFTER (patch.diff applied) ===
+
+$ cargo build --target wasm32-wasip1
+   Compiling rustix v1.1.5 (.../select.rs patched)
+   Compiling repro102 v0.1.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+
+$ wasmtime run target/wasm32-wasip1/debug/repro102.wasm
+before remove: [5, 10, 15]
+after remove(10): [5, 15]
+RESULT: CORRECT - got [5, 15] as expected
+after remove(3) [last-element case]: [1, 2]
+RESULT: CORRECT (last-element case)
+after draining to empty: []
+RESULT: CORRECT (drain-to-empty case)
+exit=0
+
+=== Project test suite (cargo test --features event --lib --tests, stable toolchain) ===
+
+Before patch: 23 passed; 0 failed; 1 ignored
+After patch:  23 passed; 0 failed; 1 ignored
+(no regressions; native host test suite doesn't exercise the windows/wasi cfg branch itself since
+the host here is x86_64-unknown-linux-gnu - the wasm32-wasip1 repro above is what actually exercises
+the affected branch end-to-end)

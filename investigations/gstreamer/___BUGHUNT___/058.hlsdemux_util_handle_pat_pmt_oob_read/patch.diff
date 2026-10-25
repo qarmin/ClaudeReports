@@ -1,0 +1,67 @@
+diff --git a/subprojects/gst-plugins-bad/ext/hls/gsthlsdemux-util.c b/subprojects/gst-plugins-bad/ext/hls/gsthlsdemux-util.c
+index 95f61d457a..885b2c32a6 100644
+--- a/subprojects/gst-plugins-bad/ext/hls/gsthlsdemux-util.c
++++ b/subprojects/gst-plugins-bad/ext/hls/gsthlsdemux-util.c
+@@ -115,13 +115,21 @@ static gboolean
+ handle_pmt (GstHLSTSReader * r, const guint8 * data, guint size)
+ {
+   const guint8 *p = data;
++  const guint8 *end = p + r->packet_size;
+   guint32 hdr = GST_READ_UINT32_BE (p);
+   guint slen, pcr_pid;
+ 
+   data = p + 4;
+-  if ((hdr & 0x00000020) != 0)  /* has_adaptation_field */
++  if ((hdr & 0x00000020) != 0) {        /* has_adaptation_field */
++    if (data >= end || 1 + p[4] > (guint) (end - data))
++      return FALSE;
+     data += 1 + p[4];           /* adaptation_field_len */
++  }
++  if (data >= end || 1 + data[0] > (guint) (end - data))
++    return FALSE;
+   data += 1 + data[0];          /* pointer_field */
++  if (end - data < 8)
++    return FALSE;
+   if (data[0] != 0x02)          /* table_id */
+     return FALSE;
+   //gst_util_dump_mem (data, 8);
+@@ -129,7 +137,7 @@ handle_pmt (GstHLSTSReader * r, const guint8 * data, guint size)
+   if (data[6] != 0 || data[6] != data[7])
+     return FALSE;
+   slen = GST_READ_UINT16_BE (data + 1) & 0x0FFF;
+-  if (slen > (gsize) (p + r->packet_size - (data + 1 + 2)) || slen < 5 + 2 + 4)
++  if (slen > (gsize) (end - (data + 1 + 2)) || slen < 5 + 2 + 4)
+     return FALSE;
+   data += 3 + 5;
+   slen -= 5;                    /* bytes after section_length field itself */
+@@ -148,20 +156,28 @@ static gboolean
+ handle_pat (GstHLSTSReader * r, const guint8 * data, guint size)
+ {
+   const guint8 *p = data;
++  const guint8 *end = p + r->packet_size;
+   guint32 hdr = GST_READ_UINT32_BE (p);
+   guint slen;
+ 
+   data = p + 4;
+-  if ((hdr & 0x00000020) != 0)  /* has_adaptation_field */
++  if ((hdr & 0x00000020) != 0) {        /* has_adaptation_field */
++    if (data >= end || 1 + p[4] > (guint) (end - data))
++      return FALSE;
+     data += 1 + p[4];           /* adaptation_field_len */
++  }
++  if (data >= end || 1 + data[0] > (guint) (end - data))
++    return FALSE;
+   data += 1 + data[0];          /* pointer_field */
++  if (end - data < 8)
++    return FALSE;
+   if (data[0] != 0)             /* table_id */
+     return FALSE;
+   /* we assume the entire PAT fits into a single packet and this is it */
+   if (data[6] != 0 || data[6] != data[7])
+     return FALSE;
+   slen = GST_READ_UINT16_BE (data + 1) & 0x0FFF;
+-  if (slen > (gsize) (p + r->packet_size - (data + 1 + 2)) || slen < 5 + 4 + 4)
++  if (slen > (gsize) (end - (data + 1 + 2)) || slen < 5 + 4 + 4)
+     return FALSE;
+   data += 3 + 5;
+   slen -= 5;                    /* bytes after section_length field itself */

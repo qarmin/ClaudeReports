@@ -1,0 +1,90 @@
+diff --git a/scene/gui/file_dialog.cpp b/scene/gui/file_dialog.cpp
+index 3d15587cbd..339655b506 100644
+--- a/scene/gui/file_dialog.cpp
++++ b/scene/gui/file_dialog.cpp
+@@ -367,7 +367,7 @@ void FileDialog::update_dir() {
+ 		directory_edit->set_text(dir_access->get_current_dir(false).trim_prefix(root_prefix).trim_prefix("/"));
+ 	}
+ 
+-	if (drives->is_visible()) {
++	if (drives && drives->is_visible()) {
+ 		if (dir_access->get_current_dir().is_network_share_path()) {
+ 			_update_drives(false);
+ 			PopupMenu *pm = drives->get_popup();
+@@ -401,7 +401,7 @@ void FileDialog::update_dir() {
+ void FileDialog::_dir_submitted(String p_dir) {
+ 	String new_dir = OS::get_singleton()->expand_path(p_dir);
+ #ifdef WINDOWS_ENABLED
+-	if (root_prefix.is_empty() && drives->is_visible() && !new_dir.is_network_share_path() && new_dir.is_absolute_path() && new_dir.find(":/") == -1 && new_dir.find(":\\") == -1) {
++	if (root_prefix.is_empty() && drives && drives->is_visible() && !new_dir.is_network_share_path() && new_dir.is_absolute_path() && new_dir.find(":/") == -1 && new_dir.find(":\\") == -1) {
+ 		// Non network path without X:/ prefix on Windows, add drive letter.
+ 		new_dir = drives->get_popup()->get_item_metadata(selected_drive).operator Dictionary()["path"].operator String().path_join(new_dir);
+ 	}
+@@ -1661,9 +1661,27 @@ void FileDialog::_change_dir(const String &p_new_dir) {
+ 	update_dir();
+ }
+ 
++// The drives MenuButton is only ever shown by _update_drives(), which runs when the dialog is
++// actually used (a directory change or an invalidate), not when it is constructed - and only
++// creates the button when the filesystem reports at least one drive for the current root prefix.
++// A dialog that is never opened therefore never builds it.
++void FileDialog::_ensure_drives() {
++	if (drives) {
++		return;
++	}
++
++	drives = memnew(MenuButton);
++	drives->set_flat(false);
++	drives->get_popup()->connect("index_pressed", callable_mp(this, &FileDialog::_select_drive));
++	drives->set_accessibility_name(ETR("Drive"));
++	drives_container->add_child(drives);
++}
++
+ void FileDialog::_update_drives(bool p_select) {
+ 	if (access != ACCESS_FILESYSTEM) {
+-		drives->hide();
++		if (drives) {
++			drives->hide();
++		}
+ 		return;
+ 	}
+ 
+@@ -1678,8 +1696,11 @@ void FileDialog::_update_drives(bool p_select) {
+ 		drive_map[i] = drv;
+ 	}
+ 	if (drive_map.size() == 0) {
+-		drives->hide();
++		if (drives) {
++			drives->hide();
++		}
+ 	} else {
++		_ensure_drives();
+ 		PopupMenu *pm = drives->get_popup();
+ 		pm->clear();
+ 		Node *dp = drives->get_parent();
+@@ -2399,11 +2420,7 @@ FileDialog::FileDialog() {
+ 	drives_container = memnew(HBoxContainer);
+ 	top_toolbar->add_child(drives_container);
+ 
+-	drives = memnew(MenuButton);
+-	drives->set_flat(false);
+-	drives->get_popup()->connect("index_pressed", callable_mp(this, &FileDialog::_select_drive));
+-	drives->set_accessibility_name(ETR("Drive"));
+-	top_toolbar->add_child(drives);
++	// drives is created lazily, see _ensure_drives().
+ 
+ 	directory_edit = memnew(LineEdit);
+ 	directory_edit->set_accessibility_name(ETR("Path:"));
+diff --git a/scene/gui/file_dialog.h b/scene/gui/file_dialog.h
+index 92ec807088..a425f91c61 100644
+--- a/scene/gui/file_dialog.h
++++ b/scene/gui/file_dialog.h
+@@ -261,6 +261,8 @@ private:
+ 	AcceptDialog *exterr = nullptr;
+ 	ConfirmationDialog *confirm_save = nullptr;
+ 
++	void _ensure_drives();
++
+ 	struct ThemeCache {
+ 		int thumbnail_size = 64;
+ 

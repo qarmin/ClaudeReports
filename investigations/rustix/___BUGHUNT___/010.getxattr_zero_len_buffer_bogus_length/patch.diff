@@ -1,0 +1,88 @@
+diff --git a/src/fs/xattr.rs b/src/fs/xattr.rs
+index ea0eaea1..ceac82d0 100644
+--- a/src/fs/xattr.rs
++++ b/src/fs/xattr.rs
+@@ -45,8 +45,13 @@ pub fn getxattr<P: path::Arg, Name: path::Arg, Buf: Buffer<u8>>(
+ ) -> io::Result<Buf::Output> {
+     path.into_with_c_str(|path| {
+         name.into_with_c_str(|name| {
++            let (_, buf_len) = value.parts_mut();
+             // SAFETY: `getxattr` behaves.
+             let len = unsafe { backend::fs::syscalls::getxattr(path, name, value.parts_mut())? };
++            // If `value`'s length is 0, `getxattr` returns the attribute's
++            // full size without writing anything, so `len` can exceed the
++            // buffer's actual capacity.
++            let len = core::cmp::min(len, buf_len);
+             // SAFETY: `getxattr` behaves.
+             unsafe { Ok(value.assume_init(len)) }
+         })
+@@ -69,8 +74,13 @@ pub fn lgetxattr<P: path::Arg, Name: path::Arg, Buf: Buffer<u8>>(
+ ) -> io::Result<Buf::Output> {
+     path.into_with_c_str(|path| {
+         name.into_with_c_str(|name| {
++            let (_, buf_len) = value.parts_mut();
+             // SAFETY: `lgetxattr` behaves.
+             let len = unsafe { backend::fs::syscalls::lgetxattr(path, name, value.parts_mut())? };
++            // If `value`'s length is 0, `lgetxattr` returns the attribute's
++            // full size without writing anything, so `len` can exceed the
++            // buffer's actual capacity.
++            let len = core::cmp::min(len, buf_len);
+             // SAFETY: `lgetxattr` behaves.
+             unsafe { Ok(value.assume_init(len)) }
+         })
+@@ -93,8 +103,13 @@ pub fn fgetxattr<Fd: AsFd, Name: path::Arg, Buf: Buffer<u8>>(
+     mut value: Buf,
+ ) -> io::Result<Buf::Output> {
+     name.into_with_c_str(|name| {
++        let (_, buf_len) = value.parts_mut();
+         // SAFETY: `fgetxattr` behaves.
+         let len = unsafe { backend::fs::syscalls::fgetxattr(fd.as_fd(), name, value.parts_mut())? };
++        // If `value`'s length is 0, `fgetxattr` returns the attribute's full
++        // size without writing anything, so `len` can exceed the buffer's
++        // actual capacity.
++        let len = core::cmp::min(len, buf_len);
+         // SAFETY: `fgetxattr` behaves.
+         unsafe { Ok(value.assume_init(len)) }
+     })
+@@ -171,8 +186,13 @@ pub fn fsetxattr<Fd: AsFd, Name: path::Arg>(
+ #[inline]
+ pub fn listxattr<P: path::Arg, Buf: Buffer<u8>>(path: P, mut list: Buf) -> io::Result<Buf::Output> {
+     path.into_with_c_str(|path| {
++        let (_, buf_len) = list.parts_mut();
+         // SAFETY: `listxattr` behaves.
+         let len = unsafe { backend::fs::syscalls::listxattr(path, list.parts_mut())? };
++        // If `list`'s length is 0, `listxattr` returns the full list size
++        // without writing anything, so `len` can exceed the buffer's actual
++        // capacity.
++        let len = core::cmp::min(len, buf_len);
+         // SAFETY: `listxattr` behaves.
+         unsafe { Ok(list.assume_init(len)) }
+     })
+@@ -191,8 +211,13 @@ pub fn llistxattr<P: path::Arg, Buf: Buffer<u8>>(
+     mut list: Buf,
+ ) -> io::Result<Buf::Output> {
+     path.into_with_c_str(|path| {
++        let (_, buf_len) = list.parts_mut();
+         // SAFETY: `flistxattr` behaves.
+         let len = unsafe { backend::fs::syscalls::llistxattr(path, list.parts_mut())? };
++        // If `list`'s length is 0, `llistxattr` returns the full list size
++        // without writing anything, so `len` can exceed the buffer's actual
++        // capacity.
++        let len = core::cmp::min(len, buf_len);
+         // SAFETY: `flistxattr` behaves.
+         unsafe { Ok(list.assume_init(len)) }
+     })
+@@ -209,8 +234,13 @@ pub fn llistxattr<P: path::Arg, Buf: Buffer<u8>>(
+ /// [Apple]: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/flistxattr.2.html
+ #[inline]
+ pub fn flistxattr<Fd: AsFd, Buf: Buffer<u8>>(fd: Fd, mut list: Buf) -> io::Result<Buf::Output> {
++    let (_, buf_len) = list.parts_mut();
+     // SAFETY: `flistxattr` behaves.
+     let len = unsafe { backend::fs::syscalls::flistxattr(fd.as_fd(), list.parts_mut())? };
++    // If `list`'s length is 0, `flistxattr` returns the full list size
++    // without writing anything, so `len` can exceed the buffer's actual
++    // capacity.
++    let len = core::cmp::min(len, buf_len);
+     // SAFETY: `flistxattr` behaves.
+     unsafe { Ok(list.assume_init(len)) }
+ }

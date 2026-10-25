@@ -1,0 +1,173 @@
+diff --git a/editor/editor_node.cpp b/editor/editor_node.cpp
+index 9baff90c7d..46717e8f5c 100644
+--- a/editor/editor_node.cpp
++++ b/editor/editor_node.cpp
+@@ -2813,7 +2813,7 @@ void EditorNode::_dialog_action(String p_file) {
+ 		} break;
+ 
+ 		case FILE_EXPORT_MESH_LIBRARY: {
+-			const Dictionary &fd_options = file_export_lib->get_selected_options();
++			const Dictionary &fd_options = _get_file_export_lib()->get_selected_options();
+ 			bool merge_with_existing_library = fd_options.get(TTR("Merge With Existing"), true);
+ 			bool apply_mesh_instance_transforms = fd_options.get(TTR("Apply MeshInstance Transforms"), false);
+ 
+@@ -3340,7 +3340,7 @@ void EditorNode::_android_export_preset_selected(int p_index) {
+ 
+ void EditorNode::_android_install_build_template() {
+ 	gradle_build_manage_templates->hide();
+-	file_android_build_source->popup_centered_ratio();
++	_get_file_android_build_source()->popup_centered_ratio();
+ }
+ 
+ void EditorNode::_android_explore_build_templates() {
+@@ -3665,9 +3665,9 @@ void EditorNode::_menu_option_confirm(int p_option, bool p_confirmed) {
+ 			String resource_path = ProjectSettings::get_singleton()->get_resource_path();
+ 			const String base_path = resource_path.substr(0, resource_path.rfind_char('/')) + "/";
+ 
+-			file_pack_zip->set_current_path(base_path);
+-			file_pack_zip->set_current_file(ProjectZIPPacker::get_project_zip_safe_name());
+-			file_pack_zip->popup_file_dialog();
++			_get_file_pack_zip()->set_current_path(base_path);
++			_get_file_pack_zip()->set_current_file(ProjectZIPPacker::get_project_zip_safe_name());
++			_get_file_pack_zip()->popup_file_dialog();
+ 		} break;
+ 
+ 		case SCENE_UNDO: {
+@@ -4199,13 +4199,13 @@ void EditorNode::_export_as_menu_option(int p_idx) {
+ 		List<String> extensions;
+ 		Ref<MeshLibrary> ml(memnew(MeshLibrary));
+ 		ResourceSaver::get_recognized_extensions(ml, &extensions);
+-		file_export_lib->clear_filters();
++		_get_file_export_lib()->clear_filters();
+ 		for (const String &E : extensions) {
+-			file_export_lib->add_filter("*." + E);
++			_get_file_export_lib()->add_filter("*." + E);
+ 		}
+ 
+-		file_export_lib->set_title(TTR("Export Mesh Library"));
+-		file_export_lib->popup_file_dialog();
++		_get_file_export_lib()->set_title(TTR("Export Mesh Library"));
++		_get_file_export_lib()->popup_file_dialog();
+ 	} else { // Custom menu options added by plugins
+ 		if (export_as_menu->get_item_submenu(p_idx).is_empty()) { // If not a submenu
+ 			Callable callback = export_as_menu->get_item_metadata(p_idx);
+@@ -4505,6 +4505,47 @@ void EditorNode::remove_extension_editor_plugin(const StringName &p_class_name)
+ 	singleton->editor_data.remove_extension_editor_plugin(p_class_name);
+ }
+ 
++// These four EditorFileDialogs each cost ~1.45MB (see ___OPTIMIZATIONS___/021) and each has a
++// single popup site, so they are built on first use instead of at editor startup.
++EditorFileDialog *EditorNode::_get_file_android_build_source() {
++	if (!file_android_build_source) {
++		file_android_build_source = memnew(EditorFileDialog);
++		file_android_build_source->set_title(TTR("Select Android sources file"));
++		file_android_build_source->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
++		file_android_build_source->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
++		file_android_build_source->add_filter("*.zip");
++		file_android_build_source->connect("file_selected", callable_mp(this, &EditorNode::_android_build_source_selected));
++		gui_base->add_child(file_android_build_source);
++	}
++	return file_android_build_source;
++}
++
++EditorFileDialog *EditorNode::_get_file_export_lib() {
++	if (!file_export_lib) {
++		file_export_lib = memnew(EditorFileDialog);
++		file_export_lib->set_title(TTR("Export Library"));
++		file_export_lib->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
++		file_export_lib->connect("file_selected", callable_mp(this, &EditorNode::_dialog_action));
++		file_export_lib->add_option(TTR("Merge With Existing"), Vector<String>(), true);
++		file_export_lib->add_option(TTR("Apply MeshInstance Transforms"), Vector<String>(), false);
++		gui_base->add_child(file_export_lib);
++	}
++	return file_export_lib;
++}
++
++EditorFileDialog *EditorNode::_get_file_pack_zip() {
++	if (!file_pack_zip) {
++		file_pack_zip = memnew(EditorFileDialog);
++		file_pack_zip->connect("file_selected", callable_mp(this, &EditorNode::_dialog_action));
++		file_pack_zip->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
++		file_pack_zip->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
++		file_pack_zip->add_filter("*.zip", "ZIP Archive");
++		file_pack_zip->set_title(TTR("Pack Project as ZIP..."));
++		gui_base->add_child(file_pack_zip);
++	}
++	return file_pack_zip;
++}
++
+ void EditorNode::_update_addon_config() {
+ 	if (_initializing_plugins) {
+ 		return;
+@@ -9375,13 +9416,7 @@ EditorNode::EditorNode() {
+ 	gradle_build_manage_templates->connect(SceneStringName(confirmed), callable_mp(this, &EditorNode::_menu_option).bind(EDITOR_MANAGE_EXPORT_TEMPLATES));
+ 	gui_base->add_child(gradle_build_manage_templates);
+ 
+-	file_android_build_source = memnew(EditorFileDialog);
+-	file_android_build_source->set_title(TTR("Select Android sources file"));
+-	file_android_build_source->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
+-	file_android_build_source->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
+-	file_android_build_source->add_filter("*.zip");
+-	file_android_build_source->connect("file_selected", callable_mp(this, &EditorNode::_android_build_source_selected));
+-	gui_base->add_child(file_android_build_source);
++	// Created lazily, see _ensure_android_dialog() / _get_* accessor below.
+ 
+ 	{
+ 		VBoxContainer *vbox = memnew(VBoxContainer);
+@@ -9410,38 +9445,18 @@ EditorNode::EditorNode() {
+ 	remove_android_build_template->connect(SceneStringName(confirmed), callable_mp(this, &EditorNode::_android_explore_build_templates));
+ 	gui_base->add_child(remove_android_build_template);
+ 
+-	file_templates = memnew(EditorFileDialog);
+-	file_templates->set_title(TTR("Import Templates From ZIP File"));
+-
+-	gui_base->add_child(file_templates);
+-	file_templates->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
+-	file_templates->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
+-	file_templates->clear_filters();
+-	file_templates->add_filter("*.tpz", TTR("Template Package"));
++	// Created lazily, see _ensure_templates_dialog() / _get_* accessor below.
+ 
+ 	file = memnew(EditorFileDialog);
+ 	gui_base->add_child(file);
+ 	file->set_current_dir("res://");
+ 	file->set_transient_to_focused(true);
+ 
+-	file_export_lib = memnew(EditorFileDialog);
+-	file_export_lib->set_title(TTR("Export Library"));
+-	file_export_lib->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
+-	file_export_lib->connect("file_selected", callable_mp(this, &EditorNode::_dialog_action));
+-	file_export_lib->add_option(TTR("Merge With Existing"), Vector<String>(), true);
+-	file_export_lib->add_option(TTR("Apply MeshInstance Transforms"), Vector<String>(), false);
+-	gui_base->add_child(file_export_lib);
+-
+-	file_pack_zip = memnew(EditorFileDialog);
+-	file_pack_zip->connect("file_selected", callable_mp(this, &EditorNode::_dialog_action));
+-	file_pack_zip->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
+-	file_pack_zip->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
+-	file_pack_zip->add_filter("*.zip", "ZIP Archive");
+-	file_pack_zip->set_title(TTR("Pack Project as ZIP..."));
+-	gui_base->add_child(file_pack_zip);
++	// Created lazily, see _ensure_exportlib_dialog() / _get_* accessor below.
++
++	// Created lazily, see _ensure_packzip_dialog() / _get_* accessor below.
+ 
+ 	file->connect("file_selected", callable_mp(this, &EditorNode::_dialog_action));
+-	file_templates->connect("file_selected", callable_mp(this, &EditorNode::_dialog_action));
+ 
+ 	audio_preview_gen = memnew(AudioStreamPreviewGenerator);
+ 	add_child(audio_preview_gen);
+diff --git a/editor/editor_node.h b/editor/editor_node.h
+index 9a47d9b8ca..d9b49bb028 100644
+--- a/editor/editor_node.h
++++ b/editor/editor_node.h
+@@ -688,6 +688,9 @@ private:
+ 	void _layout_menu_option(int p_id);
+ 
+ 	void _update_addon_config();
++	EditorFileDialog *_get_file_android_build_source();
++	EditorFileDialog *_get_file_export_lib();
++	EditorFileDialog *_get_file_pack_zip();
+ 
+ 	void _toggle_distraction_free_mode();
+ 

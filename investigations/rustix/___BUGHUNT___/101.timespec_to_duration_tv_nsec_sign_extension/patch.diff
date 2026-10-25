@@ -1,0 +1,22 @@
+diff --git a/src/timespec.rs b/src/timespec.rs
+index 9d06f203..4ff02a0a 100644
+--- a/src/timespec.rs
++++ b/src/timespec.rs
+@@ -244,7 +244,16 @@ impl TryFrom<Timespec> for Duration {
+     type Error = TryFromIntError;
+ 
+     fn try_from(ts: Timespec) -> Result<Self, Self::Error> {
+-        Ok(Self::new(ts.tv_sec.try_into()?, ts.tv_nsec as _))
++        let secs = ts.tv_sec.try_into()?;
++        // `tv_nsec` is documented to always hold `0..1_000_000_000`; reject anything outside
++        // that range instead of silently misinterpreting it via a lossy `as` cast (a negative
++        // or overlong `tv_nsec` would otherwise produce a nonsensical `Duration`).
++        if !(0..1_000_000_000).contains(&ts.tv_nsec) {
++            // There's no public constructor for `TryFromIntError`, so produce a genuine one via
++            // an int conversion that's guaranteed to fail.
++            return Err(u8::try_from(u32::MAX).unwrap_err());
++        }
++        Ok(Self::new(secs, ts.tv_nsec as u32))
+     }
+ }
+ 

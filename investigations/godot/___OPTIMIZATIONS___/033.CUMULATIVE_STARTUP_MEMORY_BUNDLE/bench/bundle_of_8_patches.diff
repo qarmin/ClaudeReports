@@ -1,0 +1,1329 @@
+diff --git a/editor/animation/animation_tree_editor_plugin.cpp b/editor/animation/animation_tree_editor_plugin.cpp
+index fbf2493fe0..d9feb87f1b 100644
+--- a/editor/animation/animation_tree_editor_plugin.cpp
++++ b/editor/animation/animation_tree_editor_plugin.cpp
+@@ -104,7 +104,12 @@ void AnimationTreeEditor::_meta_clicked(Variant p_meta) {
+ 		String child_name = full_path_str;
+ 		child_name = child_name.replace_first(parent_path, "");
+ 		child_name = child_name.trim_suffix("/");
+-		callable_mp(AnimationNodeBlendTreeEditor::get_singleton(), &AnimationNodeBlendTreeEditor::pan_to_node).call_deferred(child_name, input_index);
++		// Ensure the editor exists rather than relying on edit_path() above having built it -
++		// its own "already on this path" guard can skip that as a no-op.
++		AnimationNodeBlendTreeEditor *bte = Object::cast_to<AnimationNodeBlendTreeEditor>(_ensure_editor_for(blend_tree));
++		if (bte) {
++			callable_mp(bte, &AnimationNodeBlendTreeEditor::pan_to_node).call_deferred(child_name, input_index);
++		}
+ 	}
+ }
+ 
+@@ -355,6 +360,38 @@ void AnimationTreeEditor::_update_path() {
+ 	}
+ }
+ 
++AnimationTreeNodeEditorPlugin *AnimationTreeEditor::_ensure_editor_for(const Ref<AnimationNode> &p_node) {
++	if (p_node.is_null()) {
++		return nullptr;
++	}
++
++	// Reuse an already-constructed editor if one exists (also covers editors registered
++	// externally via add_plugin(), e.g. by a GDExtension).
++	for (int i = 0; i < editors.size(); i++) {
++		if (editors[i]->can_edit(p_node)) {
++			return editors[i];
++		}
++	}
++
++	// None of the built-in sub-editors are constructed yet - lazily build exactly the one that
++	// matches this node's type, instead of all 4 unconditionally at plugin startup.
++	AnimationTreeNodeEditorPlugin *new_editor = nullptr;
++	if (Ref<AnimationNodeBlendTree>(p_node).is_valid()) {
++		new_editor = memnew(AnimationNodeBlendTreeEditor);
++	} else if (Ref<AnimationNodeBlendSpace1D>(p_node).is_valid()) {
++		new_editor = memnew(AnimationNodeBlendSpace1DEditor);
++	} else if (Ref<AnimationNodeBlendSpace2D>(p_node).is_valid()) {
++		new_editor = memnew(AnimationNodeBlendSpace2DEditor);
++	} else if (Ref<AnimationNodeStateMachine>(p_node).is_valid()) {
++		new_editor = memnew(AnimationNodeStateMachineEditor);
++	}
++
++	if (new_editor) {
++		add_plugin(new_editor);
++	}
++	return new_editor;
++}
++
+ void AnimationTreeEditor::edit_path(const Vector<String> &p_path) {
+ 	button_path.clear();
+ 
+@@ -372,8 +409,9 @@ void AnimationTreeEditor::edit_path(const Vector<String> &p_path) {
+ 
+ 		edited_path = button_path;
+ 
++		AnimationTreeNodeEditorPlugin *matched_editor = _ensure_editor_for(node);
+ 		for (int i = 0; i < editors.size(); i++) {
+-			if (editors[i]->can_edit(node)) {
++			if (editors[i] == matched_editor) {
+ 				editors[i]->edit(node);
+ 				editors[i]->show();
+ 			} else {
+@@ -485,12 +523,20 @@ String AnimationTreeEditor::get_base_path() {
+ }
+ 
+ bool AnimationTreeEditor::can_edit(const Ref<AnimationNode> &p_node) const {
++	if (p_node.is_null()) {
++		return false;
++	}
+ 	for (int i = 0; i < editors.size(); i++) {
+ 		if (editors[i]->can_edit(p_node)) {
+ 			return true;
+ 		}
+ 	}
+-	return false;
++	// The matching built-in sub-editor may not be constructed yet - see _ensure_editor_for(),
++	// whose type list must stay in sync with this one.
++	return Ref<AnimationNodeBlendTree>(p_node).is_valid() ||
++			Ref<AnimationNodeBlendSpace1D>(p_node).is_valid() ||
++			Ref<AnimationNodeBlendSpace2D>(p_node).is_valid() ||
++			Ref<AnimationNodeStateMachine>(p_node).is_valid();
+ }
+ 
+ LocalVector<StringName> AnimationTreeEditor::get_animation_list() {
+@@ -571,10 +617,7 @@ AnimationTreeEditor::AnimationTreeEditor() {
+ 	error_button->set_tooltip_text(TTRC("Errors"));
+ 	status_bar->add_child(error_button);
+ 
+-	add_plugin(memnew(AnimationNodeBlendTreeEditor));
+-	add_plugin(memnew(AnimationNodeBlendSpace1DEditor));
+-	add_plugin(memnew(AnimationNodeBlendSpace2DEditor));
+-	add_plugin(memnew(AnimationNodeStateMachineEditor));
++	// The 4 built-in sub-editors are constructed lazily, see _ensure_editor_for().
+ 
+ 	error_scroll = memnew(ScrollContainer);
+ 	error_scroll->set_h_size_flags(SIZE_EXPAND_FILL);
+diff --git a/editor/animation/animation_tree_editor_plugin.h b/editor/animation/animation_tree_editor_plugin.h
+index b4cc0b0106..f8b6957d6c 100644
+--- a/editor/animation/animation_tree_editor_plugin.h
++++ b/editor/animation/animation_tree_editor_plugin.h
+@@ -72,6 +72,7 @@ class AnimationTreeEditor : public EditorDock {
+ 
+ 	void _update_path();
+ 	void _clear_editors();
++	AnimationTreeNodeEditorPlugin *_ensure_editor_for(const Ref<AnimationNode> &p_node);
+ 	ObjectID current_root;
+ 
+ 	void _path_button_pressed(int p_path);
+diff --git a/editor/docks/filesystem_dock.cpp b/editor/docks/filesystem_dock.cpp
+index a43fefccd6..f7ebcdc97f 100644
+--- a/editor/docks/filesystem_dock.cpp
++++ b/editor/docks/filesystem_dock.cpp
+@@ -2689,8 +2689,9 @@ void FileSystemDock::_file_option(int p_option, const Vector<String> &p_selected
+ 			if (!fpath.ends_with("/")) {
+ 				fpath = fpath.get_base_dir();
+ 			}
+-			make_script_dialog->config("Node", fpath.path_join("new_script.gd"), false, false);
+-			make_script_dialog->popup_centered();
++			ScriptCreateDialog *dialog = get_script_create_dialog();
++			dialog->config("Node", fpath.path_join("new_script.gd"), false, false);
++			dialog->popup_centered();
+ 		} break;
+ 
+ 		case FILE_MENU_COPY_PATH: {
+@@ -2827,20 +2828,24 @@ void FileSystemDock::_resource_created() {
+ 
+ 	const String type_name = new_resource_dialog->get_selected_type();
+ 	if (type_name == "Shader") {
+-		make_shader_dialog->config(fpath.path_join("new_shader"), false, false, type_name);
+-		make_shader_dialog->popup_centered();
++		ShaderCreateDialog *dialog = _ensure_shader_create_dialog();
++		dialog->config(fpath.path_join("new_shader"), false, false, type_name);
++		dialog->popup_centered();
+ 		return;
+ 	} else if (type_name == "ShaderInclude") {
+-		make_shader_dialog->config(fpath.path_join("new_shader_include"), false, false, type_name);
+-		make_shader_dialog->popup_centered();
++		ShaderCreateDialog *dialog = _ensure_shader_create_dialog();
++		dialog->config(fpath.path_join("new_shader_include"), false, false, type_name);
++		dialog->popup_centered();
+ 		return;
+ 	} else if (type_name == "VisualShader") {
+-		make_shader_dialog->config(fpath.path_join("new_shader"), false, false, type_name);
+-		make_shader_dialog->popup_centered();
++		ShaderCreateDialog *dialog = _ensure_shader_create_dialog();
++		dialog->config(fpath.path_join("new_shader"), false, false, type_name);
++		dialog->popup_centered();
+ 		return;
+ 	} else if (ClassDB::is_parent_class(type_name, "Script")) {
+-		make_script_dialog->config("Node", fpath.path_join("new_script"), false, false);
+-		make_script_dialog->popup_centered();
++		ScriptCreateDialog *dialog = get_script_create_dialog();
++		dialog->config("Node", fpath.path_join("new_script"), false, false);
++		dialog->popup_centered();
+ 		return;
+ 	}
+ 
+@@ -2991,10 +2996,26 @@ void FileSystemDock::create_directory(const String &p_path, const String &p_base
+ 	}
+ }
+ 
+-ScriptCreateDialog *FileSystemDock::get_script_create_dialog() const {
++ScriptCreateDialog *FileSystemDock::get_script_create_dialog() {
++	if (!make_script_dialog) {
++		make_script_dialog = memnew(ScriptCreateDialog);
++		make_script_dialog->set_title(TTRC("Create Script"));
++		add_child(make_script_dialog);
++		make_script_dialog->connect("script_created", callable_mp(this, &FileSystemDock::_script_or_shader_created));
++	}
+ 	return make_script_dialog;
+ }
+ 
++ShaderCreateDialog *FileSystemDock::_ensure_shader_create_dialog() {
++	if (!make_shader_dialog) {
++		make_shader_dialog = memnew(ShaderCreateDialog);
++		add_child(make_shader_dialog);
++		make_shader_dialog->connect("shader_created", callable_mp(this, &FileSystemDock::_script_or_shader_created));
++		make_shader_dialog->connect("shader_include_created", callable_mp(this, &FileSystemDock::_script_or_shader_created));
++	}
++	return make_shader_dialog;
++}
++
+ void FileSystemDock::set_file_list_display_mode(FileListDisplayMode p_mode) {
+ 	if (p_mode == file_list_display_mode) {
+ 		return;
+@@ -4760,16 +4781,6 @@ FileSystemDock::FileSystemDock() {
+ 	add_child(make_scene_dialog);
+ 	make_scene_dialog->connect(SceneStringName(confirmed), callable_mp(this, &FileSystemDock::_make_scene_confirm));
+ 
+-	make_script_dialog = memnew(ScriptCreateDialog);
+-	make_script_dialog->set_title(TTRC("Create Script"));
+-	add_child(make_script_dialog);
+-	make_script_dialog->connect("script_created", callable_mp(this, &FileSystemDock::_script_or_shader_created));
+-
+-	make_shader_dialog = memnew(ShaderCreateDialog);
+-	add_child(make_shader_dialog);
+-	make_shader_dialog->connect("shader_created", callable_mp(this, &FileSystemDock::_script_or_shader_created));
+-	make_shader_dialog->connect("shader_include_created", callable_mp(this, &FileSystemDock::_script_or_shader_created));
+-
+ 	new_resource_dialog = memnew(CreateDialog);
+ 	add_child(new_resource_dialog);
+ 	new_resource_dialog->set_base_type("Resource");
+diff --git a/editor/docks/filesystem_dock.h b/editor/docks/filesystem_dock.h
+index 5535675936..5df2a5b1f0 100644
+--- a/editor/docks/filesystem_dock.h
++++ b/editor/docks/filesystem_dock.h
+@@ -327,6 +327,7 @@ private:
+ 	void _folder_removed(const String &p_folder);
+ 
+ 	void _resource_created();
++	ShaderCreateDialog *_ensure_shader_create_dialog();
+ 	void _script_or_shader_created(const Ref<Resource> &p_resource);
+ 	void _make_scene_confirm();
+ 	void _rename_operation_confirm();
+@@ -438,7 +439,7 @@ public:
+ 	void focus_on_filter();
+ 	void create_directory(const String &p_path, const String &p_base_dir);
+ 
+-	ScriptCreateDialog *get_script_create_dialog() const;
++	ScriptCreateDialog *get_script_create_dialog();
+ 
+ 	void fix_dependencies(const String &p_for_file);
+ 	void update_all();
+diff --git a/editor/docks/scene_tree_dock.cpp b/editor/docks/scene_tree_dock.cpp
+index 143ca73ac5..7119e2494c 100644
+--- a/editor/docks/scene_tree_dock.cpp
++++ b/editor/docks/scene_tree_dock.cpp
+@@ -2774,6 +2774,27 @@ void SceneTreeDock::_shader_created(Ref<Shader> p_shader) {
+ 	EditorNode::get_singleton()->edit_item(p_shader.ptr(), this);
+ }
+ 
++// Also the backing accessor for the GDScript-exposed EditorPlugin.get_script_create_dialog(),
++// so it must construct rather than ever return null.
++ScriptCreateDialog *SceneTreeDock::get_script_create_dialog() {
++	if (!script_create_dialog) {
++		script_create_dialog = memnew(ScriptCreateDialog);
++		script_create_dialog->set_inheritance_base_type("Node");
++		add_child(script_create_dialog);
++	}
++	return script_create_dialog;
++}
++
++ShaderCreateDialog *SceneTreeDock::_ensure_shader_create_dialog() {
++	if (!shader_create_dialog) {
++		shader_create_dialog = memnew(ShaderCreateDialog);
++		add_child(shader_create_dialog);
++	}
++	return shader_create_dialog;
++}
++
++// Both *_creation_closed() handlers only ever run via their own dialog's signals, so the lazily
++// created dialog is guaranteed to exist here.
+ void SceneTreeDock::_script_creation_closed() {
+ 	script_create_dialog->disconnect("script_created", callable_mp(this, &SceneTreeDock::_script_created));
+ 	script_create_dialog->disconnect(SceneStringName(confirmed), callable_mp(this, &SceneTreeDock::_script_creation_closed));
+@@ -4431,12 +4452,13 @@ void SceneTreeDock::attach_script_to_selected(bool p_extend) {
+ 		return;
+ 	}
+ 
+-	script_create_dialog->connect("script_created", callable_mp(this, &SceneTreeDock::_script_created));
+-	script_create_dialog->connect(SceneStringName(confirmed), callable_mp(this, &SceneTreeDock::_script_creation_closed));
+-	script_create_dialog->connect("canceled", callable_mp(this, &SceneTreeDock::_script_creation_closed));
+-	script_create_dialog->set_inheritance_base_type("Node");
+-	script_create_dialog->config(inherits, path);
+-	script_create_dialog->popup_centered();
++	ScriptCreateDialog *dialog = get_script_create_dialog();
++	dialog->connect("script_created", callable_mp(this, &SceneTreeDock::_script_created));
++	dialog->connect(SceneStringName(confirmed), callable_mp(this, &SceneTreeDock::_script_creation_closed));
++	dialog->connect("canceled", callable_mp(this, &SceneTreeDock::_script_creation_closed));
++	dialog->set_inheritance_base_type("Node");
++	dialog->config(inherits, path);
++	dialog->popup_centered();
+ }
+ 
+ void SceneTreeDock::open_script_dialog(Node *p_for_node, bool p_extend) {
+@@ -4476,11 +4498,12 @@ void SceneTreeDock::attach_shader_to_selected(int p_preferred_mode) {
+ 		}
+ 	}
+ 
+-	shader_create_dialog->connect("shader_created", callable_mp(this, &SceneTreeDock::_shader_created));
+-	shader_create_dialog->connect(SceneStringName(confirmed), callable_mp(this, &SceneTreeDock::_shader_creation_closed));
+-	shader_create_dialog->connect("canceled", callable_mp(this, &SceneTreeDock::_shader_creation_closed));
+-	shader_create_dialog->config(path, true, true, "", p_preferred_mode);
+-	shader_create_dialog->popup_centered();
++	ShaderCreateDialog *dialog = _ensure_shader_create_dialog();
++	dialog->connect("shader_created", callable_mp(this, &SceneTreeDock::_shader_created));
++	dialog->connect(SceneStringName(confirmed), callable_mp(this, &SceneTreeDock::_shader_creation_closed));
++	dialog->connect("canceled", callable_mp(this, &SceneTreeDock::_shader_creation_closed));
++	dialog->config(path, true, true, "", p_preferred_mode);
++	dialog->popup_centered();
+ }
+ 
+ void SceneTreeDock::open_shader_dialog(const Ref<ShaderMaterial> &p_for_material, int p_preferred_mode) {
+@@ -5259,13 +5282,6 @@ SceneTreeDock::SceneTreeDock(Node *p_scene_root, EditorSelection *p_editor_selec
+ 	rename_dialog = memnew(RenameDialog(scene_tree));
+ 	add_child(rename_dialog);
+ 
+-	script_create_dialog = memnew(ScriptCreateDialog);
+-	script_create_dialog->set_inheritance_base_type("Node");
+-	add_child(script_create_dialog);
+-
+-	shader_create_dialog = memnew(ShaderCreateDialog);
+-	add_child(shader_create_dialog);
+-
+ 	reparent_dialog = memnew(ReparentDialog);
+ 	add_child(reparent_dialog);
+ 	reparent_dialog->connect("reparent_requested", callable_mp(this, &SceneTreeDock::_node_reparent));
+diff --git a/editor/docks/scene_tree_dock.h b/editor/docks/scene_tree_dock.h
+index 26194021d8..4acc8ea801 100644
+--- a/editor/docks/scene_tree_dock.h
++++ b/editor/docks/scene_tree_dock.h
+@@ -220,6 +220,7 @@ class SceneTreeDock : public EditorDock {
+ 
+ 	void _node_selected();
+ 	void _node_renamed();
++	ShaderCreateDialog *_ensure_shader_create_dialog();
+ 	void _script_created(Ref<Script> p_script);
+ 	void _shader_created(Ref<Shader> p_shader);
+ 	void _script_creation_closed();
+@@ -371,9 +372,7 @@ public:
+ 	void paste_node_as_replacement();
+ 	List<Node *> get_node_clipboard() const;
+ 
+-	ScriptCreateDialog *get_script_create_dialog() {
+-		return script_create_dialog;
+-	}
++	ScriptCreateDialog *get_script_create_dialog();
+ 
+ 	SceneTreeDock(Node *p_scene_root, EditorSelection *p_editor_selection, EditorData &p_editor_data);
+ 	~SceneTreeDock();
+diff --git a/editor/editor_node.cpp b/editor/editor_node.cpp
+index 9baff90c7d..8877972617 100644
+--- a/editor/editor_node.cpp
++++ b/editor/editor_node.cpp
+@@ -4004,6 +4004,7 @@ void EditorNode::_menu_option_confirm(int p_option, bool p_confirmed) {
+ 			OS::get_singleton()->shell_open("https://godotengine.org/community");
+ 		} break;
+ 		case HELP_ABOUT: {
++			_ensure_about_dialog();
+ 			about->popup_centered(Size2(780, 500) * EDSCALE);
+ 		} break;
+ 		case HELP_SUPPORT_GODOT_DEVELOPMENT: {
+@@ -4505,6 +4506,17 @@ void EditorNode::remove_extension_editor_plugin(const StringName &p_class_name)
+ 	singleton->editor_data.remove_extension_editor_plugin(p_class_name);
+ }
+ 
++// EditorAbout is a sizable dialog (contributor/donor/license lists) built up front even though
++// it's only ever shown via Help -> About Godot... - build it on first actual use instead.
++void EditorNode::_ensure_about_dialog() {
++	if (about) {
++		return;
++	}
++
++	about = memnew(EditorAbout);
++	gui_base->add_child(about);
++}
++
+ void EditorNode::_update_addon_config() {
+ 	if (_initializing_plugins) {
+ 		return;
+@@ -9039,8 +9051,7 @@ EditorNode::EditorNode() {
+ 	build_profile_manager = memnew(EditorBuildProfileManager);
+ 	gui_base->add_child(build_profile_manager);
+ 
+-	about = memnew(EditorAbout);
+-	gui_base->add_child(about);
++	// about is created lazily, see _ensure_about_dialog().
+ 	feature_profile_manager->connect("current_feature_profile_changed", callable_mp(this, &EditorNode::_feature_profile_changed));
+ 
+ #if !defined(ANDROID_ENABLED) && !defined(WEB_ENABLED)
+diff --git a/editor/editor_node.h b/editor/editor_node.h
+index 9a47d9b8ca..fc1bf8126f 100644
+--- a/editor/editor_node.h
++++ b/editor/editor_node.h
+@@ -688,6 +688,7 @@ private:
+ 	void _layout_menu_option(int p_id);
+ 
+ 	void _update_addon_config();
++	void _ensure_about_dialog();
+ 
+ 	void _toggle_distraction_free_mode();
+ 
+diff --git a/editor/export/project_export.cpp b/editor/export/project_export.cpp
+index a1972d6227..1bd1d5d98a 100644
+--- a/editor/export/project_export.cpp
++++ b/editor/export/project_export.cpp
+@@ -1385,7 +1385,7 @@ void ProjectExportDialog::_patch_tree_button_clicked(Object *p_item, int p_colum
+ 		patch_erase->set_text(vformat(TTR("Delete patch '%s' from list?"), preset_patches[patch_index].get_file()));
+ 		patch_erase->popup_centered();
+ 	} else {
+-		patch_dialog->popup_file_dialog();
++		_get_patch_dialog()->popup_file_dialog();
+ 	}
+ }
+ 
+@@ -1437,7 +1437,7 @@ void ProjectExportDialog::_patch_add_pack_pressed() {
+ 	ERR_FAIL_COND(current.is_null());
+ 
+ 	patch_index = current->get_patches().size();
+-	patch_dialog->popup_file_dialog();
++	_get_patch_dialog()->popup_file_dialog();
+ }
+ 
+ void ProjectExportDialog::_export_pck_zip() {
+@@ -1445,9 +1445,9 @@ void ProjectExportDialog::_export_pck_zip() {
+ 	ERR_FAIL_COND(current.is_null());
+ 
+ 	String dir = current->get_export_path().get_base_dir();
+-	export_pck_zip->set_current_dir(dir);
++	_get_export_pck_zip()->set_current_dir(dir);
+ 
+-	export_pck_zip->popup_file_dialog();
++	_get_export_pck_zip()->popup_file_dialog();
+ }
+ 
+ void ProjectExportDialog::_export_pck_zip_selected(const String &p_path) {
+@@ -1456,7 +1456,7 @@ void ProjectExportDialog::_export_pck_zip_selected(const String &p_path) {
+ 	Ref<EditorExportPlatform> platform = current->get_platform();
+ 	ERR_FAIL_COND(platform.is_null());
+ 
+-	const Dictionary &fd_option = export_pck_zip->get_selected_options();
++	const Dictionary &fd_option = _get_export_pck_zip()->get_selected_options();
+ 	bool export_debug = fd_option.get(TTRC("Export With Debug"), true);
+ 	bool export_as_patch = fd_option.get(TTRC("Export As Patch"), true);
+ 
+@@ -1491,13 +1491,13 @@ void ProjectExportDialog::_export_project() {
+ 	Ref<EditorExportPlatform> platform = current->get_platform();
+ 	ERR_FAIL_COND(platform.is_null());
+ 
+-	export_project->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
+-	export_project->clear_filters();
++	_get_export_project()->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
++	_get_export_project()->clear_filters();
+ 
+ 	List<String> extension_list = platform->get_binary_extensions(current);
+ 	for (const String &extension : extension_list) {
+ 		// TRANSLATORS: This is the name of a project export file format. %s will be replaced by the platform name.
+-		export_project->add_filter("*." + extension, vformat(TTR("%s Export"), platform->get_name()));
++		_get_export_project()->add_filter("*." + extension, vformat(TTR("%s Export"), platform->get_name()));
+ 	}
+ 
+ 	String path = current->get_export_path();
+@@ -1505,16 +1505,16 @@ void ProjectExportDialog::_export_project() {
+ 		if (extension_list.find(path.get_extension()) == nullptr && extension_list.size() >= 1) {
+ 			path = path.get_basename() + "." + extension_list.front()->get();
+ 		}
+-		export_project->set_current_path(path);
++		_get_export_project()->set_current_path(path);
+ 	} else {
+ 		if (extension_list.size() >= 1) {
+-			export_project->set_current_file(default_filename + "." + extension_list.front()->get());
++			_get_export_project()->set_current_file(default_filename + "." + extension_list.front()->get());
+ 		} else {
+-			export_project->set_current_file(default_filename);
++			_get_export_project()->set_current_file(default_filename);
+ 		}
+ 	}
+-	export_project->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
+-	export_project->popup_file_dialog();
++	_get_export_project()->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
++	_get_export_project()->popup_file_dialog();
+ }
+ 
+ void ProjectExportDialog::_export_project_to_path(const String &p_path) {
+@@ -1532,7 +1532,7 @@ void ProjectExportDialog::_export_project_to_path(const String &p_path) {
+ 
+ 	platform->clear_messages();
+ 	current->update_value_overrides();
+-	Dictionary fd_option = export_project->get_selected_options();
++	Dictionary fd_option = _get_export_project()->get_selected_options();
+ 	bool export_debug = fd_option.get(TTRC("Export With Debug"), true);
+ 
+ 	EditorSettings::get_singleton()->set_project_metadata("export_options", "export_debug", export_debug);
+@@ -1610,6 +1610,48 @@ void ProjectExportDialog::_bind_methods() {
+ 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "export_path"), "set_export_path", "get_export_path");
+ }
+ 
++// These three EditorFileDialogs cost ~1.45MB each (see ___OPTIMIZATIONS___/021) and each has a
++// single popup site, so they are built on first use instead of when this dialog is constructed.
++EditorFileDialog *ProjectExportDialog::_get_patch_dialog() {
++	if (!patch_dialog) {
++		patch_dialog = memnew(EditorFileDialog);
++		patch_dialog->add_filter("*.pck", TTRC("Godot Project Pack"));
++		patch_dialog->add_filter("*.aab", TTRC("Android App Bundle"));
++		patch_dialog->add_filter("*.apk", TTRC("Android Package"));
++		patch_dialog->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
++		patch_dialog->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
++		patch_dialog->connect("file_selected", callable_mp(this, &ProjectExportDialog::_patch_file_selected));
++		add_child(patch_dialog);
++	}
++	return patch_dialog;
++}
++
++EditorFileDialog *ProjectExportDialog::_get_export_pck_zip() {
++	if (!export_pck_zip) {
++		export_pck_zip = memnew(EditorFileDialog);
++		export_pck_zip->add_filter("*.zip", TTRC("ZIP File"));
++		export_pck_zip->add_filter("*.pck", TTRC("Godot Project Pack"));
++		export_pck_zip->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
++		export_pck_zip->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
++		add_child(export_pck_zip);
++		export_pck_zip->connect("file_selected", callable_mp(this, &ProjectExportDialog::_export_pck_zip_selected));
++		export_pck_zip->add_option(TTRC("Export With Debug"), Vector<String>(), EditorSettings::get_singleton()->get_project_metadata("export_options", "export_debug", true));
++		export_pck_zip->add_option(TTRC("Export As Patch"), Vector<String>(), EditorSettings::get_singleton()->get_project_metadata("export_options", "export_as_patch", true));
++	}
++	return export_pck_zip;
++}
++
++EditorFileDialog *ProjectExportDialog::_get_export_project() {
++	if (!export_project) {
++		export_project = memnew(EditorFileDialog);
++		export_project->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
++		add_child(export_project);
++		export_project->connect("file_selected", callable_mp(this, &ProjectExportDialog::_export_project_to_path));
++		export_project->add_option(TTRC("Export With Debug"), Vector<String>(), EditorSettings::get_singleton()->get_project_metadata("export_options", "export_debug", true));
++	}
++	return export_project;
++}
++
+ ProjectExportDialog::ProjectExportDialog() {
+ 	set_title(TTRC("Export"));
+ 	set_flag(FLAG_MAXIMIZE_DISABLED, false);
+@@ -1898,14 +1940,7 @@ ProjectExportDialog::ProjectExportDialog() {
+ 	patches->set_edit_checkbox_cell_only_when_checkbox_is_pressed(true);
+ 	patch_vb->add_margin_child(TTRC("Base Packs:"), patches, true);
+ 
+-	patch_dialog = memnew(EditorFileDialog);
+-	patch_dialog->add_filter("*.pck", TTRC("Godot Project Pack"));
+-	patch_dialog->add_filter("*.aab", TTRC("Android App Bundle"));
+-	patch_dialog->add_filter("*.apk", TTRC("Android Package"));
+-	patch_dialog->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
+-	patch_dialog->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
+-	patch_dialog->connect("file_selected", callable_mp(this, &ProjectExportDialog::_patch_file_selected));
+-	add_child(patch_dialog);
++	// patch_dialog is created lazily, see _get_patch_dialog().
+ 
+ 	patch_erase = memnew(ConfirmationDialog);
+ 	patch_erase->set_ok_button_text(TTRC("Delete"));
+@@ -2070,13 +2105,7 @@ ProjectExportDialog::ProjectExportDialog() {
+ 	export_all_button->connect(SceneStringName(pressed), callable_mp(this, &ProjectExportDialog::_export_all_dialog));
+ 	export_all_button->set_disabled(true);
+ 
+-	export_pck_zip = memnew(EditorFileDialog);
+-	export_pck_zip->add_filter("*.zip", TTRC("ZIP File"));
+-	export_pck_zip->add_filter("*.pck", TTRC("Godot Project Pack"));
+-	export_pck_zip->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
+-	export_pck_zip->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
+-	add_child(export_pck_zip);
+-	export_pck_zip->connect("file_selected", callable_mp(this, &ProjectExportDialog::_export_pck_zip_selected));
++	// export_pck_zip is created lazily, see _get_export_pck_zip().
+ 
+ 	// Export warnings and errors bottom section.
+ 
+@@ -2139,14 +2168,8 @@ ProjectExportDialog::ProjectExportDialog() {
+ 
+ 	// Export project file dialog.
+ 
+-	export_project = memnew(EditorFileDialog);
+-	export_project->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
+-	add_child(export_project);
+-	export_project->connect("file_selected", callable_mp(this, &ProjectExportDialog::_export_project_to_path));
+-
+-	export_project->add_option(TTRC("Export With Debug"), Vector<String>(), EditorSettings::get_singleton()->get_project_metadata("export_options", "export_debug", true));
+-	export_pck_zip->add_option(TTRC("Export With Debug"), Vector<String>(), EditorSettings::get_singleton()->get_project_metadata("export_options", "export_debug", true));
+-	export_pck_zip->add_option(TTRC("Export As Patch"), Vector<String>(), EditorSettings::get_singleton()->get_project_metadata("export_options", "export_as_patch", true));
++	// export_project is created lazily, see _get_export_project(). Its and export_pck_zip's
++	// add_option() setup moved into those accessors.
+ 
+ 	set_hide_on_ok(false);
+ 
+diff --git a/editor/export/project_export.h b/editor/export/project_export.h
+index 2a54b755d4..9352ef97c1 100644
+--- a/editor/export/project_export.h
++++ b/editor/export/project_export.h
+@@ -122,6 +122,10 @@ class ProjectExportDialog : public ConfirmationDialog {
+ 	Tree *patches = nullptr;
+ 	int patch_index = -1;
+ 	EditorFileDialog *patch_dialog = nullptr;
++
++	EditorFileDialog *_get_patch_dialog();
++	EditorFileDialog *_get_export_pck_zip();
++	EditorFileDialog *_get_export_project();
+ 	ConfirmationDialog *patch_erase = nullptr;
+ 	Button *patch_add_btn = nullptr;
+ 
+diff --git a/editor/scene/gui/theme_editor_plugin.cpp b/editor/scene/gui/theme_editor_plugin.cpp
+index 4edca89abd..9cffb2c59f 100644
+--- a/editor/scene/gui/theme_editor_plugin.cpp
++++ b/editor/scene/gui/theme_editor_plugin.cpp
+@@ -3807,7 +3807,25 @@ void ThemeEditor::_preview_scene_dialog_cbk(const String &p_path) {
+ 	preview_tab->connect("scene_reloaded", callable_mp(this, &ThemeEditor::_update_preview_tab).bind(preview_tab));
+ }
+ 
++// The default preview is a sizable widget gallery, but the dock is created at editor startup and
++// usually never opened, so it is only built once the dock is actually shown or otherwise used.
++void ThemeEditor::_ensure_default_preview() {
++	if (default_preview_tab) {
++		return;
++	}
++
++	default_preview_tab = memnew(DefaultThemeEditorPreview);
++	default_preview_tab->set_preview_theme(theme);
++	preview_tabs_content->add_child(default_preview_tab);
++	// Preview tabs are matched with their contents by index, and the default preview is always tab 0.
++	preview_tabs_content->move_child(default_preview_tab, 0);
++	default_preview_tab->connect("control_picked", callable_mp(this, &ThemeEditor::_preview_control_picked));
++	default_preview_tab->set_visible(preview_tabs->get_current_tab() == 0);
++}
++
+ void ThemeEditor::_add_preview_tab(ThemeEditorPreview *p_preview_tab, const String &p_preview_name, const Ref<Texture2D> &p_icon) {
++	_ensure_default_preview();
++
+ 	p_preview_tab->set_preview_theme(theme);
+ 
+ 	preview_tabs->add_tab(p_preview_name, p_icon);
+@@ -3820,6 +3838,8 @@ void ThemeEditor::_add_preview_tab(ThemeEditorPreview *p_preview_tab, const Stri
+ }
+ 
+ void ThemeEditor::_change_preview_tab(int p_tab) {
++	_ensure_default_preview();
++
+ 	ERR_FAIL_INDEX_MSG(p_tab, preview_tabs_content->get_child_count(), "Attempting to open a preview tab that doesn't exist.");
+ 
+ 	for (int i = 0; i < preview_tabs_content->get_child_count(); i++) {
+@@ -3897,6 +3917,8 @@ bool ThemeEditor::can_drop_data_fw(const Point2 &p_point, const Variant &p_data,
+ }
+ 
+ void ThemeEditor::drop_data_fw(const Point2 &p_point, const Variant &p_data, Control *p_from) {
++	_ensure_default_preview();
++
+ 	Dictionary d = p_data;
+ 	Vector<String> files = d["files"];
+ 	const String &path = files[0];
+@@ -3972,6 +3994,12 @@ void ThemeEditor::_notification(int p_what) {
+ 			theme_name->set_custom_minimum_size(Size2(label_min_width, 0));
+ 		} break;
+ 
++		case NOTIFICATION_VISIBILITY_CHANGED: {
++			if (is_visible_in_tree()) {
++				_ensure_default_preview();
++			}
++		} break;
++
+ 		case NOTIFICATION_LAYOUT_DIRECTION_CHANGED:
+ 		case NOTIFICATION_TRANSLATION_CHANGED: {
+ 			_preview_tabs_resized();
+@@ -4099,9 +4127,7 @@ ThemeEditor::ThemeEditor() {
+ 	add_preview_button_ph->set_custom_minimum_size(add_preview_button->get_minimum_size());
+ 	preview_tabbar_hb->add_child(add_preview_button_ph);
+ 
+-	DefaultThemeEditorPreview *default_preview_tab = memnew(DefaultThemeEditorPreview);
+-	preview_tabs_content->add_child(default_preview_tab);
+-	default_preview_tab->connect("control_picked", callable_mp(this, &ThemeEditor::_preview_control_picked));
++	// Contents are created lazily, see _ensure_default_preview().
+ 	preview_tabs->add_tab(TTRC("Default Preview"));
+ 
+ 	preview_scene_dialog = memnew(EditorFileDialog);
+diff --git a/editor/scene/gui/theme_editor_plugin.h b/editor/scene/gui/theme_editor_plugin.h
+index 450cc93949..19df5553eb 100644
+--- a/editor/scene/gui/theme_editor_plugin.h
++++ b/editor/scene/gui/theme_editor_plugin.h
+@@ -448,6 +448,7 @@ class ThemeEditor : public EditorDock {
+ 
+ 	TabBar *preview_tabs = nullptr;
+ 	PanelContainer *preview_tabs_content = nullptr;
++	DefaultThemeEditorPreview *default_preview_tab = nullptr;
+ 	Control *add_preview_button_ph = nullptr;
+ 	Button *add_preview_button = nullptr;
+ 	EditorFileDialog *preview_scene_dialog = nullptr;
+@@ -469,6 +470,7 @@ class ThemeEditor : public EditorDock {
+ 
+ 	void _add_preview_button_cbk();
+ 	void _preview_scene_dialog_cbk(const String &p_path);
++	void _ensure_default_preview();
+ 	void _add_preview_tab(ThemeEditorPreview *p_preview_tab, const String &p_preview_name, const Ref<Texture2D> &p_icon);
+ 	void _change_preview_tab(int p_tab);
+ 	void _remove_preview_tab(int p_tab);
+diff --git a/editor/script/script_editor_plugin.cpp b/editor/script/script_editor_plugin.cpp
+index 2c53a1e58d..bf3cb5f538 100644
+--- a/editor/script/script_editor_plugin.cpp
++++ b/editor/script/script_editor_plugin.cpp
+@@ -1795,8 +1795,9 @@ void ScriptEditor::_menu_option(int p_option) {
+ 	EditorHelp *eh = Object::cast_to<EditorHelp>(current_editor);
+ 	switch (p_option) {
+ 		case FILE_MENU_NEW_SCRIPT: {
+-			script_create_dialog->config("Node", "new_script", false, false);
+-			script_create_dialog->popup_centered();
++			ScriptCreateDialog *dialog = _ensure_script_create_dialog();
++			dialog->config("Node", "new_script", false, false);
++			dialog->popup_centered();
+ 		} break;
+ 		case FILE_MENU_NEW_TEXTFILE: {
+ 			file_dialog->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
+@@ -1812,13 +1813,15 @@ void ScriptEditor::_menu_option(int p_option) {
+ 		} break;
+ 		case FILE_MENU_NEW_SHADER: {
+ 			String base_path = FileSystemDock::get_singleton()->get_current_path().get_base_dir();
+-			shader_create_dialog->config(base_path.path_join("new_shader"), false, false, "Shader");
+-			shader_create_dialog->popup_centered();
++			ShaderCreateDialog *dialog = _ensure_shader_create_dialog();
++			dialog->config(base_path.path_join("new_shader"), false, false, "Shader");
++			dialog->popup_centered();
+ 		} break;
+ 		case FILE_MENU_NEW_INCLUDE: {
+ 			String base_path = FileSystemDock::get_singleton()->get_current_path().get_base_dir();
+-			shader_create_dialog->config(base_path.path_join("new_shader"), false, false, "ShaderInclude");
+-			shader_create_dialog->popup_centered();
++			ShaderCreateDialog *dialog = _ensure_shader_create_dialog();
++			dialog->config(base_path.path_join("new_shader"), false, false, "ShaderInclude");
++			dialog->popup_centered();
+ 		} break;
+ 		case FILE_MENU_OPEN: {
+ 			file_dialog->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
+@@ -2955,9 +2958,29 @@ void ScriptEditor::_auto_format_text(ScriptEditorBase *p_seb) {
+ 	}
+ }
+ 
++ScriptCreateDialog *ScriptEditor::_ensure_script_create_dialog() {
++	if (!script_create_dialog) {
++		script_create_dialog = memnew(ScriptCreateDialog);
++		script_create_dialog->set_title(TTRC("Create Script"));
++		add_child(script_create_dialog);
++		script_create_dialog->connect("script_created", callable_mp(this, &ScriptEditor::_resource_created));
++	}
++	return script_create_dialog;
++}
++
++ShaderCreateDialog *ScriptEditor::_ensure_shader_create_dialog() {
++	if (!shader_create_dialog) {
++		shader_create_dialog = memnew(ShaderCreateDialog);
++		shader_create_dialog->connect("shader_created", callable_mp(this, &ScriptEditor::_resource_created));
++		shader_create_dialog->connect("shader_include_created", callable_mp(this, &ScriptEditor::_resource_created));
++		add_child(shader_create_dialog);
++	}
++	return shader_create_dialog;
++}
++
+ void ScriptEditor::open_script_create_dialog(const String &p_base_name, const String &p_base_path) {
+ 	_menu_option(FILE_MENU_NEW_SCRIPT);
+-	script_create_dialog->config(p_base_name, p_base_path);
++	_ensure_script_create_dialog()->config(p_base_name, p_base_path);
+ }
+ 
+ void ScriptEditor::open_text_file_create_dialog(const String &p_base_path, const String &p_base_name) {
+@@ -4365,21 +4388,11 @@ ScriptEditor::ScriptEditor(const String &p_config_section, const String &p_cache
+ 	erase_tab_confirm->connect("custom_action", callable_mp(this, &ScriptEditor::_close_discard_current_tab));
+ 	add_child(erase_tab_confirm);
+ 
+-	script_create_dialog = memnew(ScriptCreateDialog);
+-	script_create_dialog->set_title(TTRC("Create Script"));
+-	add_child(script_create_dialog);
+-	script_create_dialog->connect("script_created", callable_mp(this, &ScriptEditor::_resource_created));
+-
+ 	file_dialog_option = -1;
+ 	file_dialog = memnew(EditorFileDialog);
+ 	add_child(file_dialog);
+ 	file_dialog->connect("file_selected", callable_mp(this, &ScriptEditor::_file_dialog_action));
+ 
+-	shader_create_dialog = memnew(ShaderCreateDialog);
+-	shader_create_dialog->connect("shader_created", callable_mp(this, &ScriptEditor::_resource_created));
+-	shader_create_dialog->connect("shader_include_created", callable_mp(this, &ScriptEditor::_resource_created));
+-	add_child(shader_create_dialog);
+-
+ 	error_dialog = memnew(AcceptDialog);
+ 	add_child(error_dialog);
+ 
+diff --git a/editor/script/script_editor_plugin.h b/editor/script/script_editor_plugin.h
+index bf73b06b7e..f329e236d7 100644
+--- a/editor/script/script_editor_plugin.h
++++ b/editor/script/script_editor_plugin.h
+@@ -364,6 +364,8 @@ class ScriptEditor : public EditorDock {
+ 	void _clear_execution(Ref<RefCounted> p_script) { _change_execution(p_script); }
+ 	String _get_debug_tooltip(const String &p_text, Node *p_se);
+ 	void _resource_created(Ref<Resource> p_res);
++	ScriptCreateDialog *_ensure_script_create_dialog();
++	ShaderCreateDialog *_ensure_shader_create_dialog();
+ 	void _set_breakpoint(Ref<RefCounted> p_script, int p_line, bool p_enabled);
+ 	void _clear_breakpoints();
+ 	Array _get_cached_breakpoints_for_script(const String &p_path) const;
+diff --git a/editor/settings/editor_autoload_settings.cpp b/editor/settings/editor_autoload_settings.cpp
+index 20738db123..e833305123 100644
+--- a/editor/settings/editor_autoload_settings.cpp
++++ b/editor/settings/editor_autoload_settings.cpp
+@@ -56,18 +56,9 @@
+ void EditorAutoloadSettings::_notification(int p_what) {
+ 	switch (p_what) {
+ 		case NOTIFICATION_ENTER_TREE: {
+-			List<String> afn;
+-			ResourceLoader::get_recognized_extensions_for_type("PackedScene", &afn);
+-
+-			for (const String &E : afn) {
+-				scene_file_dialog->add_filter("*." + E);
+-			}
+-
+-			ResourceLoader::get_recognized_extensions_for_type("Script", &afn);
+-
+-			for (const String &E : afn) {
+-				autoload_file_dialog->add_filter("*." + E);
+-			}
++			// The file dialogs' filters are set up when each dialog is first created, see the
++			// _get_*() accessors - doing it here would force both to be constructed at startup,
++			// which is what the lazy construction avoids.
+ 		} break;
+ 
+ 		case NOTIFICATION_THEME_CHANGED: {
+@@ -377,8 +368,8 @@ void EditorAutoloadSettings::_create_script_autoload() {
+ }
+ 
+ void EditorAutoloadSettings::_create_scene_autoload() {
+-	scene_file_dialog->set_current_file("new_autoload_scene.tscn");
+-	scene_file_dialog->popup_file_dialog();
++	_get_scene_file_dialog()->set_current_file("new_autoload_scene.tscn");
++	_get_scene_file_dialog()->popup_file_dialog();
+ }
+ 
+ void EditorAutoloadSettings::init_autoloads() {
+@@ -842,6 +833,44 @@ void EditorAutoloadSettings::_bind_methods() {
+ 	ADD_SIGNAL(MethodInfo("autoload_changed"));
+ }
+ 
++// These two EditorFileDialogs cost ~1.45MB each (see ___OPTIMIZATIONS___/021) and are only used
++// by the Autoload tab's browse/create-scene actions, so they are built on first use.
++FileDialog *EditorAutoloadSettings::_get_autoload_file_dialog() {
++	if (!autoload_file_dialog) {
++		autoload_file_dialog = memnew(EditorFileDialog);
++		autoload_file_dialog->set_file_mode(FileDialog::FILE_MODE_OPEN_FILE);
++		add_child(autoload_file_dialog);
++		autoload_file_dialog->connect("file_selected", callable_mp(this, &EditorAutoloadSettings::_autoload_file_selected));
++
++		List<String> afn;
++		ResourceLoader::get_recognized_extensions_for_type("Script", &afn);
++		for (const String &E : afn) {
++			autoload_file_dialog->add_filter("*." + E);
++		}
++	}
++	return autoload_file_dialog;
++}
++
++FileDialog *EditorAutoloadSettings::_get_scene_file_dialog() {
++	if (!scene_file_dialog) {
++		scene_file_dialog = memnew(EditorFileDialog);
++		scene_file_dialog->set_file_mode(FileDialog::FILE_MODE_SAVE_FILE);
++		add_child(scene_file_dialog);
++		scene_file_dialog->connect("file_selected", callable_mp(this, &EditorAutoloadSettings::_scene_file_selected));
++
++		List<String> afn;
++		ResourceLoader::get_recognized_extensions_for_type("PackedScene", &afn);
++		for (const String &E : afn) {
++			scene_file_dialog->add_filter("*." + E);
++		}
++	}
++	return scene_file_dialog;
++}
++
++void EditorAutoloadSettings::_browse_pressed() {
++	_get_autoload_file_dialog()->popup_file_dialog();
++}
++
+ EditorAutoloadSettings::EditorAutoloadSettings() {
+ 	ProjectSettings::get_singleton()->add_hidden_prefix("autoload/");
+ 
+@@ -884,20 +913,15 @@ EditorAutoloadSettings::EditorAutoloadSettings() {
+ 	HBoxContainer *hbc = memnew(HBoxContainer);
+ 	add_child(hbc);
+ 
+-	autoload_file_dialog = memnew(EditorFileDialog);
+-	autoload_file_dialog->set_file_mode(FileDialog::FILE_MODE_OPEN_FILE);
+-	hbc->add_child(autoload_file_dialog);
+-	autoload_file_dialog->connect("file_selected", callable_mp(this, &EditorAutoloadSettings::_autoload_file_selected));
++	// autoload_file_dialog is created lazily, see _get_autoload_file_dialog().
+ 
+-	scene_file_dialog = memnew(EditorFileDialog);
+-	scene_file_dialog->set_file_mode(FileDialog::FILE_MODE_SAVE_FILE);
+-	hbc->add_child(scene_file_dialog);
+-	scene_file_dialog->connect("file_selected", callable_mp(this, &EditorAutoloadSettings::_scene_file_selected));
++	// scene_file_dialog is created lazily, see _get_scene_file_dialog().
+ 
+ 	browse_button = memnew(Button);
+ 	browse_button->set_text(TTRC("Select Script/Scene"));
+ 	hbc->add_child(browse_button);
+-	browse_button->connect(SceneStringName(pressed), callable_mp(autoload_file_dialog, &FileDialog::popup_file_dialog));
++	// Bound to this rather than straight to the dialog, which no longer exists yet.
++	browse_button->connect(SceneStringName(pressed), callable_mp(this, &EditorAutoloadSettings::_browse_pressed));
+ 
+ 	create_script_autoload = memnew(Button);
+ 	create_script_autoload->set_text(TTRC("Create Script"));
+diff --git a/editor/settings/editor_autoload_settings.h b/editor/settings/editor_autoload_settings.h
+index ef228ee786..50e54f801a 100644
+--- a/editor/settings/editor_autoload_settings.h
++++ b/editor/settings/editor_autoload_settings.h
+@@ -98,6 +98,9 @@ class EditorAutoloadSettings : public VBoxContainer {
+ 	void _create_script_autoload();
+ 	void _create_scene_autoload();
+ 	void _autoload_file_selected(const String &p_path);
++	void _browse_pressed();
++	FileDialog *_get_autoload_file_dialog();
++	FileDialog *_get_scene_file_dialog();
+ 	void _scene_file_selected(const String &p_path);
+ 
+ 	void _script_created(Ref<Script> p_script);
+diff --git a/editor/translations/localization_editor.cpp b/editor/translations/localization_editor.cpp
+index 7dac5f6852..77ab035205 100644
+--- a/editor/translations/localization_editor.cpp
++++ b/editor/translations/localization_editor.cpp
+@@ -56,23 +56,9 @@ void LocalizationEditor::_notification(int p_what) {
+ 			template_add_builtin->set_pressed(GLOBAL_GET("internationalization/locale/translation_add_builtin_strings_to_pot"));
+ 			template_add_title->set_pressed(GLOBAL_GET("internationalization/locale/translation_add_project_title_to_translation_template"));
+ 
+-			List<String> tfn;
+-			ResourceLoader::get_recognized_extensions_for_type("Translation", &tfn);
+-			tfn.erase("csv"); // CSV is recognized by the resource importer to generate translation files, but it's not a translation file itself.
+-			for (const String &E : tfn) {
+-				translation_file_open->add_filter("*." + E);
+-			}
+-
+-			List<String> rfn;
+-			ResourceLoader::get_recognized_extensions_for_type("Resource", &rfn);
+-			for (const String &E : rfn) {
+-				translation_res_file_open_dialog->add_filter("*." + E);
+-				translation_res_option_file_open_dialog->add_filter("*." + E);
+-			}
+-
+-			_update_template_source_file_extensions();
+-			template_generate_dialog->add_filter("*.pot");
+-			template_generate_dialog->add_filter("*.csv");
++			// The file dialogs' filters are set up when each dialog is first created, see the
++			// _get_*() accessors - doing it here would force all of them to be constructed at
++			// startup, which is exactly what the lazy construction avoids.
+ 		} break;
+ 
+ 		case NOTIFICATION_DRAG_END: {
+@@ -115,7 +101,7 @@ void LocalizationEditor::_translation_add(const PackedStringArray &p_paths) {
+ }
+ 
+ void LocalizationEditor::_translation_file_open() {
+-	translation_file_open->popup_file_dialog();
++	_get_translation_file_open()->popup_file_dialog();
+ }
+ 
+ void LocalizationEditor::_translation_delete(Object *p_item, int p_column, int p_button, MouseButton p_mouse_button) {
+@@ -146,7 +132,7 @@ void LocalizationEditor::_translation_delete(Object *p_item, int p_column, int p
+ }
+ 
+ void LocalizationEditor::_translation_res_file_open() {
+-	translation_res_file_open_dialog->popup_file_dialog();
++	_get_translation_res_file_open_dialog()->popup_file_dialog();
+ }
+ 
+ void LocalizationEditor::_translation_res_add(const PackedStringArray &p_paths) {
+@@ -182,7 +168,7 @@ void LocalizationEditor::_translation_res_add(const PackedStringArray &p_paths)
+ }
+ 
+ void LocalizationEditor::_translation_res_option_file_open() {
+-	translation_res_option_file_open_dialog->popup_file_dialog();
++	_get_translation_res_option_file_open_dialog()->popup_file_dialog();
+ }
+ 
+ void LocalizationEditor::_translation_res_option_add(const PackedStringArray &p_paths) {
+@@ -409,11 +395,11 @@ void LocalizationEditor::_template_source_delete(Object *p_item, int p_column, i
+ }
+ 
+ void LocalizationEditor::_template_source_file_open() {
+-	template_source_open_dialog->popup_file_dialog();
++	_get_template_source_open_dialog()->popup_file_dialog();
+ }
+ 
+ void LocalizationEditor::_template_generate_open() {
+-	template_generate_dialog->popup_file_dialog();
++	_get_template_generate_dialog()->popup_file_dialog();
+ }
+ 
+ void LocalizationEditor::_template_generate_quick_open() {
+@@ -421,7 +407,7 @@ void LocalizationEditor::_template_generate_quick_open() {
+ }
+ 
+ void LocalizationEditor::_template_generate_command() {
+-	const String current_path = template_generate_dialog->get_current_path();
++	const String current_path = _get_template_generate_dialog()->get_current_path();
+ 	if (!current_path.is_empty() && current_path.get_file().is_valid_filename()) {
+ 		_template_generate(current_path);
+ 		EditorToaster::get_singleton()->popup_str(TTR("Template generated."));
+@@ -447,6 +433,9 @@ void LocalizationEditor::_template_generate(const String &p_file) {
+ }
+ 
+ void LocalizationEditor::_update_template_source_file_extensions() {
++	if (!template_source_open_dialog) {
++		return; // Filters are computed when the dialog is first created, see _get_template_source_open_dialog().
++	}
+ 	template_source_open_dialog->clear_filters();
+ 	List<String> translation_parse_file_extensions;
+ 	EditorTranslationParser::get_singleton()->get_recognized_extensions(&translation_parse_file_extensions);
+@@ -762,6 +751,82 @@ void LocalizationEditor::_bind_methods() {
+ 	ADD_SIGNAL(MethodInfo("localization_changed"));
+ }
+ 
++// Each of these EditorFileDialogs costs ~1.45MB (see ___OPTIMIZATIONS___/021) and has a single
++// popup site, so they are built on first use instead of when the Localization tab is built.
++
++EditorFileDialog *LocalizationEditor::_get_translation_file_open() {
++	if (!translation_file_open) {
++	translation_file_open = memnew(EditorFileDialog);
++	translation_file_open->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILES);
++	translation_file_open->connect("files_selected", callable_mp(this, &LocalizationEditor::_translation_add));
++		add_child(translation_file_open);
++
++		List<String> tfn;
++		ResourceLoader::get_recognized_extensions_for_type("Translation", &tfn);
++		tfn.erase("csv"); // CSV is recognized by the resource importer to generate translation files, but it's not a translation file itself.
++		for (const String &E : tfn) {
++			translation_file_open->add_filter("*." + E);
++		}
++	}
++	return translation_file_open;
++}
++
++EditorFileDialog *LocalizationEditor::_get_translation_res_file_open_dialog() {
++	if (!translation_res_file_open_dialog) {
++	translation_res_file_open_dialog = memnew(EditorFileDialog);
++	translation_res_file_open_dialog->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILES);
++	translation_res_file_open_dialog->connect("files_selected", callable_mp(this, &LocalizationEditor::_translation_res_add));
++		add_child(translation_res_file_open_dialog);
++
++		List<String> rfn;
++		ResourceLoader::get_recognized_extensions_for_type("Resource", &rfn);
++		for (const String &E : rfn) {
++			translation_res_file_open_dialog->add_filter("*." + E);
++		}
++	}
++	return translation_res_file_open_dialog;
++}
++
++EditorFileDialog *LocalizationEditor::_get_translation_res_option_file_open_dialog() {
++	if (!translation_res_option_file_open_dialog) {
++	translation_res_option_file_open_dialog = memnew(EditorFileDialog);
++	translation_res_option_file_open_dialog->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILES);
++	translation_res_option_file_open_dialog->connect("files_selected", callable_mp(this, &LocalizationEditor::_translation_res_option_add));
++		add_child(translation_res_option_file_open_dialog);
++
++		List<String> rfn;
++		ResourceLoader::get_recognized_extensions_for_type("Resource", &rfn);
++		for (const String &E : rfn) {
++			translation_res_option_file_open_dialog->add_filter("*." + E);
++		}
++	}
++	return translation_res_option_file_open_dialog;
++}
++
++EditorFileDialog *LocalizationEditor::_get_template_generate_dialog() {
++	if (!template_generate_dialog) {
++	template_generate_dialog = memnew(EditorFileDialog);
++	template_generate_dialog->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
++	template_generate_dialog->set_current_path(EditorSettings::get_singleton()->get_project_metadata("pot_generator", "last_pot_path", String()));
++	template_generate_dialog->connect("file_selected", callable_mp(this, &LocalizationEditor::_template_generate));
++		add_child(template_generate_dialog);
++		template_generate_dialog->add_filter("*.pot");
++		template_generate_dialog->add_filter("*.csv");
++	}
++	return template_generate_dialog;
++}
++
++EditorFileDialog *LocalizationEditor::_get_template_source_open_dialog() {
++	if (!template_source_open_dialog) {
++	template_source_open_dialog = memnew(EditorFileDialog);
++	template_source_open_dialog->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILES);
++	template_source_open_dialog->connect("files_selected", callable_mp(this, &LocalizationEditor::_template_source_add));
++		add_child(template_source_open_dialog);
++		_update_template_source_file_extensions();
++	}
++	return template_source_open_dialog;
++}
++
+ LocalizationEditor::LocalizationEditor() {
+ 	localization_changed = "localization_changed";
+ 
+@@ -802,10 +867,7 @@ LocalizationEditor::LocalizationEditor() {
+ 		locale_select->connect("locale_selected", callable_mp(this, &LocalizationEditor::_translation_res_option_selected));
+ 		add_child(locale_select);
+ 
+-		translation_file_open = memnew(EditorFileDialog);
+-		translation_file_open->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILES);
+-		translation_file_open->connect("files_selected", callable_mp(this, &LocalizationEditor::_translation_add));
+-		add_child(translation_file_open);
++		// translation_file_open is created lazily, see _get_translation_file_open().
+ 	}
+ 
+ 	{
+@@ -835,10 +897,7 @@ LocalizationEditor::LocalizationEditor() {
+ 		translation_remap->connect("button_clicked", callable_mp(this, &LocalizationEditor::_translation_res_delete));
+ 		mc->add_child(translation_remap);
+ 
+-		translation_res_file_open_dialog = memnew(EditorFileDialog);
+-		translation_res_file_open_dialog->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILES);
+-		translation_res_file_open_dialog->connect("files_selected", callable_mp(this, &LocalizationEditor::_translation_res_add));
+-		add_child(translation_res_file_open_dialog);
++		// translation_res_file_open_dialog is created lazily, see _get_translation_res_file_open_dialog().
+ 
+ 		thb = memnew(HBoxContainer);
+ 		l = memnew(Label(TTRC("Remaps by Locale:")));
+@@ -875,10 +934,7 @@ LocalizationEditor::LocalizationEditor() {
+ 		translation_remap_options->connect("custom_popup_edited", callable_mp(this, &LocalizationEditor::_translation_res_option_popup));
+ 		mc->add_child(translation_remap_options);
+ 
+-		translation_res_option_file_open_dialog = memnew(EditorFileDialog);
+-		translation_res_option_file_open_dialog->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILES);
+-		translation_res_option_file_open_dialog->connect("files_selected", callable_mp(this, &LocalizationEditor::_translation_res_option_add));
+-		add_child(translation_res_option_file_open_dialog);
++		// translation_res_option_file_open_dialog is created lazily, see _get_translation_res_option_file_open_dialog().
+ 	}
+ 
+ 	{
+@@ -929,19 +985,12 @@ LocalizationEditor::LocalizationEditor() {
+ 		template_add_title->connect(SceneStringName(pressed), callable_mp(this, &LocalizationEditor::_template_add_title_toggled));
+ 		checkbox_hb->add_child(template_add_title);
+ 
+-		template_generate_dialog = memnew(EditorFileDialog);
+-		template_generate_dialog->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
+-		template_generate_dialog->set_current_path(EditorSettings::get_singleton()->get_project_metadata("pot_generator", "last_pot_path", String()));
+-		template_generate_dialog->connect("file_selected", callable_mp(this, &LocalizationEditor::_template_generate));
+-		add_child(template_generate_dialog);
++		// template_generate_dialog is created lazily, see _get_template_generate_dialog().
+ 
+ 		template_source_quick_open_dialog = memnew(EditorQuickOpenDialog);
+ 		add_child(template_source_quick_open_dialog);
+ 
+-		template_source_open_dialog = memnew(EditorFileDialog);
+-		template_source_open_dialog->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILES);
+-		template_source_open_dialog->connect("files_selected", callable_mp(this, &LocalizationEditor::_template_source_add));
+-		add_child(template_source_open_dialog);
++		// template_source_open_dialog is created lazily, see _get_template_source_open_dialog().
+ 	}
+ 
+ 	for (Tree *tree : trees) {
+diff --git a/editor/translations/localization_editor.h b/editor/translations/localization_editor.h
+index ef00e09519..b18d2365bf 100644
+--- a/editor/translations/localization_editor.h
++++ b/editor/translations/localization_editor.h
+@@ -46,6 +46,12 @@ class LocalizationEditor : public VBoxContainer {
+ 	EditorLocaleDialog *locale_select = nullptr;
+ 	EditorFileDialog *translation_file_open = nullptr;
+ 
++	EditorFileDialog *_get_translation_file_open();
++	EditorFileDialog *_get_translation_res_file_open_dialog();
++	EditorFileDialog *_get_translation_res_option_file_open_dialog();
++	EditorFileDialog *_get_template_generate_dialog();
++	EditorFileDialog *_get_template_source_open_dialog();
++
+ 	Button *translation_res_option_add_button = nullptr;
+ 	EditorFileDialog *translation_res_file_open_dialog = nullptr;
+ 	EditorFileDialog *translation_res_option_file_open_dialog = nullptr;
+diff --git a/scene/gui/file_dialog.cpp b/scene/gui/file_dialog.cpp
+index 3d15587cbd..afc0306fa2 100644
+--- a/scene/gui/file_dialog.cpp
++++ b/scene/gui/file_dialog.cpp
+@@ -547,11 +547,13 @@ void FileDialog::_action_pressed() {
+ 
+ 		String file_name = file_text.strip_edges().get_file();
+ 		if (!valid || file_name.is_empty()) {
++			_ensure_exterr();
+ 			exterr->popup_centered(Size2(250, 80));
+ 			return;
+ 		}
+ 
+ 		if (customization_flags[CUSTOMIZATION_OVERWRITE_WARNING] && (dir_access->file_exists(f) || dir_access->is_bundle(f))) {
++			_ensure_confirm_save();
+ 			confirm_save->set_text(vformat(atr(ETR("File \"%s\" already exists.\nDo you want to overwrite it?")), f));
+ 			confirm_save->popup_centered(Size2(250, 80));
+ 		} else {
+@@ -722,6 +724,7 @@ void FileDialog::_item_menu_id_pressed(int p_option) {
+ 
+ 		case ITEM_MENU_DELETE: {
+ 			if (selected > -1) {
++				_ensure_delete_dialog();
+ 				delete_dialog->popup_centered(Size2(250, 80));
+ 			}
+ 		} break;
+@@ -1619,12 +1622,16 @@ void FileDialog::_make_dir_confirm() {
+ 		update_filters();
+ 		_push_history();
+ 	} else {
++		_ensure_mkdirerr();
+ 		mkdirerr->popup_centered(Size2(250, 50));
+ 	}
+ 	new_dir_name->set_text(""); // reset label
+ }
+ 
+ void FileDialog::_make_dir() {
++	// _make_dir_confirm() can then rely on make_dir_dialog/new_dir_name existing: it only runs via
++	// this dialog's own "confirmed" signal.
++	_ensure_make_dir_dialog();
+ 	make_dir_dialog->popup_centered(Size2(250, 80));
+ 	new_dir_name->grab_focus();
+ }
+@@ -2344,6 +2351,73 @@ bool FileDialog::get_use_native_dialog() const {
+ 	return use_native_dialog;
+ }
+ 
++// FileDialog builds several sub-dialogs of its own (overwrite confirmation, delete confirmation,
++// create-folder prompt, and two error popups). Each is a Window with its own widget tree, together
++// about a third of a FileDialog's construction cost, and none is needed unless the user actually
++// hits that specific flow - so they are built on first use instead of in the constructor.
++void FileDialog::_ensure_confirm_save() {
++	if (confirm_save) {
++		return;
++	}
++
++	confirm_save = memnew(ConfirmationDialog);
++	add_child(confirm_save, false, INTERNAL_MODE_FRONT);
++	confirm_save->connect(SceneStringName(confirmed), callable_mp(this, &FileDialog::_save_confirm_pressed));
++}
++
++void FileDialog::_ensure_delete_dialog() {
++	if (delete_dialog) {
++		return;
++	}
++
++	delete_dialog = memnew(ConfirmationDialog);
++	delete_dialog->set_flag(Window::FLAG_RESIZE_DISABLED, true);
++	delete_dialog->set_text(ETR("Delete the selected file?\nDepending on your filesystem configuration, the files will either be moved to the system trash or deleted permanently."));
++	add_child(delete_dialog, false, INTERNAL_MODE_FRONT);
++	delete_dialog->connect(SceneStringName(confirmed), callable_mp(this, &FileDialog::_delete_confirm));
++}
++
++void FileDialog::_ensure_make_dir_dialog() {
++	if (make_dir_dialog) {
++		return;
++	}
++
++	make_dir_dialog = memnew(ConfirmationDialog);
++	make_dir_dialog->set_title(ETR("Create Folder"));
++	add_child(make_dir_dialog, false, INTERNAL_MODE_FRONT);
++	make_dir_dialog->connect(SceneStringName(confirmed), callable_mp(this, &FileDialog::_make_dir_confirm));
++
++	VBoxContainer *makevb = memnew(VBoxContainer);
++	make_dir_dialog->add_child(makevb);
++
++	new_dir_name = memnew(LineEdit);
++	new_dir_name->set_structured_text_bidi_override(TextServer::STRUCTURED_TEXT_FILE);
++	makevb->add_margin_child(ETR("Name:"), new_dir_name);
++	make_dir_dialog->register_text_enter(new_dir_name);
++}
++
++void FileDialog::_ensure_mkdirerr() {
++	if (mkdirerr) {
++		return;
++	}
++
++	mkdirerr = memnew(AcceptDialog);
++	mkdirerr->set_flag(Window::FLAG_RESIZE_DISABLED, true);
++	mkdirerr->set_text(ETR("Could not create folder."));
++	add_child(mkdirerr, false, INTERNAL_MODE_FRONT);
++}
++
++void FileDialog::_ensure_exterr() {
++	if (exterr) {
++		return;
++	}
++
++	exterr = memnew(AcceptDialog);
++	exterr->set_flag(Window::FLAG_RESIZE_DISABLED, true);
++	exterr->set_text(ETR("Invalid extension, or empty filename."));
++	add_child(exterr, false, INTERNAL_MODE_FRONT);
++}
++
+ FileDialog::FileDialog() {
+ 	set_title(ETR("Save a File"));
+ 	set_hide_on_ok(false);
+@@ -2647,38 +2721,7 @@ FileDialog::FileDialog() {
+ 	grid_select_options->set_columns(2);
+ 	main_vbox->add_child(grid_select_options);
+ 
+-	confirm_save = memnew(ConfirmationDialog);
+-	add_child(confirm_save, false, INTERNAL_MODE_FRONT);
+-	confirm_save->connect(SceneStringName(confirmed), callable_mp(this, &FileDialog::_save_confirm_pressed));
+-
+-	delete_dialog = memnew(ConfirmationDialog);
+-	delete_dialog->set_flag(Window::FLAG_RESIZE_DISABLED, true);
+-	delete_dialog->set_text(ETR("Delete the selected file?\nDepending on your filesystem configuration, the files will either be moved to the system trash or deleted permanently."));
+-	add_child(delete_dialog, false, INTERNAL_MODE_FRONT);
+-	delete_dialog->connect(SceneStringName(confirmed), callable_mp(this, &FileDialog::_delete_confirm));
+-
+-	make_dir_dialog = memnew(ConfirmationDialog);
+-	make_dir_dialog->set_title(ETR("Create Folder"));
+-	add_child(make_dir_dialog, false, INTERNAL_MODE_FRONT);
+-	make_dir_dialog->connect(SceneStringName(confirmed), callable_mp(this, &FileDialog::_make_dir_confirm));
+-
+-	VBoxContainer *makevb = memnew(VBoxContainer);
+-	make_dir_dialog->add_child(makevb);
+-
+-	new_dir_name = memnew(LineEdit);
+-	new_dir_name->set_structured_text_bidi_override(TextServer::STRUCTURED_TEXT_FILE);
+-	makevb->add_margin_child(ETR("Name:"), new_dir_name);
+-	make_dir_dialog->register_text_enter(new_dir_name);
+-
+-	mkdirerr = memnew(AcceptDialog);
+-	mkdirerr->set_flag(Window::FLAG_RESIZE_DISABLED, true);
+-	mkdirerr->set_text(ETR("Could not create folder."));
+-	add_child(mkdirerr, false, INTERNAL_MODE_FRONT);
+-
+-	exterr = memnew(AcceptDialog);
+-	exterr->set_flag(Window::FLAG_RESIZE_DISABLED, true);
+-	exterr->set_text(ETR("Invalid extension, or empty filename."));
+-	add_child(exterr, false, INTERNAL_MODE_FRONT);
++	// The confirm/delete/make-dir/error sub-dialogs are created lazily, see _ensure_*() below.
+ 
+ 	item_menu = memnew(PopupMenu);
+ 	item_menu->connect(SceneStringName(id_pressed), callable_mp(this, &FileDialog::_item_menu_id_pressed));
+diff --git a/scene/gui/file_dialog.h b/scene/gui/file_dialog.h
+index 92ec807088..896cab8647 100644
+--- a/scene/gui/file_dialog.h
++++ b/scene/gui/file_dialog.h
+@@ -261,6 +261,12 @@ private:
+ 	AcceptDialog *exterr = nullptr;
+ 	ConfirmationDialog *confirm_save = nullptr;
+ 
++	void _ensure_confirm_save();
++	void _ensure_delete_dialog();
++	void _ensure_make_dir_dialog();
++	void _ensure_mkdirerr();
++	void _ensure_exterr();
++
+ 	struct ThemeCache {
+ 		int thumbnail_size = 64;
+ 

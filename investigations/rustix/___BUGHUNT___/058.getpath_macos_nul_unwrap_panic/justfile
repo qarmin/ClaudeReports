@@ -1,0 +1,68 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# `getpath` is `#[cfg(all(apple, feature = "alloc"))]`-gated - it cannot be built or executed on
+# a non-Apple host at all, and this sandboxed environment has no macOS SDK/cross-linker to
+# produce a real linked Darwin binary, nor a way to run one (see RESULT.md's "Fully
+# reproducible" section). Instead this uses Miri's cross-interpretation
+# (`cargo miri run --target x86_64-apple-darwin`), which interprets MIR directly and does not
+# need to natively execute Darwin code. `mock.patch` stands in for the unavailable real XNU
+# kernel: it mocks only the single lowest-level `fcntl` syscall call, for two magic raw fd
+# values (simulating a pathological full-buffer, no-NUL response, and the legitimate maximal
+# boundary case) - every other fd still takes the real, unmodified syscall. Everything else
+# exercised (rustix::fs::getpath's real public API, the real, unmodified
+# `position(...).unwrap()`/`truncate`/`CString::new(...).unwrap()` logic) is the exact,
+# unmodified source being tested, compiled for the real `cfg(apple)` target.
+#
+# `patch.diff` is the real, minimal fix against pristine source (independently build- and
+# test-suite-verified against the main project's own worktree - see RESULT.md). It cannot be
+# layered directly on top of `mock.patch` in the same clone for the "after" demonstration below,
+# because both touch overlapping lines of the same function (the mock wraps the real `fcntl`
+# call; the fix changes the lines immediately below it) - `git apply` would conflict. So the
+# "after" step instead applies `mock_and_fix.patch`, which is the same two changes
+# (mock + fix) pre-combined into one patch against a second, separately fetched pristine clone -
+# not a different fix, just a different packaging to avoid the hunk conflict.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+# Full cycle: clone pristine, mock the syscall boundary, prove the bug exists, then on a second
+# fresh clone, mock + apply the real fix together, prove it's gone.
+test: clone mock reproduce-before clone-after mock-and-fix reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    rustup target add x86_64-apple-darwin
+    rustup run nightly cargo miri setup --target x86_64-apple-darwin
+
+# Mock only the syscall boundary (stands in for the real XNU kernel this sandbox can't run) -
+# never the vulnerable `getpath` logic itself.
+mock:
+    cd clone && git apply "{{justfile_directory()}}/mock.patch"
+
+# Build+run the standalone repro against the pristine (mocked-syscall-only) clone, cross-
+# interpreted under Miri for the apple target - should panic on the full-buffer case.
+# (prefixed with `-`: this step is EXPECTED to print a panic for one of its two checks - that's
+# the bug reproducing - `just` must not treat that as a reason to abort the `test` chain)
+reproduce-before:
+    -cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-apple-darwin
+
+clone-after:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+mock-and-fix:
+    cd clone && git apply "{{justfile_directory()}}/mock_and_fix.patch"
+
+# Same repro again, now against the mocked+fixed clone - the full-buffer case should return a
+# clean `NAMETOOLONG` error instead of panicking; the boundary case keeps succeeding.
+reproduce-after:
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-apple-darwin
+
+clean:
+    rm -rf clone repro/target

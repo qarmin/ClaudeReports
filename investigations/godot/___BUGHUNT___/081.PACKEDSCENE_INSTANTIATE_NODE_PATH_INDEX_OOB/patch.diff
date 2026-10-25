@@ -1,0 +1,136 @@
+diff --git a/scene/resources/packed_scene.cpp b/scene/resources/packed_scene.cpp
+index cb832a5138..521d9aed17 100644
+--- a/scene/resources/packed_scene.cpp
++++ b/scene/resources/packed_scene.cpp
+@@ -1763,28 +1763,46 @@ void SceneState::set_bundled_scene(const Dictionary &p_dictionary) {
+ 		variants.clear();
+ 	}
+ 
++	bool corrupt = false;
++	const auto read_int = [&corrupt](const int *p_data, int p_size, int &r_idx) -> int {
++		if (r_idx >= p_size) {
++			corrupt = true;
++			return 0;
++		}
++		return p_data[r_idx++];
++	};
++	const auto read_count = [&corrupt, &read_int](const int *p_data, int p_size, int &r_idx, int p_elements_per_item) -> int {
++		const int count = read_int(p_data, p_size, r_idx);
++		if (count < 0 || count > (p_size - r_idx) / p_elements_per_item) {
++			corrupt = true;
++			return 0;
++		}
++		return count;
++	};
++
+ 	nodes.resize(node_count);
+ 	if (node_count) {
+ 		const int *r = snodes.ptr();
++		const int rsize = snodes.size();
+ 		int idx = 0;
+-		for (int i = 0; i < node_count; i++) {
++		for (int i = 0; i < node_count && !corrupt; i++) {
+ 			NodeData &nd = nodes.write[i];
+-			nd.parent = r[idx++];
+-			nd.owner = r[idx++];
+-			nd.type = r[idx++];
+-			uint32_t name_index = r[idx++];
++			nd.parent = read_int(r, rsize, idx);
++			nd.owner = read_int(r, rsize, idx);
++			nd.type = read_int(r, rsize, idx);
++			uint32_t name_index = read_int(r, rsize, idx);
+ 			nd.name = name_index & ((1 << NAME_INDEX_BITS) - 1);
+ 			nd.index = (name_index >> NAME_INDEX_BITS);
+ 			nd.index--; //0 is invalid, stored as 1
+-			nd.instance = r[idx++];
+-			nd.properties.resize(r[idx++]);
++			nd.instance = read_int(r, rsize, idx);
++			nd.properties.resize(read_count(r, rsize, idx, 2));
+ 			for (int j = 0; j < nd.properties.size(); j++) {
+-				nd.properties.write[j].name = r[idx++];
+-				nd.properties.write[j].value = r[idx++];
++				nd.properties.write[j].name = read_int(r, rsize, idx);
++				nd.properties.write[j].value = read_int(r, rsize, idx);
+ 			}
+-			nd.groups.resize(r[idx++]);
++			nd.groups.resize(read_count(r, rsize, idx, 1));
+ 			for (int j = 0; j < nd.groups.size(); j++) {
+-				nd.groups.write[j] = r[idx++];
++				nd.groups.write[j] = read_int(r, rsize, idx);
+ 			}
+ 		}
+ 	}
+@@ -1792,25 +1810,32 @@ void SceneState::set_bundled_scene(const Dictionary &p_dictionary) {
+ 	connections.resize(conn_count);
+ 	if (conn_count) {
+ 		const int *r = sconns.ptr();
++		const int rsize = sconns.size();
+ 		int idx = 0;
+-		for (int i = 0; i < conn_count; i++) {
++		for (int i = 0; i < conn_count && !corrupt; i++) {
+ 			ConnectionData &cd = connections.write[i];
+-			cd.from = r[idx++];
+-			cd.to = r[idx++];
+-			cd.signal = r[idx++];
+-			cd.method = r[idx++];
+-			cd.flags = r[idx++];
+-			cd.binds.resize(r[idx++]);
++			cd.from = read_int(r, rsize, idx);
++			cd.to = read_int(r, rsize, idx);
++			cd.signal = read_int(r, rsize, idx);
++			cd.method = read_int(r, rsize, idx);
++			cd.flags = read_int(r, rsize, idx);
++			cd.binds.resize(read_count(r, rsize, idx, 1));
+ 
+ 			for (int j = 0; j < cd.binds.size(); j++) {
+-				cd.binds.write[j] = r[idx++];
++				cd.binds.write[j] = read_int(r, rsize, idx);
+ 			}
+ 			if (version >= 3) {
+-				cd.unbinds = r[idx++];
++				cd.unbinds = read_int(r, rsize, idx);
+ 			}
+ 		}
+ 	}
+ 
++	if (corrupt) {
++		nodes.clear();
++		connections.clear();
++		ERR_FAIL_MSG("Invalid bundled scene: node or connection data is truncated.");
++	}
++
+ 	if (p_dictionary.has("node_ids")) {
+ 		ids = p_dictionary["node_ids"];
+ 	}
+@@ -1850,6 +1875,31 @@ void SceneState::set_bundled_scene(const Dictionary &p_dictionary) {
+ 	}
+ 
+ 	//path=p_dictionary["path"];
++
++	const auto is_bad_node_id = [this](int p_id) {
++		return (p_id & FLAG_ID_IS_PATH) && (p_id & FLAG_MASK) >= node_paths.size();
++	};
++	const uint32_t name_count = names.size();
++	const int variant_count = variants.size();
++	bool valid = true;
++	for (int i = 0; i < nodes.size() && valid; i++) {
++		const NodeData &nd = nodes[i];
++		valid = nd.name < name_count && (i == 0 || !is_bad_node_id(nd.parent)) && (nd.owner < 0 || !is_bad_node_id(nd.owner));
++		valid = valid && (nd.instance < 0 || (nd.instance & FLAG_MASK) < variant_count);
++		valid = valid && (nd.instance >= 0 || nd.type == TYPE_INSTANTIATED || (uint32_t)nd.type < name_count);
++	}
++	for (int i = 0; i < connections.size() && valid; i++) {
++		const ConnectionData &cd = connections[i];
++		valid = !is_bad_node_id(cd.from) && !is_bad_node_id(cd.to) && (uint32_t)cd.signal < name_count && (uint32_t)cd.method < name_count;
++		for (int j = 0; j < cd.binds.size() && valid; j++) {
++			valid = (uint32_t)cd.binds[j] < (uint32_t)variant_count;
++		}
++	}
++	if (!valid) {
++		nodes.clear();
++		connections.clear();
++		ERR_FAIL_MSG("Invalid bundled scene: a node or connection refers to a name, variant or node path that does not exist.");
++	}
+ }
+ 
+ Dictionary SceneState::get_bundled_scene() const {

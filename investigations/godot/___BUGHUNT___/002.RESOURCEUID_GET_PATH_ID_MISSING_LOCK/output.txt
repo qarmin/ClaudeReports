@@ -1,0 +1,81 @@
+Reproducing missing lock in ResourceUID::get_path_id() (core/io/resource_uid.cpp:221-227)
+Writer thread: add_id()/remove_id() (locked, real code path)
+Reader thread: get_path_id() (UNLOCKED, the bug)
+Expect ASAN to report heap-use-after-free inside HashMap::getptr()/_resize_and_rehash() shortly.
+=================================================================
+==10522==ERROR: AddressSanitizer: heap-use-after-free on address 0x7c2db0df2100 at pc 0x7fcdb1ab4445 bp 0x7bcdadbfd9f0 sp 0x7bcdadbfd198
+READ of size 20 at 0x7c2db0df2100 thread T2
+    #0 0x7fcdb1ab4444 in MemcmpInterceptorCommon(void*, int (*)(void const*, void const*, unsigned long), void const*, void const*, unsigned long) ../../../../src/libsanitizer/sanitizer_common/sanitizer_common_interceptors.inc:848
+    #1 0x7fcdb1ab4834 in memcmp ../../../../src/libsanitizer/sanitizer_common/sanitizer_common_interceptors.inc:880
+    #2 0x7fcdb1ab4834 in memcmp ../../../../src/libsanitizer/sanitizer_common/sanitizer_common_interceptors.inc:875
+    #3 0x55de32c8e287 in bool are_spans_equal<char, char>(char const*, char const*, unsigned long) clone/core/templates/span.h:43
+    #4 0x55de32c8e287 in bool operator==<char, char>(Span<char> const&, Span<char> const&) clone/core/templates/span.h:237
+    #5 0x55de32c8e287 in CharStringT<char>::operator==(CharStringT<char> const&) const clone/core/string/ustring.h:222
+    #6 0x55de32c8e287 in HashMapComparatorDefault<CharStringT<char>, void>::compare(CharStringT<char> const&, CharStringT<char> const&) clone/core/templates/hashfuncs.h:306
+    #7 0x55de32c8e287 in HashMap<CharStringT<char>, long, HashMapHasherDefault, HashMapComparatorDefault<CharStringT<char>, void>, DefaultTypedAllocator<HashMapElement<CharStringT<char>, long> > >::_lookup_idx_unchecked(CharStringT<char> const&, unsigned int, unsigned int&) const clone/core/templates/hash_map.h:120
+    #8 0x55de32c8d26b in HashMap<CharStringT<char>, long, HashMapHasherDefault, HashMapComparatorDefault<CharStringT<char>, void>, DefaultTypedAllocator<HashMapElement<CharStringT<char>, long> > >::_lookup_idx(CharStringT<char> const&, unsigned int&) const clone/core/templates/hash_map.h:107
+    #9 0x55de32c8d26b in HashMap<CharStringT<char>, long, HashMapHasherDefault, HashMapComparatorDefault<CharStringT<char>, void>, DefaultTypedAllocator<HashMapElement<CharStringT<char>, long> > >::getptr(CharStringT<char> const&) const clone/core/templates/hash_map.h:312
+    #10 0x55de32c8d26b in MiniResourceUID::get_path_id(CharStringT<char> const&) const repro/repro.cpp:50
+    #11 0x55de32c8d26b in reader_thread repro/repro.cpp:84
+    #12 0x55de32c8d668 in void std::__invoke_impl<void, void (*)()>(std::__invoke_other, void (*&&)()) /usr/include/c++/15/bits/invoke.h:63
+    #13 0x55de32c8d668 in std::__invoke_result<void (*)()>::type std::__invoke<void (*)()>(void (*&&)()) /usr/include/c++/15/bits/invoke.h:98
+    #14 0x55de32c8d668 in void std::thread::_Invoker<std::tuple<void (*)()> >::_M_invoke<0ul>(std::_Index_tuple<0ul>) /usr/include/c++/15/bits/std_thread.h:303
+    #15 0x55de32c8d668 in std::thread::_Invoker<std::tuple<void (*)()> >::operator()() /usr/include/c++/15/bits/std_thread.h:310
+    #16 0x55de32c8d668 in std::thread::_State_impl<std::thread::_Invoker<std::tuple<void (*)()> > >::_M_run() /usr/include/c++/15/bits/std_thread.h:255
+    #17 0x7fcdb181cef8  (/usr/lib/x86_64-linux-gnu/libstdc++.so.6+0xf5ef8) (BuildId: 3a7a8c6bd922e6314edb7a710fdc0293265c2c42)
+    #18 0x7fcdb1a2aa80 in asan_thread_start ../../../../src/libsanitizer/asan/asan_interceptors.cpp:246
+    #19 0x7fcdb1455df9 in start_thread nptl/pthread_create.c:454
+    #20 0x7fcdb14e93d3 in clone ../sysdeps/unix/sysv/linux/x86_64/clone.S:100
+
+0x7c2db0df2100 is located 32 bytes inside of 53-byte region [0x7c2db0df20e0,0x7c2db0df2115)
+freed by thread T1 here:
+    #0 0x7fcdb1af13ff in free ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:51
+    #1 0x55de32c93186 in Memory::free_static(void*, bool) clone/core/os/memory.cpp:204
+
+previously allocated by thread T1 here:
+    #0 0x7fcdb1af260f in malloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:67
+    #1 0x55de32c93344 in void* Memory::alloc_static<false>(unsigned long, bool) clone/core/os/memory.cpp:101
+
+Thread T2 created by T0 here:
+    #0 0x7fcdb1ae8f80 in pthread_create ../../../../src/libsanitizer/asan/asan_interceptors.cpp:257
+    #1 0x7fcdb181cff0 in std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) (/usr/lib/x86_64-linux-gnu/libstdc++.so.6+0xf5ff0) (BuildId: 3a7a8c6bd922e6314edb7a710fdc0293265c2c42)
+    #2 0x55de32c8d9ad in std::thread::thread<void (&)(), , void>(void (&)()) /usr/include/c++/15/bits/std_thread.h:175
+
+Thread T1 created by T0 here:
+    #0 0x7fcdb1ae8f80 in pthread_create ../../../../src/libsanitizer/asan/asan_interceptors.cpp:257
+    #1 0x7fcdb181cff0 in std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) (/usr/lib/x86_64-linux-gnu/libstdc++.so.6+0xf5ff0) (BuildId: 3a7a8c6bd922e6314edb7a710fdc0293265c2c42)
+    #2 0x55de32c8d9ad in std::thread::thread<void (&)(), , void>(void (&)()) /usr/include/c++/15/bits/std_thread.h:175
+
+SUMMARY: AddressSanitizer: heap-use-after-free clone/core/templates/span.h:43 in bool are_spans_equal<char, char>(char const*, char const*, unsigned long)
+Shadow bytes around the buggy address:
+  0x7c2db0df1e80: fa fa fa fa fd fd fd fd fd fd fd fa fa fa fa fa
+  0x7c2db0df1f00: fd fd fd fd fd fd fd fa fa fa fa fa fd fd fd fd
+  0x7c2db0df1f80: fd fd fd fa fa fa fa fa fd fd fd fd fd fd fd fa
+  0x7c2db0df2000: fa fa fa fa fd fd fd fd fd fd fd fa fa fa fa fa
+  0x7c2db0df2080: fd fd fd fd fd fd fd fa fa fa fa fa fd fd fd fd
+=>0x7c2db0df2100:[fd]fd fd fa fa fa fa fa fd fd fd fd fd fd fd fa
+  0x7c2db0df2180: fa fa fa fa fd fd fd fd fd fd fd fa fa fa fa fa
+  0x7c2db0df2200: fd fd fd fd fd fd fd fa fa fa fa fa fd fd fd fd
+  0x7c2db0df2280: fd fd fd fa fa fa fa fa fd fd fd fd fd fd fd fa
+  0x7c2db0df2300: fa fa fa fa fd fd fd fd fd fd fd fa fa fa fa fa
+  0x7c2db0df2380: fd fd fd fd fd fd fd fa fa fa fa fa fd fd fd fd
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07 
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==10522==ABORTING

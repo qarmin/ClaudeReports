@@ -1,0 +1,65 @@
+# Self-contained reproduction for this candidate.
+#
+# repro/repro.cpp and repro/repro_fixed.cpp reuse Godot's REAL
+# core/templates/local_vector.h and core/templates/rid.h verbatim (compiled
+# directly from a fresh clone, no reimplementation), plus a minimal function
+# (mini_feedback_buffer_material_index) that is a byte-for-byte copy of the
+# real TextureStreaming::feedback_buffer_material_index() body
+# (texture_streaming.cpp:457-472). See repro/README.md for why this candidate
+# has a C++ mirror instead of a GDScript repro (the real function is only
+# reachable from the GPU rendering backend, not GDScript, not headless-testable).
+#
+# patch.diff is the real fix applied to the actual texture_streaming.cpp - but
+# the mirror here does not link the real TextureStreaming/RID_Owner/Object
+# machinery (would require the full String/Variant implementation just for
+# unused ERR_FAIL_V_MSG diagnostic strings). The "fix verified" claim rests on
+# repro.cpp vs. repro_fixed.cpp, cross-checked by compiling the real patched
+# file against the real project headers (`g++ -c`, see RESULT.md).
+
+repo_url := "https://github.com/qarmin/godot.git"
+base_commit := "b8420aa3a60689572a745c0f8a85c9df62d4cbfb"
+
+inc_flags := "-I./clone -I./clone/platform/linuxbsd -DASAN_ENABLED -DTHREADS_ENABLED"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    touch clone/core/profiling/profiling.gen.h
+
+# Expected (confirming) result: a fatal CRASH_BAD_UNSIGNED_INDEX abort
+# (GENERATE_TRAP(), SIGILL) from LocalVector::operator[]'s own bounds check -
+# this is Godot's own defense-in-depth catching the out-of-bounds index before
+# it becomes silent heap corruption, but it is still an unconditional engine
+# crash reachable in normal rendering. `|| true` keeps this from failing the
+# `test` chain.
+reproduce-before:
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c clone/core/os/memory.cpp -o memory.o
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c repro/err_stub.cpp -o err_stub.o
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c repro/repro.cpp -o repro.o
+    g++ -std=c++17 -fsanitize=address -g -O1 repro.o err_stub.o memory.o -o repro_before -lpthread
+    ulimit -c 0 && (ASAN_OPTIONS=detect_leaks=0 ./repro_before || true)
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Best-effort extra check: compile the real patched file against real project
+# headers (type-check only, no link - needs several SCons-generated headers
+# this bare clone doesn't have, so this is allowed to fail; it's not part of
+# the main `test` chain). When it DOES succeed, it's strong independent
+# evidence the patch is valid against real Godot, not just the mirror.
+check-real-file: apply
+    g++ -std=c++17 -c -I./clone -I./clone/platform/linuxbsd -DTOOLS_ENABLED -DDEBUG_ENABLED -DTHREADS_ENABLED -DRD_ENABLED clone/modules/texture_streaming/texture_streaming.cpp -o /dev/null
+
+# Expected result: prints "Returned index: 4294967295" and exits 0 - no crash.
+reproduce-after:
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c clone/core/os/memory.cpp -o memory.o
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c repro/err_stub.cpp -o err_stub.o
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c repro/repro_fixed.cpp -o repro_fixed.o
+    g++ -std=c++17 -fsanitize=address -g -O1 repro_fixed.o err_stub.o memory.o -o repro_after -lpthread
+    ulimit -c 0 && ASAN_OPTIONS=detect_leaks=0 ./repro_after
+
+clean:
+    rm -rf clone *.o repro_before repro_after

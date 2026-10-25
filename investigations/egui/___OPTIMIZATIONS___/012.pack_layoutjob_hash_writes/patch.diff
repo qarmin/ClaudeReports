@@ -1,0 +1,99 @@
+diff --git a/crates/epaint/src/stroke.rs b/crates/epaint/src/stroke.rs
+index 14969063f..a65f6187e 100644
+--- a/crates/epaint/src/stroke.rs
++++ b/crates/epaint/src/stroke.rs
+@@ -91,8 +91,15 @@ impl core::hash::Hash for Stroke {
+     #[inline(always)]
+     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+         let Self { width, color } = *self;
+-        emath::OrderedFloat(width).hash(state);
+-        color.hash(state);
++        // Same equivalence classes as `OrderedFloat`; one write instead of three.
++        let width_bits = if width.is_nan() {
++            0x7fc0_0000
++        } else {
++            (width + 0.0).to_bits()
++        };
++        state.write_u64(
++            u64::from(width_bits) | u64::from(u32::from_ne_bytes(color.to_array())) << 32,
++        );
+     }
+ }
+ 
+diff --git a/crates/epaint/src/text/text_layout_types.rs b/crates/epaint/src/text/text_layout_types.rs
+index 8d07864aa..ee3647b0a 100644
+--- a/crates/epaint/src/text/text_layout_types.rs
++++ b/crates/epaint/src/text/text_layout_types.rs
+@@ -322,12 +322,23 @@ impl core::hash::Hash for LayoutJob {
+         text.hash(state);
+         sections.hash(state);
+         wrap.hash(state);
+-        emath::OrderedFloat(*first_row_min_height).hash(state);
+-        break_on_newline.hash(state);
+-        halign.hash(state);
+-        justify.hash(state);
+-        round_output_to_gui.hash(state);
+-        keep_trailing_whitespace.hash(state);
++        // Packed into one write: this runs for every label layout, cached or not.
++        let flags = u32::from(*break_on_newline)
++            | u32::from(*justify) << 1
++            | u32::from(*round_output_to_gui) << 2
++            | u32::from(*keep_trailing_whitespace) << 3
++            | (*halign as u32) << 4;
++        state.write_u64(u64::from(float_bits(*first_row_min_height)) | u64::from(flags) << 32);
++    }
++}
++
++/// Same equivalence classes as [`emath::OrderedFloat`]'s hash (all NaNs equal, `-0.0 == 0.0`).
++#[inline(always)]
++fn float_bits(value: f32) -> u32 {
++    if value.is_nan() {
++        0x7fc0_0000
++    } else {
++        (value + 0.0).to_bits()
+     }
+ }
+ 
+@@ -569,18 +580,21 @@ impl core::hash::Hash for TextFormat {
+             valign,
+         } = self;
+         font_id.hash(state);
+-        emath::OrderedFloat(*extra_letter_spacing).hash(state);
+         if let Some(line_height) = *line_height {
+             emath::OrderedFloat(line_height).hash(state);
+         }
+-        color.hash(state);
+-        background.hash(state);
+-        emath::OrderedFloat(*expand_bg).hash(state);
++        // Packed into fewer writes: this runs for every label layout, cached or not.
++        state.write_u64(
++            u64::from(float_bits(*extra_letter_spacing)) | u64::from(float_bits(*expand_bg)) << 32,
++        );
++        state.write_u64(
++            u64::from(u32::from_ne_bytes(color.to_array()))
++                | u64::from(u32::from_ne_bytes(background.to_array())) << 32,
++        );
+         coords.hash(state);
+-        italics.hash(state);
+         underline.hash(state);
+         strikethrough.hash(state);
+-        valign.hash(state);
++        state.write_u8(u8::from(*italics) | (*valign as u8) << 1);
+     }
+ }
+ 
+@@ -671,10 +685,11 @@ impl core::hash::Hash for TextWrapping {
+             break_anywhere,
+             overflow_character,
+         } = self;
+-        emath::OrderedFloat(*max_width).hash(state);
+         max_rows.hash(state);
+-        break_anywhere.hash(state);
+-        overflow_character.hash(state);
++        let overflow = overflow_character.map_or(0, |c| c as u64 + 1);
++        state.write_u64(
++            u64::from(float_bits(*max_width)) | u64::from(*break_anywhere) << 32 | overflow << 33,
++        );
+     }
+ }
+ 

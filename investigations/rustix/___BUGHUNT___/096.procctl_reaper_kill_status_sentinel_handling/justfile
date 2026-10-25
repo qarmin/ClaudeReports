@@ -1,0 +1,54 @@
+# Self-contained reproduction for candidate 096
+# (procctl_reaper_kill_status_sentinel_handling).
+#
+# The affected code (`rustix::process::reaper_kill`, src/process/procctl.rs) is
+# `#[cfg(freebsdlike)]`-gated and cannot be compiled or run on a Linux host - there is no FreeBSD
+# hardware/VM in this environment (see RESULT.md "Fully reproducible"). So this justfile's
+# `reproduce-before`/`reproduce-after` do two REAL, automated things instead of hand-waving:
+#
+#   1. Cross-compile-check (`cargo check --target x86_64-unknown-freebsd`) the real
+#      `src/process/procctl.rs` against the clone, before and after the patch, proving the
+#      vulnerable/fixed code is real, live source for the real affected target (not dead code),
+#      and that the patch doesn't break compilation for it.
+#   2. Build and run `repro/`, which drives the real, portable `rustix::process::Pid::from_raw`
+#      (the exact function `reaper_kill`'s vulnerable line calls) with the literal `rk_fpid` value
+#      (`-1`) the real FreeBSD kernel source (sys/kern/kern_procctl.c's `reap_kill()`) proves is
+#      left in that field on every ordinary, fully-successful (0 failures) `reaper_kill` call -
+#      through both the vulnerable formula (current HEAD) and the fixed formula (this patch),
+#      in both debug and release builds.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+reproduce-before:
+    echo "=== cross-compile check (unpatched clone, real FreeBSD target) ==="
+    cd clone && cargo check --target x86_64-unknown-freebsd --features "std,all-apis"
+    echo
+    echo "=== repro (debug build, vulnerable mode) - expect: REPRODUCED (panic) ==="
+    ulimit -c 0 && cd repro && cargo run -- vulnerable
+    echo
+    echo "=== repro (release build, vulnerable mode) - expect: REPRODUCED (bogus Some(Pid(-1))) ==="
+    ulimit -c 0 && cd repro && cargo run --release -- vulnerable
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+reproduce-after:
+    echo "=== cross-compile check (patched clone, real FreeBSD target) ==="
+    cd clone && cargo check --target x86_64-unknown-freebsd --features "std,all-apis"
+    echo
+    echo "=== confirm the real patched source now has the sentinel check ==="
+    grep -q "if req.rk_fpid == -1" clone/src/process/procctl.rs && echo "OK: guard present in patched source"
+    echo
+    echo "=== repro (release build, fixed mode) - expect: correct None, clean exit ==="
+    ulimit -c 0 && cd repro && cargo run --release -- fixed
+
+clean:
+    rm -rf clone

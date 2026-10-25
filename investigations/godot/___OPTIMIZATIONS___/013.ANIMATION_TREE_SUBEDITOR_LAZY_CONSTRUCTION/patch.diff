@@ -1,0 +1,114 @@
+diff --git a/editor/animation/animation_tree_editor_plugin.cpp b/editor/animation/animation_tree_editor_plugin.cpp
+index fbf2493fe0..d9feb87f1b 100644
+--- a/editor/animation/animation_tree_editor_plugin.cpp
++++ b/editor/animation/animation_tree_editor_plugin.cpp
+@@ -104,7 +104,12 @@ void AnimationTreeEditor::_meta_clicked(Variant p_meta) {
+ 		String child_name = full_path_str;
+ 		child_name = child_name.replace_first(parent_path, "");
+ 		child_name = child_name.trim_suffix("/");
+-		callable_mp(AnimationNodeBlendTreeEditor::get_singleton(), &AnimationNodeBlendTreeEditor::pan_to_node).call_deferred(child_name, input_index);
++		// Ensure the editor exists rather than relying on edit_path() above having built it -
++		// its own "already on this path" guard can skip that as a no-op.
++		AnimationNodeBlendTreeEditor *bte = Object::cast_to<AnimationNodeBlendTreeEditor>(_ensure_editor_for(blend_tree));
++		if (bte) {
++			callable_mp(bte, &AnimationNodeBlendTreeEditor::pan_to_node).call_deferred(child_name, input_index);
++		}
+ 	}
+ }
+ 
+@@ -355,6 +360,38 @@ void AnimationTreeEditor::_update_path() {
+ 	}
+ }
+ 
++AnimationTreeNodeEditorPlugin *AnimationTreeEditor::_ensure_editor_for(const Ref<AnimationNode> &p_node) {
++	if (p_node.is_null()) {
++		return nullptr;
++	}
++
++	// Reuse an already-constructed editor if one exists (also covers editors registered
++	// externally via add_plugin(), e.g. by a GDExtension).
++	for (int i = 0; i < editors.size(); i++) {
++		if (editors[i]->can_edit(p_node)) {
++			return editors[i];
++		}
++	}
++
++	// None of the built-in sub-editors are constructed yet - lazily build exactly the one that
++	// matches this node's type, instead of all 4 unconditionally at plugin startup.
++	AnimationTreeNodeEditorPlugin *new_editor = nullptr;
++	if (Ref<AnimationNodeBlendTree>(p_node).is_valid()) {
++		new_editor = memnew(AnimationNodeBlendTreeEditor);
++	} else if (Ref<AnimationNodeBlendSpace1D>(p_node).is_valid()) {
++		new_editor = memnew(AnimationNodeBlendSpace1DEditor);
++	} else if (Ref<AnimationNodeBlendSpace2D>(p_node).is_valid()) {
++		new_editor = memnew(AnimationNodeBlendSpace2DEditor);
++	} else if (Ref<AnimationNodeStateMachine>(p_node).is_valid()) {
++		new_editor = memnew(AnimationNodeStateMachineEditor);
++	}
++
++	if (new_editor) {
++		add_plugin(new_editor);
++	}
++	return new_editor;
++}
++
+ void AnimationTreeEditor::edit_path(const Vector<String> &p_path) {
+ 	button_path.clear();
+ 
+@@ -372,8 +409,9 @@ void AnimationTreeEditor::edit_path(const Vector<String> &p_path) {
+ 
+ 		edited_path = button_path;
+ 
++		AnimationTreeNodeEditorPlugin *matched_editor = _ensure_editor_for(node);
+ 		for (int i = 0; i < editors.size(); i++) {
+-			if (editors[i]->can_edit(node)) {
++			if (editors[i] == matched_editor) {
+ 				editors[i]->edit(node);
+ 				editors[i]->show();
+ 			} else {
+@@ -485,12 +523,20 @@ String AnimationTreeEditor::get_base_path() {
+ }
+ 
+ bool AnimationTreeEditor::can_edit(const Ref<AnimationNode> &p_node) const {
++	if (p_node.is_null()) {
++		return false;
++	}
+ 	for (int i = 0; i < editors.size(); i++) {
+ 		if (editors[i]->can_edit(p_node)) {
+ 			return true;
+ 		}
+ 	}
+-	return false;
++	// The matching built-in sub-editor may not be constructed yet - see _ensure_editor_for(),
++	// whose type list must stay in sync with this one.
++	return Ref<AnimationNodeBlendTree>(p_node).is_valid() ||
++			Ref<AnimationNodeBlendSpace1D>(p_node).is_valid() ||
++			Ref<AnimationNodeBlendSpace2D>(p_node).is_valid() ||
++			Ref<AnimationNodeStateMachine>(p_node).is_valid();
+ }
+ 
+ LocalVector<StringName> AnimationTreeEditor::get_animation_list() {
+@@ -571,10 +617,7 @@ AnimationTreeEditor::AnimationTreeEditor() {
+ 	error_button->set_tooltip_text(TTRC("Errors"));
+ 	status_bar->add_child(error_button);
+ 
+-	add_plugin(memnew(AnimationNodeBlendTreeEditor));
+-	add_plugin(memnew(AnimationNodeBlendSpace1DEditor));
+-	add_plugin(memnew(AnimationNodeBlendSpace2DEditor));
+-	add_plugin(memnew(AnimationNodeStateMachineEditor));
++	// The 4 built-in sub-editors are constructed lazily, see _ensure_editor_for().
+ 
+ 	error_scroll = memnew(ScrollContainer);
+ 	error_scroll->set_h_size_flags(SIZE_EXPAND_FILL);
+diff --git a/editor/animation/animation_tree_editor_plugin.h b/editor/animation/animation_tree_editor_plugin.h
+index b4cc0b0106..f8b6957d6c 100644
+--- a/editor/animation/animation_tree_editor_plugin.h
++++ b/editor/animation/animation_tree_editor_plugin.h
+@@ -72,6 +72,7 @@ class AnimationTreeEditor : public EditorDock {
+ 
+ 	void _update_path();
+ 	void _clear_editors();
++	AnimationTreeNodeEditorPlugin *_ensure_editor_for(const Ref<AnimationNode> &p_node);
+ 	ObjectID current_root;
+ 
+ 	void _path_button_pressed(int p_path);

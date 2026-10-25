@@ -1,0 +1,98 @@
+=== Run 1/2: reproduce-before (pristine clone at base_commit) ===
+(full 'just test' transcript shown in full below the summary)
+
+rm -rf clone
+git clone https://github.com/bytecodealliance/rustix.git clone
+Cloning into 'clone'...
+cd clone && git checkout 287214b889865d8e1406a0ee71cc409b6f6191c8
+Note: switching to '287214b889865d8e1406a0ee71cc409b6f6191c8'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at 287214b8 chore: Release rustix version 1.1.5
+bash repro/run.sh clone || true
+=== 1) 'cargo clippy --features std,all-apis' (linux_raw backend) - no -W flag needed ===
+   --> src/timespec.rs:210:31
+    |
+210 |     pub(crate) fn to_sec_usec(&self) -> Option<(Secs, u32)> {
+    |                               ^^^^^
+    |
+    = help: consider choosing a less ambiguous name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#wrong_self_convention
+
+=== 2) 'cargo clippy --features std,all-apis,use-libc' (libc backend, both to_* methods compiled) ===
+   --> src/timespec.rs:210:31
+    |
+210 |     pub(crate) fn to_sec_usec(&self) -> Option<(Secs, u32)> {
+    |                               ^^^^^
+    |
+    = help: consider choosing a less ambiguous name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#wrong_self_convention
+   --> src/timespec.rs:223:30
+    |
+223 |     pub(crate) fn to_timeval(&self) -> crate::io::Result<c::timeval> {
+    |                              ^^^^^
+    |
+    = help: consider choosing a less ambiguous name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#wrong_self_convention
+
+--- summary ---
+REPRODUCED: clippy::wrong_self_convention (warn-by-default, no opt-in flag needed) fires on
+Timespec::to_sec_usec (src/timespec.rs:210) under the linux_raw backend, and, once the
+libc-backend-only to_timeval is compiled in too, also on src/timespec.rs:223.
+cd clone && git apply "/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/060.timespec_to_methods_self_convention/patch.diff"
+bash repro/run.sh clone
+=== 1) 'cargo clippy --features std,all-apis' (linux_raw backend) - no -W flag needed ===
+(no hit on line 210 under linux_raw backend)
+
+=== 2) 'cargo clippy --features std,all-apis,use-libc' (libc backend, both to_* methods compiled) ===
+(no hit on line 210 under libc backend)
+(no hit on line 223 under libc backend)
+
+--- summary ---
+did not reproduce - cargo clippy did not flag the expected lines
+
+=== Run 2/2: repeat run of reproduce-before only (independent fresh clone), to confirm repeatability ===
+=== 1) 'cargo clippy --features std,all-apis' (linux_raw backend) - no -W flag needed ===
+   --> src/timespec.rs:210:31
+    |
+210 |     pub(crate) fn to_sec_usec(&self) -> Option<(Secs, u32)> {
+    |                               ^^^^^
+    |
+    = help: consider choosing a less ambiguous name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#wrong_self_convention
+
+=== 2) 'cargo clippy --features std,all-apis,use-libc' (libc backend, both to_* methods compiled) ===
+   --> src/timespec.rs:210:31
+    |
+210 |     pub(crate) fn to_sec_usec(&self) -> Option<(Secs, u32)> {
+    |                               ^^^^^
+    |
+    = help: consider choosing a less ambiguous name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#wrong_self_convention
+   --> src/timespec.rs:223:30
+    |
+223 |     pub(crate) fn to_timeval(&self) -> crate::io::Result<c::timeval> {
+    |                              ^^^^^
+    |
+    = help: consider choosing a less ambiguous name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#wrong_self_convention
+
+--- summary ---
+REPRODUCED: clippy::wrong_self_convention (warn-by-default, no opt-in flag needed) fires on
+Timespec::to_sec_usec (src/timespec.rs:210) under the linux_raw backend, and, once the
+libc-backend-only to_timeval is compiled in too, also on src/timespec.rs:223.
+exit code: 1

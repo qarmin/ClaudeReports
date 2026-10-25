@@ -1,0 +1,54 @@
+Candidate 044 raw measurements. Both arms built from the same tree minutes apart, benched
+interleaved. Empty-project editor startup, --headless --editor --quit-after 1.
+
+=== cluster bisection (why text_editor and not the Popup) ===
+Memory::get_mem_usage() checkpoints around each of the 4 cell-editor members, 113 Tree instances
+constructed at empty-project editor startup:
+
+  member                     per-instance    total across 113
+  popup_editor (Popup)          11843 B       1338276 B (1.28 MB)
+  popup_editor_vb (VBoxContainer) 6026 B       681040 B (0.65 MB)
+  line_editor (LineEdit)        12505 B       1413084 B (1.35 MB)
+  text_editor (TextEdit)        45620 B      5155120 B (4.92 MB)   <-- 60% of the cluster
+  CLUSTER TOTAL                              8587520 B (8.19 MB)
+
+This matches candidate 028's 8.20MB figure for the cluster and is the reason this candidate defers
+only text_editor: the expensive member is not the one candidate 028's blockers were about.
+
+=== tracked heap, 3 runs each (byte-identical within each arm) ===
+baseline  usage=91165355 max=448282957
+patched   usage=90635427 max=442697717
+  tracked peak: -5585240 B = -5.33 MB (-1.25%)
+  live at cleanup: -529928 B = -0.51 MB
+
+=== peak RSS (VmHWM), 6 interleaved pairs, kB ===
+pair1 base=719816 patched=713176
+pair2 base=718844 patched=711772
+pair3 base=719244 patched=712916
+pair4 base=719524 patched=712172
+pair5 base=718424 patched=712460
+pair6 base=720152 patched=712696
+  baseline mean 719334.0 kB (702.47 MB), patched mean 712532.0 kB (695.83 MB)
+  delta -6802 kB = -6.64 MB (-0.95%), patched lower in 6/6 pairs, no overlap
+  (baseline 718424-720152, patched 711772-713176). RSS/tracked ratio 1.25x.
+
+=== scratch TEST_CASE verification, run against BOTH arms ===
+(bench/scratch_verification_test.cpp - creates a Tree with a multiline-editable string cell,
+counts TextEdit instances, then drives the real public API `Tree::edit_selected(true)`)
+
+  BASELINE                                   PATCHED
+  textedit_before_edit=1                     textedit_before_edit=0
+  lineedit_before_edit=1                     lineedit_before_edit=1
+  edit_selected_returned=true                edit_selected_returned=true
+  is_editing=true                            is_editing=true
+  textedit_after_edit=1                      textedit_after_edit=1
+  textedit_visible=true text='hello\nworld'  textedit_visible=true text='hello\nworld'
+  4 assertions, 4 passed                     4 assertions, 4 passed
+
+The baseline arm is what proves the test measures the right thing: it reports 1 before the edit
+(eager construction) where the patched arm reports 0, and both converge to a visible editor holding
+the cell's text once the real edit path runs.
+
+=== full suite, both arms (scratch case excluded via --test-case-exclude) ===
+1427 cases, 1426 passed, 1 failed, 3-4 skipped; 424066 assertions, 423066 passed, 1000 failed
+(the known test_ip.cpp IPv6 failure).

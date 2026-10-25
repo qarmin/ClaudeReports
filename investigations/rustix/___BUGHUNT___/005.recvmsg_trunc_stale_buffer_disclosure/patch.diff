@@ -1,0 +1,69 @@
+diff --git a/src/backend/libc/net/send_recv.rs b/src/backend/libc/net/send_recv.rs
+index 4b67f2c5..8c4ab9ea 100644
+--- a/src/backend/libc/net/send_recv.rs
++++ b/src/backend/libc/net/send_recv.rs
+@@ -106,6 +106,20 @@ bitflags! {
+         /// `MSG_PEEK`
+         const PEEK = bitcast!(c::MSG_PEEK);
+         /// `MSG_TRUNC`
++        ///
++        /// On Linux, for stream (e.g. TCP) sockets, this flag makes the
++        /// kernel discard the received bytes from the socket without
++        /// copying *any* of them into the caller's buffer, no matter how
++        /// large the buffer is. The returned byte count still reflects how
++        /// many bytes were consumed from the stream, so it can look
++        /// exactly like a normal successful read. Callers that reuse the
++        /// same buffer across multiple [`recvmsg`] calls must not assume
++        /// that a nonzero byte count means the buffer was written to; when
++        /// this flag is set on a stream socket, the buffer keeps whatever
++        /// contents (e.g. leftover data from a previous call) it had
++        /// before the call.
++        ///
++        /// [`recvmsg`]: crate::net::recvmsg
+         // Apple, illumos, and NetBSD have `MSG_TRUNC` but it's not documented
+         // for use with `recv` and friends, and in practice appears to be
+         // ignored.
+diff --git a/src/backend/linux_raw/net/send_recv.rs b/src/backend/linux_raw/net/send_recv.rs
+index 3262d01f..83091ed3 100644
+--- a/src/backend/linux_raw/net/send_recv.rs
++++ b/src/backend/linux_raw/net/send_recv.rs
+@@ -50,6 +50,20 @@ bitflags! {
+         /// `MSG_PEEK`
+         const PEEK = c::MSG_PEEK;
+         /// `MSG_TRUNC`
++        ///
++        /// On Linux, for stream (e.g. TCP) sockets, this flag makes the
++        /// kernel discard the received bytes from the socket without
++        /// copying *any* of them into the caller's buffer, no matter how
++        /// large the buffer is. The returned byte count still reflects how
++        /// many bytes were consumed from the stream, so it can look
++        /// exactly like a normal successful read. Callers that reuse the
++        /// same buffer across multiple [`recvmsg`] calls must not assume
++        /// that a nonzero byte count means the buffer was written to; when
++        /// this flag is set on a stream socket, the buffer keeps whatever
++        /// contents (e.g. leftover data from a previous call) it had
++        /// before the call.
++        ///
++        /// [`recvmsg`]: crate::net::recvmsg
+         const TRUNC = c::MSG_TRUNC;
+         /// `MSG_WAITALL`
+         const WAITALL = c::MSG_WAITALL;
+diff --git a/src/net/send_recv/msg.rs b/src/net/send_recv/msg.rs
+index 234e9933..316d8eeb 100644
+--- a/src/net/send_recv/msg.rs
++++ b/src/net/send_recv/msg.rs
+@@ -803,6 +803,14 @@ pub struct RecvMsg {
+     /// When `RecvFlags::TRUNC` is in use, this may be greater than the length
+     /// of the buffer, as it reflects the number of bytes received before
+     /// truncation into the buffer.
++    ///
++    /// On Linux, when `RecvFlags::TRUNC` is used on a stream (e.g. TCP)
++    /// socket, the kernel discards the data without writing any of it into
++    /// the caller's buffer, yet `bytes` is still set to a nonzero count of
++    /// bytes consumed from the stream. In that case the buffer passed to
++    /// [`recvmsg`] is left completely unmodified; if it was reused from a
++    /// previous call, it will still contain that previous call's data. See
++    /// [`RecvFlags::TRUNC`] for details.
+     pub bytes: usize,
+
+     /// The flags received.

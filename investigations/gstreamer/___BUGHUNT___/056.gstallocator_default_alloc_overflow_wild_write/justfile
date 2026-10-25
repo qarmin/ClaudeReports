@@ -1,0 +1,53 @@
+# Self-contained reproduction for this candidate.
+#
+# Only core gstreamer is built - the bug is entirely in subprojects/gstreamer/gst/gstallocator.c,
+# reachable through the public gst_allocator_alloc() API. Requires valgrind on PATH.
+# `just test`'s reproduce-before is expected to crash (SIGSEGV) - that IS the repro.
+
+repo_url := "https://github.com/GStreamer/gstreamer.git"
+base_commit := "65b9547519cdafce691e65777d4178280bf10808"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Builds+runs repro.c under valgrind - should crash with SIGSEGV inside memset()
+# (gstallocator.c:464, _sysmem_new_block, called from default_alloc).
+reproduce-before:
+    #!/usr/bin/env bash
+    set -o pipefail
+    OUT="$(SRC_DIR="{{justfile_directory()}}/clone" bash repro/build_and_run.sh 2>&1)"
+    RC=$?
+    echo "$OUT"
+    if ! grep -q "Bad permissions for mapped region" <<< "$OUT"; then
+        echo "expected valgrind to report a SIGSEGV/bad-permissions crash, exit=$RC" >&2
+        exit 1
+    fi
+    rm -f "{{justfile_directory()}}/clone"/core.* "{{justfile_directory()}}"/core.*
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    export PATH="$HOME/.local/bin:$PATH" && cd clone && ninja -C build-core-repro
+
+# Same repro again, now against the patched clone - gst_allocator_alloc() should return NULL
+# cleanly instead of crashing.
+reproduce-after:
+    #!/usr/bin/env bash
+    set -eo pipefail
+    OUT="$(SRC_DIR="{{justfile_directory()}}/clone" bash repro/build_and_run.sh 2>&1)"
+    RC=$?
+    echo "$OUT"
+    if [ "$RC" != 0 ] || grep -q "Bad permissions\|SIGSEGV" <<< "$OUT"; then
+        echo "expected a clean exit with no crash after the fix, got exit=$RC" >&2
+        exit 1
+    fi
+    if ! grep -q "returned (nil)" <<< "$OUT"; then
+        echo "expected gst_allocator_alloc() to return NULL after the fix" >&2
+        exit 1
+    fi
+
+clean:
+    rm -rf clone

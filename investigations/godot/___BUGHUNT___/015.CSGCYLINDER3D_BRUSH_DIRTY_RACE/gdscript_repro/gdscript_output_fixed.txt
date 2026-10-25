@@ -1,0 +1,23 @@
+8/8 runs against the patched binary (brush_mutex added to CSGShape3D, held across _get_brush(),
+_make_dirty()'s own dirty write, and the whole body of _get_brush_collision_faces()), each a
+full ~15s run of main.gd's 6-thread loop mixing radius/height property writes with
+bake_collision_shape()/get_meshes() calls:
+
+First attempt (brush_mutex added only inside _get_brush() itself, not held by the external caller
+_get_brush_collision_faces() across its own use of the returned pointer) was INCOMPLETE - still
+crashed 8/8 runs with the identical use-after-free signature, because the caller's raw CSGBrush*
+stays valid only as long as the lock that protected its creation is still held, and
+_get_brush_collision_faces() kept reading from it after _get_brush() had already returned (and
+released the lock). See RESULT.md "The fix" for the corrected version.
+
+Complete fix (brush_mutex additionally held for the whole body of _get_brush_collision_faces(),
+not just around the _get_brush() call inside it):
+
+run 1: exit=0 survived=1 crash_markers=0
+run 2: exit=0 survived=1 crash_markers=0
+run 3: exit=0 survived=1 crash_markers=0
+run 4: exit=0 survived=1 crash_markers=0
+run 5: exit=0 survived=1 crash_markers=0
+run 6: exit=0 survived=1 crash_markers=0
+run 7: exit=0 survived=1 crash_markers=0
+run 8: exit=0 survived=1 crash_markers=0

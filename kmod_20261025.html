@@ -1,0 +1,978 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Code Audit — Interactive</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{color-scheme:dark}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f172a;color:#e5e7eb;font-size:14px;line-height:1.5}
+.app{max-width:1100px;margin:0 auto;padding:1.5rem 1rem}
+body.wide .app{max-width:none}
+.no-status #progress-bar,.no-status #progress-text,.no-status .filter-row-status{display:none}
+.no-status .copy-btn{margin-left:auto}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:1rem;flex-wrap:wrap}
+h1{font-size:1.5rem;font-weight:700;color:#f1f5f9}
+.meta{font-size:.8rem;color:#6b7280;margin-top:.2rem}
+.top-right{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap}
+.project-info{margin-bottom:1rem;padding:.75rem .9rem;background:#1e293b;border:1px solid #334155;border-radius:8px}
+.project-info .pi-name{font-size:.95rem;font-weight:700;color:#f1f5f9}
+.project-info .pi-desc{font-size:.82rem;color:#d1d5db;margin-top:.25rem}
+.project-info .pi-row{display:flex;flex-wrap:wrap;gap:.4rem .9rem;margin-top:.45rem;font-size:.78rem;color:#9ca3af}
+.project-info .pi-row .pi-k{color:#6b7280}
+.project-info a{color:#60a5fa;text-decoration:none}
+.project-info a:hover{text-decoration:underline}
+.project-info code{font-family:"JetBrains Mono","Fira Code",Consolas,monospace;font-size:.74rem;color:#93c5fd}
+.pi-repo-btn{display:inline-flex;align-items:center;gap:.3rem;padding:.18rem .5rem;background:#0f172a;border:1px solid #3b82f6;border-radius:6px;color:#60a5fa !important;font-weight:600}
+.pi-repo-btn:hover{background:#1d283a;text-decoration:none !important}
+#search{background:#1e293b;border:1px solid #334155;color:#e5e7eb;padding:.4rem .75rem;border-radius:6px;font-size:.875rem;width:220px;outline:none}
+#search:focus{border-color:#3b82f6}
+.group-label{font-size:.8rem;color:#9ca3af;display:flex;align-items:center;gap:.4rem}
+select{background:#1e293b;border:1px solid #334155;color:#e5e7eb;padding:.35rem .6rem;border-radius:6px;font-size:.8rem;outline:none;cursor:pointer}
+select:focus{border-color:#3b82f6}
+.filterbar{display:flex;flex-direction:column;gap:.4rem;margin-bottom:.6rem;padding:.6rem .75rem;background:#1e293b;border:1px solid #334155;border-radius:8px}
+.filter-row{display:flex;flex-wrap:wrap;gap:.3rem;align-items:center}
+.filter-lbl{font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#4b5563;white-space:nowrap;margin-right:.25rem}
+.filter-toggle{font-size:.65rem;font-weight:600;padding:.18rem .5rem;border-radius:4px;border:1px solid #334155;background:#0f172a;color:#9ca3af;cursor:pointer;margin-left:auto;white-space:nowrap;letter-spacing:.04em}
+.filter-toggle:hover{background:#1e293b;color:#e5e7eb;border-color:#4b5563}
+.badge{font-size:.68rem;font-weight:700;padding:.18rem .5rem;border-radius:4px;border:1px solid transparent;cursor:pointer;letter-spacing:.03em;transition:opacity .12s,filter .12s;user-select:none}
+.badge.off{opacity:.28;filter:grayscale(.5)}
+.sev-critical{background:#450a0a;color:#fca5a5;border-color:#991b1b}
+.sev-high    {background:#431407;color:#fdba74;border-color:#9a3412}
+.sev-medium  {background:#422006;color:#fcd34d;border-color:#854d0e}
+.sev-low     {background:#0c1a3a;color:#93c5fd;border-color:#1d4ed8}
+.sev-negligible{background:#1e293b;color:#6b7280;border-color:#334155}
+.type-badge{background:#0c1e33;color:#7dd3fc;border-color:#0369a1}
+.diff-very-easy{background:#052e16;color:#86efac;border-color:#16a34a}
+.diff-easy{background:#064e3b;color:#6ee7b7;border-color:#059669}
+.diff-medium{background:#1e293b;color:#9ca3af;border-color:#4b5563}
+.diff-hard{background:#2e1065;color:#c4b5fd;border-color:#7c3aed}
+.st-open{background:#1e293b;color:#4b5563;border-color:#334155}
+.st-fixed{background:#052e16;color:#4ade80;border-color:#16a34a}
+.st-wont{background:#431407;color:#fdba74;border-color:#9a3412}
+.st-fp{background:#2e1065;color:#c4b5fd;border-color:#7c3aed}
+.ign-badge{background:#1f1b16;color:#a8a29e;border-color:#57534e;max-width:22rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#progress-wrap{display:flex;align-items:center;gap:.75rem;margin-bottom:.6rem;flex-wrap:wrap}
+#progress-bar{flex:1;min-width:120px;height:7px;background:#1e293b;border-radius:4px;overflow:hidden;border:1px solid #334155}
+#progress-fill{height:100%;background:#22c55e;border-radius:4px;transition:width .35s ease;width:0}
+#progress-text{font-size:.75rem;color:#6b7280;white-space:nowrap}
+.action-btn{font-size:.72rem;padding:.25rem .6rem;border-radius:5px;border:1px solid #334155;background:#1e293b;color:#9ca3af;cursor:pointer;white-space:nowrap}
+.action-btn:hover{background:#334155;color:#e5e7eb}
+.action-btn.active{background:#1d4ed8;color:#fff;border-color:#2563eb}
+.action-btn.active:hover{background:#2563eb}
+.search-wrap{display:flex;align-items:center;gap:.35rem}
+#hidden-bar{margin-bottom:.6rem}
+.hidden-inner{display:flex;flex-wrap:wrap;gap:.35rem;align-items:center}
+.hidden-lbl{font-size:.72rem;color:#4b5563}
+.show-btn{font-size:.7rem;padding:.15rem .45rem;border-radius:4px;background:#1e293b;color:#9ca3af;border:1px solid #334155;cursor:pointer}
+.show-btn:hover{background:#334155;color:#e5e7eb}
+.show-all-btn{font-size:.7rem;padding:.15rem .45rem;border-radius:4px;background:#2563eb;color:#fff;border:none;cursor:pointer}
+.show-all-btn:hover{background:#1d4ed8}
+.group-section{margin-bottom:1.5rem}
+.group-header{display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem;padding-bottom:.35rem;border-bottom:1px solid #334155}
+.group-title{font-size:.95rem;font-weight:700;color:#d1d5db}
+.group-title.all-done{color:#4ade80}
+.group-count{font-size:.72rem;color:#4b5563;background:#1e293b;padding:.1rem .4rem;border-radius:10px;white-space:nowrap}
+.icon-btn{background:transparent;border:none;color:#334155;cursor:pointer;font-size:.85rem;padding:.05rem .2rem;line-height:1}
+.icon-btn:hover{color:#6b7280}
+.hide-btn{margin-left:auto;font-size:.68rem;padding:.12rem .45rem;border-radius:4px;background:transparent;color:#334155;border:1px solid #1e293b;cursor:pointer}
+.hide-btn:hover{background:#1e293b;color:#6b7280}
+.card{background:#1e293b;border:1px solid #334155;border-radius:8px;margin-bottom:.6rem;overflow:hidden;transition:opacity .15s}
+.card.resolved{opacity:.55;border-left:3px solid #16a34a}
+.card.resolved:hover{opacity:.85}
+.card.ignored{opacity:.5;border-left:3px solid #57534e}
+.card.ignored:hover{opacity:.85}
+.card-header{display:flex;align-items:center;gap:.5rem;padding:.45rem .85rem;background:#162032;border-bottom:1px solid #334155;flex-wrap:wrap;cursor:pointer;user-select:none}
+.card-header:hover{background:#1a2840}
+.card-arrow{font-size:.65rem;color:#334155;flex-shrink:0}
+.card-id{font-size:.75rem;font-weight:700;color:#6b7280;font-family:monospace;letter-spacing:.04em}
+.card-loc{font-size:.72rem;color:#6b7280;font-family:"JetBrains Mono","Fira Code",Consolas,monospace;letter-spacing:.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.status-btn{margin-left:auto;font-size:.68rem;font-weight:600;padding:.15rem .5rem;border-radius:4px;border:1px solid transparent;cursor:pointer;white-space:nowrap;transition:filter .1s}
+.status-btn:hover{filter:brightness(1.25)}
+.copy-btn{font-size:.68rem;font-weight:600;padding:.15rem .5rem;border-radius:4px;border:1px solid #334155;background:#0f172a;color:#9ca3af;cursor:pointer;white-space:nowrap;transition:background .12s,color .12s}
+.copy-btn:hover{background:#334155;color:#e5e7eb}
+.card-body{padding:.85rem .9rem}
+.field-lbl{font-size:.85rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#7dd3fc;margin:1rem 0 .35rem;padding-bottom:.18rem;border-bottom:1px solid #1e293b}
+.field-lbl:first-child{margin-top:0}
+.desc,.fix-txt{font-size:.875rem;color:#d1d5db;line-height:1.55}
+.desc p,.fix-txt p{margin:.4rem 0}
+.desc p:first-child,.fix-txt p:first-child{margin-top:0}
+.desc p:last-child,.fix-txt p:last-child{margin-bottom:0}
+.loc-block{margin:.3rem 0 .6rem}
+.loc-ref{font-size:.8rem;color:#38bdf8;font-family:"JetBrains Mono","Fira Code",Consolas,monospace;font-weight:600;margin-bottom:.22rem}
+a.loc-link{color:inherit;text-decoration:none}
+a.loc-link:hover{text-decoration:underline}
+.loc-lines{color:#4b5563;font-weight:400}
+pre{background:#0f172a;color:#cdd6f4;border-radius:5px;padding:.6rem .8rem;overflow-x:auto;white-space:pre;font-size:.8rem;line-height:1.55;font-family:"JetBrains Mono","Fira Code",Consolas,monospace;border:1px solid #1e293b;max-height:320px}
+.desc pre.md-code,.fix-txt pre.md-code{margin:.5rem 0;font-size:.82rem;color:#e5e7eb;background:#0b1224;border:1px solid #1e293b;max-height:none}
+code.md-inline{font-family:"JetBrains Mono","Fira Code",Consolas,monospace;font-size:.86em;background:#0b1224;color:#fca5a5;border:1px solid #1e293b;border-radius:3px;padding:.04rem .32rem;white-space:pre-wrap;word-break:break-word}
+.not-found{font-size:.8rem;color:#334155;font-style:italic}
+mark{background:#854d0e;color:#fef9c3;border-radius:2px;padding:0 .1rem}
+.no-results{text-align:center;color:#334155;padding:3rem 1rem;font-size:.9rem}
+</style>
+</head>
+<body>
+<script type="application/json" id="D">[
+{"id":"PANIC_1","type":"panic","type_label":"Panic","severity":"medium","difficulty":"easy","description":"`kmod_elf_new()` takes `e_shstrndx` and `e_shnum` straight from the ELF header and passes them to `elf_get_section_info()`, which calls `elf_get_section_header_offset()`. That function has `assert(idx != SHN_UNDEF)` and `assert(idx < elf->header.section.count)` ahead of its graceful range check. The build does not define `NDEBUG`, so a crafted module with `e_shstrndx == 0`, `e_shstrndx >= e_shnum` or `e_shnum == 0` aborts the process instead of returning `-EINVAL`. The same asserts are reachable from `kmod_elf_get_section()` and `kmod_elf_save_sections()` only with already-valid indices, so the header path is the exploitable one.","fix":"In `kmod_elf_new()`, reject `elf->header.strings.section == SHN_UNDEF || elf->header.strings.section >= elf->header.section.count` with `goto invalid` before calling `elf_get_section_info()`. Alternatively drop the two `assert()` calls in `elf_get_section_header_offset()` and keep the existing runtime check.","locations":[{"ref":"libkmod/libkmod-elf.c:209-220","code":"  209 | static uint64_t elf_get_section_header_offset(const struct kmod_elf *elf, uint16_t idx)\n  210 | {\n  211 | \tassert(idx != SHN_UNDEF);\n  212 | \tassert(idx < elf->header.section.count);\n  213 | \tif (idx == SHN_UNDEF || idx >= elf->header.section.count) {\n  214 | \t\tELFDBG(elf, \"invalid section number: %\" PRIu16 \", last=%\" PRIu16 \"\\n\",\n  215 | \t\t       idx, elf->header.section.count);\n  216 | \t\treturn 0;\n  217 | \t}\n  218 | \treturn elf->header.section.offset +\n  219 | \t       (uint64_t)(idx * elf->header.section.entry_size);\n  220 | }","lines":12,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-elf.c#L209-L220"},{"ref":"libkmod/libkmod-elf.c:376-381","code":"  376 | \tif (elf_get_section_info(elf, elf->header.strings.section,\n  377 | \t\t\t\t &elf->header.strings.offset, &elf->header.strings.size,\n  378 | \t\t\t\t &name) < 0) {\n  379 | \t\tELFDBG(elf, \"could not get strings section\\n\");\n  380 | \t\tgoto invalid;\n  381 | \t} else {","lines":6,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-elf.c#L376-L381"}]},
+{"id":"PANIC_2","type":"panic","type_label":"Panic","severity":"medium","difficulty":"easy","description":"`cfg_files_insert_sorted()` with `name == NULL` computes `dirlen -= namelen + 1` after `name = basename(dir)`. When `-C` is given a plain relative file name without a slash (e.g. `depmod -C my.conf`), `basename()` returns the whole string, so `dirlen` becomes `SIZE_MAX`. The `malloc` size wraps to a small value and the following `memcpy(f->path, dir, dirlen)` crashes. `case 'C'` in `do_depmod()` stores `optarg` unchanged, so this is reachable from the command line.","fix":"Compute the split explicitly and handle the no-slash case, for example:\n```c\nconst char *slash = strrchr(dir, '/');\nname = slash ? slash + 1 : dir;\nnamelen = strlen(name);\ndirlen = slash ? (size_t)(slash - dir) : 0;\n```\nFor `dirlen == 0` either store `.` as the directory part or build `f->path` without the leading `/`.","locations":[{"ref":"tools/depmod.c:802-809","code":"  802 | \n  803 | \tdirlen = strlen(dir);\n  804 | \tif (name != NULL)\n  805 | \t\tnamelen = strlen(name);\n  806 | \telse {\n  807 | \t\tname = basename(dir);\n  808 | \t\tnamelen = strlen(name);\n  809 | \t\tdirlen -= namelen + 1;","lines":8,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L802-L809"},{"ref":"tools/depmod.c:823-849","code":"  823 | \n  824 | \tf = malloc(sizeof(struct cfg_file) + dirlen + namelen + 2);\n  825 | \tif (f == NULL) {\n  826 | \t\tERR(\"files insert sorted: out of memory\\n\");\n  827 | \t\treturn -ENOMEM;\n  828 | \t}\n  829 | \n  830 | \ttmp = realloc(files, sizeof(struct cfg_file *) * (n_files + 1));\n  831 | \tif (tmp == NULL) {\n  832 | \t\tERR(\"files insert sorted: out of memory\\n\");\n  833 | \t\tfree(f);\n  834 | \t\treturn -ENOMEM;\n  835 | \t}\n  836 | \t*p_files = files = tmp;\n  837 | \n  838 | \tif (i < n_files) {\n  839 | \t\tmemmove(files + i + 1, files + i,\n  840 | \t\t\tsizeof(struct cfg_file *) * (n_files - i));\n  841 | \t}\n  842 | \tfiles[i] = f;\n  843 | \n  844 | \tf->dirlen = dirlen;\n  845 | \tf->namelen = namelen;\n  846 | \tf->name = f->path + dirlen + 1;\n  847 | \tmemcpy(f->path, dir, dirlen);\n  848 | \tf->path[dirlen] = '/';\n  849 | \tmemcpy(f->path + dirlen + 1, name, namelen);","lines":27,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L823-L849"},{"ref":"tools/depmod.c:872-875","code":"  872 | \tif (!S_ISDIR(st.st_mode)) {\n  873 | \t\tcfg_files_insert_sorted(p_files, p_n_files, path, NULL);\n  874 | \t\treturn 0;\n  875 | \t}","lines":4,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L872-L875"},{"ref":"tools/depmod.c:2929-2941","code":" 2929 | \t\tcase 'C': {\n 2930 | \t\t\tsize_t bytes = sizeof(char *) * (n_config_paths + 2);\n 2931 | \t\t\t_clang_suppress_alloc_ void *tmp = realloc(config_paths, bytes);\n 2932 | \n 2933 | \t\t\tif (!tmp) {\n 2934 | \t\t\t\tfputs(\"Error: out-of-memory\\n\", stderr);\n 2935 | \t\t\t\tgoto cmdline_failed;\n 2936 | \t\t\t}\n 2937 | \t\t\tconfig_paths = tmp;\n 2938 | \t\t\tconfig_paths[n_config_paths] = optarg;\n 2939 | \t\t\tn_config_paths++;\n 2940 | \t\t\tconfig_paths[n_config_paths] = NULL;\n 2941 | \t\t\tbreak;","lines":13,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L2929-L2941"}]},
+{"id":"PANIC_3","type":"panic","type_label":"Panic","severity":"medium","difficulty":"medium","description":"The cycle-reporting stack in `depmod_report_cycles()` is allocated with `n_r` entries (the number of modules that still have users). `depmod_report_cycles_from_root()` pushes one `vertex` per dependency edge, with no visited check on push, so the number of simultaneously live entries can exceed the number of modules. For example, a dense 3-module cycle where each module depends on the other two overflows a stack of 3: the second push after the third level trips `assert(is < stack_size)`. With NDEBUG the same code writes out of bounds. Depmod therefore aborts instead of printing the cycle report.","fix":"Size the stack by total edge count (sum of `deps.count` over the roots), or grow it dynamically. Alternatively, skip pushing already visited non-root modules.","locations":[{"ref":"tools/depmod.c:1829-1922","code":" 1829 | static int depmod_report_cycles_from_root(struct mod *root_mod, struct kmod_list **roots,\n 1830 | \t\t\t\t\t  void **stack, size_t stack_size,\n 1831 | \t\t\t\t\t  struct hash *loop_set)\n 1832 | {\n 1833 | \tstruct kmod_list *free_list = NULL; /* struct vertex */\n 1834 | \tstruct kmod_list *l;\n 1835 | \tstruct vertex *root;\n 1836 | \tstruct vertex *vertex;\n 1837 | \tstruct vertex *v;\n 1838 | \tstruct mod *m;\n 1839 | \tstruct mod **itr, **itr_end;\n 1840 | \tsize_t is;\n 1841 | \tint ret = -ENOMEM;\n 1842 | \n 1843 | \troot = vertex_new(root_mod, NULL);\n 1844 | \tif (root == NULL) {\n 1845 | \t\tERR(\"No memory to report cycles\\n\");\n 1846 | \t\tgoto out;\n 1847 | \t}\n 1848 | \n 1849 | \tl = kmod_list_append(free_list, root);\n 1850 | \tif (l == NULL) {\n 1851 | \t\tERR(\"No memory to report cycles\\n\");\n 1852 | \t\tfree(root);\n 1853 | \t\tgoto out;\n 1854 | \t}\n 1855 | \tfree_list = l;\n 1856 | \n 1857 | \tis = 0;\n 1858 | \tstack[is++] = (void *)root;\n 1859 | \n 1860 | \twhile (is > 0) {\n 1861 | \t\tvertex = stack[--is];\n 1862 | \t\tm = vertex->mod;\n 1863 | \t\t/*\n 1864 | \t\t * because of the topological sort we can start only\n 1865 | \t\t * from part of a loop or from a branch after a loop\n 1866 | \t\t */\n 1867 | \t\tif (m->visited && m == root->mod) {\n 1868 | \t\t\tint rc;\n 1869 | \t\t\trc = depmod_report_one_cycle(vertex, roots, loop_set);\n 1870 | \t\t\tif (rc != 0) {\n 1871 | \t\t\t\tret = rc;\n 1872 | \t\t\t\tgoto out;\n 1873 | \t\t\t}\n 1874 | \t\t\tcontinue;\n 1875 | \t\t}\n 1876 | \n 1877 | \t\tm->visited = true;\n 1878 | \t\tif (m->deps.count == 0) {\n 1879 | \t\t\t/*\n 1880 | \t\t\t * boundary condition: if there is more than one\n 1881 | \t\t\t * single node branch (not a loop), it is\n 1882 | \t\t\t * recognized as a loop by the code above:\n 1883 | \t\t\t * m->visited because more then one,\n 1884 | \t\t\t * m == root->mod since it is a single node.\n 1885 | \t\t\t * So, prevent deeping into the branch second\n 1886 | \t\t\t * time.\n 1887 | \t\t\t */\n 1888 | \t\t\tdepmod_list_remove_data(roots, m);\n 1889 | \n 1890 | \t\t\tcontinue;\n 1891 | \t\t}\n 1892 | \n 1893 | \t\titr = (struct mod **)m->deps.array;\n 1894 | \t\titr_end = itr + m->deps.count;\n 1895 | \t\tfor (; itr < itr_end; itr++) {\n 1896 | \t\t\tstruct mod *dep = *itr;\n 1897 | \t\t\tv = vertex_new(dep, vertex);\n 1898 | \t\t\tif (v == NULL) {\n 1899 | \t\t\t\tERR(\"No memory to report cycles\\n\");\n 1900 | \t\t\t\tgoto out;\n 1901 | \t\t\t}\n 1902 | \t\t\tassert(is < stack_size);\n 1903 | \t\t\tstack[is++] = v;\n 1904 | \n 1905 | \t\t\tl = kmod_list_append(free_list, v);\n 1906 | \t\t\tif (l == NULL) {\n 1907 | \t\t\t\tERR(\"No memory to report cycles\\n\");\n 1908 | \t\t\t\tfree(v);\n 1909 | \t\t\t\tgoto out;\n 1910 | \t\t\t}\n 1911 | \t\t\tfree_list = l;\n 1912 | \t\t}\n 1913 | \t}\n 1914 | \tret = 0;\n 1915 | \n 1916 | out:\n 1917 | \tkmod_list_release(free_list, free);\n 1918 | \n 1919 | \treturn ret;\n 1920 | }\n 1921 | \n 1922 | static void depmod_report_cycles(struct depmod *depmod, uint16_t n_mods, uint16_t *users)","lines":94,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L1829-L1922"},{"ref":"tools/depmod.c:1948-1952","code":" 1948 | \t_clang_suppress_alloc_ stack = malloc(n_r * sizeof(void *));\n 1949 | \tif (stack == NULL) {\n 1950 | \t\tERR(\"No memory to report cycles\\n\");\n 1951 | \t\tgoto out_list;\n 1952 | \t}","lines":5,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L1948-L1952"}]},
+{"id":"PANIC_4","type":"panic","type_label":"Panic","severity":"low","difficulty":"easy","description":"`kmod_elf_get_modinfo_strings()` evaluates `strings[i] == '\\0'` before the bound check `i < size` in `while (strings[i] == '\\0' && i < size)`. When the last byte of `.modinfo` is NUL, this reads `strings[size]`, one byte past the section. If the section ends at the end of the file mapping, that is an out-of-bounds read.","fix":"```\nwhile (i < size && strings[i] == '\\0')\n\ti++;\n```","locations":[{"ref":"libkmod/libkmod-elf.c:460-470","code":"  460 | \tfor (i = 0, count = 0; i < size;) {\n  461 | \t\tif (strings[i] != '\\0') {\n  462 | \t\t\ti++;\n  463 | \t\t\tcontinue;\n  464 | \t\t}\n  465 | \n  466 | \t\twhile (strings[i] == '\\0' && i < size)\n  467 | \t\t\ti++;\n  468 | \n  469 | \t\tcount++;\n  470 | \t}","lines":11,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-elf.c#L460-L470"}]},
+{"id":"PANIC_5","type":"panic","type_label":"Panic","severity":"low","difficulty":"easy","description":"Symbol names taken from `.strtab` are used with `strstartswith()` and `streq()`, and are later stored and `strlen`'d by callers, without checking that `.strtab` ends in NUL. Only `name_off < strtablen` is checked. A crafted module whose `.strtab` ends in a non-NUL byte at the end of the mapped file causes an out-of-bounds read in `kmod_elf_get_symbols()` and `kmod_elf_get_dependency_symbols()`. The `__ksymtab_strings` fallback and the `.shstrtab` path do check for a terminator.","fix":"Before using `.strtab`, reject it if `strtablen == 0` or the last byte `elf_get_mem(elf, str_sec_off)[strtablen - 1] != '\\0'` (fall back or return `-EINVAL`).","locations":[{"ref":"libkmod/libkmod-elf.c:862-874","code":"  862 | \t\tif (name_off >= strtablen) {\n  863 | \t\t\tELFDBG(elf,\n  864 | \t\t\t       \".strtab is %\" PRIu64\n  865 | \t\t\t       \" bytes, but .symtab entry %zu wants to access offset %\" PRIu32\n  866 | \t\t\t       \".\\n\",\n  867 | \t\t\t       strtablen, i, name_off);\n  868 | \t\t\tgoto fallback;\n  869 | \t\t}\n  870 | \n  871 | \t\tname = elf_get_mem(elf, str_off + name_off);\n  872 | \n  873 | \t\tif (!strstartswith(name, crc_str))\n  874 | \t\t\tcontinue;","lines":13,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-elf.c#L862-L874"},{"ref":"libkmod/libkmod-elf.c:1083-1097","code":" 1083 | \t\t\t */\n 1084 | \t\t\tif (type == STT_REGISTER)\n 1085 | \t\t\t\tcontinue;\n 1086 | \t\t}\n 1087 | \n 1088 | \t\tif (name_off >= strtablen) {\n 1089 | \t\t\tELFDBG(elf,\n 1090 | \t\t\t       \".strtab is %\" PRIu64\n 1091 | \t\t\t       \" bytes, but .symtab entry %zu wants to access offset %\" PRIu32\n 1092 | \t\t\t       \".\\n\",\n 1093 | \t\t\t       strtablen, i, name_off);\n 1094 | \t\t\tfree(visited_versions);\n 1095 | \t\t\tfree(symcrcs);\n 1096 | \t\t\treturn -EINVAL;\n 1097 | \t\t}","lines":15,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-elf.c#L1083-L1097"}]},
+{"id":"PANIC_6","type":"panic","type_label":"Panic","severity":"low","difficulty":"medium","description":"The mmap-based reader trusts offsets and strings inside the index file. `index_mm_read_node()` only checks that the node offset is `< idx->size`; `read_chars_mm()` uses an unbounded `strlen()` (file is not guaranteed NUL terminated), the `children` array (`sizeof(uint32_t) * child_count`) and `value_count`/value strings are never bounds-checked against `idx->size`, and `index_mm_search_node()` does `strdup(p + 4)` unbounded. A truncated or malicious `modules.dep.bin`/`modules.alias.bin` causes out-of-bounds reads. Child offsets forming a cycle also cause unbounded recursion in `index_mm_dump_node()`/`index_mm_searchwild_all()` (stack overflow).","fix":"Pass `idx->size` into the read helpers and validate that prefix NUL, children array, value_count entries and strings lie within `[mm, mm + size)`; add a depth limit to the recursive dump/searchwild.","locations":[{"ref":"libkmod/libkmod-index.c:677-740","code":"  677 | static inline const char *read_chars_mm(const void **p, size_t *rlen)\n  678 | {\n  679 | \tconst char *addr = *(const char **)p;\n  680 | \tsize_t len = *rlen = strlen(addr);\n  681 | \t*p = addr + len + 1;\n  682 | \treturn addr;\n  683 | }\n  684 | \n  685 | static inline void read_value_mm(const void **p, struct index_mm_value *v)\n  686 | {\n  687 | \tv->priority = read_u32_mm(p);\n  688 | \tv->value = read_chars_mm(p, &v->len);\n  689 | }\n  690 | \n  691 | /* reads node into given node struct and returns its address on success or NULL on error. */\n  692 | static struct index_mm_node *index_mm_read_node(const struct index_mm *idx,\n  693 | \t\t\t\t\t\tuint32_t offset,\n  694 | \t\t\t\t\t\tstruct index_mm_node *node)\n  695 | {\n  696 | \tconst void *p;\n  697 | \n  698 | \tif ((offset & INDEX_NODE_MASK) == 0 || (offset & INDEX_NODE_MASK) >= idx->size)\n  699 | \t\treturn NULL;\n  700 | \n  701 | \tp = (const char *)idx->mm + (offset & INDEX_NODE_MASK);\n  702 | \n  703 | \tif (offset & INDEX_NODE_PREFIX) {\n  704 | \t\tsize_t len;\n  705 | \t\tnode->prefix = read_chars_mm(&p, &len);\n  706 | \t} else {\n  707 | \t\tnode->prefix = \"\";\n  708 | \t}\n  709 | \n  710 | \tif (offset & INDEX_NODE_CHILDS) {\n  711 | \t\tsize_t child_count;\n  712 | \n  713 | \t\tnode->first = read_char_mm(&p);\n  714 | \t\tnode->last = read_char_mm(&p);\n  715 | \n  716 | \t\tif (node->first > node->last || node->first >= INDEX_CHILDMAX ||\n  717 | \t\t    node->last >= INDEX_CHILDMAX)\n  718 | \t\t\treturn NULL;\n  719 | \n  720 | \t\tnode->children = p;\n  721 | \n  722 | \t\tchild_count = node->last - node->first + 1;\n  723 | \t\tp = (const char *)p + sizeof(uint32_t) * child_count;\n  724 | \t} else {\n  725 | \t\tnode->first = INDEX_CHILDMAX;\n  726 | \t\tnode->last = 0;\n  727 | \t\tnode->children = NULL;\n  728 | \t}\n  729 | \n  730 | \tif (offset & INDEX_NODE_VALUES) {\n  731 | \t\tnode->value_count = read_u32_mm(&p);\n  732 | \t\tnode->values = p;\n  733 | \t} else {\n  734 | \t\tnode->value_count = 0;\n  735 | \t\tnode->values = NULL;\n  736 | \t}\n  737 | \n  738 | \tnode->idx = idx;\n  739 | \n  740 | \treturn node;","lines":64,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-index.c#L677-L740"},{"ref":"libkmod/libkmod-index.c:906-940","code":"  906 | static char *index_mm_search_node(struct index_mm_node *node, const char *key)\n  907 | {\n  908 | \tchar *value;\n  909 | \tint j;\n  910 | \n  911 | \twhile (node) {\n  912 | \t\tfor (j = 0; node->prefix[j]; j++) {\n  913 | \t\t\tuint8_t ch = node->prefix[j];\n  914 | \n  915 | \t\t\tif (ch != key[j])\n  916 | \t\t\t\treturn NULL;\n  917 | \t\t}\n  918 | \n  919 | \t\tkey += j;\n  920 | \n  921 | \t\tif (*key == '\\0') {\n  922 | \t\t\tif (node->value_count > 0) {\n  923 | \t\t\t\tconst char *p = node->values;\n  924 | \n  925 | \t\t\t\t/* return first value without priority */\n  926 | \t\t\t\tp += sizeof(uint32_t);\n  927 | \t\t\t\tvalue = strdup(p);\n  928 | \t\t\t} else {\n  929 | \t\t\t\tvalue = NULL;\n  930 | \t\t\t}\n  931 | \n  932 | \t\t\treturn value;\n  933 | \t\t}\n  934 | \n  935 | \t\tnode = index_mm_readchild(node, *key, node);\n  936 | \t\tkey++;\n  937 | \t}\n  938 | \n  939 | \treturn NULL;\n  940 | }","lines":35,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-index.c#L906-L940"}]},
+{"id":"PANIC_7","type":"panic","type_label":"Panic","severity":"low","difficulty":"very_easy","description":"`module_options_concat()` does not check the result of `malloc()`; on allocation failure it immediately `memcpy()`s / writes through a NULL pointer. It is called for every module in `kmod_module_probe_insert_module()`.","fix":"Before:\n```\nr = malloc(optlen + xoptlen + 2);\n\nif (opt != NULL) {\n```\nAfter:\n```\nr = malloc(optlen + xoptlen + 2);\nif (r == NULL)\n\treturn NULL;\n\nif (opt != NULL) {\n```\n(and make the caller treat NULL with non-empty inputs as -ENOMEM).","locations":[{"ref":"libkmod/libkmod-module.c:888-912","code":"  888 | static char *module_options_concat(const char *opt, const char *xopt)\n  889 | {\n  890 | \t// TODO: we might need to check if xopt overrides options on opt\n  891 | \tsize_t optlen = opt == NULL ? 0 : strlen(opt);\n  892 | \tsize_t xoptlen = xopt == NULL ? 0 : strlen(xopt);\n  893 | \tchar *r;\n  894 | \n  895 | \tif (optlen == 0 && xoptlen == 0)\n  896 | \t\treturn NULL;\n  897 | \n  898 | \tr = malloc(optlen + xoptlen + 2);\n  899 | \n  900 | \tif (opt != NULL) {\n  901 | \t\tmemcpy(r, opt, optlen);\n  902 | \t\tr[optlen] = ' ';\n  903 | \t\toptlen++;\n  904 | \t}\n  905 | \n  906 | \tif (xopt != NULL)\n  907 | \t\tmemcpy(r + optlen, xopt, xoptlen);\n  908 | \n  909 | \tr[optlen + xoptlen] = '\\0';\n  910 | \n  911 | \treturn r;\n  912 | }","lines":25,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-module.c#L888-L912"}]},
+{"id":"MEM_1","type":"memory_leak","type_label":"Memory Leak","severity":"low","difficulty":"very_easy","description":"`kmod_elf_get_modversions()` sets `*array = a = malloc(...)` and then returns `-EINVAL` from inside the loop when a symbol name is too long (`nlen == namlen`). The caller `kmod_module_get_versions()` returns immediately when `count < 0` and never frees `versions`, so the allocation leaks for every malformed `__versions` section.","fix":"```\nif (nlen == namlen) {\n\tELFDBG(elf, \"symbol name at index %zu too long\\n\", i);\n\tfree(a);\n\t*array = NULL;\n\treturn -EINVAL;\n}\n```","locations":[{"ref":"libkmod/libkmod-elf.c:559-571","code":"  559 | \t*array = a = malloc(sizeof(struct kmod_modversion) * count);\n  560 | \tif (*array == NULL)\n  561 | \t\treturn -ENOMEM;\n  562 | \n  563 | \tfor (i = 0, off = sec_off; i < count; i++, off += verlen) {\n  564 | \t\tuint64_t crc = elf_get_uint(elf, off, crclen);\n  565 | \t\tconst char *symbol = elf_get_mem(elf, off + crclen);\n  566 | \t\tsize_t nlen = strnlen(symbol, namlen);\n  567 | \n  568 | \t\tif (nlen == namlen) {\n  569 | \t\t\tELFDBG(elf, \"symbol name at index %zu too long\\n\", i);\n  570 | \t\t\treturn -EINVAL;\n  571 | \t\t}","lines":13,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-elf.c#L559-L571"},{"ref":"libkmod/libkmod-module.c:2095-2097","code":" 2095 | \tcount = kmod_elf_get_modversions(mod->elf, &versions);\n 2096 | \tif (count < 0)\n 2097 | \t\treturn count;","lines":3,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-module.c#L2095-L2097"}]},
+{"id":"MEM_2","type":"memory_leak","type_label":"Memory Leak","severity":"low","difficulty":"easy","description":"In `index_read()` the error path `err:` frees `prefix` and `node` but not `node->values`. If reading the value list fails midway (truncated or corrupt index file: `read_u32()` or `getdelim()` fails after one or more `add_value()` calls), the already-built `index_value` chain leaks. Also, `node->values` is only initialised at line 308, so a generic fix must set `node->values = NULL` right after each `malloc()` (before any `goto err`).","fix":"Set `node->values = NULL` immediately after both `malloc()` calls, and in the `err:` label call `if (node) index_values_free(node->values);` before `free(node);`.","locations":[{"ref":"libkmod/libkmod-index.c:308-334","code":"  308 | \tnode->values = NULL;\n  309 | \tif (offset & INDEX_NODE_VALUES) {\n  310 | \t\tuint32_t value_count;\n  311 | \t\tuint32_t priority;\n  312 | \n  313 | \t\tif (!read_u32(fp, &value_count))\n  314 | \t\t\tgoto err;\n  315 | \n  316 | \t\twhile (value_count--) {\n  317 | \t\t\tssize_t n;\n  318 | \n  319 | \t\t\tif (!read_u32(fp, &priority))\n  320 | \t\t\t\tgoto err;\n  321 | \t\t\tn = getdelim(&idx->tmp, &idx->tmp_size, '\\0', fp);\n  322 | \t\t\tif (n < 0)\n  323 | \t\t\t\tgoto err;\n  324 | \t\t\tadd_value(&node->values, idx->tmp, n, priority);\n  325 | \t\t}\n  326 | \t}\n  327 | \n  328 | \tnode->prefix = prefix;\n  329 | \tnode->idx = idx;\n  330 | \treturn node;\n  331 | err:\n  332 | \tfree(prefix);\n  333 | \tfree(node);\n  334 | \treturn NULL;","lines":27,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-index.c#L308-L334"}]},
+{"id":"MEM_3","type":"memory_leak","type_label":"Memory Leak","severity":"low","difficulty":"very_easy","description":"In `kmod_module_new()` `m->ctx = kmod_ref(ctx)` is taken before `kmod_pool_add_module()`. If the hash insertion fails (ENOMEM) the code does `free(m)` without releasing the context reference, so the ctx refcount is leaked and the context can never be destroyed.","fix":"Before:\n```\nif (err < 0) {\n\tfree(m);\n\treturn err;\n}\n```\nAfter:\n```\nif (err < 0) {\n\tkmod_unref(m->ctx);\n\tfree(m);\n\treturn err;\n}\n```","locations":[{"ref":"libkmod/libkmod-module.c:264-281","code":"  264 | \tm->ctx = kmod_ref(ctx);\n  265 | \tm->name = (char *)m + sizeof(*m);\n  266 | \tmemcpy(m->name, key, keylen + 1);\n  267 | \tif (alias == NULL) {\n  268 | \t\tm->hashkey = m->name;\n  269 | \t\tm->alias = NULL;\n  270 | \t} else {\n  271 | \t\tm->name[namelen] = '\\0';\n  272 | \t\tm->alias = m->name + namelen + 1;\n  273 | \t\tm->hashkey = m->name + keylen + 1;\n  274 | \t\tmemcpy(m->hashkey, key, keylen + 1);\n  275 | \t}\n  276 | \n  277 | \tm->refcount = 1;\n  278 | \terr = kmod_pool_add_module(ctx, m, m->hashkey);\n  279 | \tif (err < 0) {\n  280 | \t\tfree(m);\n  281 | \t\treturn err;","lines":18,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-module.c#L264-L281"}]},
+{"id":"MEM_4","type":"memory_leak","type_label":"Memory Leak","severity":"low","difficulty":"very_easy","description":"In `kmod_new()`, when `hash_new()` fails after `kmod_config_new()` succeeded, the `fail` path does not release `ctx->config`, so the config leaks (OOM path only). The `fail` label also calls `free(ctx->modules_by_name)` on a `struct hash *` instead of `hash_free()`. This is harmless today only because the pointer is always NULL there.","fix":"```\nfail:\n-\tfree(ctx->modules_by_name);\n+\thash_free(ctx->modules_by_name);\n+\tif (ctx->config)\n+\t\tkmod_config_free(ctx->config);\n \tfree(ctx->dirname);\n \tfree(ctx);\n```","locations":[{"ref":"libkmod/libkmod.c:250-270","code":"  250 | \t\tconfig_paths = default_config_paths;\n  251 | \terr = kmod_config_new(ctx, &ctx->config, config_paths);\n  252 | \tif (err < 0) {\n  253 | \t\tERR(ctx, \"could not create config\\n\");\n  254 | \t\tgoto fail;\n  255 | \t}\n  256 | \n  257 | \tctx->modules_by_name = hash_new(KMOD_HASH_SIZE, NULL);\n  258 | \tif (ctx->modules_by_name == NULL) {\n  259 | \t\tERR(ctx, \"could not create by-name hash\\n\");\n  260 | \t\tgoto fail;\n  261 | \t}\n  262 | \n  263 | \tINFO(ctx, \"ctx %p created\\n\", ctx);\n  264 | \tDBG(ctx, \"log_priority=%d\\n\", ctx->log_priority);\n  265 | \n  266 | \treturn ctx;\n  267 | \n  268 | fail:\n  269 | \tfree(ctx->modules_by_name);\n  270 | \tfree(ctx->dirname);","lines":21,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod.c#L250-L270"}]},
+{"id":"MEM_5","type":"memory_leak","type_label":"Memory Leak","severity":"negligible","difficulty":"easy","description":"`depmod_report_one_cycle()` returns early with `return rc` when `array_append` or `hash_add` fails inside the loop. The `reverse` array, initialised with `array_init` and already holding allocated storage, is leaked. The `out:` label that calls `array_free_array(&reverse)` is bypassed.","fix":"Replace `return rc;` in both branches with `goto out;`.","locations":[{"ref":"tools/depmod.c:1784-1796","code":" 1784 | \tarray_init(&reverse, 3);\n 1785 | \n 1786 | \tsz = 0;\n 1787 | \tfor (v = vertex->parent, n = 0; v != NULL; v = v->parent, n++) {\n 1788 | \t\tsz += v->mod->modnamesz - 1;\n 1789 | \t\trc = array_append(&reverse, v);\n 1790 | \t\tif (rc < 0)\n 1791 | \t\t\treturn rc;\n 1792 | \t\trc = hash_add(loop_set, v->mod->modname, NULL);\n 1793 | \t\tif (rc != 0)\n 1794 | \t\t\treturn rc;\n 1795 | \t\t/* the hash will be freed where created */\n 1796 | \t}","lines":13,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L1784-L1796"},{"ref":"tools/depmod.c:1823-1826","code":" 1823 | out:\n 1824 | \tarray_free_array(&reverse);\n 1825 | \n 1826 | \treturn rc;","lines":4,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L1823-L1826"}]},
+{"id":"MEM_6","type":"memory_leak","type_label":"Memory Leak","severity":"negligible","difficulty":"easy","description":"In `do_depmod()`, failures of `depmod_load_symvers()` and `depmod_load_system_map()` jump to `cmdline_failed`. At that point `depmod_init()` has succeeded and `ctx` was set to NULL because it is owned by `depmod`. `depmod_shutdown()` is skipped, leaking the hashes and the kmod context.","fix":"Use `goto cmdline_modules_failed;` for these two error paths, so `depmod_shutdown()` runs.","locations":[{"ref":"tools/depmod.c:3047-3058","code":" 3047 | \tif (module_symvers != NULL) {\n 3048 | \t\terr = depmod_load_symvers(&depmod, module_symvers);\n 3049 | \t\tif (err < 0) {\n 3050 | \t\t\tCRIT(\"could not load %s: %s\\n\", module_symvers, strerror(-err));\n 3051 | \t\t\tgoto cmdline_failed;\n 3052 | \t\t}\n 3053 | \t} else if (system_map != NULL) {\n 3054 | \t\terr = depmod_load_system_map(&depmod, system_map);\n 3055 | \t\tif (err < 0) {\n 3056 | \t\t\tCRIT(\"could not load %s: %s\\n\", system_map, strerror(-err));\n 3057 | \t\t\tgoto cmdline_failed;\n 3058 | \t\t}","lines":12,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L3047-L3058"},{"ref":"tools/depmod.c:3122-3129","code":" 3122 | cmdline_modules_failed:\n 3123 | \tdepmod_shutdown(&depmod);\n 3124 | depmod_init_failed:\n 3125 | \tif (ctx != NULL)\n 3126 | \t\tkmod_unref(ctx);\n 3127 | cmdline_failed:\n 3128 | \tcfg_free(&cfg);\n 3129 | \treturn EXIT_FAILURE;","lines":8,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L3122-L3129"}]},
+{"id":"LOGIC_1","type":"logic_error","type_label":"Logic Error","severity":"medium","difficulty":"easy","description":"`index_read()` accepts any `first <= last` read from the file (up to 255), unlike `index_mm_read_node()` which rejects `last >= INDEX_CHILDMAX`. The loops `for (uint8_t ch = node->first; ch <= node->last; ch++)` in `index_dump_node()` and `index_searchwild__all()` never terminate when `node->last == 255`, since a `uint8_t` is always `<= 255`; the counter wraps and the function loops forever (re-reading nodes and growing the strbuf). A corrupt `modules.*.bin` read via the non-mmap `index_file` path triggers an infinite loop.","fix":"In `index_read()` reject `last >= INDEX_CHILDMAX` (same as the mm reader), or use an `unsigned int ch` loop variable and cast to `uint8_t` when calling `index_readchild()`.","locations":[{"ref":"libkmod/libkmod-index.c:280-298","code":"  280 | \tif (offset & INDEX_NODE_CHILDS) {\n  281 | \t\tint first = read_char(fp);\n  282 | \t\tint last = read_char(fp);\n  283 | \n  284 | \t\tif (first == EOF || last == EOF || first > last)\n  285 | \t\t\tgoto err;\n  286 | \n  287 | \t\tchild_count = last - first + 1;\n  288 | \n  289 | \t\tnode = malloc(sizeof(struct index_node_f) +\n  290 | \t\t\t      sizeof(uint32_t) * child_count);\n  291 | \t\tif (node == NULL)\n  292 | \t\t\tgoto err;\n  293 | \n  294 | \t\tnode->first = (uint8_t)first;\n  295 | \t\tnode->last = (uint8_t)last;\n  296 | \n  297 | \t\tif (!read_u32s(fp, node->children, child_count))\n  298 | \t\t\tgoto err;","lines":19,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-index.c#L280-L298"},{"ref":"libkmod/libkmod-index.c:414-424","code":"  414 | \tfor (uint8_t ch = node->first; ch <= node->last; ch++) {\n  415 | \t\tstruct index_node_f *child = index_readchild(node, ch);\n  416 | \n  417 | \t\tif (!child)\n  418 | \t\t\tcontinue;\n  419 | \n  420 | \t\tif (strbuf_pushchar(buf, ch)) {\n  421 | \t\t\tindex_dump_node(child, buf, wbuf);\n  422 | \t\t\tstrbuf_popchar(buf);\n  423 | \t\t}\n  424 | \t}","lines":11,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-index.c#L414-L424"},{"ref":"libkmod/libkmod-index.c:523-533","code":"  523 | \tfor (uint8_t ch = node->first; ch <= node->last; ch++) {\n  524 | \t\tstruct index_node_f *child = index_readchild(node, ch);\n  525 | \n  526 | \t\tif (!child)\n  527 | \t\t\tcontinue;\n  528 | \n  529 | \t\tif (strbuf_pushchar(buf, ch)) {\n  530 | \t\t\tindex_searchwild__all(child, 0, buf, subkey, out);\n  531 | \t\t\tstrbuf_popchar(buf);\n  532 | \t\t}\n  533 | \t}","lines":11,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-index.c#L523-L533"}]},
+{"id":"LOGIC_2","type":"logic_error","type_label":"Logic Error","severity":"low","difficulty":"very_easy","description":"`softdep_to_char()` joins the `pre:` and `post:` parts without a separator. After the pre block, `itr` points at the copied NUL terminator, and the next `memcpy(itr, \"post: \", ...)` overwrites that NUL. A softdep with both lists is therefore rendered as `pre: a bpost: c`. The buffer is sized with no slot for a separating space. This string is returned by `kmod_config_iter_get_value()` for softdeps (used by `modprobe -c` and similar callers).","fix":"Add 1 to `sz` when both lists are present, and after the pre loop write a space at `itr` before copying `post: `: `*itr++ = ' ';`","locations":[{"ref":"libkmod/libkmod-config.c:541-593","code":"  541 | \tif (dep->n_pre > 0) {\n  542 | \t\tstart = dep->pre[0];\n  543 | \t\tend = dep->pre[dep->n_pre - 1] + strlen(dep->pre[dep->n_pre - 1]);\n  544 | \t\tsz_pre = end - start;\n  545 | \t\tsz += sz_pre + strlen(\"pre: \");\n  546 | \t} else\n  547 | \t\tsz_pre = 0;\n  548 | \n  549 | \tif (dep->n_post > 0) {\n  550 | \t\tstart = dep->post[0];\n  551 | \t\tend = dep->post[dep->n_post - 1] + strlen(dep->post[dep->n_post - 1]);\n  552 | \t\tsz_post = end - start;\n  553 | \t\tsz += sz_post + strlen(\"post: \");\n  554 | \t} else\n  555 | \t\tsz_post = 0;\n  556 | \n  557 | \titr = s = malloc(sz);\n  558 | \tif (s == NULL)\n  559 | \t\treturn NULL;\n  560 | \n  561 | \tif (sz_pre) {\n  562 | \t\tchar *p;\n  563 | \n  564 | \t\tmemcpy(itr, \"pre: \", strlen(\"pre: \"));\n  565 | \t\titr += strlen(\"pre: \");\n  566 | \n  567 | \t\t/* include last '\\0' */\n  568 | \t\tmemcpy(itr, dep->pre[0], sz_pre + 1);\n  569 | \t\tfor (p = itr; p < itr + sz_pre; p++) {\n  570 | \t\t\tif (*p == '\\0')\n  571 | \t\t\t\t*p = ' ';\n  572 | \t\t}\n  573 | \t\titr = p;\n  574 | \t}\n  575 | \n  576 | \tif (sz_post) {\n  577 | \t\tchar *p;\n  578 | \n  579 | \t\tmemcpy(itr, \"post: \", strlen(\"post: \"));\n  580 | \t\titr += strlen(\"post: \");\n  581 | \n  582 | \t\t/* include last '\\0' */\n  583 | \t\tmemcpy(itr, dep->post[0], sz_post + 1);\n  584 | \t\tfor (p = itr; p < itr + sz_post; p++) {\n  585 | \t\t\tif (*p == '\\0')\n  586 | \t\t\t\t*p = ' ';\n  587 | \t\t}\n  588 | \t\titr = p;\n  589 | \t}\n  590 | \n  591 | \t*itr = '\\0';\n  592 | \n  593 | \treturn s;","lines":53,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-config.c#L541-L593"}]},
+{"id":"LOGIC_3","type":"logic_error","type_label":"Logic Error","severity":"low","difficulty":"easy","description":"`kmod_elf_get_build_id()` does not validate `namesz`. `name` is compared with `streq(name, \"GNU\")` without confirming `namesz == 4`, so the read can run past the note when `namesz < 4`. `3 * sizeof(uint32_t) + namesz + descsz` can also wrap on 32-bit `size_t`, because both values come from the file. `off += namesz` gives the hash offset without any alignment handling.","fix":"Require `namesz == sizeof(\"GNU\")` before the `streq`, and do the size check in `uint64_t` (`(uint64_t)namesz + descsz + 12 > size`).","locations":[{"ref":"libkmod/libkmod-elf.c:1285-1307","code":" 1285 | \tnamesz = elf_get_u32(elf, off);\n 1286 | \toff += sizeof(uint32_t);\n 1287 | \tdescsz = elf_get_u32(elf, off);\n 1288 | \toff += sizeof(uint32_t);\n 1289 | \ttype = elf_get_u32(elf, off);\n 1290 | \toff += sizeof(uint32_t);\n 1291 | \n 1292 | \tif (size < 3 * sizeof(uint32_t) + namesz + descsz) {\n 1293 | \t\tELFDBG(elf, \"build-id section is too small: %\" PRIu64 \"\\n\", size);\n 1294 | \t\treturn -EINVAL;\n 1295 | \t}\n 1296 | \n 1297 | \tname = elf_get_mem(elf, off);\n 1298 | \n 1299 | \tif (type != NT_GNU_BUILD_ID || !streq(name, \"GNU\")) {\n 1300 | \t\tELFDBG(elf, \"Invalid build-id section: type %\" PRIu32 \", name %.3s\\n\",\n 1301 | \t\t       type, name);\n 1302 | \t\treturn -EINVAL;\n 1303 | \t}\n 1304 | \n 1305 | \toff += namesz;\n 1306 | \t*hash = elf_get_mem(elf, off);\n 1307 | \t*hash_len = descsz;","lines":23,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-elf.c#L1285-L1307"}]},
+{"id":"LOGIC_4","type":"logic_error","type_label":"Logic Error","severity":"low","difficulty":"easy","description":"`kmod_list_remove_data()` returns `node->next` of the removed element as the new list head. When the removed element is not the head, the head moves to the removed element's successor and the list is silently rotated, so iteration order changes (elements before the removed one now come last). Its only in-tree user (`depmod_list_remove_data()` on `roots`) assigns the result back, so order of roots changes. Existing test `test_list_remove_data` only checks length and absence, not order or head.","fix":"Return `list` unchanged when `itr != list` (only return the successor when the head itself is removed), and extend `test_list_remove_data` to assert order is preserved.","locations":[{"ref":"libkmod/libkmod-list.c:179-199","code":"  179 | struct kmod_list *kmod_list_remove_data(struct kmod_list *list, const void *data)\n  180 | {\n  181 | \tstruct kmod_list *itr;\n  182 | \tstruct list_node *node;\n  183 | \n  184 | \tfor (itr = list; itr != NULL; itr = kmod_list_next(list, itr)) {\n  185 | \t\tif (itr->data == data)\n  186 | \t\t\tbreak;\n  187 | \t}\n  188 | \n  189 | \tif (itr == NULL)\n  190 | \t\treturn list;\n  191 | \n  192 | \tnode = list_node_remove(&itr->node);\n  193 | \tfree(itr);\n  194 | \n  195 | \tif (node == NULL)\n  196 | \t\treturn NULL;\n  197 | \n  198 | \treturn container_of(node, struct kmod_list, node);\n  199 | }","lines":21,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-list.c#L179-L199"},{"ref":"libkmod/libkmod-list.c:32-41","code":"   32 | static inline struct list_node *list_node_remove(struct list_node *node)\n   33 | {\n   34 | \tif (node->prev == node || node->next == node)\n   35 | \t\treturn NULL;\n   36 | \n   37 | \tnode->prev->next = node->next;\n   38 | \tnode->next->prev = node->prev;\n   39 | \n   40 | \treturn node->next;\n   41 | }","lines":10,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-list.c#L32-L41"}]},
+{"id":"LOGIC_5","type":"logic_error","type_label":"Logic Error","severity":"low","difficulty":"easy","description":"`module_do_install_commands()` expands `$CMDLINE_OPTS` with `while ((p = strstr(cmd, \"$CMDLINE_OPTS\")) != NULL)` always rescanning from the start of the already-substituted string. If `options` itself contains the text `$CMDLINE_OPTS` (e.g. `options foo $CMDLINE_OPTS` in config or user-supplied extra options), the substitution re-matches its own output and loops forever, growing the buffer until OOM.","fix":"Continue the search after the inserted text: keep a `search_from` offset (`prefixlen + options_len`) and call `strstr(cmd + search_from, ...)` instead of `strstr(cmd, ...)`.","locations":[{"ref":"libkmod/libkmod-module.c:861-878","code":"  861 | \twhile ((p = strstr(cmd, \"$CMDLINE_OPTS\")) != NULL) {\n  862 | \t\tsize_t prefixlen = p - cmd;\n  863 | \t\tsize_t suffixlen = cmdlen - prefixlen - varlen;\n  864 | \t\tsize_t slen = cmdlen - varlen + options_len;\n  865 | \t\tchar *suffix = p + varlen;\n  866 | \t\t_clang_suppress_alloc_ char *s = malloc(slen + 1);\n  867 | \t\tif (!s)\n  868 | \t\t\treturn -ENOMEM;\n  869 | \n  870 | \t\tmemcpy(s, cmd, p - cmd);\n  871 | \t\tmemcpy(s + prefixlen, options, options_len);\n  872 | \t\tmemcpy(s + prefixlen + options_len, suffix, suffixlen);\n  873 | \t\ts[slen] = '\\0';\n  874 | \n  875 | \t\tfree(cmd);\n  876 | \t\tcmd = s;\n  877 | \t\tcmdlen = slen;\n  878 | \t}","lines":18,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-module.c#L861-L878"}]},
+{"id":"LOGIC_6","type":"logic_error","type_label":"Logic Error","severity":"low","difficulty":"very_easy","description":"`x509_name_to_str()` never returns NULL when no commonName entry exists. `nid` holds the NID of the last iterated entry, so `nid == -1` is only true for an empty name. For an issuer without a CN, the data of the last RDN entry is returned and reported as the signer, instead of leaving the signer empty.","fix":"Check the loop result instead of `nid`:\n```\n-\tint nid = -1;\n...\n-\tfor (i = 0; i < sym_X509_NAME_entry_count(name); i++) {\n+\tfor (i = 0; i < sym_X509_NAME_entry_count(name); i++) {\n \t\te = ...;\n \t\tnid = sym_OBJ_obj2nid(o);\n \t\tif (nid == NID_commonName)\n \t\t\tbreak;\n \t}\n-\tif (nid == -1)\n+\tif (nid != NID_commonName)\n \t\treturn NULL;\n```","locations":[{"ref":"libkmod/libkmod-signature-openssl.c:64-84","code":"   64 | static const char *x509_name_to_str(X509_NAME *name)\n   65 | {\n   66 | \tint i;\n   67 | \tX509_NAME_ENTRY *e;\n   68 | \tASN1_STRING *d;\n   69 | \tASN1_OBJECT *o;\n   70 | \tint nid = -1;\n   71 | \tconst char *str;\n   72 | \n   73 | \tfor (i = 0; i < sym_X509_NAME_entry_count(name); i++) {\n   74 | \t\te = sym_X509_NAME_get_entry(name, i);\n   75 | \t\to = sym_X509_NAME_ENTRY_get_object(e);\n   76 | \t\tnid = sym_OBJ_obj2nid(o);\n   77 | \t\tif (nid == NID_commonName)\n   78 | \t\t\tbreak;\n   79 | \t}\n   80 | \tif (nid == -1)\n   81 | \t\treturn NULL;\n   82 | \n   83 | \td = sym_X509_NAME_ENTRY_get_data(e);\n   84 | \tstr = (const char *)sym_ASN1_STRING_get0_data(d);","lines":21,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-signature-openssl.c#L64-L84"}]},
+{"id":"LOGIC_7","type":"logic_error","type_label":"Logic Error","severity":"low","difficulty":"easy","description":"`strbuf_pushmem()` returns 0 both for failure (allocation failure or overflow) and for the successful no-op `sz == 0`. `strbuf_pushchars()` forwards this, and `tools/delete_module.c` uses `!strbuf_pushchars(...)` as the error test. Pushing an empty string is therefore reported as an allocation failure, and callers that ignore the result cannot tell a failed push from an empty one.","fix":"Make the empty-push case unambiguous, for example return `bool` (true on success, including `sz == 0`), or return `(size_t)-1` on failure. Then update the callers in `testsuite/delete_module.c` and `tools/modinfo.c`.","locations":[{"ref":"shared/strbuf.c:84-100","code":"   84 | size_t strbuf_pushmem(struct strbuf *buf, const char *src, size_t sz)\n   85 | {\n   86 | \tassert(src != NULL);\n   87 | \tassert(buf != NULL);\n   88 | \n   89 | \tif (sz == 0)\n   90 | \t\treturn 0;\n   91 | \n   92 | \tif (!strbuf_reserve_extra(buf, sz))\n   93 | \t\treturn 0;\n   94 | \n   95 | \tmemcpy(buf->bytes + buf->used, src, sz);\n   96 | \tbuf->used += sz;\n   97 | \n   98 | \treturn sz;\n   99 | }\n  100 | ","lines":17,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/shared/strbuf.c#L84-L100"},{"ref":"shared/strbuf.h:63-67","code":"   63 | bool strbuf_pushchar(struct strbuf *buf, char ch);\n   64 | size_t strbuf_pushmem(struct strbuf *buf, const char *src, size_t sz);\n   65 | static inline size_t strbuf_pushchars(struct strbuf *buf, const char *str)\n   66 | {\n   67 | \treturn strbuf_pushmem(buf, str, strlen(str));","lines":5,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/shared/strbuf.h#L63-L67"},{"ref":"libkmod/libkmod-builtin.c:100-104","code":"  100 | \t\tif (!strbuf_pushchars(buf, dot + 1) || !strbuf_pushchar(buf, '\\0')) {\n  101 | \t\t\tcount = -ENOMEM;\n  102 | \t\t\tERR(info->ctx, \"failed to append modinfo string\\n\");\n  103 | \t\t\treturn count;\n  104 | \t\t}","lines":5,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-builtin.c#L100-L104"},{"ref":"testsuite/delete_module.c:195-198","code":"  195 | \tif (!strbuf_pushchars(&buf, \"/sys/module/\") || !strbuf_pushchars(&buf, modname)) {\n  196 | \t\terrno = ENOMEM;\n  197 | \t\treturn -1;\n  198 | \t}","lines":4,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/testsuite/delete_module.c#L195-L198"}]},
+{"id":"LOGIC_8","type":"logic_error","type_label":"Logic Error","severity":"low","difficulty":"medium","description":"`depmod_module_add()` sets `mod->sort_idx = depmod->modules.count + 1`, but `depmod->modules` is only populated later by `depmod_modules_build_array()`. During discovery `count` is therefore always 0, so every module gets `sort_idx == 1`. The intended insertion-order tiebreak is lost, and modules not listed in `modules.order` are ordered by the unstable `qsort` over hash iteration order. This is the observable sort behaviour: `depmod_modules_sort()` also returns early without sorting if `modules.order` is missing or corrupted.","fix":"Use a monotonically increasing counter on `struct depmod` (for example `depmod->n_added++`) for `sort_idx`, and always run the sort even if `modules.order` is absent.","locations":[{"ref":"tools/depmod.c:1097","code":" 1097 | \tmod->sort_idx = depmod->modules.count + 1;","lines":1,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L1097"},{"ref":"tools/depmod.c:1456-1481","code":" 1456 | \n 1457 | static int mod_cmp(const void *pa, const void *pb)\n 1458 | {\n 1459 | \tconst struct mod *a = *(const struct mod **)pa;\n 1460 | \tconst struct mod *b = *(const struct mod **)pb;\n 1461 | \treturn a->sort_idx - b->sort_idx;\n 1462 | }\n 1463 | \n 1464 | static int depmod_modules_build_array(struct depmod *depmod)\n 1465 | {\n 1466 | \tstruct hash_iter module_iter;\n 1467 | \tconst void *v;\n 1468 | \tint err;\n 1469 | \n 1470 | \thash_iter_init(depmod->modules_by_name, &module_iter);\n 1471 | \twhile (hash_iter_next(&module_iter, NULL, &v)) {\n 1472 | \t\tstruct mod *mod = (struct mod *)v;\n 1473 | \t\tmod->idx = depmod->modules.count;\n 1474 | \t\terr = array_append(&depmod->modules, mod);\n 1475 | \t\tif (err < 0)\n 1476 | \t\t\treturn err;\n 1477 | \t}\n 1478 | \tif (depmod->modules.count >= UINT16_MAX)\n 1479 | \t\treturn -ERANGE;\n 1480 | \n 1481 | \treturn 0;","lines":26,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L1456-L1481"},{"ref":"tools/depmod.c:1510-1551","code":" 1510 | static void depmod_modules_sort(struct depmod *depmod)\n 1511 | {\n 1512 | \tchar line[PATH_MAX];\n 1513 | \tconst char *order_file = \"modules.order\";\n 1514 | \tFILE *fp;\n 1515 | \tsize_t idx = 0;\n 1516 | \t// all sorted modules shall have precedence\n 1517 | \tint i = -(int)depmod->modules.count;\n 1518 | \n 1519 | \tfp = dfdopen(depmod->cfg->dirname, order_file, O_RDONLY, \"r\");\n 1520 | \tif (fp == NULL)\n 1521 | \t\treturn;\n 1522 | \n 1523 | \twhile (fgets(line, sizeof(line), fp) != NULL) {\n 1524 | \t\tstruct mod *mod;\n 1525 | \t\tsize_t len = strlen(line);\n 1526 | \t\tidx++;\n 1527 | \t\tif (len == 0)\n 1528 | \t\t\tcontinue;\n 1529 | \t\tif (line[len - 1] != '\\n') {\n 1530 | \t\t\tERR(\"%s/%s:%zu corrupted line misses '\\\\n'\\n\",\n 1531 | \t\t\t    depmod->cfg->dirname, order_file, idx);\n 1532 | \t\t\tgoto corrupted;\n 1533 | \t\t}\n 1534 | \t\tline[len - 1] = '\\0';\n 1535 | \t\tmod = hash_find(depmod->modules_by_uncrelpath, line);\n 1536 | \t\tif (mod == NULL || mod->sort_idx < 0)\n 1537 | \t\t\tcontinue;\n 1538 | \t\tmod->sort_idx = i++;\n 1539 | \t}\n 1540 | \n 1541 | \tif (depmod->modules.count > 1) {\n 1542 | \t\tarray_sort(&depmod->modules, mod_cmp);\n 1543 | \t\tfor (idx = 0; idx < depmod->modules.count; idx++) {\n 1544 | \t\t\tstruct mod *m = depmod->modules.array[idx];\n 1545 | \t\t\tm->idx = idx;\n 1546 | \t\t}\n 1547 | \t}\n 1548 | \n 1549 | corrupted:\n 1550 | \tfclose(fp);\n 1551 | }","lines":42,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L1510-L1551"}]},
+{"id":"LOGIC_9","type":"logic_error","type_label":"Logic Error","severity":"low","difficulty":"medium","description":"`flush_stream_to()` reads a character before testing `i < dst_sz`. When the buffer fills, the consumed character is dropped and the function returns 0, unless that character happens to equal `endchar`. In that exact-fit case, the length is wrongly decremented and a spurious truncation warning is printed. The rest of the overlong token is not discarded, so the parser in `output_builtin_alias_bin()` desynchronises and interprets the tail of one token as the next field. `flush_stream()` has a dead `size_t i = 0` that makes it always return 0.","fix":"Test `i < dst_sz - 1` before storing, discard the rest of the token up to `endchar` or `'\\0'` on overflow, and return a distinct truncated result. Remove the unused `i` in `flush_stream()` or make it return a meaningful value.","locations":[{"ref":"tools/depmod.c:2412-2439","code":" 2412 | static int flush_stream(FILE *in, int endchar)\n 2413 | {\n 2414 | \tsize_t i = 0;\n 2415 | \tint c;\n 2416 | \n 2417 | \tfor (c = fgetc(in); c != EOF && c != endchar && c != '\\0'; c = fgetc(in))\n 2418 | \t\t;\n 2419 | \n 2420 | \treturn c == endchar ? i : 0;\n 2421 | }\n 2422 | \n 2423 | static int flush_stream_to(FILE *in, int endchar, char *dst, size_t dst_sz)\n 2424 | {\n 2425 | \tsize_t i = 0;\n 2426 | \tint c;\n 2427 | \n 2428 | \tfor (c = fgetc(in); c != EOF && c != endchar && c != '\\0' && i < dst_sz;\n 2429 | \t     c = fgetc(in))\n 2430 | \t\tdst[i++] = c;\n 2431 | \n 2432 | \tif (i == dst_sz) {\n 2433 | \t\tWRN(\"Could not flush stream: %d. Partial content: %.*s\\n\", ENOSPC,\n 2434 | \t\t    (int)dst_sz, dst);\n 2435 | \t\ti--;\n 2436 | \t}\n 2437 | \n 2438 | \treturn c == endchar ? i : 0;\n 2439 | }","lines":28,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L2412-L2439"},{"ref":"tools/depmod.c:2463-2482","code":" 2463 | \t\tchar modname[PATH_MAX];\n 2464 | \t\tchar value[PATH_MAX];\n 2465 | \t\tsize_t len;\n 2466 | \n 2467 | \t\tlen = flush_stream_to(in, '.', modname, sizeof(modname));\n 2468 | \t\tmodname[len] = '\\0';\n 2469 | \t\tif (!len)\n 2470 | \t\t\tcontinue;\n 2471 | \n 2472 | \t\tlen = flush_stream_to(in, '=', value, sizeof(value));\n 2473 | \t\tvalue[len] = '\\0';\n 2474 | \t\tif (!streq(value, \"alias\")) {\n 2475 | \t\t\tflush_stream(in, '\\0');\n 2476 | \t\t\tcontinue;\n 2477 | \t\t}\n 2478 | \n 2479 | \t\tlen = flush_stream_to(in, '\\0', value, sizeof(value));\n 2480 | \t\tvalue[len] = '\\0';\n 2481 | \t\tif (!len)\n 2482 | \t\t\tcontinue;","lines":20,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L2463-L2482"}]},
+{"id":"LOGIC_10","type":"logic_error","type_label":"Logic Error","severity":"low","difficulty":"easy","description":"In `depmod_output()`, `tmpfile_publish()` is called before `ferr` (write or close error) is checked. A truncated index is therefore atomically published over the previous good file, and only then reported as an error. The temporary file should be released instead of published when `ferr` is set.","fix":"Check `ferr` right after `fclose` and call `tmpfile_release(&file)` instead of `tmpfile_publish()` when it is set. Only publish when both `r >= 0` and `!ferr`.","locations":[{"ref":"tools/depmod.c:2614-2637","code":" 2614 | \n 2615 | \t\tferr = ferror(fp) | fclose(fp);\n 2616 | \n 2617 | \t\tif (r < 0) {\n 2618 | \t\t\ttmpfile_release(&file);\n 2619 | \n 2620 | \t\t\tERR(\"Could not write index '%s': %s\\n\", itr->name, strerror(-r));\n 2621 | \t\t\terr = r;\n 2622 | \t\t\tbreak;\n 2623 | \t\t}\n 2624 | \n 2625 | \t\terr = tmpfile_publish(&file, itr->name);\n 2626 | \t\tif (err != 0) {\n 2627 | \t\t\tCRIT(\"publish temporary from %s to %s\\n\", file.tmpname, itr->name);\n 2628 | \t\t\tbreak;\n 2629 | \t\t}\n 2630 | \n 2631 | \t\tif (ferr) {\n 2632 | \t\t\terr = -ENOSPC;\n 2633 | \t\t\tERR(\"Could not create index '%s'. Output is truncated: %s\\n\",\n 2634 | \t\t\t    itr->name, strerror(-err));\n 2635 | \t\t\tbreak;\n 2636 | \t\t}\n 2637 | \t}","lines":24,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L2614-L2637"}]},
+{"id":"LOGIC_11","type":"logic_error","type_label":"Logic Error","severity":"low","difficulty":"easy","description":"`prepend_options_from_env()` emits a spurious empty-string argument after every quoted token that is followed by a space. After the closing quote of a token that starts with a quote (`quote == str`), `str` is set to `s + 1`, which is the following space. The next iteration then sees `*s == ' '` and stores `new_argv[i] = str`, which is `\"\"`. With `MODPROBE_OPTIONS='-C \"/a b\" -v'` the resulting argv is `-C`, `/a b`, `\"\"`, `-v`, `x` (reproduced with an extracted copy of the function). getopt treats `\"\"` as a non-option, so it becomes a module name and `modprobe x` is run with an extra empty module argument. Consecutive spaces in the variable also produce empty arguments.","fix":"After closing a quoted token, skip the separator space that follows (for example `if (s[1] == ' ') s++;` after `str = s + 1`). Also skip tokens where `s == str` when `*s == ' '`, so repeated spaces do not create empty arguments.","locations":[{"ref":"tools/modprobe.c:749-783","code":"  749 | \tquote = NULL;\n  750 | \tfor (i = 1, s = str; *s != '\\0'; s++) {\n  751 | \t\tif (quote == NULL) {\n  752 | \t\t\tif (*s == ' ') {\n  753 | \t\t\t\tnew_argv[i] = str;\n  754 | \t\t\t\ti++;\n  755 | \t\t\t\t*s = '\\0';\n  756 | \t\t\t\tstr = s + 1;\n  757 | \t\t\t} else if (*s == '\"' || *s == '\\'')\n  758 | \t\t\t\tquote = s;\n  759 | \t\t} else {\n  760 | \t\t\tif (*s == *quote) {\n  761 | \t\t\t\tif (quote == str) {\n  762 | \t\t\t\t\tnew_argv[i] = str + 1;\n  763 | \t\t\t\t\ti++;\n  764 | \t\t\t\t\t*s = '\\0';\n  765 | \t\t\t\t\tstr = s + 1;\n  766 | \t\t\t\t} else {\n  767 | \t\t\t\t\tchar *it;\n  768 | \t\t\t\t\tfor (it = quote; it < s - 1; it++)\n  769 | \t\t\t\t\t\tit[0] = it[1];\n  770 | \t\t\t\t\tfor (it = s - 1; it < str_end - 2; it++)\n  771 | \t\t\t\t\t\tit[0] = it[2];\n  772 | \t\t\t\t\tstr_end -= 2;\n  773 | \t\t\t\t\t*str_end = '\\0';\n  774 | \t\t\t\t\ts -= 2;\n  775 | \t\t\t\t}\n  776 | \t\t\t\tquote = NULL;\n  777 | \t\t\t}\n  778 | \t\t}\n  779 | \t}\n  780 | \tif (str < s) {\n  781 | \t\tnew_argv[i] = str;\n  782 | \t\ti++;\n  783 | \t}","lines":35,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/modprobe.c#L749-L783"}]},
+{"id":"LOGIC_12","type":"logic_error","type_label":"Logic Error","severity":"negligible","difficulty":"easy","description":"In `output_deps_bin()`, the `continue` after a failed `strbuf_pushchar` or `strbuf_pushchars` inside the inner `for (j...)` loop only skips one dependency. The module's truncated, incomplete dependency line is still inserted into the index. The error message implies the module is skipped.","fix":"On failure set a flag and `break`, then skip `index_insert()` for that module (or use `goto next_module`).","locations":[{"ref":"tools/depmod.c:2180-2192","code":" 2180 | \n 2181 | \t\tfor (j = 0; j < array.count; j++) {\n 2182 | \t\t\tconst struct mod *d = array.array[j];\n 2183 | \t\t\tconst char *dp = mod_get_compressed_path(d);\n 2184 | \n 2185 | \t\t\tif (!strbuf_pushchar(&sbuf, ' ') || !strbuf_pushchars(&sbuf, dp)) {\n 2186 | \t\t\t\tERR(\"could not write dependencies of %s\\n\", p);\n 2187 | \t\t\t\tcontinue;\n 2188 | \t\t\t}\n 2189 | \t\t}\n 2190 | \t\tline = strbuf_str(&sbuf);\n 2191 | \n 2192 | \t\tduplicate = index_insert(idx, mod->modname, line, mod->idx);","lines":13,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L2180-L2192"}]},
+{"id":"LOGIC_13","type":"logic_error","type_label":"Logic Error","severity":"negligible","difficulty":"easy","description":"In `do_modprobe()`, `-w` is parsed with `strtoul`, which accepts a leading `-` and wraps (`-w -1` gives `ULONG_MAX`) without setting `errno`. `wait_msec` is then used in `tend_msec = now_msec() + wait_msec`, which can wrap and make the deadline already expired, so the wait is skipped. The only guard is the `ERANGE` check.","fix":"Reject values starting with `-` and clamp `wait_msec` so that `now_msec() + wait_msec` cannot overflow.","locations":[{"ref":"tools/modprobe.c:834-844","code":"  834 | \t\tcase 'w': {\n  835 | \t\t\tchar *endptr = NULL;\n  836 | \t\t\terrno = 0;\n  837 | \t\t\twait_msec = strtoul(optarg, &endptr, 0);\n  838 | \t\t\tif (!*optarg || *endptr || errno == ERANGE) {\n  839 | \t\t\t\tERR(\"unexpected wait value '%s'.\\n\", optarg);\n  840 | \t\t\t\terr = -1;\n  841 | \t\t\t\tgoto done;\n  842 | \t\t\t}\n  843 | \t\t\tbreak;\n  844 | \t\t}","lines":11,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/modprobe.c#L834-L844"},{"ref":"tools/modprobe.c:394-397","code":"  394 | \t\t\tif (!tend_msec) {\n  395 | \t\t\t\ttend_msec = now_msec() + wait_msec;\n  396 | \t\t\t\tinterval_msec = 1;\n  397 | \t\t\t}","lines":4,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/modprobe.c#L394-L397"}]},
+{"id":"ERR_1","type":"incorrect_error_handling","type_label":"Incorrect Error Handling","severity":"medium","difficulty":"easy","description":"In `depmod_output()`, when `tmpfile_openat()` fails, the code logs an error and does `continue` without setting `err`. If every file fails, or only some do, the function still returns 0 and `do_depmod()` exits with `EXIT_SUCCESS` even though some `modules.*` files were not written or updated.","fix":"Set `err = -errno;` (saved right after the failed call) before `continue`, or `break` out of the loop, so the failure is propagated to the exit status.","locations":[{"ref":"tools/depmod.c:2601-2609","code":" 2601 | \t\tif (fp == NULL) {\n 2602 | \t\t\tmode_t mode = 0644;\n 2603 | \n 2604 | \t\t\tfp = tmpfile_openat(dfd, mode, &file);\n 2605 | \t\t\tif (fp == NULL) {\n 2606 | \t\t\t\tERR(\"Could not create temporary file at '%s'\\n\", dname);\n 2607 | \t\t\t\tcontinue;\n 2608 | \t\t\t}\n 2609 | \t\t}","lines":9,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L2601-L2609"}]},
+{"id":"ERR_2","type":"incorrect_error_handling","type_label":"Incorrect Error Handling","severity":"low","difficulty":"easy","description":"In `kmod_config_parse()`, the return values of `kmod_config_add_alias/blacklist/options/command/mask/softdep/weakdep` are ignored. An `-ENOMEM` or `-EINVAL` is silently dropped (for example a softdep with too many entries) and the config is loaded incompletely with `kmod_config_new()` still returning 0. `kcmdline_parse_result()` does the same.","fix":"Propagate or at least log a non-zero return from each `kmod_config_add_*` call (for example `err = ...; if (err < 0) ERR(...)`).","locations":[{"ref":"libkmod/libkmod-config.c:830-893","code":"  830 | \t\tif (streq(cmd, \"alias\")) {\n  831 | \t\t\tchar *alias = strtok_r(NULL, \"\\t \", &saveptr);\n  832 | \t\t\tchar *modname = strtok_r(NULL, \"\\t \", &saveptr);\n  833 | \n  834 | \t\t\tif (underscores(alias) < 0 || underscores(modname) < 0)\n  835 | \t\t\t\tgoto syntax_error;\n  836 | \n  837 | \t\t\tkmod_config_add_alias(config, alias, modname);\n  838 | \t\t} else if (streq(cmd, \"blacklist\")) {\n  839 | \t\t\tchar *modname = strtok_r(NULL, \"\\t \", &saveptr);\n  840 | \n  841 | \t\t\tif (underscores(modname) < 0)\n  842 | \t\t\t\tgoto syntax_error;\n  843 | \n  844 | \t\t\tkmod_config_add_blacklist(config, modname);\n  845 | \t\t} else if (streq(cmd, \"options\")) {\n  846 | \t\t\tchar *modname = strtok_r(NULL, \"\\t \", &saveptr);\n  847 | \t\t\tchar *options = strtok_r(NULL, \"\\0\", &saveptr);\n  848 | \n  849 | \t\t\tif (underscores(modname) < 0 || options == NULL)\n  850 | \t\t\t\tgoto syntax_error;\n  851 | \n  852 | \t\t\tkmod_config_add_options(config, modname, options);\n  853 | \t\t} else if (streq(cmd, \"install\")) {\n  854 | \t\t\tchar *modname = strtok_r(NULL, \"\\t \", &saveptr);\n  855 | \t\t\tchar *installcmd = strtok_r(NULL, \"\\0\", &saveptr);\n  856 | \n  857 | \t\t\tif (underscores(modname) < 0 || installcmd == NULL)\n  858 | \t\t\t\tgoto syntax_error;\n  859 | \n  860 | \t\t\tkmod_config_add_command(config, modname, installcmd, cmd,\n  861 | \t\t\t\t\t\t&config->install_commands);\n  862 | \t\t} else if (streq(cmd, \"mask\")) {\n  863 | \t\t\tchar *modname = strtok_r(NULL, \"\\t \", &saveptr);\n  864 | \n  865 | \t\t\tif (underscores(modname) < 0)\n  866 | \t\t\t\tgoto syntax_error;\n  867 | \n  868 | \t\t\tkmod_config_add_mask(config, modname);\n  869 | \t\t} else if (streq(cmd, \"remove\")) {\n  870 | \t\t\tchar *modname = strtok_r(NULL, \"\\t \", &saveptr);\n  871 | \t\t\tchar *removecmd = strtok_r(NULL, \"\\0\", &saveptr);\n  872 | \n  873 | \t\t\tif (underscores(modname) < 0 || removecmd == NULL)\n  874 | \t\t\t\tgoto syntax_error;\n  875 | \n  876 | \t\t\tkmod_config_add_command(config, modname, removecmd, cmd,\n  877 | \t\t\t\t\t\t&config->remove_commands);\n  878 | \t\t} else if (streq(cmd, \"softdep\")) {\n  879 | \t\t\tchar *modname = strtok_r(NULL, \"\\t \", &saveptr);\n  880 | \t\t\tchar *softdeps = strtok_r(NULL, \"\\0\", &saveptr);\n  881 | \n  882 | \t\t\tif (underscores(modname) < 0 || softdeps == NULL)\n  883 | \t\t\t\tgoto syntax_error;\n  884 | \n  885 | \t\t\tkmod_config_add_softdep(config, modname, softdeps);\n  886 | \t\t} else if (streq(cmd, \"weakdep\")) {\n  887 | \t\t\tchar *modname = strtok_r(NULL, \"\\t \", &saveptr);\n  888 | \t\t\tchar *weakdeps = strtok_r(NULL, \"\\0\", &saveptr);\n  889 | \n  890 | \t\t\tif (underscores(modname) < 0 || weakdeps == NULL)\n  891 | \t\t\t\tgoto syntax_error;\n  892 | \n  893 | \t\t\tkmod_config_add_weakdep(config, modname, weakdeps);","lines":64,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-config.c#L830-L893"},{"ref":"libkmod/libkmod-config.c:646-662","code":"  646 | \t\t\tchar *t = strsep(&value, \",\");\n  647 | \t\t\tif (t == NULL)\n  648 | \t\t\t\tbreak;\n  649 | \n  650 | \t\t\tif (underscores(t) < 0)\n  651 | \t\t\t\tcontinue;\n  652 | \n  653 | \t\t\tif (is_blacklist)\n  654 | \t\t\t\tkmod_config_add_blacklist(config, t);\n  655 | \t\t\telse\n  656 | \t\t\t\tkmod_config_add_mask(config, t);\n  657 | \t\t}\n  658 | \t} else {\n  659 | \t\tif (underscores(modname) < 0) {\n  660 | \t\t\tERR(config->ctx,\n  661 | \t\t\t    \"Ignoring bad option on kernel command line while parsing module name: '%s'\\n\",\n  662 | \t\t\t    modname);","lines":17,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-config.c#L646-L662"}]},
+{"id":"ERR_3","type":"incorrect_error_handling","type_label":"Incorrect Error Handling","severity":"low","difficulty":"easy","description":"The return value of `add_value()` (which returns -1 on `malloc()` failure) is ignored in `index_read()`, `index_searchwild__allvalues()` and `index_mm_searchwild_allvalues()`. On OOM values are silently dropped, so lookups return incomplete results (or a node is returned with missing values) and the failure cannot be distinguished from 'no match'.","fix":"Check the result of `add_value()`; in `index_read()` `goto err`, and in the searchwild helpers propagate an error (or at least log it).","locations":[{"ref":"libkmod/libkmod-index.c:321-325","code":"  321 | \t\t\tn = getdelim(&idx->tmp, &idx->tmp_size, '\\0', fp);\n  322 | \t\t\tif (n < 0)\n  323 | \t\t\t\tgoto err;\n  324 | \t\t\tadd_value(&node->values, idx->tmp, n, priority);\n  325 | \t\t}","lines":5,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-index.c#L321-L325"},{"ref":"libkmod/libkmod-index.c:504-510","code":"  504 | \tstruct index_value *v;\n  505 | \n  506 | \tfor (v = node->values; v != NULL; v = v->next)\n  507 | \t\tadd_value(out, v->value, v->len, v->priority);\n  508 | \n  509 | \tindex_close(node);\n  510 | }","lines":7,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-index.c#L504-L510"},{"ref":"libkmod/libkmod-index.c:960-972","code":"  960 | static void index_mm_searchwild_allvalues(struct index_mm_node *node,\n  961 | \t\t\t\t\t  struct index_value **out)\n  962 | {\n  963 | \tconst void *p;\n  964 | \tsize_t i;\n  965 | \n  966 | \tfor (i = 0, p = node->values; i < node->value_count; i++) {\n  967 | \t\tstruct index_mm_value v;\n  968 | \n  969 | \t\tread_value_mm(&p, &v);\n  970 | \t\tadd_value(out, v.value, v.len, v.priority);\n  971 | \t}\n  972 | }","lines":13,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-index.c#L960-L972"}]},
+{"id":"ERR_4","type":"incorrect_error_handling","type_label":"Incorrect Error Handling","severity":"low","difficulty":"easy","description":"In `kmod_module_get_size()`, when `coresize` opens fine but `read_str_long()` fails, an error is logged but `size` keeps its initial value `-ENOENT`, so the caller gets a misleading 'no such entry' instead of the real read error.","fix":"Capture the return of `read_str_long()` and, if negative, set `size = err` before `goto done`.","locations":[{"ref":"libkmod/libkmod-module.c:1532-1538","code":" 1532 | \tcfd = openat(dfd, \"coresize\", O_RDONLY | O_CLOEXEC);\n 1533 | \tif (cfd >= 0) {\n 1534 | \t\tif (read_str_long(cfd, &size, 10) < 0)\n 1535 | \t\t\tERR(mod->ctx, \"failed to read coresize from %s\\n\", line);\n 1536 | \t\tclose(cfd);\n 1537 | \t\tgoto done;\n 1538 | \t}","lines":7,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-module.c#L1532-L1538"}]},
+{"id":"ERR_5","type":"incorrect_error_handling","type_label":"Incorrect Error Handling","severity":"low","difficulty":"very_easy","description":"`sleep_until_msec()` checks `clock_nanosleep(...) < 0 && errno != EINTR`. `clock_nanosleep()` returns the error number directly (positive) and does not set `errno`. The `< 0` test is never true, so errors are never reported and the function always returns 0. The caller in `modprobe.c` therefore busy-loops or retries without sleeping on a real failure, for example `EINVAL`.","fix":"Before:\n```c\nif (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) < 0 &&\n    errno != EINTR)\n\treturn -errno;\n```\nAfter:\n```c\nint r = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);\nif (r != 0 && r != EINTR)\n\treturn -r;\n```","locations":[{"ref":"shared/util.c:524-533","code":"  524 | int sleep_until_msec(unsigned long long msec)\n  525 | {\n  526 | \tstruct timespec ts = msec_ts(msec);\n  527 | \n  528 | \tif (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) < 0 &&\n  529 | \t    errno != EINTR)\n  530 | \t\treturn -errno;\n  531 | \n  532 | \treturn 0;\n  533 | }","lines":10,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/shared/util.c#L524-L533"},{"ref":"tools/modprobe.c:399-410","code":"  399 | \t\t\tuntil_msec = get_backoff_delta_msec(tend_msec, &interval_msec);\n  400 | \t\t\terr = sleep_until_msec(until_msec);\n  401 | \n  402 | \t\t\t/* Error out if now_msec() fails */\n  403 | \t\t\tif (tend_msec == wait_msec)\n  404 | \t\t\t\terr = -ENOTSUP;\n  405 | \n  406 | \t\t\tif (err < 0) {\n  407 | \t\t\t\tERR(\"Failed to sleep: %s\\n\", strerror(-err));\n  408 | \t\t\t\terr = -EAGAIN;\n  409 | \t\t\t\tbreak;\n  410 | \t\t\t}","lines":12,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/modprobe.c#L399-L410"}]},
+{"id":"ERR_6","type":"incorrect_error_handling","type_label":"Incorrect Error Handling","severity":"low","difficulty":"easy","description":"`depmod_load_modules()` returns 0 from the middle of the loop when `array_append` fails for alias, softdep or weakdep values. The remaining modules never get their info or dependency symbols loaded, but depmod continues and writes incomplete `modules.dep` and `modules.alias` files while reporting success.","fix":"Return `-ENOMEM` (or the negative `array_append` result) instead of 0, so `depmod_load()` fails.","locations":[{"ref":"tools/depmod.c:1620-1648","code":" 1620 | load_info:\n 1621 | \t\tkmod_module_get_info(mod->kmod, &mod->info_list);\n 1622 | \t\tkmod_list_foreach(l, mod->info_list) {\n 1623 | \t\t\tconst char *key = kmod_module_info_get_key(l);\n 1624 | \n 1625 | \t\t\tif (streq(key, \"alias\")) {\n 1626 | \t\t\t\tconst char *value = kmod_module_info_get_value(l);\n 1627 | \n 1628 | \t\t\t\tif (array_append(&mod->alias_values, value) < 0)\n 1629 | \t\t\t\t\treturn 0;\n 1630 | \t\t\t\tcontinue;\n 1631 | \t\t\t}\n 1632 | \t\t\tif (streq(key, \"softdep\")) {\n 1633 | \t\t\t\tconst char *value = kmod_module_info_get_value(l);\n 1634 | \n 1635 | \t\t\t\tif (array_append(&mod->softdep_values, value) < 0)\n 1636 | \t\t\t\t\treturn 0;\n 1637 | \t\t\t\tcontinue;\n 1638 | \t\t\t}\n 1639 | \t\t\tif (streq(key, \"weakdep\")) {\n 1640 | \t\t\t\tconst char *value = kmod_module_info_get_value(l);\n 1641 | \n 1642 | \t\t\t\tif (array_append(&mod->weakdep_values, value) < 0)\n 1643 | \t\t\t\t\treturn 0;\n 1644 | \t\t\t\tcontinue;\n 1645 | \t\t\t}\n 1646 | \t\t}\n 1647 | \t\tkmod_module_get_dependency_symbols(mod->kmod, &mod->dep_sym_list);\n 1648 | \t\tkmod_module_unref(mod->kmod);","lines":29,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L1620-L1648"}]},
+{"id":"ERR_7","type":"incorrect_error_handling","type_label":"Incorrect Error Handling","severity":"low","difficulty":"easy","description":"`command_do()` tests only `WEXITSTATUS(ret)` after `system()`. A command killed by a signal has `WEXITSTATUS == 0`, so the install/remove command is reported as successful and the function returns the nonzero raw `ret`. Callers test `err < 0`, so a positive `ret` is also treated as success.","fix":"Treat `!WIFEXITED(ret) || WEXITSTATUS(ret) != 0` as failure and return a negative errno or negated status.","locations":[{"ref":"tools/modprobe.c:352-359","code":"  352 | \tsetenv(\"MODPROBE_MODULE\", modname, 1);\n  353 | \tret = system(cmd);\n  354 | \tunsetenv(\"MODPROBE_MODULE\");\n  355 | \tif (ret == -1 || WEXITSTATUS(ret)) {\n  356 | \t\tLOG(\"Error running %s command for %s\\n\", type, modname);\n  357 | \t\tif (ret != -1)\n  358 | \t\t\tret = -WEXITSTATUS(ret);\n  359 | \t}","lines":8,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/modprobe.c#L352-L359"},{"ref":"tools/modprobe.c:516-519","code":"  516 | \t} else\n  517 | \t\terr = command_do(mod, \"remove\", cmd, NULL);\n  518 | \n  519 | \tif (err < 0)","lines":4,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/modprobe.c#L516-L519"}]},
+{"id":"ERR_8","type":"incorrect_error_handling","type_label":"Incorrect Error Handling","severity":"low","difficulty":"easy","description":"In `insmod()`, `show_modversions()` and `show_exports()`, `err` is overwritten on each loop iteration with the result for the latest module. A failure for an earlier module in the alias list is lost when a later module succeeds, so `modprobe` exits 0 although part of the work failed. `rmmod()` breaks on the first error, so the behaviour is inconsistent.","fix":"Keep the first or any negative result, for example `int r = ...; if (r < 0) err = r;` with `err` initialised to 0.","locations":[{"ref":"tools/modprobe.c:675-687","code":"  675 | \t/* If module is loaded from path */\n  676 | \tif (mod != NULL) {\n  677 | \t\terr = insmod_insert(mod, flags, extra_options);\n  678 | \t\tkmod_module_unref(mod);\n  679 | \t} else {\n  680 | \t\tkmod_list_foreach(l, list) {\n  681 | \t\t\tmod = kmod_module_get_module(l);\n  682 | \t\t\terr = insmod_insert(mod, flags, extra_options);\n  683 | \t\t\tkmod_module_unref(mod);\n  684 | \t\t}\n  685 | \t\tkmod_module_unref_list(list);\n  686 | \t}\n  687 | \treturn err;","lines":13,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/modprobe.c#L675-L687"},{"ref":"tools/modprobe.c:254-266","code":"  254 | \t/* If module is loaded from path */\n  255 | \tif (mod != NULL) {\n  256 | \t\terr = print_modversions(mod);\n  257 | \t\tkmod_module_unref(mod);\n  258 | \t} else {\n  259 | \t\tkmod_list_foreach(l, list) {\n  260 | \t\t\tmod = kmod_module_get_module(l);\n  261 | \t\t\terr = print_modversions(mod);\n  262 | \t\t\tkmod_module_unref(mod);\n  263 | \t\t}\n  264 | \t\tkmod_module_unref_list(list);\n  265 | \t}\n  266 | \treturn err;","lines":13,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/modprobe.c#L254-L266"},{"ref":"tools/modprobe.c:296-308","code":"  296 | \t/* If module is loaded from path */\n  297 | \tif (mod != NULL) {\n  298 | \t\terr = print_exports(mod);\n  299 | \t\tkmod_module_unref(mod);\n  300 | \t} else {\n  301 | \t\tkmod_list_foreach(l, list) {\n  302 | \t\t\tmod = kmod_module_get_module(l);\n  303 | \t\t\terr = print_exports(mod);\n  304 | \t\t\tkmod_module_unref(mod);\n  305 | \t\t}\n  306 | \t\tkmod_module_unref_list(list);\n  307 | \t}\n  308 | \treturn err;","lines":13,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/modprobe.c#L296-L308"}]},
+{"id":"ERR_9","type":"incorrect_error_handling","type_label":"Incorrect Error Handling","severity":"low","difficulty":"easy","description":"`do_static_nodes()` ignores the return value of `format->write()` and of `fclose(out)`. Write errors (disk full, closed pipe) are silently dropped and the command exits `EXIT_SUCCESS`. The `write_*` helpers explicitly compute `EXIT_FAILURE` for this case, but the caller discards it. `fgets` with a `PATH_MAX` buffer also splits an overlong line into pieces that are then parsed as separate bogus entries.","fix":"Use `if (format->write(...) != EXIT_SUCCESS) ret = EXIT_FAILURE;` and check `fclose(out) != 0` (or `ferror`) at `finish`.","locations":[{"ref":"tools/static-nodes.c:248-267","code":"  248 | \twhile (fgets(buf, sizeof(buf), in) != NULL) {\n  249 | \t\tchar modname[PATH_MAX];\n  250 | \t\tchar devname[PATH_MAX];\n  251 | \t\tchar type;\n  252 | \t\tunsigned int maj, min;\n  253 | \t\tint matches;\n  254 | \n  255 | \t\tif (buf[0] == '#')\n  256 | \t\t\tcontinue;\n  257 | \n  258 | \t\tmatches =\n  259 | \t\t\tsscanf(buf, \"%s %s %c%u:%u\", modname, devname, &type, &maj, &min);\n  260 | \t\tif (matches != 5 || (type != 'c' && type != 'b')) {\n  261 | \t\t\tfprintf(stderr, \"Error: invalid devname entry: %s\", buf);\n  262 | \t\t\tret = EXIT_FAILURE;\n  263 | \t\t\tcontinue;\n  264 | \t\t}\n  265 | \n  266 | \t\tformat->write(out, modname, devname, type, maj, min);\n  267 | \t}","lines":20,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/static-nodes.c#L248-L267"},{"ref":"tools/static-nodes.c:269-274","code":"  269 | finish:\n  270 | \tif (in)\n  271 | \t\tfclose(in);\n  272 | \tif (out)\n  273 | \t\tfclose(out);\n  274 | \treturn ret;","lines":6,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/static-nodes.c#L269-L274"}]},
+{"id":"ERR_10","type":"incorrect_error_handling","type_label":"Incorrect Error Handling","severity":"negligible","difficulty":"easy","description":"`output_builtin_bin()` ignores the return value of `path_to_modname(line, modname, NULL)`. If it returns NULL (empty basename), `modname` is uninitialised and passed to `index_insert()`.","fix":"```c\nif (path_to_modname(line, modname, NULL) == NULL) {\n\tERR(\"Invalid modules.builtin line: %s\\n\", line);\n\tcontinue;\n}\n```","locations":[{"ref":"tools/depmod.c:2395-2403","code":" 2395 | \twhile (fgets(line, sizeof(line), in) != NULL) {\n 2396 | \t\tif (!isalpha(line[0])) {\n 2397 | \t\t\tERR(\"Invalid modules.builtin line: %s\\n\", line);\n 2398 | \t\t\tcontinue;\n 2399 | \t\t}\n 2400 | \n 2401 | \t\tpath_to_modname(line, modname, NULL);\n 2402 | \t\tindex_insert(idx, modname, \"\", 0);\n 2403 | \t}","lines":9,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L2395-L2403"},{"ref":"shared/util.c:162-171","code":"  162 | char *path_to_modname(const char *path, char buf[static PATH_MAX], size_t *len)\n  163 | {\n  164 | \tconst char *modname;\n  165 | \n  166 | \tmodname = basename(path);\n  167 | \tif (modname == NULL || modname[0] == '\\0')\n  168 | \t\treturn NULL;\n  169 | \n  170 | \treturn modname_normalize(modname, buf, len);\n  171 | }","lines":10,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/shared/util.c#L162-L171"}]},
+{"id":"PERF_1","type":"performance","type_label":"Performance","severity":"low","difficulty":"medium","description":"`kmod_elf_get_dependency_symbols()` calls `kmod_elf_crc_find()` for every undefined symbol, and each call linearly scans the whole `__versions` table with `strnlen` and `streq`. That is O(symbols x versions), which gets slow for large modules with thousands of imports. `kmod_elf_crc_find()` also logs `symbol name ... too long` for every non-matching entry, because the length check and the name comparison share one condition.","fix":"Build a hash or sorted index of `__versions` names once, and split the too-long check from the mismatch `continue`.","locations":[{"ref":"libkmod/libkmod-elf.c:935-956","code":"  935 | static int kmod_elf_crc_find(const struct kmod_elf *elf, uint64_t off,\n  936 | \t\t\t     uint64_t versionslen, const char *name, uint64_t *crc)\n  937 | {\n  938 | \tsize_t namlen, verlen, crclen;\n  939 | \tuint64_t i;\n  940 | \n  941 | \telf_get_modversion_lengths(elf, &verlen, &crclen, &namlen);\n  942 | \n  943 | \tfor (i = 0; i < versionslen; i += verlen) {\n  944 | \t\tconst char *symbol = elf_get_mem(elf, off + i + crclen);\n  945 | \t\tif (strnlen(symbol, namlen) == namlen || !streq(name, symbol)) {\n  946 | \t\t\tELFDBG(elf, \"symbol name at index %\" PRIu64 \" too long\\n\", i);\n  947 | \t\t\tcontinue;\n  948 | \t\t}\n  949 | \t\t*crc = elf_get_uint(elf, off + i, crclen);\n  950 | \t\treturn i / verlen;\n  951 | \t}\n  952 | \n  953 | \tELFDBG(elf, \"could not find crc for symbol '%s'\\n\", name);\n  954 | \t*crc = 0;\n  955 | \treturn -1;\n  956 | }","lines":22,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-elf.c#L935-L956"},{"ref":"libkmod/libkmod-elf.c:1099-1103","code":" 1099 | \t\tname = elf_get_mem(elf, str_off + name_off);\n 1100 | \t\tif (name[0] == '\\0') {\n 1101 | \t\t\tELFDBG(elf, \"empty symbol name at index %zu\\n\", i);\n 1102 | \t\t\tcontinue;\n 1103 | \t\t}","lines":5,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-elf.c#L1099-L1103"}]},
+{"id":"DEAD_1","type":"dead_code","type_label":"Dead Code","severity":"negligible","difficulty":"easy","description":"In `depmod_modules_search()`, the loop over external dirs does `if (err < 0 && err == -ENOENT) continue;` as the only use of `err`, so the check is a no-op. Every other error is silently ignored too, and the function always returns 0. The conditional suggests error handling that does not exist.","fix":"Either log or return errors other than `-ENOENT`, or drop the dead conditional and the unused `err`.","locations":[{"ref":"tools/depmod.c:1440-1454","code":" 1440 | \tint err;\n 1441 | \tstruct cfg_external *ext;\n 1442 | \n 1443 | \terr = depmod_modules_search_path(depmod, depmod->cfg->dirname);\n 1444 | \tif (err < 0)\n 1445 | \t\treturn err;\n 1446 | \n 1447 | \tfor (ext = depmod->cfg->externals; ext != NULL; ext = ext->next) {\n 1448 | \t\terr = depmod_modules_search_path(depmod, ext->path);\n 1449 | \t\tif (err < 0 && err == -ENOENT)\n 1450 | \t\t\t/* ignore external dir absence */\n 1451 | \t\t\tcontinue;\n 1452 | \t}\n 1453 | \n 1454 | \treturn 0;","lines":15,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L1440-L1454"}]},
+{"id":"DEAD_2","type":"dead_code","type_label":"Dead Code","severity":"negligible","difficulty":"very_easy","description":"`kmod_cmd_insert` and `kmod_cmd_remove` are declared `extern` in `kmod.h` but defined nowhere in the tools. They are stale declarations.","fix":"Before: `extern const struct kmod_cmd kmod_cmd_insert;` ... `extern const struct kmod_cmd kmod_cmd_remove;`\nAfter: delete both lines.","locations":[{"ref":"tools/kmod.h:25-28","code":"   25 | extern const struct kmod_cmd kmod_cmd_insert;\n   26 | extern const struct kmod_cmd kmod_cmd_list;\n   27 | extern const struct kmod_cmd kmod_cmd_static_nodes;\n   28 | extern const struct kmod_cmd kmod_cmd_remove;","lines":4,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/kmod.h#L25-L28"}]},
+{"id":"CMT_1","type":"invalid_comment","type_label":"Invalid Comment","severity":"negligible","difficulty":"very_easy","description":"The comment `/* In-memory index (depmod only) */` on `index_file_open()` and friends is inaccurate: this stdio-backed reader is not in memory and is also used by libkmod itself (`libkmod.c` `kmod_lookup_alias_from_alias_bin()`, `index_dump`) as the non-mmap fallback.","fix":"Before:\n```\n/* In-memory index (depmod only) */\n```\nAfter:\n```\n/* File-backed (stdio) index reader */\n```","locations":[{"ref":"libkmod/libkmod-index.h:17-22","code":"   17 | /* In-memory index (depmod only) */\n   18 | struct index_file;\n   19 | struct index_file *index_file_open(const char *filename);\n   20 | void index_file_close(struct index_file *idx);\n   21 | char *index_search(struct index_file *idx, const char *key);\n   22 | void index_dump(struct index_file *in, int fd, bool alias_prefix);","lines":6,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-index.h#L17-L22"}]},
+{"id":"CMT_2","type":"invalid_comment","type_label":"Invalid Comment","severity":"negligible","difficulty":"very_easy","description":"The doc comment of `kmod_unload_resources()` says `Returns: 0 on success or < 0 otherwise.` but the function returns `void`.","fix":"Remove the ` * Returns: 0 on success or < 0 otherwise.` line (and the blank ` *` before it) from the `kmod_unload_resources` doc block.","locations":[{"ref":"libkmod/libkmod.h:104-121","code":"  104 | /**\n  105 |  * kmod_unload_resources:\n  106 |  * @ctx: kmod library context\n  107 |  *\n  108 |  * Unload all the indexes. This will free the resources to maintain the index\n  109 |  * open and all subsequent searches will need to open and close the index.\n  110 |  *\n  111 |  * User is free to call kmod_load_resources() and kmod_unload_resources() as\n  112 |  * many times as wanted during the lifecycle of @ctx. For example, if a daemon\n  113 |  * knows that when starting up it will lookup a lot of modules, it could call\n  114 |  * kmod_load_resources() and after the first burst of searches is gone, it\n  115 |  * could free the resources by calling kmod_unload_resources().\n  116 |  *\n  117 |  * Returns: 0 on success or < 0 otherwise.\n  118 |  *\n  119 |  * Since: 1\n  120 |  */\n  121 | void kmod_unload_resources(struct kmod_ctx *ctx);","lines":18,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod.h#L104-L121"}]},
+{"id":"DUP_1","type":"duplicate_code","type_label":"Duplicate Code","severity":"low","difficulty":"medium","description":"`kmod_config_add_softdep()` and `kmod_config_add_weakdep()` repeat the same two-pass whitespace tokenizer (count/measure pass and copy pass), including the `was_space` state machine, and the pass bodies are near-identical. A fix in one of them is easy to miss in the other.","fix":"Extract a shared token iterator, for example `next_token(const char **s, const char **tok, size_t *len)`, and use it in both functions.","locations":[{"ref":"libkmod/libkmod-config.c:261-412","code":"  261 | static int kmod_config_add_softdep(struct kmod_config *config, const char *modname,\n  262 | \t\t\t\t   const char *line)\n  263 | {\n  264 | \tstruct kmod_list *list;\n  265 | \tstruct kmod_softdep *dep;\n  266 | \tconst char *s, *p;\n  267 | \tchar *itr;\n  268 | \tunsigned int n_pre = 0, n_post = 0;\n  269 | \tsize_t modnamelen = strlen(modname) + 1;\n  270 | \tsize_t buflen = 0, size, size_pre, size_post;\n  271 | \tbool was_space = false;\n  272 | \tenum { S_NONE, S_PRE, S_POST } mode = S_NONE;\n  273 | \n  274 | \tDBG(config->ctx, \"modname=%s\\n\", modname);\n  275 | \n  276 | \t/* analyze and count */\n  277 | \tfor (p = s = line;; s++) {\n  278 | \t\tsize_t plen;\n  279 | \n  280 | \t\tif (*s != '\\0') {\n  281 | \t\t\tif (!isspace(*s)) {\n  282 | \t\t\t\twas_space = false;\n  283 | \t\t\t\tcontinue;\n  284 | \t\t\t}\n  285 | \n  286 | \t\t\tif (was_space) {\n  287 | \t\t\t\tp = s + 1;\n  288 | \t\t\t\tcontinue;\n  289 | \t\t\t}\n  290 | \t\t\twas_space = true;\n  291 | \n  292 | \t\t\tif (p >= s)\n  293 | \t\t\t\tcontinue;\n  294 | \t\t}\n  295 | \t\tplen = s - p;\n  296 | \n  297 | \t\tif (plen == strlen(\"pre:\") && strstartswith(p, \"pre:\"))\n  298 | \t\t\tmode = S_PRE;\n  299 | \t\telse if (plen == strlen(\"post:\") && strstartswith(p, \"post:\"))\n  300 | \t\t\tmode = S_POST;\n  301 | \t\telse if (*s != '\\0' || (*s == '\\0' && !was_space)) {\n  302 | \t\t\tif (mode == S_PRE) {\n  303 | \t\t\t\tbuflen += plen + 1;\n  304 | \t\t\t\tif (uadd32_overflow(n_pre, 1, &n_pre)) {\n  305 | \t\t\t\t\tERR(config->ctx,\n  306 | \t\t\t\t\t    \"too many pre softdeps for modname=%s\\n\",\n  307 | \t\t\t\t\t    modname);\n  308 | \t\t\t\t\treturn -EINVAL;\n  309 | \t\t\t\t}\n  310 | \t\t\t} else if (mode == S_POST) {\n  311 | \t\t\t\tbuflen += plen + 1;\n  312 | \t\t\t\tif (uadd32_overflow(n_post, 1, &n_post)) {\n  313 | \t\t\t\t\tERR(config->ctx,\n  314 | \t\t\t\t\t    \"too many post softdeps for modname=%s\\n\",\n  315 | \t\t\t\t\t    modname);\n  316 | \t\t\t\t\treturn -EINVAL;\n  317 | \t\t\t\t}\n  318 | \t\t\t}\n  319 | \t\t}\n  320 | \t\tp = s + 1;\n  321 | \t\tif (*s == '\\0')\n  322 | \t\t\tbreak;\n  323 | \t}\n  324 | \n  325 | \tDBG(config->ctx, \"%u pre, %u post\\n\", n_pre, n_post);\n  326 | \n  327 | \t/*\n  328 | \t * sizeof(struct kmod_softdep) + modnamelen +\n  329 | \t * n_pre * sizeof(const char *) + n_post * sizeof(const char *) + buflen\n  330 | \t */\n  331 | \tif (uaddsz_overflow(sizeof(struct kmod_softdep), modnamelen, &size) ||\n  332 | \t    umulsz_overflow(n_pre, sizeof(const char *), &size_pre) ||\n  333 | \t    uaddsz_overflow(size, size_pre, &size) ||\n  334 | \t    umulsz_overflow(n_post, sizeof(const char *), &size_post) ||\n  335 | \t    uaddsz_overflow(size, size_post, &size) ||\n  336 | \t    uaddsz_overflow(size, buflen, &size)) {\n  337 | \t\tERR(config->ctx, \"out-of-memory modname=%s\\n\", modname);\n  338 | \t\treturn -ENOMEM;\n  339 | \t}\n  340 | \n  341 | \tdep = malloc(size);\n  342 | \tif (dep == NULL) {\n  343 | \t\tERR(config->ctx, \"out-of-memory modname=%s\\n\", modname);\n  344 | \t\treturn -ENOMEM;\n  345 | \t}\n  346 | \tdep->n_pre = n_pre;\n  347 | \tdep->n_post = n_post;\n  348 | \tdep->pre = (const char **)((char *)dep + sizeof(struct kmod_softdep));\n  349 | \tdep->post = dep->pre + n_pre;\n  350 | \tdep->name = (char *)(dep->post + n_post);\n  351 | \n  352 | \tmemcpy(dep->name, modname, modnamelen);\n  353 | \n  354 | \t/* copy strings */\n  355 | \titr = dep->name + modnamelen;\n  356 | \tn_pre = 0;\n  357 | \tn_post = 0;\n  358 | \tmode = S_NONE;\n  359 | \twas_space = false;\n  360 | \tfor (p = s = line;; s++) {\n  361 | \t\tsize_t plen;\n  362 | \n  363 | \t\tif (*s != '\\0') {\n  364 | \t\t\tif (!isspace(*s)) {\n  365 | \t\t\t\twas_space = false;\n  366 | \t\t\t\tcontinue;\n  367 | \t\t\t}\n  368 | \n  369 | \t\t\tif (was_space) {\n  370 | \t\t\t\tp = s + 1;\n  371 | \t\t\t\tcontinue;\n  372 | \t\t\t}\n  373 | \t\t\twas_space = true;\n  374 | \n  375 | \t\t\tif (p >= s)\n  376 | \t\t\t\tcontinue;\n  377 | \t\t}\n  378 | \t\tplen = s - p;\n  379 | \n  380 | \t\tif (plen == strlen(\"pre:\") && strstartswith(p, \"pre:\"))\n  381 | \t\t\tmode = S_PRE;\n  382 | \t\telse if (plen == strlen(\"post:\") && strstartswith(p, \"post:\"))\n  383 | \t\t\tmode = S_POST;\n  384 | \t\telse if (*s != '\\0' || (*s == '\\0' && !was_space)) {\n  385 | \t\t\tif (mode == S_PRE) {\n  386 | \t\t\t\tdep->pre[n_pre] = itr;\n  387 | \t\t\t\tmemcpy(itr, p, plen);\n  388 | \t\t\t\titr[plen] = '\\0';\n  389 | \t\t\t\titr += plen + 1;\n  390 | \t\t\t\tn_pre++;\n  391 | \t\t\t} else if (mode == S_POST) {\n  392 | \t\t\t\tdep->post[n_post] = itr;\n  393 | \t\t\t\tmemcpy(itr, p, plen);\n  394 | \t\t\t\titr[plen] = '\\0';\n  395 | \t\t\t\titr += plen + 1;\n  396 | \t\t\t\tn_post++;\n  397 | \t\t\t}\n  398 | \t\t}\n  399 | \t\tp = s + 1;\n  400 | \t\tif (*s == '\\0')\n  401 | \t\t\tbreak;\n  402 | \t}\n  403 | \n  404 | \tlist = kmod_list_append(config->softdeps, dep);\n  405 | \tif (list == NULL) {\n  406 | \t\tfree(dep);\n  407 | \t\treturn -ENOMEM;\n  408 | \t}\n  409 | \tconfig->softdeps = list;\n  410 | \n  411 | \treturn 0;\n  412 | }","lines":152,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-config.c#L261-L412"},{"ref":"libkmod/libkmod-config.c:414-528","code":"  414 | static int kmod_config_add_weakdep(struct kmod_config *config, const char *modname,\n  415 | \t\t\t\t   const char *line)\n  416 | {\n  417 | \tstruct kmod_list *list;\n  418 | \tstruct kmod_weakdep *dep;\n  419 | \tconst char *s, *p;\n  420 | \tchar *itr;\n  421 | \tunsigned int n_weak = 0;\n  422 | \tsize_t modnamelen = strlen(modname) + 1;\n  423 | \tsize_t buflen = 0, size, size_weak;\n  424 | \tbool was_space = false;\n  425 | \n  426 | \tDBG(config->ctx, \"modname=%s\\n\", modname);\n  427 | \n  428 | \t/* analyze and count */\n  429 | \tfor (p = s = line;; s++) {\n  430 | \t\tsize_t plen;\n  431 | \n  432 | \t\tif (*s != '\\0') {\n  433 | \t\t\tif (!isspace(*s)) {\n  434 | \t\t\t\twas_space = false;\n  435 | \t\t\t\tcontinue;\n  436 | \t\t\t}\n  437 | \n  438 | \t\t\tif (was_space) {\n  439 | \t\t\t\tp = s + 1;\n  440 | \t\t\t\tcontinue;\n  441 | \t\t\t}\n  442 | \t\t\twas_space = true;\n  443 | \n  444 | \t\t\tif (p >= s)\n  445 | \t\t\t\tcontinue;\n  446 | \t\t}\n  447 | \t\tplen = s - p;\n  448 | \n  449 | \t\tif (*s != '\\0' || (*s == '\\0' && !was_space)) {\n  450 | \t\t\tbuflen += plen + 1;\n  451 | \t\t\tif (uadd32_overflow(n_weak, 1, &n_weak)) {\n  452 | \t\t\t\tERR(config->ctx, \"too many weakdeps for modname=%s\\n\",\n  453 | \t\t\t\t    modname);\n  454 | \t\t\t\treturn -EINVAL;\n  455 | \t\t\t}\n  456 | \t\t}\n  457 | \t\tp = s + 1;\n  458 | \t\tif (*s == '\\0')\n  459 | \t\t\tbreak;\n  460 | \t}\n  461 | \n  462 | \tDBG(config->ctx, \"%u weak\\n\", n_weak);\n  463 | \n  464 | \t/* sizeof(struct kmod_weakdep) + modnamelen + n_weak * sizeof(const char *) + buflen */\n  465 | \tif (uaddsz_overflow(sizeof(struct kmod_weakdep), modnamelen, &size) ||\n  466 | \t    umulsz_overflow(n_weak, sizeof(const char *), &size_weak) ||\n  467 | \t    uaddsz_overflow(size, size_weak, &size) ||\n  468 | \t    uaddsz_overflow(size, buflen, &size)) {\n  469 | \t\tERR(config->ctx, \"out-of-memory modname=%s\\n\", modname);\n  470 | \t\treturn -ENOMEM;\n  471 | \t}\n  472 | \n  473 | \tdep = malloc(size);\n  474 | \tif (dep == NULL) {\n  475 | \t\tERR(config->ctx, \"out-of-memory modname=%s\\n\", modname);\n  476 | \t\treturn -ENOMEM;\n  477 | \t}\n  478 | \tdep->n_weak = n_weak;\n  479 | \tdep->weak = (const char **)((char *)dep + sizeof(struct kmod_weakdep));\n  480 | \tdep->name = (char *)(dep->weak + n_weak);\n  481 | \n  482 | \tmemcpy(dep->name, modname, modnamelen);\n  483 | \n  484 | \t/* copy strings */\n  485 | \titr = dep->name + modnamelen;\n  486 | \tn_weak = 0;\n  487 | \twas_space = false;\n  488 | \tfor (p = s = line;; s++) {\n  489 | \t\tsize_t plen;\n  490 | \n  491 | \t\tif (*s != '\\0') {\n  492 | \t\t\tif (!isspace(*s)) {\n  493 | \t\t\t\twas_space = false;\n  494 | \t\t\t\tcontinue;\n  495 | \t\t\t}\n  496 | \n  497 | \t\t\tif (was_space) {\n  498 | \t\t\t\tp = s + 1;\n  499 | \t\t\t\tcontinue;\n  500 | \t\t\t}\n  501 | \t\t\twas_space = true;\n  502 | \n  503 | \t\t\tif (p >= s)\n  504 | \t\t\t\tcontinue;\n  505 | \t\t}\n  506 | \t\tplen = s - p;\n  507 | \n  508 | \t\tif (*s != '\\0' || (*s == '\\0' && !was_space)) {\n  509 | \t\t\tdep->weak[n_weak] = itr;\n  510 | \t\t\tmemcpy(itr, p, plen);\n  511 | \t\t\titr[plen] = '\\0';\n  512 | \t\t\titr += plen + 1;\n  513 | \t\t\tn_weak++;\n  514 | \t\t}\n  515 | \t\tp = s + 1;\n  516 | \t\tif (*s == '\\0')\n  517 | \t\t\tbreak;\n  518 | \t}\n  519 | \n  520 | \tlist = kmod_list_append(config->weakdeps, dep);\n  521 | \tif (list == NULL) {\n  522 | \t\tfree(dep);\n  523 | \t\treturn -ENOMEM;\n  524 | \t}\n  525 | \tconfig->weakdeps = list;\n  526 | \n  527 | \treturn 0;\n  528 | }","lines":115,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-config.c#L414-L528"}]},
+{"id":"DUP_2","type":"duplicate_code","type_label":"Duplicate Code","severity":"low","difficulty":"medium","description":"`kmod_module_get_versions()`, `kmod_module_get_symbols()` and `kmod_module_get_dependency_symbols()` (and their `*_new`/`*_free` helpers) are near-identical ~45-line functions differing only in the elf getter and element type; the error handling is copy-pasted three times.","fix":"Factor out a helper that takes the elf getter and a constructor/destructor callback pair and builds the `kmod_list`, or unify `kmod_module_version`/`kmod_module_symbol` into one struct.","locations":[{"ref":"libkmod/libkmod-module.c:2080-2127","code":" 2080 | KMOD_EXPORT int kmod_module_get_versions(const struct kmod_module *mod,\n 2081 | \t\t\t\t\t struct kmod_list **list)\n 2082 | {\n 2083 | \tstruct kmod_modversion *versions;\n 2084 | \tint i, count, ret = 0;\n 2085 | \n 2086 | \tif (mod == NULL || list == NULL)\n 2087 | \t\treturn -ENOENT;\n 2088 | \n 2089 | \tassert(*list == NULL);\n 2090 | \n 2091 | \tret = kmod_module_load_elf(mod);\n 2092 | \tif (ret)\n 2093 | \t\treturn ret;\n 2094 | \n 2095 | \tcount = kmod_elf_get_modversions(mod->elf, &versions);\n 2096 | \tif (count < 0)\n 2097 | \t\treturn count;\n 2098 | \n 2099 | \tfor (i = 0; i < count; i++) {\n 2100 | \t\tstruct kmod_module_version *mv;\n 2101 | \t\tstruct kmod_list *n;\n 2102 | \n 2103 | \t\tmv = kmod_module_versions_new(versions[i].crc, versions[i].symbol);\n 2104 | \t\tif (mv == NULL) {\n 2105 | \t\t\tkmod_module_versions_free_list(*list);\n 2106 | \t\t\t*list = NULL;\n 2107 | \t\t\tret = -ENOMEM;\n 2108 | \t\t\tgoto list_error;\n 2109 | \t\t}\n 2110 | \n 2111 | \t\tn = kmod_list_append(*list, mv);\n 2112 | \t\tif (n != NULL)\n 2113 | \t\t\t*list = n;\n 2114 | \t\telse {\n 2115 | \t\t\tkmod_module_version_free(mv);\n 2116 | \t\t\tkmod_module_versions_free_list(*list);\n 2117 | \t\t\t*list = NULL;\n 2118 | \t\t\tret = -ENOMEM;\n 2119 | \t\t\tgoto list_error;\n 2120 | \t\t}\n 2121 | \t}\n 2122 | \tret = count;\n 2123 | \n 2124 | list_error:\n 2125 | \tfree(versions);\n 2126 | \treturn ret;\n 2127 | }","lines":48,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-module.c#L2080-L2127"},{"ref":"libkmod/libkmod-module.c:2180-2227","code":" 2180 | KMOD_EXPORT int kmod_module_get_symbols(const struct kmod_module *mod,\n 2181 | \t\t\t\t\tstruct kmod_list **list)\n 2182 | {\n 2183 | \tstruct kmod_modversion *symbols;\n 2184 | \tint i, count, ret = 0;\n 2185 | \n 2186 | \tif (mod == NULL || list == NULL)\n 2187 | \t\treturn -ENOENT;\n 2188 | \n 2189 | \tassert(*list == NULL);\n 2190 | \n 2191 | \tret = kmod_module_load_elf(mod);\n 2192 | \tif (ret)\n 2193 | \t\treturn ret;\n 2194 | \n 2195 | \tcount = kmod_elf_get_symbols(mod->elf, &symbols);\n 2196 | \tif (count < 0)\n 2197 | \t\treturn count;\n 2198 | \n 2199 | \tfor (i = 0; i < count; i++) {\n 2200 | \t\tstruct kmod_module_symbol *mv;\n 2201 | \t\tstruct kmod_list *n;\n 2202 | \n 2203 | \t\tmv = kmod_module_symbols_new(symbols[i].crc, symbols[i].symbol);\n 2204 | \t\tif (mv == NULL) {\n 2205 | \t\t\tkmod_module_symbols_free_list(*list);\n 2206 | \t\t\t*list = NULL;\n 2207 | \t\t\tret = -ENOMEM;\n 2208 | \t\t\tgoto list_error;\n 2209 | \t\t}\n 2210 | \n 2211 | \t\tn = kmod_list_append(*list, mv);\n 2212 | \t\tif (n != NULL)\n 2213 | \t\t\t*list = n;\n 2214 | \t\telse {\n 2215 | \t\t\tkmod_module_symbol_free(mv);\n 2216 | \t\t\tkmod_module_symbols_free_list(*list);\n 2217 | \t\t\t*list = NULL;\n 2218 | \t\t\tret = -ENOMEM;\n 2219 | \t\t\tgoto list_error;\n 2220 | \t\t}\n 2221 | \t}\n 2222 | \tret = count;\n 2223 | \n 2224 | list_error:\n 2225 | \tfree(symbols);\n 2226 | \treturn ret;\n 2227 | }","lines":48,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-module.c#L2180-L2227"},{"ref":"libkmod/libkmod-module.c:2285-2333","code":" 2285 | KMOD_EXPORT int kmod_module_get_dependency_symbols(const struct kmod_module *mod,\n 2286 | \t\t\t\t\t\t   struct kmod_list **list)\n 2287 | {\n 2288 | \tstruct kmod_modversion *symbols;\n 2289 | \tint i, count, ret = 0;\n 2290 | \n 2291 | \tif (mod == NULL || list == NULL)\n 2292 | \t\treturn -ENOENT;\n 2293 | \n 2294 | \tassert(*list == NULL);\n 2295 | \n 2296 | \tret = kmod_module_load_elf(mod);\n 2297 | \tif (ret)\n 2298 | \t\treturn ret;\n 2299 | \n 2300 | \tcount = kmod_elf_get_dependency_symbols(mod->elf, &symbols);\n 2301 | \tif (count < 0)\n 2302 | \t\treturn count;\n 2303 | \n 2304 | \tfor (i = 0; i < count; i++) {\n 2305 | \t\tstruct kmod_module_dependency_symbol *mv;\n 2306 | \t\tstruct kmod_list *n;\n 2307 | \n 2308 | \t\tmv = kmod_module_dependency_symbols_new(symbols[i].crc, symbols[i].bind,\n 2309 | \t\t\t\t\t\t\tsymbols[i].symbol);\n 2310 | \t\tif (mv == NULL) {\n 2311 | \t\t\tkmod_module_dependency_symbols_free_list(*list);\n 2312 | \t\t\t*list = NULL;\n 2313 | \t\t\tret = -ENOMEM;\n 2314 | \t\t\tgoto list_error;\n 2315 | \t\t}\n 2316 | \n 2317 | \t\tn = kmod_list_append(*list, mv);\n 2318 | \t\tif (n != NULL)\n 2319 | \t\t\t*list = n;\n 2320 | \t\telse {\n 2321 | \t\t\tkmod_module_dependency_symbol_free(mv);\n 2322 | \t\t\tkmod_module_dependency_symbols_free_list(*list);\n 2323 | \t\t\t*list = NULL;\n 2324 | \t\t\tret = -ENOMEM;\n 2325 | \t\t\tgoto list_error;\n 2326 | \t\t}\n 2327 | \t}\n 2328 | \tret = count;\n 2329 | \n 2330 | list_error:\n 2331 | \tfree(symbols);\n 2332 | \treturn ret;\n 2333 | }","lines":49,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-module.c#L2285-L2333"}]},
+{"id":"DUP_3","type":"duplicate_code","type_label":"Duplicate Code","severity":"negligible","difficulty":"easy","description":"`kmod_lookup_alias_from_commands()` repeats the same ~35-line block for `install_commands` and `remove_commands`: find the matching name, create the module, append it to the list, set the commands, break. The only differences are the list and the setter.","fix":"Extract a static helper taking the command list and a setter function pointer (`kmod_module_set_install_commands` or `kmod_module_set_remove_commands`). Call it once for each list.","locations":[{"ref":"libkmod/libkmod.c:616-697","code":"  616 | int kmod_lookup_alias_from_commands(struct kmod_ctx *ctx, const char *name,\n  617 | \t\t\t\t    struct kmod_list **list)\n  618 | {\n  619 | \tstruct kmod_config *config = ctx->config;\n  620 | \tstruct kmod_list *l, *node;\n  621 | \tint err, nmatch = 0;\n  622 | \n  623 | \tassert(*list == NULL);\n  624 | \n  625 | \tkmod_list_foreach(l, config->install_commands) {\n  626 | \t\tconst char *modname = kmod_command_get_modname(l);\n  627 | \n  628 | \t\tif (streq(modname, name)) {\n  629 | \t\t\tconst char *cmd = kmod_command_get_command(l);\n  630 | \t\t\tstruct kmod_module *mod;\n  631 | \n  632 | \t\t\terr = kmod_module_new_from_name(ctx, modname, &mod);\n  633 | \t\t\tif (err < 0) {\n  634 | \t\t\t\tERR(ctx, \"Could not create module from name %s: %s\\n\",\n  635 | \t\t\t\t    modname, strerror(-err));\n  636 | \t\t\t\treturn err;\n  637 | \t\t\t}\n  638 | \n  639 | \t\t\tnode = kmod_list_append(*list, mod);\n  640 | \t\t\tif (node == NULL) {\n  641 | \t\t\t\tERR(ctx, \"out of memory\\n\");\n  642 | \t\t\t\tkmod_module_unref(mod);\n  643 | \t\t\t\treturn -ENOMEM;\n  644 | \t\t\t}\n  645 | \n  646 | \t\t\t*list = node;\n  647 | \t\t\tnmatch = 1;\n  648 | \n  649 | \t\t\tkmod_module_set_install_commands(mod, cmd);\n  650 | \n  651 | \t\t\t/*\n  652 | \t\t\t * match only the first one, like modprobe from\n  653 | \t\t\t * module-init-tools does\n  654 | \t\t\t */\n  655 | \t\t\tbreak;\n  656 | \t\t}\n  657 | \t}\n  658 | \n  659 | \tif (nmatch)\n  660 | \t\treturn nmatch;\n  661 | \n  662 | \tkmod_list_foreach(l, config->remove_commands) {\n  663 | \t\tconst char *modname = kmod_command_get_modname(l);\n  664 | \n  665 | \t\tif (streq(modname, name)) {\n  666 | \t\t\tconst char *cmd = kmod_command_get_command(l);\n  667 | \t\t\tstruct kmod_module *mod;\n  668 | \n  669 | \t\t\terr = kmod_module_new_from_name(ctx, modname, &mod);\n  670 | \t\t\tif (err < 0) {\n  671 | \t\t\t\tERR(ctx, \"Could not create module from name %s: %s\\n\",\n  672 | \t\t\t\t    modname, strerror(-err));\n  673 | \t\t\t\treturn err;\n  674 | \t\t\t}\n  675 | \n  676 | \t\t\tnode = kmod_list_append(*list, mod);\n  677 | \t\t\tif (node == NULL) {\n  678 | \t\t\t\tERR(ctx, \"out of memory\\n\");\n  679 | \t\t\t\tkmod_module_unref(mod);\n  680 | \t\t\t\treturn -ENOMEM;\n  681 | \t\t\t}\n  682 | \n  683 | \t\t\t*list = node;\n  684 | \t\t\tnmatch = 1;\n  685 | \n  686 | \t\t\tkmod_module_set_remove_commands(mod, cmd);\n  687 | \n  688 | \t\t\t/*\n  689 | \t\t\t * match only the first one, like modprobe from\n  690 | \t\t\t * module-init-tools does\n  691 | \t\t\t */\n  692 | \t\t\tbreak;\n  693 | \t\t}\n  694 | \t}\n  695 | \n  696 | \treturn nmatch;\n  697 | }","lines":82,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod.c#L616-L697"}]},
+{"id":"DUP_4","type":"duplicate_code","type_label":"Duplicate Code","severity":"negligible","difficulty":"easy","description":"`hash_add()` and `hash_add_unique()` contain a near-identical ~35-line body: hash and bucket computation, bucket growth via `realloc`, and the sorted-insert scan with `memmove`. They differ only in the `c == 0` branch. Any fix to the growth or insert logic must be applied twice.","fix":"Factor the shared logic into a static helper such as `hash_insert(hash, key, value, bool replace)`. `hash_add()` and `hash_add_unique()` would then be thin wrappers around it.","locations":[{"ref":"shared/hash.c:130-209","code":"  130 | int hash_add(struct hash *hash, const char *key, const void *value)\n  131 | {\n  132 | \tunsigned int keylen = strlen(key);\n  133 | \tunsigned int hashval = hash_superfast(key, keylen);\n  134 | \tunsigned int pos = hashval & (hash->n_buckets - 1);\n  135 | \tstruct hash_bucket *bucket = hash->buckets + pos;\n  136 | \tstruct hash_entry *entry, *entry_end;\n  137 | \n  138 | \tif (bucket->used + 1 >= bucket->total) {\n  139 | \t\tunsigned new_total = bucket->total + hash->step;\n  140 | \t\tsize_t size = new_total * sizeof(struct hash_entry);\n  141 | \t\tstruct hash_entry *tmp = realloc(bucket->entries, size);\n  142 | \t\tif (tmp == NULL)\n  143 | \t\t\treturn -ENOMEM;\n  144 | \t\tbucket->entries = tmp;\n  145 | \t\tbucket->total = new_total;\n  146 | \t}\n  147 | \n  148 | \tentry = bucket->entries;\n  149 | \tentry_end = entry + bucket->used;\n  150 | \tfor (; entry < entry_end; entry++) {\n  151 | \t\tint c = strcmp(key, entry->key);\n  152 | \t\tif (c == 0) {\n  153 | \t\t\tif (hash->free_value)\n  154 | \t\t\t\thash->free_value((void *)entry->value);\n  155 | \t\t\tentry->key = key;\n  156 | \t\t\tentry->value = value;\n  157 | \t\t\treturn 0;\n  158 | \t\t} else if (c < 0) {\n  159 | \t\t\tmemmove(entry + 1, entry,\n  160 | \t\t\t\t(entry_end - entry) * sizeof(struct hash_entry));\n  161 | \t\t\tbreak;\n  162 | \t\t}\n  163 | \t}\n  164 | \n  165 | \tentry->key = key;\n  166 | \tentry->value = value;\n  167 | \tbucket->used++;\n  168 | \thash->count++;\n  169 | \treturn 0;\n  170 | }\n  171 | \n  172 | /* similar to hash_add(), but fails if key already exists */\n  173 | int hash_add_unique(struct hash *hash, const char *key, const void *value)\n  174 | {\n  175 | \tunsigned int keylen = strlen(key);\n  176 | \tunsigned int hashval = hash_superfast(key, keylen);\n  177 | \tunsigned int pos = hashval & (hash->n_buckets - 1);\n  178 | \tstruct hash_bucket *bucket = hash->buckets + pos;\n  179 | \tstruct hash_entry *entry, *entry_end;\n  180 | \n  181 | \tif (bucket->used + 1 >= bucket->total) {\n  182 | \t\tunsigned new_total = bucket->total + hash->step;\n  183 | \t\tsize_t size = new_total * sizeof(struct hash_entry);\n  184 | \t\tstruct hash_entry *tmp = realloc(bucket->entries, size);\n  185 | \t\tif (tmp == NULL)\n  186 | \t\t\treturn -ENOMEM;\n  187 | \t\tbucket->entries = tmp;\n  188 | \t\tbucket->total = new_total;\n  189 | \t}\n  190 | \n  191 | \tentry = bucket->entries;\n  192 | \tentry_end = entry + bucket->used;\n  193 | \tfor (; entry < entry_end; entry++) {\n  194 | \t\tint c = strcmp(key, entry->key);\n  195 | \t\tif (c == 0)\n  196 | \t\t\treturn -EEXIST;\n  197 | \t\telse if (c < 0) {\n  198 | \t\t\tmemmove(entry + 1, entry,\n  199 | \t\t\t\t(entry_end - entry) * sizeof(struct hash_entry));\n  200 | \t\t\tbreak;\n  201 | \t\t}\n  202 | \t}\n  203 | \n  204 | \tentry->key = key;\n  205 | \tentry->value = value;\n  206 | \tbucket->used++;\n  207 | \thash->count++;\n  208 | \treturn 0;\n  209 | }","lines":80,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/shared/hash.c#L130-L209"}]},
+{"id":"OTHER_1","type":"other","type_label":"Other","severity":"low","difficulty":"very_easy","description":"`kmod_file_open()` returns `ret` without closing `file->fd` when `lseek(file->fd, 0, SEEK_CUR)` fails (non-seekable input such as a pipe or FIFO). `_cleanup_free_` frees only the struct, so the descriptor leaks. The `pread_str_safe` failure path just below does call `close()`. `ret` is also an `int` holding an `off_t` result, and the function returns `ret` (which is -1) instead of `-errno`, so callers get `-EPERM` rather than `-ESPIPE`.","fix":"```\nif (lseek(file->fd, 0, SEEK_CUR) < 0) {\n\tret = -errno;\n\tclose(file->fd);\n\treturn ret;\n}\n```","locations":[{"ref":"libkmod/libkmod-file.c:84-89","code":"   84 | \t/*\n   85 | \t * Bail out if underlying fd is not seekable  - that is not supported\n   86 | \t */\n   87 | \tret = lseek(file->fd, 0, SEEK_CUR);\n   88 | \tif (ret < 0)\n   89 | \t\treturn ret;","lines":6,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/libkmod/libkmod-file.c#L84-L89"}]},
+{"id":"OTHER_2","type":"other","type_label":"Other","severity":"low","difficulty":"easy","description":"In `depmod_modules_search_file()`, `relpath = path + depmod->cfg->dirnamelen + 1` is computed unconditionally. For modules found in `external` directories, `path` does not start with `cfg->dirname` and may be shorter than `dirnamelen + 1`, so the pointer lies beyond the string. It is then read by the `%s` in two `DBG` calls (lines 1287 and 1298) when debug logging is on, which is an out-of-bounds read.","fix":"Only compute `relpath` when `strncmp(path, cfg->dirname, cfg->dirnamelen) == 0 && path[cfg->dirnamelen] == '/'`; otherwise use `path` for the debug output.","locations":[{"ref":"tools/depmod.c:1286-1298","code":" 1286 | \trelpath = path + depmod->cfg->dirnamelen + 1;\n 1287 | \tDBG(\"try %s (%s)\\n\", relpath, modname);\n 1288 | \n 1289 | \tmod = hash_find(depmod->modules_by_name, modname);\n 1290 | \tif (mod == NULL)\n 1291 | \t\tgoto add;\n 1292 | \n 1293 | \tif (depmod_module_is_higher_priority(depmod, mod, baselen, modnamelen, path)) {\n 1294 | \t\tDBG(\"Ignored lower priority: %s, higher: %s\\n\", path, mod->path);\n 1295 | \t\treturn 0;\n 1296 | \t}\n 1297 | \n 1298 | \tDBG(\"Replace lower priority %s with new module %s\\n\", mod->relpath, relpath);","lines":13,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L1286-L1298"}]},
+{"id":"OTHER_3","type":"other","type_label":"Other","severity":"low","difficulty":"easy","description":"`depmod_symbol_find()` strips a leading `.` and then does `if (name[0] == cfg->sym_prefix) name++`. The default `sym_prefix` is `'\\0'`, so a symbol named exactly `.` (as an undefined symbol in a crafted module) becomes `\"\"`, then `name[0] == '\\0'` matches and `name` is advanced past the terminator. `hash_find` then reads out-of-bounds. `depmod_symbol_add()` has the same pattern with `name[0] == sym_prefix`, and so does `depmod_load_system_map()` with `p[0] == sym_prefix`.","fix":"Guard the prefix skip with `depmod->cfg->sym_prefix != '\\0' &&` (or `name[0] != '\\0'`) before incrementing.","locations":[{"ref":"tools/depmod.c:1584-1591","code":" 1584 | static struct symbol *depmod_symbol_find(const struct depmod *depmod, const char *name)\n 1585 | {\n 1586 | \tif (name[0] == '.') /* PPC64 needs this: .foo == foo */\n 1587 | \t\tname++;\n 1588 | \tif (name[0] == depmod->cfg->sym_prefix)\n 1589 | \t\tname++;\n 1590 | \treturn hash_find(depmod->symbols, name);\n 1591 | }","lines":8,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L1584-L1591"},{"ref":"tools/depmod.c:1556-1563","code":" 1556 | \tsize_t namelen;\n 1557 | \tint err;\n 1558 | \tstruct symbol *sym;\n 1559 | \n 1560 | \tif (!prefix_skipped && (name[0] == depmod->cfg->sym_prefix))\n 1561 | \t\tname++;\n 1562 | \n 1563 | \tnamelen = strlen(name) + 1;","lines":8,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L1556-L1563"},{"ref":"tools/depmod.c:2736-2738","code":" 2736 | \t\t/* skip prefix */\n 2737 | \t\tif (p[0] == depmod->cfg->sym_prefix)\n 2738 | \t\t\tp++;","lines":3,"link":"https://github.com/kmod-project/kmod/blob/692c5a0f731f31c1da49cce12b231be35c76b7fe/tools/depmod.c#L2736-L2738"}]}
+]</script>
+<script type="application/json" id="PI">{"name":"kmod","description":"","git_url":"git@github.com:kmod-project/kmod.git","repo_url":"https://github.com/kmod-project/kmod","commit":"692c5a0f731f31c1da49cce12b231be35c76b7fe","commit_short":"692c5a0f73","commit_url":"https://github.com/kmod-project/kmod/commit/692c5a0f731f31c1da49cce12b231be35c76b7fe","branch":"master","has_tests":true,"test_layout":"separate_dirs","test_globs":["testsuite/**","scripts/test/**"],"generated":"2026-10-25"}</script>
+<script type="application/json" id="OPT">{"show_ignored":false}</script>
+<div class="app">
+<div class="top">
+  <div>
+    <h1>Code Audit Report &mdash; kmod</h1>
+    <div class="meta">Generated 2026-10-25 &mdash; <span id="stats"></span></div>
+  </div>
+  <div class="top-right">
+    <div class="search-wrap">
+      <input type="search" id="search" placeholder="Search findings…" autocomplete="off">
+      <button id="search-scope" class="action-btn" type="button" title="Toggle: search everywhere vs. only in file/folder paths">📁 Paths only</button>
+    </div>
+    <label class="group-label">Group by
+      <select id="groupby">
+        <option value="type">Type</option>
+        <option value="severity">Severity</option>
+        <option value="file">File</option>
+        <option value="folder">Folder</option>
+        <option value="none">None (flat)</option>
+      </select>
+    </label>
+  </div>
+</div>
+<div class="project-info"><div class="pi-name">kmod</div><div class="pi-row"><a class="pi-repo-btn" href="https://github.com/kmod-project/kmod" target="_blank" rel="noopener">&#128279; https://github.com/kmod-project/kmod</a><span><span class="pi-k">branch</span> <code>master</code></span><span><span class="pi-k">commit</span> <a href="https://github.com/kmod-project/kmod/commit/692c5a0f731f31c1da49cce12b231be35c76b7fe" target="_blank" rel="noopener"><code>692c5a0f73</code></a></span></div></div>
+<div class="filterbar" id="filterbar"></div>
+<div id="progress-wrap">
+  <div id="progress-bar"><div id="progress-fill"></div></div>
+  <span id="progress-text"></span>
+  <button class="action-btn" data-action="collapse-all">⊟ Collapse all</button>
+  <button class="action-btn" data-action="expand-all">⊞ Expand all</button>
+  <button class="action-btn" data-action="toggle-width" title="Toggle content width: centered vs. full-width">⤢ Wide</button>
+  <button class="action-btn" data-action="download-md">&#11015; MD</button>
+  <button class="action-btn" data-action="download-md-short">&#11015; MD Short</button>
+  <button class="action-btn" data-action="download-toml">&#11015; TOML</button>
+</div>
+<div id="hidden-bar"></div>
+<div id="content"></div>
+</div>
+<script>
+(function(){
+'use strict';
+
+// Data
+// ALL_FINDINGS is everything the TOML held; FINDINGS is what the report draws.
+// A finding with a non-empty `ignore` ("False Positive", ...) was dismissed by hand:
+// it is dropped from FINDINGS - so it is never drawn, counted, grouped, filtered or
+// exported to Markdown - but kept in ALL_FINDINGS so the TOML export round-trips the
+// marker instead of silently deleting it. Ids were already assigned (python side)
+// over the FULL list, so dismissing one never renumbers the rest.
+const ALL_FINDINGS = JSON.parse(document.getElementById('D').textContent);
+const OPTS         = JSON.parse(document.getElementById('OPT').textContent);
+const PROJECT_INFO = JSON.parse(document.getElementById('PI').textContent);
+const FINDINGS     = OPTS.show_ignored ? ALL_FINDINGS : ALL_FINDINGS.filter(f => !f.ignore);
+const SEVS     = ['critical','high','medium','low','negligible'];
+const STATUSES = ['open','fixed','wont-fix','false-positive'];
+const ALL_TYPES = [...new Set(FINDINGS.map(f => f.type))].sort(cmpTypes);
+// Build lookup map for O(1) access
+const FINDING_BY_ID = new Map(FINDINGS.map(f => [f.id, f]));
+// Only severities actually present in the report — the filter bar hides the rest.
+const PRESENT_SEVS = SEVS.filter(s => FINDINGS.some(f => (f.severity || 'medium') === s));
+// Which difficulties occur at all — the "Quick wins" filter row is hidden otherwise.
+const DIFFICULTY_ORDER = ['very_easy','easy','medium','hard'];
+const DIFFICULTY_LBL = {very_easy:'⚡ Very Easy', easy:'Easy', medium:'Medium', hard:'Hard'};
+const DIFFICULTY_CLS = {very_easy:'diff-very-easy', easy:'diff-easy', medium:'diff-medium', hard:'diff-hard'};
+const PRESENT_DIFFS = DIFFICULTY_ORDER.filter(d => FINDINGS.some(f => f.difficulty === d));
+const HAS_DIFFICULTY = PRESENT_DIFFS.length > 0;
+// Key on the document identity (origin+path), NOT location.href: the latter
+// includes the filter hash this report writes via history.replaceState, so the
+// same report opened/shared under a different #hash would otherwise get a
+// SEPARATE status store and the fixed/won't-fix marks would appear to vanish.
+const DOC_KEY = location.origin + location.pathname;
+const STORE_KEY = 'audit-status:' + DOC_KEY;
+const PREFS_KEY = 'audit-prefs:' + DOC_KEY;
+// Status (open/fixed/wont-fix/false-positive) is only meaningful if it can be
+// PERSISTED. In a sandboxed iframe / opaque origin (some report servers, artifact
+// viewers) localStorage access throws, so the toggle would silently never save.
+// When we can't write, hide the whole status feature (resolved% + per-finding
+// status), rather than showing a control that quietly does nothing.
+const STATUS_ENABLED = (() => {
+  try { const k = '__audit_probe__'; localStorage.setItem(k, '1'); localStorage.removeItem(k); return true; }
+  catch { return false; }
+})();
+
+const STATUS_CLS = {open:'st-open', fixed:'st-fixed', 'wont-fix':'st-wont', 'false-positive':'st-fp'};
+const STATUS_LBL = {open:'● open', fixed:'✓ fixed', 'wont-fix':"— won't fix", 'false-positive':'✗ false pos.'};
+const STATUS_NEXT = {open:'fixed', fixed:'wont-fix', 'wont-fix':'false-positive', 'false-positive':'open'};
+
+// State
+const S = {
+  search: '', searchScope: 'all', groupBy: 'type',
+  hiddenSev: new Set(), hiddenType: new Set(),
+  hiddenStatus: new Set(), hiddenDiff: new Set(), hiddenGroup: new Set(),
+  collapsed: new Set(),
+};
+const statuses = {};
+
+// Persistence
+function loadStatuses() {
+  try { Object.assign(statuses, JSON.parse(localStorage.getItem(STORE_KEY) || '{}')); } catch {}
+}
+function saveStatuses() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(statuses)); } catch {}
+}
+function statusOf(id) { return statuses[id] || 'open'; }
+
+// UI preferences (e.g. wide layout) - persisted locally only, best-effort. On a
+// sandboxed/read-only origin these silently no-op, exactly like the status store.
+function loadPrefs() { try { return JSON.parse(localStorage.getItem(PREFS_KEY) || '{}'); } catch { return {}; } }
+function savePrefs(p) { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch {} }
+const PREFS = loadPrefs();
+
+// URL hash — debounced so rapid filter changes don't thrash history
+let _hashTimer = 0;
+function syncHash() {
+  clearTimeout(_hashTimer);
+  _hashTimer = setTimeout(() => {
+    const p = new URLSearchParams();
+    if (S.groupBy !== 'type') p.set('g', S.groupBy);
+    if (S.hiddenSev.size)    p.set('hs',  [...S.hiddenSev].join(','));
+    if (S.hiddenType.size)   p.set('ht',  [...S.hiddenType].join(','));
+    if (S.hiddenStatus.size) p.set('hst', [...S.hiddenStatus].join(','));
+    if (S.hiddenDiff.size)   p.set('hd',  [...S.hiddenDiff].join(','));
+    if (S.search)            p.set('q',   S.search);
+    if (S.searchScope !== 'all') p.set('qs', S.searchScope);
+    const str = p.toString();
+    history.replaceState(null, '', str ? '#' + str : location.pathname + location.search);
+  }, 300);
+}
+
+function loadHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  if (p.has('g'))   { S.groupBy = p.get('g'); document.getElementById('groupby').value = S.groupBy; }
+  if (p.has('q'))   { S.search  = p.get('q'); document.getElementById('search').value  = S.search;  }
+  if (p.has('qs'))  { S.searchScope = p.get('qs'); }
+  document.getElementById('search-scope').classList.toggle('active', S.searchScope === 'locations');
+  if (p.has('hs'))  p.get('hs') .split(',').filter(Boolean).forEach(v => S.hiddenSev.add(v));
+  if (p.has('ht'))  p.get('ht') .split(',').filter(Boolean).forEach(v => S.hiddenType.add(v));
+  if (p.has('hst')) p.get('hst').split(',').filter(Boolean).forEach(v => S.hiddenStatus.add(v));
+  if (p.has('hd'))  p.get('hd') .split(',').filter(Boolean).forEach(v => S.hiddenDiff.add(v));
+}
+
+// Helpers
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function highlight(text, q) {
+  if (!q) return esc(text);
+  const re = new RegExp('(' + q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + ')', 'gi');
+  return String(text).split(re).map((p, i) => i % 2 ? '<mark>' + esc(p) + '</mark>' : esc(p)).join('');
+}
+
+// Render text with ```fenced``` code blocks and `inline` backticks,
+// also paragraph-splitting on blank lines. Output is HTML-safe.
+function renderMd(text, q) {
+  const src = String(text == null ? '' : text);
+  const FENCE = /```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\r?\n([\s\S]*?)```/g;
+  const parts = [];
+  let last = 0, m;
+  while ((m = FENCE.exec(src)) !== null) {
+    parts.push({kind: 'text', value: src.slice(last, m.index)});
+    parts.push({kind: 'code', value: m[2].replace(/\r?\n$/, '')});
+    last = m.index + m[0].length;
+  }
+  parts.push({kind: 'text', value: src.slice(last)});
+
+  function renderInline(s) {
+    const re = /`([^`\n]+)`/g;
+    let out = '', i = 0, mm;
+    while ((mm = re.exec(s)) !== null) {
+      out += highlight(s.slice(i, mm.index), q);
+      out += '<code class="md-inline">' + highlight(mm[1], q) + '</code>';
+      i = mm.index + mm[0].length;
+    }
+    out += highlight(s.slice(i), q);
+    return out;
+  }
+
+  function renderTextChunk(s) {
+    const paragraphs = s.split(/\r?\n[ \t]*\r?\n/);
+    const out = [];
+    for (const p of paragraphs) {
+      const trimmed = p.replace(/^\s+|\s+$/g, '');
+      if (!trimmed) continue;
+      out.push('<p>' + renderInline(trimmed).replace(/\r?\n/g, '<br>') + '</p>');
+    }
+    return out.join('');
+  }
+
+  let html = '';
+  for (const p of parts) {
+    if (p.kind === 'text') html += renderTextChunk(p.value);
+    else html += '<pre class="md-code">' + highlight(p.value, q) + '</pre>';
+  }
+  return html;
+}
+
+function sevCls(s)    { return SEVS.includes(s) ? 'sev-'+s : 'sev-negligible'; }
+function sevLbl(s)    { return s ? s[0].toUpperCase()+s.slice(1) : 'Medium'; }
+function typeLabel(t) { return t.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase()); }
+function isCustom(t)  { return String(t).toLowerCase() === 'custom'; }
+function typeCls(t)   { return 'type-badge' + (isCustom(t) ? ' custom-type' : ''); }
+// 'custom' findings are the user's own externally-sourced ones; pin them first
+// everywhere types are listed so they never blend into the audit's own categories.
+function cmpTypes(a, b) {
+  if (isCustom(a) !== isCustom(b)) return isCustom(a) ? -1 : 1;
+  return String(a).localeCompare(String(b));
+}
+
+// First sentence of text (up to and including the first period).
+function firstSentence(text) {
+  const m = String(text).match(/\.(\s|$)/);
+  return m ? text.slice(0, text.indexOf(m[0]) + 1) : text;
+}
+
+// Render a "**Label:** value" line. GitHub/CommonMark only recognizes a
+// ``` fence when it starts at the beginning of a line, so if the value
+// itself opens with a fence, put it on its own line instead of right
+// after the inline label - otherwise the fence marker gets glued onto
+// "**Label:** ```" and never renders as a code block.
+function mdField(label, value) {
+  value = value || '';
+  return /^```/.test(value.trim())
+    ? '**' + label + ':**\n\n' + value
+    : '**' + label + ':** ' + value;
+}
+
+// Render the "**Locations:**" block. When a location has a commit-pinned
+// permalink (GitHub/GitLab), just paste the bare URL on its own line -
+// GitHub/GitLab auto-expand a line-range blob link into an inline code
+// preview, so re-pasting the snippet as a fenced block would duplicate it.
+// Forges without a detected permalink shape (or missing commit/repo info)
+// fall back to the fenced ref+snippet so the location is still readable.
+function mdLocations(locations) {
+  if (!locations.length) return '';
+  let out = '**Locations:**\n\n';
+  for (const l of locations) {
+    if (l.link)               out += l.link + '\n\n';
+    else if (l.code != null)  out += '```\n' + l.ref + '\n' + l.code + '\n```\n\n';
+    else                      out += '- `' + l.ref + '` _(file not found)_\n\n';
+  }
+  return out;
+}
+
+// Build full MD report for in-browser download.
+function buildMdFull() {
+  const SORD = ['critical','high','medium','low','negligible'];
+  const today = new Date().toISOString().slice(0, 10);
+  let out = '# Code Audit Report\n\n_Generated ' + today + '_\n\n';
+
+  const typeMap = new Map();
+  for (const f of FINDINGS) {
+    if (!typeMap.has(f.type)) typeMap.set(f.type, []);
+    typeMap.get(f.type).push(f);
+  }
+  const sortedTypes = [...typeMap.keys()].sort(cmpTypes);
+
+  out += '## Summary\n\n| Type | Severity | Count |\n|------|----------|-------|\n';
+  for (const t of sortedTypes) {
+    const items = typeMap.get(t);
+    const topSev = items.map(f => f.severity || 'medium').reduce((best, s) => {
+      const bi = SORD.indexOf(best), si = SORD.indexOf(s);
+      return (si >= 0 && (bi < 0 || si < bi)) ? s : best;
+    }, 'negligible');
+    out += '| ' + typeLabel(t) + ' | ' + topSev + ' | ' + items.length + ' |\n';
+  }
+
+  for (const t of sortedTypes) {
+    out += '\n## ' + typeLabel(t) + '\n\n';
+    for (const f of typeMap.get(t)) {
+      const sevStr  = f.severity ? ' `' + f.severity.toUpperCase() + '`' : '';
+      out += '### ' + f.id + sevStr + '\n\n';
+      out += mdField('Description', f.description) + '\n\n';
+      out += mdLocations(f.locations);
+      out += mdField('Fix', f.fix) + '\n\n---\n\n';
+    }
+  }
+  return out;
+}
+
+// Build MD short checklist for in-browser download.
+function buildMdShort() {
+  const lines = [];
+  const ids   = [];
+  const sorted = [...FINDINGS].sort((a, b) => a.type.localeCompare(b.type));
+  for (const f of sorted) {
+    ids.push(f.id);
+    const desc    = firstSentence(f.description || '');
+    const locs    = f.locations.map(l => l.ref);
+    const locStr  = locs.length ? ' - [' + locs.join(', ') + ']' : '';
+    const sevStr  = f.severity ? ' [' + f.severity.toUpperCase() + ']' : '';
+    lines.push('- [ ] - ' + f.id + sevStr + ' - ' + desc + locStr);
+  }
+  lines.push('', '## IDs only', '');
+  ids.forEach(id => lines.push('- [ ] - ' + id));
+  return lines.join('\n') + '\n';
+}
+
+function downloadText(text, filename, mime) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], {type: mime || 'text/plain'}));
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function tomlStr(s) {
+  return '"' + String(s == null ? '' : s)
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t') + '"';
+}
+
+// Build a [project] header block from embedded PROJECT_INFO, so the exported
+// findings.toml is self-contained (doesn't depend on a sibling project-info.toml
+// that a second, separately-triggered download could silently fail to save).
+// '' when there is no project info at all.
+function buildProjectToml() {
+  const ORDER = ['name','description','git_url','repo_url','commit','commit_short','commit_url','branch','generated'];
+  const pi = PROJECT_INFO || {};
+  if (!Object.keys(pi).length) return '';
+  const lines = ['[project]'];
+  for (const k of ORDER) {
+    if (k in pi) lines.push(k + ' = ' + tomlStr(pi[k]));
+  }
+  return lines.join('\n') + '\n\n';
+}
+
+// Build TOML matching the original findings.toml format (re-parseable by toml_to_report.py).
+function buildFindingsToml() {
+  function pad(key) { return (key + '            ').slice(0, 12); }
+  const chunks = [];
+  // ALL_FINDINGS, not FINDINGS: the export is the data file, so hand-dismissed
+  // findings and their `ignore` reason must survive it - exporting only what is
+  // drawn would quietly delete every dismissal on the next round-trip.
+  for (const f of ALL_FINDINGS) {
+    const lns = ['[[finding]]'];
+    // Pin the id so re-rendering this export - or filtering it down later - can't
+    // renumber findings that were already referenced by id elsewhere.
+    if (f.id && f.id !== '?') lns.push(pad('id') + '= ' + tomlStr(f.id));
+    if (f.ignore) lns.push(pad('ignore') + '= ' + tomlStr(f.ignore));
+    lns.push(pad('type')        + '= ' + tomlStr(f.type));
+    lns.push(pad('severity')    + '= ' + tomlStr(f.severity || 'medium'));
+    if (f.difficulty) lns.push(pad('difficulty')  + '= ' + tomlStr(f.difficulty));
+    lns.push(pad('description') + '= ' + tomlStr(f.description || ''));
+    const refs = f.locations.map(l => tomlStr(l.ref));
+    lns.push(pad('locations')   + '= [' + refs.join(', ') + ']');
+    lns.push(pad('fix')         + '= ' + tomlStr(f.fix || ''));
+    chunks.push(lns.join('\n'));
+  }
+  return buildProjectToml() + chunks.join('\n\n') + '\n';
+}
+
+// Build the GitHub-ready Markdown for one finding (mirrors findings.md).
+function findingToMd(f) {
+  let out = '### ' + f.id + (f.severity ? ' `' + f.severity.toUpperCase() + '`' : '') + '\n\n';
+  out += mdField('Description', f.description) + '\n\n';
+  out += mdLocations(f.locations);
+  out += mdField('Fix', f.fix) + '\n';
+  return out;
+}
+
+function flashBtn(btn, msg) {
+  btn.textContent = msg;
+  setTimeout(() => { btn.textContent = '⧉ Copy'; }, 1200);
+}
+
+function copyText(text, btn) {
+  const ok = () => flashBtn(btn, '✓ Copied');
+  const no = () => flashBtn(btn, '✗ Failed');
+  const fallback = () => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.top = '-9999px';
+      document.body.appendChild(ta); ta.select();
+      const r = document.execCommand('copy');
+      document.body.removeChild(ta);
+      r ? ok() : no();
+    } catch { no(); }
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText)
+    navigator.clipboard.writeText(text).then(ok, fallback);
+  else fallback();
+}
+
+// Filter logic
+function getKey(f) {
+  if (S.groupBy === 'severity') return f.severity || 'medium';
+  if (S.groupBy === 'file')     return f.locations.length ? f.locations[0].ref.replace(/:.*/,'') : '(no location)';
+  if (S.groupBy === 'folder') {
+    if (!f.locations.length) return '(no location)';
+    const path = f.locations[0].ref.replace(/:.*/,'');
+    const idx = path.lastIndexOf('/');
+    return idx === -1 ? '(root)' : path.slice(0, idx);
+  }
+  if (S.groupBy === 'none')     return '';
+  return f.type_label;
+}
+
+// Pre-compute search haystacks per finding (cleared on full re-render).
+// Two variants: everything (default), and file/folder paths only - for when a
+// search term (e.g. a directory name like 'dlls/abc') also happens to appear
+// inside description/fix prose and you only want path matches.
+const _hay = new Map();
+const _hayLoc = new Map();
+function hayOf(f) {
+  if (!_hay.has(f.id)) {
+    _hay.set(f.id, [f.id, f.type_label, f.severity, f.description, f.fix,
+                    f.difficulty ? (DIFFICULTY_LBL[f.difficulty] || f.difficulty) : '',
+                    f.ignore ? 'ignored ' + f.ignore : '',
+                    ...f.locations.map(l => l.ref)].join(' ').toLowerCase());
+  }
+  return _hay.get(f.id);
+}
+function hayLocOf(f) {
+  if (!_hayLoc.has(f.id)) {
+    _hayLoc.set(f.id, f.locations.map(l => l.ref).join(' ').toLowerCase());
+  }
+  return _hayLoc.get(f.id);
+}
+
+function matches(f) {
+  if (S.hiddenDiff.size > 0 && f.difficulty && S.hiddenDiff.has(f.difficulty)) return false;
+  if (S.hiddenSev.has(f.severity || 'medium')) return false;
+  if (S.hiddenType.has(f.type))                return false;
+  const st = statusOf(f.id);
+  if (S.hiddenStatus.has(st))                  return false;
+  if (S.search) {
+    const q = S.search.toLowerCase();
+    if (S.searchScope === 'locations') {
+      if (!hayLocOf(f).includes(q)) return false;
+    } else if (!hayOf(f).includes(q) && !st.includes(q)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sortKeys(keys) {
+  if (S.groupBy === 'severity') {
+    return [...keys].sort((a, b) => {
+      const ai = SEVS.indexOf(a), bi = SEVS.indexOf(b);
+      return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+    });
+  }
+  if (S.groupBy === 'type') return [...keys].sort(cmpTypes);
+  return [...keys].sort();
+}
+
+// Build body HTML for an expanded card (called lazily on first expand).
+function renderCardBody(f, q) {
+  let locs = '';
+  for (const l of f.locations) {
+    const lineInfo = l.lines != null
+      ? ' <span class="loc-lines">(' + l.lines + ' line' + (l.lines === 1 ? '' : 's') + ')</span>'
+      : '';
+    const refHtml = l.link
+      ? '<a class="loc-link" href="' + esc(l.link) + '" target="_blank" rel="noopener" title="Open at this commit">' + highlight(l.ref, q) + ' ↗</a>'
+      : highlight(l.ref, q);
+    locs += '<div class="loc-block"><div class="loc-ref">' + refHtml + lineInfo + '</div>';
+    locs += l.code != null ? '<pre>' + esc(l.code) + '</pre>' : '<div class="not-found">(file not found)</div>';
+    locs += '</div>';
+  }
+  return (
+    '<div class="field-lbl">Description</div>' +
+    '<div class="desc">'    + renderMd(f.description, q) + '</div>' +
+    (locs ? '<div class="field-lbl">Locations</div>' + locs : '') +
+    '<div class="field-lbl">Fix</div>' +
+    '<div class="fix-txt">' + renderMd(f.fix, q) + '</div>'
+  );
+}
+
+// Render card shell only — header + empty or populated body.
+// When collapsed the body is empty (display:none) — avoids renderMd for 1800+ cards.
+function renderCard(f, q) {
+  const sc  = sevCls(f.severity || 'medium');
+  const sl  = sevLbl(f.severity || 'medium');
+  const st  = statusOf(f.id);
+  const sc2 = STATUS_CLS[st] || 'st-open';
+  const sl2 = STATUS_LBL[st] || '● open';
+  const isCollapsed = S.collapsed.has(f.id);
+  const isResolved  = st !== 'open';
+
+  const locSummary = f.locations.length
+    ? f.locations[0].ref + (f.locations.length > 1 ? ' \u2026' : '')
+    : '';
+
+  const bodyInner = isCollapsed ? '' : renderCardBody(f, q);
+
+  return (
+    '<div class="card' + (isResolved ? ' resolved' : '') + (f.ignore ? ' ignored' : '') + '" data-card-id="' + esc(f.id) + '">' +
+    '<div class="card-header" data-action="toggle-card" data-id="' + esc(f.id) + '">' +
+    '<span class="card-arrow">' + (isCollapsed ? '\u25b6' : '\u25bc') + '</span>' +
+    '<span class="card-id">' + esc(f.id) + '</span>' +
+    '<span class="badge ' + sc + '" style="cursor:default">' + esc(sl) + '</span>' +
+    '<span class="badge ' + typeCls(f.type) + '" style="cursor:default">' + esc(f.type_label) + '</span>' +
+    (f.difficulty ? '<span class="badge ' + (DIFFICULTY_CLS[f.difficulty]||'') + '" style="cursor:default" title="Difficulty: ' + esc(DIFFICULTY_LBL[f.difficulty]||f.difficulty) + '">' + esc(DIFFICULTY_LBL[f.difficulty]||f.difficulty) + '</span>' : '') +
+    (f.ignore ? '<span class="badge ign-badge" style="cursor:default" title="Ignored: ' + esc(f.ignore) + '">✗ ignored: ' + esc(f.ignore) + '</span>' : '') +
+    (locSummary ? '<span class="card-loc" title="' + esc(locSummary) + '">' + esc(locSummary) + '</span>' : '') +
+    (STATUS_ENABLED ? '<button class="status-btn ' + sc2 + '" data-action="cycle-status" data-id="' + esc(f.id) + '">' + sl2 + '</button>' : '') +
+    '<button class="copy-btn" data-action="copy-md" data-id="' + esc(f.id) + '" title="Copy as Markdown for GitHub">\u29c9 Copy</button>' +
+    '</div>' +
+    '<div class="card-body" data-body-id="' + esc(f.id) + '"' + (isCollapsed ? ' style="display:none"' : '') + '>' +
+    bodyInner +
+    '</div></div>'
+  );
+}
+
+function initFilterBar() {
+  const fb = document.getElementById('filterbar');
+  let h = '<div class="filter-row"><span class="filter-lbl">Severity:</span>';
+  for (const s of PRESENT_SEVS)
+    h += '<button class="badge ' + sevCls(s) + '" data-sev="' + s + '">' + sevLbl(s) + '</button>';
+  h += '<button class="filter-toggle" data-toggle-all="sev"></button></div>';
+
+  h += '<div class="filter-row"><span class="filter-lbl">Type:</span>';
+  for (const t of ALL_TYPES)
+    h += '<button class="badge ' + typeCls(t) + '" data-type="' + esc(t) + '">' + esc(typeLabel(t)) + '</button>';
+  h += '<button class="filter-toggle" data-toggle-all="type"></button></div>';
+
+  h += '<div class="filter-row filter-row-status"><span class="filter-lbl">Status:</span>';
+  for (const st of STATUSES)
+    h += '<button class="badge ' + (STATUS_CLS[st]||'st-open') + '" data-status="' + st + '">' + (STATUS_LBL[st]||st) + '</button>';
+  h += '<button class="filter-toggle" data-toggle-all="status"></button></div>';
+
+  if (HAS_DIFFICULTY) {
+    h += '<div class="filter-row"><span class="filter-lbl">Difficulty:</span>';
+    for (const d of PRESENT_DIFFS)
+      h += '<button class="badge ' + (DIFFICULTY_CLS[d]||'') + '" data-diff="' + d + '">' + esc(DIFFICULTY_LBL[d]||d) + '</button>';
+    h += '<button class="filter-toggle" data-toggle-all="diff"></button></div>';
+  }
+
+  fb.innerHTML = h;
+}
+
+function updateToggles() {
+  for (const b of document.querySelectorAll('[data-sev]'))    b.classList.toggle('off', S.hiddenSev.has(b.dataset.sev));
+  for (const b of document.querySelectorAll('[data-type]'))   b.classList.toggle('off', S.hiddenType.has(b.dataset.type));
+  for (const b of document.querySelectorAll('[data-status]')) b.classList.toggle('off', S.hiddenStatus.has(b.dataset.status));
+  for (const b of document.querySelectorAll('[data-diff]'))   b.classList.toggle('off', S.hiddenDiff.has(b.dataset.diff));
+  for (const b of document.querySelectorAll('[data-toggle-all]')) {
+    const k = b.dataset.toggleAll;
+    const set = k === 'sev' ? S.hiddenSev : k === 'type' ? S.hiddenType : k === 'status' ? S.hiddenStatus : k === 'diff' ? S.hiddenDiff : null;
+    if (set) b.textContent = set.size === 0 ? 'Hide all' : 'Show all';
+  }
+}
+
+function updateProgress() {
+  const total = FINDINGS.length;
+  const done  = FINDINGS.filter(f => statusOf(f.id) !== 'open').length;
+  const pct   = total ? Math.round(done / total * 100) : 0;
+  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('progress-text').textContent = done + ' / ' + total + ' resolved (' + pct + '%)';
+}
+
+// Surgical toggle: flip one card without touching the rest of the DOM.
+function toggleCard(id) {
+  const wasCollapsed = S.collapsed.has(id);
+  if (wasCollapsed) S.collapsed.delete(id); else S.collapsed.add(id);
+  const body  = document.querySelector('[data-body-id="' + id + '"]');
+  const arrow = document.querySelector('[data-card-id="' + id + '"] .card-arrow');
+  if (!body) { render(); return; }
+  if (wasCollapsed) {
+    if (!body.firstChild) {
+      const f = FINDING_BY_ID.get(id);
+      if (f) body.innerHTML = renderCardBody(f, S.search);
+    }
+    body.style.display = '';
+    if (arrow) arrow.textContent = '\u25bc';
+  } else {
+    body.style.display = 'none';
+    if (arrow) arrow.textContent = '\u25b6';
+  }
+}
+
+// Surgical status update: update one card's button + resolved class.
+function cycleStatus(id) {
+  statuses[id] = STATUS_NEXT[statusOf(id)] || 'open';
+  saveStatuses();
+  const st  = statusOf(id);
+  const btn = document.querySelector('.status-btn[data-id="' + id + '"]');
+  if (!btn) { render(); return; }
+  btn.className   = 'status-btn ' + (STATUS_CLS[st] || 'st-open');
+  btn.textContent = STATUS_LBL[st] || '\u25cf open';
+  const card = document.querySelector('[data-card-id="' + id + '"]');
+  if (card) card.classList.toggle('resolved', st !== 'open');
+  updateProgress();
+}
+
+// Surgical collapse/expand for a group: toggle all bodies in the group without full re-render.
+function collapseGroup(key, collapse) {
+  FINDINGS.forEach(f => {
+    if (getKey(f) !== key) return;
+    if (collapse) S.collapsed.add(f.id); else S.collapsed.delete(f.id);
+    const body  = document.querySelector('[data-body-id="' + f.id + '"]');
+    const arrow = document.querySelector('[data-card-id="' + f.id + '"] .card-arrow');
+    if (!body) return;
+    if (collapse) {
+      body.style.display = 'none';
+      if (arrow) arrow.textContent = '\u25b6';
+    } else {
+      if (!body.firstChild) {
+        const ff = FINDING_BY_ID.get(f.id);
+        if (ff) body.innerHTML = renderCardBody(ff, S.search);
+      }
+      body.style.display = '';
+      if (arrow) arrow.textContent = '\u25bc';
+    }
+  });
+}
+
+// Full re-render: used for filter/group-by/search changes.
+// Batched via requestAnimationFrame.
+let _rafPending = false;
+function scheduleRender() {
+  if (_rafPending) return;
+  _rafPending = true;
+  requestAnimationFrame(() => { _rafPending = false; render(); });
+}
+
+function render() {
+  _hay.clear();
+  _hayLoc.clear();
+  updateToggles();
+  updateProgress();
+
+  const q       = S.search;
+  const visible = FINDINGS.filter(matches);
+  document.getElementById('stats').textContent = visible.length + ' / ' + FINDINGS.length + ' findings';
+
+  // Build groups
+  const map = new Map();
+  for (const f of visible) {
+    const k = getKey(f);
+    if (!map.has(k)) map.set(k, []);
+    map.get(k).push(f);
+  }
+
+  // Hidden-groups bar
+  const hbar = document.getElementById('hidden-bar');
+  if (S.hiddenGroup.size > 0) {
+    let hh = '<div class="hidden-inner"><span class="hidden-lbl">Hidden:</span>';
+    for (const g of [...S.hiddenGroup].sort())
+      hh += '<button class="show-btn" data-action="show-group" data-key="' + esc(g) + '">' + esc(g || '(all findings)') + '</button>';
+    hh += '<button class="show-all-btn" data-action="show-all">Show all</button></div>';
+    hbar.innerHTML = hh;
+  } else {
+    hbar.innerHTML = '';
+  }
+
+  // Content
+  const content = document.getElementById('content');
+  if (!visible.length) {
+    content.innerHTML = '<div class="no-results">No findings match the current filters.</div>';
+    syncHash();
+    return;
+  }
+
+  let hh = '';
+  for (const k of sortKeys([...map.keys()])) {
+    if (S.hiddenGroup.has(k)) continue;
+    const items   = map.get(k);
+    const title   = k || 'All Findings';
+    const done    = items.filter(f => statusOf(f.id) !== 'open').length;
+    const allDone = done === items.length;
+    hh += '<div class="group-section">' +
+      '<div class="group-header">' +
+      '<span class="group-title' + (allDone ? ' all-done' : '') + '">' + esc(title) + '</span>' +
+      '<span class="group-count">' + done + '/' + items.length + '</span>' +
+      '<button class="icon-btn" data-action="collapse-group" data-key="' + esc(k) + '" title="Collapse all">\u229f</button>' +
+      '<button class="icon-btn" data-action="expand-group"   data-key="' + esc(k) + '" title="Expand all">\u229e</button>' +
+      '<button class="hide-btn" data-action="hide-group"     data-key="' + esc(k) + '">Hide</button>' +
+      '</div>';
+    for (const f of items) hh += renderCard(f, q);
+    hh += '</div>';
+  }
+  content.innerHTML = hh;
+  syncHash();
+}
+
+// Long-press solo: hold a filter badge 450 ms to isolate that value (hide all others in the group).
+let _soloTimer = 0;
+let _soloFired = false;
+
+function _applySolo(b) {
+  _soloFired = true;
+  const sev = b.dataset.sev, typ = b.dataset.type, sta = b.dataset.status, dif = b.dataset.diff;
+  if      (sev) { S.hiddenSev.clear();    PRESENT_SEVS.filter(v => v !== sev).forEach(v => S.hiddenSev.add(v)); }
+  else if (typ) { S.hiddenType.clear();   ALL_TYPES.filter(v => v !== typ).forEach(v => S.hiddenType.add(v)); }
+  else if (sta) { S.hiddenStatus.clear(); STATUSES.filter(v => v !== sta).forEach(v => S.hiddenStatus.add(v)); }
+  else if (dif) { S.hiddenDiff.clear();   PRESENT_DIFFS.filter(v => v !== dif).forEach(v => S.hiddenDiff.add(v)); }
+  scheduleRender();
+}
+
+const _fb = document.getElementById('filterbar');
+
+_fb.addEventListener('pointerdown', e => {
+  const b = e.target.closest('[data-sev],[data-type],[data-status],[data-diff]');
+  if (!b) return;
+  _soloFired = false;
+  clearTimeout(_soloTimer);
+  _soloTimer = setTimeout(() => _applySolo(b), 450);
+}, {passive: true});
+_fb.addEventListener('pointerup',     () => clearTimeout(_soloTimer), {passive: true});
+_fb.addEventListener('pointercancel', () => clearTimeout(_soloTimer), {passive: true});
+_fb.addEventListener('pointermove', e => {
+  if (!_soloTimer) return;
+  if (!e.target.closest('[data-sev],[data-type],[data-status],[data-diff]')) clearTimeout(_soloTimer);
+}, {passive: true});
+
+// Event delegation
+_fb.addEventListener('click', e => {
+  if (_soloFired) { _soloFired = false; return; }
+  const b = e.target.closest('[data-sev],[data-type],[data-status],[data-toggle-all],[data-diff]');
+  if (!b) return;
+  if (b.dataset.toggleAll) {
+    const k = b.dataset.toggleAll;
+    const set  = k === 'sev' ? S.hiddenSev : k === 'type' ? S.hiddenType : k === 'status' ? S.hiddenStatus : k === 'diff' ? S.hiddenDiff : null;
+    const full = k === 'sev' ? PRESENT_SEVS : k === 'type' ? ALL_TYPES : k === 'status' ? STATUSES : k === 'diff' ? PRESENT_DIFFS : [];
+    if (!set) return;
+    if (set.size === 0) full.forEach(v => set.add(v));
+    else                set.clear();
+  }
+  else if (b.dataset.sev)    { const s = S.hiddenSev;    s.has(b.dataset.sev)    ? s.delete(b.dataset.sev)    : s.add(b.dataset.sev); }
+  else if (b.dataset.type)   { const s = S.hiddenType;   s.has(b.dataset.type)   ? s.delete(b.dataset.type)   : s.add(b.dataset.type); }
+  else if (b.dataset.status) { const s = S.hiddenStatus; s.has(b.dataset.status) ? s.delete(b.dataset.status) : s.add(b.dataset.status); }
+  else if (b.dataset.diff)   { const s = S.hiddenDiff;   s.has(b.dataset.diff)   ? s.delete(b.dataset.diff)   : s.add(b.dataset.diff); }
+  scheduleRender();
+});
+
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-action]');
+  if (!b) return;
+  const { action, key, id } = b.dataset;
+
+  if      (action === 'hide-group')     { S.hiddenGroup.add(key);    scheduleRender(); }
+  else if (action === 'show-group')     { S.hiddenGroup.delete(key); scheduleRender(); }
+  else if (action === 'show-all')       { S.hiddenGroup.clear();     scheduleRender(); }
+  else if (action === 'collapse-all')   { FINDINGS.forEach(f => S.collapsed.add(f.id)); scheduleRender(); }
+  else if (action === 'expand-all')     { S.collapsed.clear(); scheduleRender(); }
+  else if (action === 'toggle-width') {
+    const wide = document.body.classList.toggle('wide');
+    b.textContent = wide ? '⤢ Narrow' : '⤢ Wide';
+    PREFS.wide = wide; savePrefs(PREFS);
+  }
+  else if (action === 'copy-md') {
+    e.stopPropagation();
+    const f = FINDING_BY_ID.get(id);
+    if (f) copyText(findingToMd(f), b);
+  }
+  else if (action === 'download-md')       { downloadText(buildMdFull(),  'findings.md'); }
+  else if (action === 'download-md-short') { downloadText(buildMdShort(), 'findings-short.md'); }
+  else if (action === 'download-toml') {
+    // Single download (was two) - a second auto-triggered download is commonly
+    // blocked by the browser unless the user explicitly allows it, which silently
+    // drops project-info.toml. Embedding [project] in findings.toml itself avoids
+    // that failure mode entirely.
+    downloadText(buildFindingsToml(), 'findings.toml', 'application/toml');
+  }
+  else if (action === 'cycle-status') {
+    e.stopPropagation();
+    cycleStatus(id);
+  }
+  else if (action === 'toggle-card') {
+    toggleCard(id);
+  }
+  else if (action === 'collapse-group') {
+    collapseGroup(key, true);
+  }
+  else if (action === 'expand-group') {
+    collapseGroup(key, false);
+  }
+});
+
+// Debounced search — 180 ms after last keystroke
+let _searchTimer = 0;
+document.getElementById('search').addEventListener('input', e => {
+  S.search = e.target.value;
+  clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(scheduleRender, 180);
+});
+document.getElementById('groupby').addEventListener('change', e => {
+  S.groupBy = e.target.value;
+  S.hiddenGroup.clear();
+  scheduleRender();
+});
+document.getElementById('search-scope').addEventListener('click', e => {
+  S.searchScope = S.searchScope === 'locations' ? 'all' : 'locations';
+  e.currentTarget.classList.toggle('active', S.searchScope === 'locations');
+  scheduleRender();
+});
+
+// Init
+if (!STATUS_ENABLED) { try { document.body.classList.add('no-status'); } catch {} }
+if (PREFS.wide) {
+  try {
+    document.body.classList.add('wide');
+    const wb = document.querySelector('[data-action="toggle-width"]');
+    if (wb) wb.textContent = '⤢ Narrow';
+  } catch {}
+}
+loadStatuses();
+initFilterBar();
+loadHash();
+FINDINGS.forEach(f => S.collapsed.add(f.id));
+render();
+})();
+</script>
+</body></html>

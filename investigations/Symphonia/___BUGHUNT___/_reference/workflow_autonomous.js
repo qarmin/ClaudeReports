@@ -159,7 +159,7 @@ while (true) {
         `Read the watermark line at the top of ${optDir}/IDEAS.md ("Last GitHub issue/PR checked ` +
         `for inspiration: #N (repo: R)", "#0 (repo: none yet)" if missing/never done). Then run ` +
         `(global flags before the subcommand): \`python3 ~/.claude/skills/gh-issues-check/` +
-        `fetch_issues.py --dir ${optDir}/issues_raw raw-sync --since <N>\` - unless R is "none ` +
+        `fetch_issues.py --dir ${optDir}/__issues_raw raw-sync --since <N>\` - unless R is "none ` +
         `yet", first confirm R still matches this project's own repo before trusting <N>; if it ` +
         `doesn't (remote changed), use --since 0 instead, since <N> was recorded against a ` +
         `different repo's own numbering. This calls gh-issues-check's own fetch script directly ` +
@@ -168,7 +168,7 @@ while (true) {
         `a 2000/endpoint safety cap only, meant to fetch everything currently open). Best-effort: ` +
         `if it fails (no network/gh auth), report zero ` +
         `candidates and move on, that's not an error. Otherwise read through whatever it just ` +
-        `wrote under issues_raw/issues/ and issues_raw/pulls/ once, keep only entries relevant to ` +
+        `wrote under __issues_raw/issues/ and __issues_raw/pulls/ once, keep only entries relevant to ` +
         `bug-hunting on this project (a still-open crash/correctness/UB report, or an open, ` +
         `not-yet-merged PR attempting to fix one - worth checking whether a sibling code path has ` +
         `the same bug it doesn't touch)${focus} - skip anything else without forcing a ` +

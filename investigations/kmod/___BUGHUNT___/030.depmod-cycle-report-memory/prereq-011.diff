@@ -1,0 +1,81 @@
+diff --git a/tools/depmod.c b/tools/depmod.c
+index 0a137f1..45aaddf 100644
+--- a/tools/depmod.c
++++ b/tools/depmod.c
+@@ -1827,7 +1827,7 @@ out:
+ }
+ 
+ static int depmod_report_cycles_from_root(struct mod *root_mod, struct kmod_list **roots,
+-					  void **stack, size_t stack_size,
++					  void ***p_stack, size_t *p_stack_size,
+ 					  struct hash *loop_set)
+ {
+ 	struct kmod_list *free_list = NULL; /* struct vertex */
+@@ -1837,6 +1837,7 @@ static int depmod_report_cycles_from_root(struct mod *root_mod, struct kmod_list
+ 	struct vertex *v;
+ 	struct mod *m;
+ 	struct mod **itr, **itr_end;
++	void **stack = *p_stack;
+ 	size_t is;
+ 	int ret = -ENOMEM;
+ 
+@@ -1874,6 +1875,14 @@ static int depmod_report_cycles_from_root(struct mod *root_mod, struct kmod_list
+ 			continue;
+ 		}
+ 
++		/* a cycle that does not pass through root is reported from its own root */
++		for (v = vertex->parent; v != NULL; v = v->parent) {
++			if (v->mod == m)
++				break;
++		}
++		if (v != NULL)
++			continue;
++
+ 		m->visited = true;
+ 		if (m->deps.count == 0) {
+ 			/*
+@@ -1899,7 +1908,16 @@ static int depmod_report_cycles_from_root(struct mod *root_mod, struct kmod_list
+ 				ERR("No memory to report cycles\n");
+ 				goto out;
+ 			}
+-			assert(is < stack_size);
++			if (is == *p_stack_size) {
++				void **tmp = realloc(stack, 2 * *p_stack_size * sizeof(void *));
++				if (tmp == NULL) {
++					ERR("No memory to report cycles\n");
++					free(v);
++					goto out;
++				}
++				stack = *p_stack = tmp;
++				*p_stack_size *= 2;
++			}
+ 			stack[is++] = v;
+ 
+ 			l = kmod_list_append(free_list, v);
+@@ -1925,6 +1943,7 @@ static void depmod_report_cycles(struct depmod *depmod, uint16_t n_mods, uint16_
+ 	struct kmod_list *roots = NULL; /* struct mod */
+ 	struct kmod_list *l;
+ 	size_t n_r; /* local n_roots */
++	size_t stack_size;
+ 	int i;
+ 	int err;
+ 	_cleanup_free_ void **stack = NULL;
+@@ -1945,7 +1964,8 @@ static void depmod_report_cycles(struct depmod *depmod, uint16_t n_mods, uint16_
+ 		n_r++;
+ 	}
+ 
+-	_clang_suppress_alloc_ stack = malloc(n_r * sizeof(void *));
++	stack_size = n_r;
++	_clang_suppress_alloc_ stack = malloc(stack_size * sizeof(void *));
+ 	if (stack == NULL) {
+ 		ERR("No memory to report cycles\n");
+ 		goto out_list;
+@@ -1961,7 +1981,7 @@ static void depmod_report_cycles(struct depmod *depmod, uint16_t n_mods, uint16_
+ 		root = roots->data;
+ 		l = kmod_list_remove(roots);
+ 		roots = l;
+-		err = depmod_report_cycles_from_root(root, &roots, stack, n_r, loop_set);
++		err = depmod_report_cycles_from_root(root, &roots, &stack, &stack_size, loop_set);
+ 		if (err < 0)
+ 			goto out_hash;
+ 	}

@@ -1,0 +1,28 @@
+# Self-contained reproduction. Same pattern as ../010.avidemux_ncdt_nctg_heap_overflow/justfile,
+# but using tools/build_asan_core.sh (core-gstreamer-only, no plugins needed - this bug is a
+# self-contained core-lib API call, gst_meta_register_custom_simple + gst_meta_serialize_simple)
+# instead of tools/build_asan_fuzz.sh's much heavier full-plugin-scoped build.
+
+repo_url := "https://github.com/GStreamer/gstreamer.git"
+base_commit := "65b9547519cdafce691e65777d4178280bf10808"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && bash ../../tools/build_asan_core.sh build-asan-core
+
+reproduce-before:
+    BUILD_DIR="{{justfile_directory()}}/clone/build-asan-core" bash repro/run.sh
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && export PATH="$HOME/.local/bin:$PATH" && ninja -C build-asan-core subprojects/gstreamer/gst/libgstreamer-1.0.so.0.2902.0
+
+reproduce-after:
+    BUILD_DIR="{{justfile_directory()}}/clone/build-asan-core" bash repro/run.sh
+
+clean:
+    rm -rf clone repro/repro_bin

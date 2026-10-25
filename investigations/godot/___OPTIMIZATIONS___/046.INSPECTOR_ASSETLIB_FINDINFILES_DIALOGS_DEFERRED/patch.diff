@@ -1,0 +1,173 @@
+diff --git a/editor/asset_library/asset_library_editor_plugin.cpp b/editor/asset_library/asset_library_editor_plugin.cpp
+index 14f5bfc91c..aba0d0563d 100644
+--- a/editor/asset_library/asset_library_editor_plugin.cpp
++++ b/editor/asset_library/asset_library_editor_plugin.cpp
+@@ -2069,8 +2069,22 @@ void EditorAssetLibrary::_asset_file_selected(const String &p_file) {
+ 	asset_installer->open_asset(p_file);
+ }
+ 
++// Only reached from the "Import..." action, so it is built on first use rather than at startup.
++EditorFileDialog *EditorAssetLibrary::_get_asset_open() {
++	if (!asset_open) {
++		asset_open = memnew(EditorFileDialog);
++
++		asset_open->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
++		asset_open->add_filter("*.zip", TTRC("Assets ZIP File"));
++		asset_open->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
++		add_child(asset_open);
++		asset_open->connect("file_selected", callable_mp(this, &EditorAssetLibrary::_asset_file_selected));
++	}
++	return asset_open;
++}
++
+ void EditorAssetLibrary::_asset_open() {
+-	asset_open->popup_file_dialog();
++	_get_asset_open()->popup_file_dialog();
+ }
+ 
+ void EditorAssetLibrary::_manage_plugins() {
+@@ -2350,13 +2364,7 @@ EditorAssetLibrary::EditorAssetLibrary(bool p_templates_only) {
+ 	downloads_scroll->add_child(downloads_hb);
+ 	downloads_hb->connect("child_entered_tree", callable_mp(this, &EditorAssetLibrary::_update_downloads_section).unbind(1));
+ 
+-	asset_open = memnew(EditorFileDialog);
+-
+-	asset_open->set_access(EditorFileDialog::ACCESS_FILESYSTEM);
+-	asset_open->add_filter("*.zip", TTRC("Assets ZIP File"));
+-	asset_open->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
+-	add_child(asset_open);
+-	asset_open->connect("file_selected", callable_mp(this, &EditorAssetLibrary::_asset_file_selected));
++	// asset_open is created lazily, see _get_asset_open().
+ }
+ 
+ ///////
+diff --git a/editor/asset_library/asset_library_editor_plugin.h b/editor/asset_library/asset_library_editor_plugin.h
+index 53f05fd257..45474198d2 100644
+--- a/editor/asset_library/asset_library_editor_plugin.h
++++ b/editor/asset_library/asset_library_editor_plugin.h
+@@ -256,6 +256,7 @@ class EditorAssetLibrary : public EditorDock {
+ 	String host;
+ 
+ 	EditorFileDialog *asset_open = nullptr;
++	EditorFileDialog *_get_asset_open();
+ 	EditorAssetInstaller *asset_installer = nullptr;
+ 
+ 	void _asset_open();
+diff --git a/editor/docks/inspector_dock.cpp b/editor/docks/inspector_dock.cpp
+index 80781d0c60..1c24bfafc6 100644
+--- a/editor/docks/inspector_dock.cpp
++++ b/editor/docks/inspector_dock.cpp
+@@ -235,23 +235,35 @@ void InspectorDock::_new_resource() {
+ 	new_resource_dialog->popup_create(true);
+ }
+ 
++// Only reached from the Load-resource menu action, so it is built on first use rather than at
++// editor startup (a configured EditorFileDialog costs ~2MB - see ___OPTIMIZATIONS___/021).
++EditorFileDialog *InspectorDock::_get_load_resource_dialog() {
++	if (!load_resource_dialog) {
++		load_resource_dialog = memnew(EditorFileDialog);
++		add_child(load_resource_dialog);
++		load_resource_dialog->set_current_dir("res://");
++		load_resource_dialog->connect("file_selected", callable_mp(this, &InspectorDock::_resource_file_selected));
++	}
++	return load_resource_dialog;
++}
++
+ void InspectorDock::_load_resource(const String &p_type) {
+-	load_resource_dialog->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
++	_get_load_resource_dialog()->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
+ 
+ 	List<String> extensions;
+ 	ResourceLoader::get_recognized_extensions_for_type(p_type, &extensions);
+ 
+-	load_resource_dialog->clear_filters();
++	_get_load_resource_dialog()->clear_filters();
+ 	for (const String &extension : extensions) {
+-		load_resource_dialog->add_filter("*." + extension, extension.to_upper());
++		_get_load_resource_dialog()->add_filter("*." + extension, extension.to_upper());
+ 	}
+ 
+ 	const Vector<String> textfile_ext = ((String)(EDITOR_GET("docks/filesystem/textfile_extensions"))).split(",", false);
+ 	for (int i = 0; i < textfile_ext.size(); i++) {
+-		load_resource_dialog->add_filter("*." + textfile_ext[i], textfile_ext[i].to_upper());
++		_get_load_resource_dialog()->add_filter("*." + textfile_ext[i], textfile_ext[i].to_upper());
+ 	}
+ 
+-	load_resource_dialog->popup_file_dialog();
++	_get_load_resource_dialog()->popup_file_dialog();
+ }
+ 
+ void InspectorDock::_resource_file_selected(const String &p_file) {
+@@ -870,10 +882,7 @@ InspectorDock::InspectorDock(EditorData &p_editor_data) {
+ 	info_dialog->set_flag(Window::FLAG_RESIZE_DISABLED, true);
+ 	EditorNode::get_singleton()->get_gui_base()->add_child(info_dialog);
+ 
+-	load_resource_dialog = memnew(EditorFileDialog);
+-	main_vb->add_child(load_resource_dialog);
+-	load_resource_dialog->set_current_dir("res://");
+-	load_resource_dialog->connect("file_selected", callable_mp(this, &InspectorDock::_resource_file_selected));
++	// load_resource_dialog is created lazily, see _get_load_resource_dialog().
+ 
+ 	MarginContainer *mc = memnew(MarginContainer);
+ 	main_vb->add_child(mc);
+diff --git a/editor/docks/inspector_dock.h b/editor/docks/inspector_dock.h
+index ce1ba8ba11..758789e3dd 100644
+--- a/editor/docks/inspector_dock.h
++++ b/editor/docks/inspector_dock.h
+@@ -83,6 +83,7 @@ class InspectorDock : public EditorDock {
+ 	Button *forward_button = nullptr;
+ 
+ 	EditorFileDialog *load_resource_dialog = nullptr;
++	EditorFileDialog *_get_load_resource_dialog();
+ 	CreateDialog *new_resource_dialog = nullptr;
+ 	Button *resource_save_button = nullptr;
+ 	MenuButton *resource_extra_button = nullptr;
+diff --git a/editor/script/find_in_files.cpp b/editor/script/find_in_files.cpp
+index 40db1f28fe..b3ae2fe444 100644
+--- a/editor/script/find_in_files.cpp
++++ b/editor/script/find_in_files.cpp
+@@ -521,8 +521,19 @@ void FindInFilesSearchPanel::_on_filter_toggled(bool p_pressed, const String &p_
+ 	_on_search_modified();
+ }
+ 
++// Only reached from the Select-Folder button, so it is built on first use rather than at startup.
++FileDialog *FindInFilesSearchPanel::_get_folder_dialog() {
++	if (!folder_dialog) {
++		folder_dialog = memnew(EditorFileDialog);
++		folder_dialog->set_file_mode(FileDialog::FILE_MODE_OPEN_DIR);
++		folder_dialog->connect("dir_selected", callable_mp(this, &FindInFilesSearchPanel::_on_folder_selected));
++		add_child(folder_dialog);
++	}
++	return folder_dialog;
++}
++
+ void FindInFilesSearchPanel::_on_folder_button_pressed() {
+-	folder_dialog->popup_file_dialog();
++	_get_folder_dialog()->popup_file_dialog();
+ }
+ 
+ void FindInFilesSearchPanel::_on_search_submitted() {
+@@ -701,10 +712,7 @@ FindInFilesSearchPanel::FindInFilesSearchPanel() {
+ 		folder_button->connect(SceneStringName(pressed), callable_mp(this, &FindInFilesSearchPanel::_on_folder_button_pressed));
+ 		folder_hbc->add_child(folder_button);
+ 
+-		folder_dialog = memnew(EditorFileDialog);
+-		folder_dialog->set_file_mode(FileDialog::FILE_MODE_OPEN_DIR);
+-		folder_dialog->connect("dir_selected", callable_mp(this, &FindInFilesSearchPanel::_on_folder_selected));
+-		add_child(folder_dialog);
++		// folder_dialog is created lazily, see _get_folder_dialog().
+ 	}
+ 
+ 	Label *excludes_label = memnew(Label);
+diff --git a/editor/script/find_in_files.h b/editor/script/find_in_files.h
+index f9d5241662..5143af0286 100644
+--- a/editor/script/find_in_files.h
++++ b/editor/script/find_in_files.h
+@@ -149,6 +149,7 @@ class FindInFilesSearchPanel : public ScrollContainer {
+ 
+ 	Label *filters_label = nullptr;
+ 	FileDialog *folder_dialog = nullptr;
++	FileDialog *_get_folder_dialog();
+ 	HFlowContainer *filters_container = nullptr;
+ 	HashMap<String, bool> filters_preferences;
+ 	LineEdit *folder_line_edit = nullptr;

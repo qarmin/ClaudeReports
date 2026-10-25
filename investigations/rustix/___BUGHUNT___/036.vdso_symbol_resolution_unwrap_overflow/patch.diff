@@ -1,0 +1,61 @@
+diff --git a/src/backend/linux_raw/vdso.rs b/src/backend/linux_raw/vdso.rs
+index 4fa1d1cc..b02e530f 100644
+--- a/src/backend/linux_raw/vdso.rs
++++ b/src/backend/linux_raw/vdso.rs
+@@ -371,12 +371,10 @@ impl Vdso {
+                     if h1 == (h2 | 1)
+                         && self.check_sym(sym, ElfHashEntry::from(i), name, version, ver_hash)
+                     {
+-                        let sum = self.addr_from_elf(sym.st_value).unwrap();
+-                        assert!(
+-                            sum as usize >= self.load_addr as usize
+-                                && sum as usize <= self.load_end as usize
+-                        );
+-                        return sum as *mut c::c_void;
++                        return match self.checked_sym_addr(sym.st_value) {
++                            Some(sum) => sum,
++                            None => null_mut(),
++                        };
+                     }
+                     if (h2 & 1) != 0 {
+                         break;
+@@ -391,12 +389,10 @@ impl Vdso {
+                     let sym: &Elf_Sym = &*self.symtab.add(i as usize);
+                     if sym.st_shndx != SHN_UNDEF && self.check_sym(sym, i, name, version, ver_hash)
+                     {
+-                        let sum = self.addr_from_elf(sym.st_value).unwrap();
+-                        assert!(
+-                            sum as usize >= self.load_addr as usize
+-                                && sum as usize <= self.load_end as usize
+-                        );
+-                        return sum as *mut c::c_void;
++                        return match self.checked_sym_addr(sym.st_value) {
++                            Some(sum) => sum,
++                            None => null_mut(),
++                        };
+                     }
+                     i = *self.chain.add(i as usize);
+                 }
+@@ -418,6 +414,22 @@ impl Vdso {
+     unsafe fn addr_from_elf(&self, elf_addr: usize) -> Option<*const c_void> {
+         self.base_plus(elf_addr.wrapping_add(self.pv_offset))
+     }
++
++    /// Resolve a candidate symbol's `st_value` into a usable address,
++    /// returning `None` if the address space arithmetic overflows (a bogus
++    /// `st_value` from a corrupted/adversarial vDSO) or if the resulting
++    /// address falls outside the vDSO's own loaded range - both are treated
++    /// identically as "this symbol can't be trusted", since there's no
++    /// `sum` to compare against `load_addr`/`load_end` at all when the
++    /// address computation itself overflowed.
++    unsafe fn checked_sym_addr(&self, st_value: usize) -> Option<*mut c::c_void> {
++        let sum = self.addr_from_elf(st_value)?;
++        if sum as usize >= self.load_addr as usize && sum as usize <= self.load_end as usize {
++            Some(sum as *mut c::c_void)
++        } else {
++            None
++        }
++    }
+ }
+ 
+ #[cfg(test)]

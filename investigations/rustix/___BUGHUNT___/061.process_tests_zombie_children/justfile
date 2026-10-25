@@ -1,0 +1,23 @@
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+# No patch.diff for this candidate (Not reproducible as an actual zombie-process risk - see
+# RESULT.md). `test` clones the pristine tree and runs the standalone repro against it, which
+# empirically checks real /proc state of a real spawned+signalled+rustix-reaped child pid.
+test: clone reproduce
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone. Expected output: "did not reproduce"
+# for case 1 (rustix::process::waitpid reaps the real child even though std::process::Child::wait()
+# is never called), and a real zombie (state 'Z') for the control case 2 (no wait call at all) -
+# demonstrating that clippy::zombie_processes fires on tests/process/wait.rs but does not
+# correspond to an actual lingering zombie process.
+reproduce:
+    ulimit -c 0 && cd repro && cargo run --release
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

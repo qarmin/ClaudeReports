@@ -1,0 +1,102 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything needed is either in this folder or fetched by `just clone` into ./clone (gitignored),
+# except the shared empty-project harness at ___OPTIMIZATIONS___/harness/empty_project (untracked
+# in the main repo, shared with candidates 006/007/010-013/015-019/023-037 - see SKILL.md's
+# "Bench harnesses" section). This candidate's self-containment is relaxed to "given the whole
+# ___OPTIMIZATIONS___ folder kept together", not a fully isolated single subfolder.
+#
+# This is a from-scratch Godot build (SCons) - expect ~15-25 min per build on a modern multi-core
+# machine (~4 min on the 24-core container this was measured on), not a Rust/cargo build. scons
+# isn't preinstalled everywhere - `pip3 install scons --break-system-packages` if `command -v
+# scons` fails.
+#
+# This candidate is measurement-only: there is no patch.diff. `just test` applies the probe
+# instrumentation, builds once, and prints the PERFPROBE_TRIM / PERFPROBE_MEM lines plus peak RSS.
+#
+# (original header note follows)
+# This candidate is measured with the probe patch applied to the clone: candidate 035's
+# bench/trim_probe_instrumentation.diff (copied here as bench/trim_probe_instrumentation.diff), which
+# prints Godot's own allocator counters at shutdown, plus this candidate's own patch.diff. The
+# headline number is the tracked-peak delta from `get_mem_max_usage()`, which is byte-deterministic
+# (5 runs per arm, zero variance) - peak RSS is reported as secondary confirmation because it is
+# bimodal in this harness (see candidate 035).
+
+repo_url := "https://github.com/godotengine/godot.git"
+base_commit := "9552dfb6859a1aaba1e570b8e0ef5c599b830f19"
+harness_dir := "../harness/empty_project"
+
+test: clone apply-instrumentation build-default build-pgo-generate train build-pgo-use compare
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/_empty_project
+
+
+apply-instrumentation:
+    git -C clone apply "{{justfile_directory()}}/bench/trim_probe_instrumentation.diff"
+
+
+clean:
+    rm -rf clone bin_default bin_pgo
+
+build-default:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v scons >/dev/null 2>&1 || pip3 install scons --break-system-packages
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone && scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+    cp bin/godot.linuxbsd.editor.x86_64 "{{justfile_directory()}}/bin_default"
+
+build-pgo-generate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    find bin/obj -name '*.gcda' -delete 2>/dev/null || true
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes \
+      ccflags="-fprofile-generate -fprofile-update=atomic" linkflags="-fprofile-generate"
+
+# Training workload. Startup only, deliberately: see RESULT.md on profile overfitting.
+train:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    export XDG_DATA_HOME="{{justfile_directory()}}/clone/_xdg_data"
+    export XDG_CONFIG_HOME="{{justfile_directory()}}/clone/_xdg_config"
+    mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME"
+    cd clone
+    for i in 1 2 3; do
+      ./bin/godot.linuxbsd.editor.x86_64 --headless --editor --path _empty_project --quit-after 1 > /dev/null 2>&1
+    done
+    echo "profile files: $(find bin/obj -name '*.gcda' | wc -l)"
+
+build-pgo-use:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes \
+      ccflags="-fprofile-use -fprofile-correction -Wno-missing-profile" linkflags=""
+    cp bin/godot.linuxbsd.editor.x86_64 "{{justfile_directory()}}/bin_pgo"
+
+# Binary size, per-mapping RSS (binary pages vs heap vs anon) and peak RSS for both builds.
+compare:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    export XDG_DATA_HOME="{{justfile_directory()}}/clone/_xdg_data"
+    export XDG_CONFIG_HOME="{{justfile_directory()}}/clone/_xdg_config"
+    mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME"
+    cd clone
+    for ARM in default pgo; do
+      BIN="{{justfile_directory()}}/bin_$ARM"
+      echo "=== $ARM: $(stat -c %s "$BIN") bytes on disk ==="
+      "$BIN" --headless --editor --path _empty_project --quit-after 400 > /dev/null 2>&1 &
+      PID=$!; sleep 3
+      if [ -r /proc/$PID/status ]; then
+        awk '/VmHWM|VmRSS/ {print "  " $1 " " $2 " kB"}' /proc/$PID/status
+        awk -v b="bin_$ARM" '/^[0-9a-f]/ {n=$6} /^Rss:/ {if (index(n,b)) bp+=$2; else if (n=="[heap]") h+=$2} END {printf "  binary_pages %d kB, heap %d kB\n", bp, h}' /proc/$PID/smaps
+      fi
+      kill $PID 2>/dev/null; wait $PID 2>/dev/null
+    done

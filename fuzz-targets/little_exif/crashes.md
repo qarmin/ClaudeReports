@@ -1,0 +1,13 @@
+# little_exif - crashes
+
+Source: https://github.com/TechnikTobi/little_exif @ 2c86b66d2feeb1498180ec33cca5aab60239dfbd
+
+<table>
+<tr><th>Code</th><th>Crash</th></tr>
+<tr><td valign="top"><pre>let _ = ExifTag::from_u16_with_data(0u16, &amp;ExifTagFormat::FLOAT, &amp;vec![0u8],
+    &amp;Endian::Little, &amp;ExifTagGroup::GENERIC);</pre></td><td valign="top"><pre>thread 'main' panicked at little_exif/src/u8conversion.rs:32:26:
+from_u8_vec: Mangled EXIF data encountered!
+backtrace:
+  &lt;little_exif::exif_tag::ExifTag&gt;::from_u16_with_data (little_exif/src/exif_tag/mod.rs:201:69)
+  repro_little_exif_src_u8conversion_rs_32_26_bf8a4d::main (src/main.rs:7:13)</pre></td></tr>
+</table>

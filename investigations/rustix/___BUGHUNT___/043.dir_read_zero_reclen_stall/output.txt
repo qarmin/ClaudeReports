@@ -1,0 +1,62 @@
+Captured by actually running `just test` (clone -> reproduce-before -> apply -> reproduce-after)
+from this candidate folder, 2026-10-01, against a fresh `git clone` of
+https://github.com/bytecodealliance/rustix.git at 287214b889865d8e1406a0ee71cc409b6f6191c8, with
+`repro/repro_test.patch` applied on top (see repro/README.md for why this is a test patch rather
+than a standalone public-API crate).
+
+=== reproduce-before (pristine tree + repro_test.patch, debug build, `cargo test`) ===
+exit code: 101 (test harness failure - this IS the reproduction, not a broken build)
+
+    cargo test --features=all-apis --lib -- backend::fs::dir::tests::dir_read_zero_reclen_stalls_forever --exact --nocapture
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.26s
+     Running unittests src/lib.rs (target/debug/deps/rustix-31215aa70807873c)
+
+    running 1 test
+
+    thread 'backend::fs::dir::tests::dir_read_zero_reclen_stalls_forever' (191003) panicked at src/backend/linux_raw/fs/dir.rs:473:9:
+    REPRODUCED: Dir::read returned the same unchanged entry for 50000 straight iterations (d_reclen=0 stall)
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    test backend::fs::dir::tests::dir_read_zero_reclen_stalls_forever ... FAILED
+
+    failures:
+        backend::fs::dir::tests::dir_read_zero_reclen_stalls_forever
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 53 filtered out; finished in 0.01s
+
+This is the real `Dir::read_from`/`Iterator::next` public entry point, fed a `buf` that was
+populated by one genuine `getdents64` syscall on a real temp directory, with only the two
+`d_reclen` bytes of the next record corrupted to 0 (standing in for what a buggy getdents64
+backend would have sent - see repro/README.md). `self.pos` never advances past that record, so
+every one of 50,000 straight `.next()` calls re-parses the exact same corrupted bytes and returns
+the exact same `DirEntry`, with `any_errors` never set - this is the unbounded stall the
+candidate description predicts, demonstrated against the real parsing code rather than a
+reimplementation of it. Reproduced 5/5 runs (bit-for-bit identical panic message every time, debug
+build, `--features=all-apis`).
+
+=== reproduce-after (same clone, patch.diff applied, debug build, `cargo test`) ===
+exit code: 0
+
+    cargo test --features=all-apis --lib -- backend::fs::dir::tests::dir_read_zero_reclen_stalls_forever --exact --nocapture
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.77s
+     Running unittests src/lib.rs (target/debug/deps/rustix-31215aa70807873c)
+
+    running 1 test
+    test backend::fs::dir::tests::dir_read_zero_reclen_stalls_forever ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 53 filtered out; finished in 0.00s
+
+With the fix, `Dir::read` now detects `d_reclen == 0` before adding it to `self.pos`, sets
+`any_errors = true`, and returns `Some(Err(io::Errno::BADMSG))` on the very first call instead of
+looping - the test's early-return-on-`Err` branch fires and the test passes. Reproduced (fix
+holds) 5/5 runs, same build.
+
+=== Full project test suite, before vs. after (cargo test --features=all-apis --workspace --no-fail-fast) ===
+Before (pristine, patch.diff not applied): 413 passed, 1 failed, 5 ignored.
+After  (patch.diff applied, repro test also included): 414 passed, 1 failed, 5 ignored.
+
+The one failure in both runs is `ioctl::test_int_setter` ("No such file or directory"), a
+pre-existing environmental failure unrelated to this candidate - this sandboxed container has no
+`/dev/net/tun`, which that test depends on (already noted in this workspace's own README.md from
+earlier candidates in this session). No other failures, and no new failures introduced by the fix.

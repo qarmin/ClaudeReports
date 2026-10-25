@@ -1,0 +1,62 @@
+# Self-contained reproduction for candidate 039 (ges_track_remove_element UAF).
+#
+# Everything needed is either in this folder or fetched by `just clone` into ./clone (gitignored).
+# `meson`/`ninja` must be on PATH (e.g. `uv tool install meson && uv tool install ninja`), and
+# `clang` with the ASAN runtime must be available.
+#
+# The build enables gst-editing-services with the whole tree instrumented with ASAN+UBSAN
+# (-Db_sanitize=address,undefined) so the use-after-free inside libges itself (not just in
+# repro.c) is caught with a full stack trace. good/bad are left disabled - the repro's effect
+# element ("volume", klass Filter/Effect/Audio) lives in gst-plugins-base, so no wider plugin
+# scope is needed to trigger or fix this bug (unlike candidate 033, which needed a real
+# compositor/textrender chain to demonstrate its *fix* fully resolving).
+
+repo_url := "git@github.com:GStreamer/gstreamer.git"
+base_commit := "65b9547519cdafce691e65777d4178280bf10808"
+
+test: clone reproduce-before apply rebuild reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && \
+    PATH="$HOME/.local/bin:$PATH" CC=clang CXX=clang++ meson setup build-asan-ges \
+        --buildtype=debugoptimized \
+        -Db_sanitize=address,undefined \
+        -Db_lundef=false \
+        -Dc_args=-fno-sanitize=function \
+        -Dcpp_args=-fno-sanitize=function \
+        -Dges=enabled \
+        -Dgood=disabled \
+        -Dbad=disabled \
+        -Dugly=disabled \
+        -Dlibav=disabled \
+        -Drtsp_server=disabled \
+        -Ddevtools=disabled \
+        -Ddoc=disabled \
+        -Dexamples=disabled \
+        -Dintrospection=disabled \
+        -Dges:tests=enabled
+    cd clone && PATH="$HOME/.local/bin:$PATH" ninja -C build-asan-ges
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the UAF (SEGV or
+# ASAN heap-use-after-free report, both stemming from ges-track.c:1244's g_sequence_remove(it)
+# call on a freed GSequenceIter).
+reproduce-before:
+    ulimit -c 0 && BUILD_DIR="{{justfile_directory()}}/clone/build-asan-ges" bash "{{justfile_directory()}}/repro/run.sh"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+rebuild:
+    cd clone && PATH="$HOME/.local/bin:$PATH" ninja -C build-asan-ges
+
+# Same repro again, now against the patched+rebuilt clone - should no longer crash: the first
+# remove succeeds, all further removes on the same (now untracked) element cleanly return FALSE,
+# and a genuine re-add/re-remove cycle still works.
+reproduce-after:
+    ulimit -c 0 && BUILD_DIR="{{justfile_directory()}}/clone/build-asan-ges" bash "{{justfile_directory()}}/repro/run.sh"
+
+clean:
+    rm -rf clone repro/bin

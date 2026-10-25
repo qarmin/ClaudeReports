@@ -1,0 +1,91 @@
+diff --git a/crates/epaint/src/tessellator.rs b/crates/epaint/src/tessellator.rs
+index 22ba5c814..fd86bcfbd 100644
+--- a/crates/epaint/src/tessellator.rs
++++ b/crates/epaint/src/tessellator.rs
+@@ -1413,6 +1413,40 @@ fn mul_color(color: Color32, factor: f32) -> Color32 {
+ 
+ // ----------------------------------------------------------------------------
+ 
++/// Vertices and indices that text and mesh shapes will add (other shapes are not counted).
++fn shape_mesh_size(shape: &Shape) -> (usize, usize) {
++    match shape {
++        Shape::Text(text) => (text.galley.num_vertices, text.galley.num_indices),
++        Shape::Mesh(mesh) => (mesh.vertices.len(), mesh.indices.len()),
++        Shape::Vec(shapes) => shapes.iter().fold((0, 0), |(v, i), shape| {
++            let (sv, si) = shape_mesh_size(shape);
++            (v + sv, i + si)
++        }),
++        _ => (0, 0),
++    }
++}
++
++/// For each shape that starts a run of shapes with the same clip rect, the expected size of
++/// the mesh that run is tessellated into; `(0, 0)` for the other shapes.
++fn mesh_size_hints(shapes: &[ClippedShape]) -> Vec<(usize, usize)> {
++    let mut hints = vec![(0, 0); shapes.len()];
++    let mut run_start = 0;
++    let mut total = (0, 0);
++    for (i, clipped) in shapes.iter().enumerate() {
++        if clipped.clip_rect != shapes[run_start].clip_rect {
++            hints[run_start] = total;
++            run_start = i;
++            total = (0, 0);
++        }
++        let (v, idx) = shape_mesh_size(&clipped.shape);
++        total = (total.0 + v, total.1 + idx);
++    }
++    if let Some(hint) = hints.get_mut(run_start) {
++        *hint = total;
++    }
++    hints
++}
++
+ /// Converts [`Shape`]s into triangles ([`Mesh`]).
+ ///
+ /// For performance reasons it is smart to reuse the same [`Tessellator`].
+@@ -1433,6 +1467,9 @@ pub struct Tessellator {
+ 
+     scratchpad_points: Vec<Pos2>,
+     scratchpad_path: Path,
++
++    /// Expected `(vertices, indices)` of the next new mesh, to avoid regrowing it.
++    mesh_size_hint: (usize, usize),
+ }
+ 
+ impl Tessellator {
+@@ -1464,6 +1501,7 @@ impl Tessellator {
+             clip_rect: Rect::EVERYTHING,
+             scratchpad_points: Default::default(),
+             scratchpad_path: Default::default(),
++            mesh_size_hint: (0, 0),
+         }
+     }
+ 
+@@ -1531,8 +1569,13 @@ impl Tessellator {
+         if start_new_mesh {
+             out_primitives.push(ClippedPrimitive {
+                 clip_rect,
+-                primitive: Primitive::Mesh(Mesh::default()),
++                primitive: Primitive::Mesh(Mesh {
++                    vertices: Vec::with_capacity(self.mesh_size_hint.0),
++                    indices: Vec::with_capacity(self.mesh_size_hint.1),
++                    ..Default::default()
++                }),
+             });
++            self.mesh_size_hint = (0, 0);
+         }
+ 
+         #[expect(clippy::unwrap_used)] // it's never empty
+@@ -2489,7 +2532,11 @@ impl Tessellator {
+ 
+         {
+             profiling::scope!("tessellate");
+-            for clipped_shape in shapes {
++            let run_hints = mesh_size_hints(&shapes);
++            for (clipped_shape, hint) in shapes.into_iter().zip(run_hints) {
++                if hint != (0, 0) {
++                    self.mesh_size_hint = hint;
++                }
+                 self.tessellate_clipped_shape(clipped_shape, &mut clipped_primitives);
+             }
+         }

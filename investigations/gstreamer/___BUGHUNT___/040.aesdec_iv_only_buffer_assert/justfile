@@ -1,0 +1,110 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# Only gst-plugins-bad's "aes" plugin (and its own hard prerequisites: gstreamer core,
+# gst-plugins-base for gstpbutils/gstvideo/gstapp, openssl) is built - this bug lives entirely
+# in ext/aes/gstaesdec.c's prepare_output_buffer()/transform().
+
+repo_url := "https://github.com/GStreamer/gstreamer.git"
+base_commit := "65b9547519cdafce691e65777d4178280bf10808"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    export PATH="$HOME/.local/bin:$PATH" && cd clone && meson setup \
+        --buildtype=debugoptimized \
+        -Dglib:tests=false \
+        -Ddoc=disabled \
+        -Dexamples=disabled \
+        -Dintrospection=disabled \
+        -Dgood=disabled \
+        -Dbad=enabled \
+        -Dgst-plugins-bad:auto_features=disabled \
+        -Dgst-plugins-bad:aes=enabled \
+        -Dgst-plugins-bad:aja=disabled \
+        -Dgst-plugins-bad:openh264=disabled \
+        -Dgst-plugins-bad:vmaf=disabled \
+        -Dgst-plugins-bad:webrtcdsp=disabled \
+        -Dgst-plugins-bad:fdkaac=disabled \
+        -Dgst-plugins-bad:srtp=disabled \
+        -Dgst-plugins-bad:sctp=disabled \
+        -Dugly=disabled \
+        -Dlibav=disabled \
+        -Dges=disabled \
+        -Dsharp=disabled \
+        -Drs=disabled \
+        -Dpython=disabled \
+        -Dlibnice=disabled \
+        -Ddevtools=disabled \
+        -Drtsp_server=disabled \
+        -Dgst-examples=disabled \
+        -Dqt5=disabled \
+        -Dorc=disabled \
+        -Dgstreamer:tracer_hooks=false \
+        -Dgst-plugins-base:pango=disabled \
+        build-aes
+    export PATH="$HOME/.local/bin:$PATH" && cd clone && ninja -C build-aes \
+        subprojects/gst-plugins-bad/ext/aes/libgstaes.so \
+        subprojects/gst-plugins-base/gst-libs/gst/app/libgstapp-1.0.so.0.2902.0 \
+        subprojects/gst-plugins-base/gst/app/libgstapp.so \
+        subprojects/gstreamer/plugins/elements/libgstcoreelements.so
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug: the
+# real "aesdec" element, with serialize-iv=true, aborts the whole process
+# (g_assert(in_size > GST_AES_BLOCK_SIZE) failing) when a real appsrc pushes a real 16-byte
+# buffer (a complete IV, zero ciphertext bytes) through the real pad-push/chain path.
+reproduce-before:
+    #!/usr/bin/env bash
+    set -eo pipefail
+    OUT="$(BUILD_DIR="{{justfile_directory()}}/clone/build-aes" \
+        SRC_DIR="{{justfile_directory()}}/clone" \
+        bash repro/run.sh repro 2>&1)" || true
+    echo "$OUT"
+    if ! grep -q "assertion failed: (in_size > GST_AES_BLOCK_SIZE)" <<< "$OUT"; then
+        echo "expected the g_assert(in_size > GST_AES_BLOCK_SIZE) abort, did not see it" >&2
+        exit 1
+    fi
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    export PATH="$HOME/.local/bin:$PATH" && cd clone && ninja -C build-aes \
+        subprojects/gst-plugins-bad/ext/aes/libgstaes.so
+
+# Same repro again, now against the patched clone - should no longer abort the process (a real
+# EOS message on the bus instead), and the boundary/regression checks (a too-short 15-byte first
+# buffer still fails gracefully, and a full aesenc|aesdec round trip still decrypts correctly)
+# must also pass.
+reproduce-after:
+    #!/usr/bin/env bash
+    set -eo pipefail
+    OUT="$(BUILD_DIR="{{justfile_directory()}}/clone/build-aes" \
+        SRC_DIR="{{justfile_directory()}}/clone" \
+        bash repro/run.sh repro 2>&1)"
+    echo "$OUT"
+    if grep -q "assertion failed" <<< "$OUT"; then
+        echo "still saw an assertion failure after applying the patch" >&2
+        exit 1
+    fi
+    if ! grep -q "Reached end of main() without the process aborting." <<< "$OUT"; then
+        echo "expected a clean exit after applying the patch, did not see one" >&2
+        exit 1
+    fi
+    OUT2="$(BUILD_DIR="{{justfile_directory()}}/clone/build-aes" \
+        SRC_DIR="{{justfile_directory()}}/clone" \
+        bash repro/run.sh boundary 2>&1)"
+    echo "$OUT2"
+    if ! grep -q "ALL CHECKS PASSED" <<< "$OUT2"; then
+        echo "expected boundary.c's ALL CHECKS PASSED, did not see it" >&2
+        exit 1
+    fi
+
+clean:
+    rm -rf clone repro/repro repro/boundary

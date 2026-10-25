@@ -1,0 +1,36 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# before/after are two separate binaries because the fix changes the public API's own type
+# signature (Option<Pid> -> bool) - the same source cannot compile against both pre- and
+# post-patch rustix, so `cargo run --bin before`/`--bin after` only builds the one bin that
+# matches whichever state ./clone is currently in.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug.
+# `-` tolerates the repro's own nonzero "REPRODUCED" exit code so `just test` can still continue
+# on to apply/reproduce-after instead of stopping here.
+reproduce-before:
+    -ulimit -c 0 && cd repro && cargo run --bin before
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same scenario again, now against the patched clone, using the fixed bool API - should no
+# longer demonstrate the bug.
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo run --bin after
+
+clean:
+    rm -rf clone

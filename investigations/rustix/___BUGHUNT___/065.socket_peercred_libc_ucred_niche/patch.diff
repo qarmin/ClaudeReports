@@ -1,0 +1,23 @@
+diff --git a/src/backend/libc/net/sockopt.rs b/src/backend/libc/net/sockopt.rs
+index 97104883..4848a190 100644
+--- a/src/backend/libc/net/sockopt.rs
++++ b/src/backend/libc/net/sockopt.rs
+@@ -1093,7 +1093,17 @@ pub(crate) fn tcp_cork(fd: BorrowedFd<'_>) -> io::Result<bool> {
+ #[cfg(linux_kernel)]
+ #[inline]
+ pub(crate) fn socket_peercred(fd: BorrowedFd<'_>) -> io::Result<UCred> {
+-    getsockopt(fd, c::SOL_SOCKET, c::SO_PEERCRED)
++    // Go through the raw `c::ucred` (plain `pid_t`/`uid_t`/`gid_t`, no niche) rather than
++    // `getsockopt::<UCred>` directly: the kernel can legitimately report `pid == 0` (e.g. an
++    // unconnected socket, or a peer not visible in the caller's PID namespace), which would
++    // otherwise be written straight into `UCred.pid`'s `NonZeroI32` niche via `assume_init()`,
++    // constructing an invalid `Pid` (UB).
++    let creds: c::ucred = getsockopt(fd, c::SOL_SOCKET, c::SO_PEERCRED)?;
++    Ok(UCred {
++        pid: crate::pid::Pid::from_raw(creds.pid).ok_or(io::Errno::INVAL)?,
++        uid: crate::ugid::Uid::from_raw(creds.uid),
++        gid: crate::ugid::Gid::from_raw(creds.gid),
++    })
+ }
+ 
+ #[cfg(all(target_os = "linux", feature = "time"))]

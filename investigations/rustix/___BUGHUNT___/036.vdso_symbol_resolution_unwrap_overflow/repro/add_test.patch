@@ -1,0 +1,84 @@
+diff --git a/src/backend/linux_raw/vdso.rs b/src/backend/linux_raw/vdso.rs
+index 4fa1d1cc..f10fd352 100644
+--- a/src/backend/linux_raw/vdso.rs
++++ b/src/backend/linux_raw/vdso.rs
+@@ -542,4 +542,79 @@ mod tests {
+             assert!(!ptr.is_null());
+         }
+     }
++
++    // Candidate 036: a vDSO symbol table entry whose `st_value`, once added
++    // to the real load address, overflows `usize` makes `addr_from_elf`
++    // legitimately return `None` - but `sym()` immediately `.unwrap()`s that
++    // result, panicking before the `assert!` right below it (which was
++    // clearly meant to be the actual bounds check for a bogus-but-
++    // non-overflowing value) ever gets a chance to run.
++    //
++    // This builds the minimal internal state `sym()` needs entirely in
++    // this process (a single-bucket classic `DT_HASH` table with one
++    // symbol) rather than going through a real kernel-supplied vDSO: per
++    // CONFIRMATION.md section 11, the vDSO image is a single external
++    // artifact handed to this parser (like a malformed file), not a live
++    // interactive second participant - and the only way to get a genuinely
++    // kernel-produced vDSO with a corrupted `st_value` would be a custom/
++    // modified kernel build, impractical in this environment/session.
++    #[test]
++    fn test_vdso_sym_overflow_panics_via_unwrap_before_bounds_assert() {
++        let name = cstr!("evil_symbol");
++        let symstrings = b"evil_symbol\0";
++
++        // symtab[0] is the reserved null symbol, never read here since
++        // bucket[0] points straight at index 1.
++        let null_sym = Elf_Sym {
++            st_name: 0,
++            st_info: 0,
++            st_other: 0,
++            st_shndx: 0,
++            st_value: 0,
++            st_size: 0,
++        };
++
++        // A real `load_addr` (the address of our own stack array is a
++        // perfectly real, moderate `usize` value) and an `st_value` chosen
++        // as its exact two's-complement negation: `load_addr.wrapping_add(
++        // st_value) == 0`, i.e. `checked_add` in `base_plus` is guaranteed
++        // to detect the overflow and return `None` - a hand-picked boundary
++        // value, not a guess.
++        let load_addr_placeholder = [0u8; 1];
++        let load_addr = load_addr_placeholder.as_ptr() as usize;
++        let evil_sym = Elf_Sym {
++            st_name: 0, // "evil_symbol", at symstrings[0]
++            st_info: (STB_GLOBAL << 4) | STT_FUNC,
++            st_other: 0,
++            st_shndx: 1, // anything != SHN_UNDEF (0)
++            st_value: load_addr.wrapping_neg(),
++            st_size: 0,
++        };
++        let symtab = [null_sym, evil_sym];
++
++        let bucket: [ElfHashEntry; 1] = [1];
++        let chain: [ElfHashEntry; 2] = [0, 0];
++
++        let vdso = Vdso {
++            load_addr: load_addr as *const Elf_Ehdr,
++            load_end: load_addr as *const c_void,
++            pv_offset: 0,
++            symtab: symtab.as_ptr(),
++            symstrings: symstrings.as_ptr(),
++            gnu_hash: null(),
++            bucket: bucket.as_ptr(),
++            chain: chain.as_ptr(),
++            nbucket: 1,
++            versym: null(),
++            verdef: null(),
++        };
++
++        // `check_sym` passes (right type/bind/name, no version table to
++        // check since `versym` is null) - so this reaches the `.unwrap()`
++        // on `addr_from_elf`'s overflow-signaling `None` and panics there,
++        // never reaching the `assert!` right after it. (Once fixed, this
++        // should instead return a null pointer, i.e. "symbol not found",
++        // rather than panic.)
++        assert!(vdso.sym(name, name).is_null());
++    }
+ }

@@ -1,0 +1,49 @@
+# Self-contained reproduction for this candidate.
+#
+# Per this project's repro policy (2026-10-05), this candidate has ONLY a
+# GDScript-level repro (repro/) - no standalone C++ mirror.
+#
+# NOTE: unlike most candidates this session, the unfixed symptom here is NOT
+# an ASan-reported crash - it's hundreds of thousands of spurious
+# "Error parsing key"/"Failed to import key" ERROR log lines from racing
+# CryptoKeyMbedTLS::load_from_string()/save_to_string() calls against each
+# other on the same underlying PSA key slot (pk_slot/pk_type/pk_size), using
+# a single, constant, perfectly valid PEM string throughout. "Fixed" means
+# the error count drops to zero, not that a segfault stops happening.
+#
+# Build parallelism is deliberately capped (-j12, not -j$(nproc)) - a full
+# -j$(nproc) use_asan=yes build on a 24-core/29GB box was observed to risk
+# OOM when stacked with other concurrent work in this workspace.
+
+repo_url := "https://github.com/qarmin/godot.git"
+base_commit := "b8420aa3a60689572a745c0f8a85c9df62d4cbfb"
+
+test: clone verify-patch
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+verify-patch:
+    cd clone && git apply --check "{{justfile_directory()}}/patch.diff"
+    @echo "patch.diff applies cleanly."
+
+# The real thing: builds a fresh ASan editor binary from the clone, runs
+# repro/ against it unpatched (expect a LOT of "Error parsing key"/"Failed to
+# import key" ERROR lines in the log - grep -c 'Error parsing key\|Failed to
+# import' on the output should be in the tens/hundreds of thousands, not
+# zero), applies the fix, rebuilds, and runs it again (expect zero such
+# errors and a clean "survived" exit).
+build-and-run: clone
+    cd clone && python3 -m venv .venv 2>/dev/null; . .venv/bin/activate 2>/dev/null; pip install scons -q 2>/dev/null || true
+    cd clone && scons platform=linuxbsd target=editor use_asan=yes tests=yes debug_symbols=yes -j12
+    @echo "=== unfixed: running repro/, expect many spurious parse/import errors ==="
+    (cd clone && ASAN_OPTIONS=detect_leaks=0 timeout -k 5 20 ./bin/godot.linuxbsd.editor.x86_64.san --headless --path "{{justfile_directory()}}/repro" 2>&1 | grep -c 'Error parsing key\|Failed to import' || true)
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && scons platform=linuxbsd target=editor use_asan=yes tests=yes debug_symbols=yes -j12
+    @echo "=== fixed: running repro/, expect zero spurious errors ==="
+    cd clone && ASAN_OPTIONS=detect_leaks=0 timeout -k 5 20 ./bin/godot.linuxbsd.editor.x86_64.san --headless --path "{{justfile_directory()}}/repro" 2>&1 | grep -c 'Error parsing key\|Failed to import' || true
+
+clean:
+    rm -rf clone

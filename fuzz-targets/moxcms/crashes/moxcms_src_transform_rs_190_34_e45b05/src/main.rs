@@ -1,0 +1,6 @@
+use moxcms::Layout;
+
+fn main() {
+    let layout = Layout::GrayAlpha;
+    let _ = layout.r_i();
+}

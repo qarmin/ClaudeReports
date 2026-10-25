@@ -1,0 +1,31 @@
+diff --git a/modules/camera/camera_linux.cpp b/modules/camera/camera_linux.cpp
+index 0880bf9e07..94d97e4ba3 100644
+--- a/modules/camera/camera_linux.cpp
++++ b/modules/camera/camera_linux.cpp
+@@ -164,6 +164,8 @@ bool CameraLinux::_can_query_format(int p_file_descriptor, int p_type) {
+ }
+ 
+ inline void CameraLinux::set_monitoring_feeds(bool p_monitoring_feeds) {
++	MutexLock lock(monitoring_feeds_mutex);
++
+ 	if (p_monitoring_feeds == monitoring_feeds) {
+ 		return;
+ 	}
+diff --git a/modules/camera/camera_linux.h b/modules/camera/camera_linux.h
+index f1920b727c..6da99afff1 100644
+--- a/modules/camera/camera_linux.h
++++ b/modules/camera/camera_linux.h
+@@ -40,6 +40,13 @@ private:
+ 	SafeFlag exit_flag;
+ 	Thread camera_thread;
+ 	Mutex camera_mutex;
++	// Separate from camera_mutex: serializes concurrent set_monitoring_feeds() callers around
++	// camera_thread's start()/wait_to_finish() lifecycle. Kept distinct from camera_mutex (which
++	// guards `feeds` in _update_devices()) because wait_to_finish() below can block for a while,
++	// and _update_devices() needs to go on taking camera_mutex independently in the meantime for
++	// the background thread to ever notice exit_flag and return - sharing one mutex for both
++	// would let a wait_to_finish() call deadlock against the background thread's own locking.
++	Mutex monitoring_feeds_mutex;
+ 
+ 	static void camera_thread_func(void *p_camera_linux);
+ 

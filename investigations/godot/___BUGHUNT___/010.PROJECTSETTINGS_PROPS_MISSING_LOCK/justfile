@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# Per this project's repro policy (2026-10-05), this candidate has ONLY a GDScript-level repro
+# (repro/) - no standalone C++ mirror. Re-running it from scratch means building a real Godot
+# editor binary with ASan (~1-15 min depending on how much is cached), so this justfile splits
+# into a cheap default check (`test`: does the patch still apply to a fresh clone?) and a
+# separate, expensive recipe (`build-and-run`) that does the real thing.
+
+repo_url := "https://github.com/qarmin/godot.git"
+base_commit := "b8420aa3a60689572a745c0f8a85c9df62d4cbfb"
+
+test: clone verify-patch
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Cheap sanity check: does patch.diff still apply cleanly to the commit this
+# candidate was recorded against? Does NOT build or run anything.
+verify-patch:
+    cd clone && git apply --check "{{justfile_directory()}}/patch.diff"
+    @echo "patch.diff applies cleanly."
+
+# The real thing: builds a fresh ASan editor binary from the clone, runs repro/ against it
+# unpatched several times (expect every run to crash with a real ASan heap-use-after-free -
+# see RESULT.md/output.txt), applies the fix, rebuilds (much faster, only
+# project_settings.cpp changed), and runs it again (expect all clean).
+build-and-run: clone
+    cd clone && python3 -m venv .venv 2>/dev/null; . .venv/bin/activate 2>/dev/null; pip install scons -q 2>/dev/null || true
+    cd clone && scons platform=linuxbsd target=editor use_asan=yes tests=yes debug_symbols=yes -j"$(nproc)"
+    @echo "=== unfixed: running repro/ 5 times, expect every run to crash (ASan heap-use-after-free) ==="
+    for i in 1 2 3 4 5; do \
+        (cd clone && XDG_DATA_HOME="{{justfile_directory()}}/clone/.xdg_data_home" ASAN_OPTIONS=detect_leaks=0 timeout 20 ./bin/godot.linuxbsd.editor.x86_64.san --headless --path "{{justfile_directory()}}/repro" || true); \
+    done
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && scons platform=linuxbsd target=editor use_asan=yes tests=yes debug_symbols=yes -j"$(nproc)"
+    @echo "=== fixed: running repro/ 5 times, expect all clean (no AddressSanitizer output) ==="
+    for i in 1 2 3 4 5; do \
+        (cd clone && XDG_DATA_HOME="{{justfile_directory()}}/clone/.xdg_data_home" ASAN_OPTIONS=detect_leaks=0 timeout 60 ./bin/godot.linuxbsd.editor.x86_64.san --headless --path "{{justfile_directory()}}/repro"); \
+    done
+
+clean:
+    rm -rf clone

@@ -1,0 +1,91 @@
+=== Environment check: why a genuine real-FUSE / corrupted-image end-to-end repro is infeasible
+=== in this sandboxed container (run in the investigating worktree, /tmp/rustix_wt_032) ===
+
+$ ls -la /dev/fuse
+ls: cannot access '/dev/fuse': No such file or directory
+
+$ sudo -n true; echo "sudo status: $?"
+sudo: The "no new privileges" flag is set, which prevents sudo from running as root.
+sudo: If sudo is running in a container, you may need to adjust the container configuration to disable the flag.
+sudo status: 1
+
+$ ls -la /dev/loop*
+ls: cannot access '/dev/loop*': No such file or directory
+
+$ unshare -rm --propagation private bash -c 'mount -t tmpfs tmpfs /mnt 2>&1; ls /mnt'
+unshare: unshare failed: Operation not permitted
+
+=== 5/5 repeated runs via the real public API (rustix::fs::readlink), syscall boundary mocked
+=== for one magic path only (mock.patch), against pristine code (base_commit 287214b8),
+=== run directly in the investigating worktree /tmp/rustix_wt_032 ===
+
+$ cargo run --example bughunt_032 --features "fs,alloc,std"
+thread 'main' (73002) panicked at src/fs/abs.rs:133:44:
+called `Result::unwrap()` on an `Err` value: NulError(3, [97, 98, 99, 0, 100, 101, 102])
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - panicked: called `Result::unwrap()` on an `Err` value: NulError(3, [97, 98, 99, 0, 100, 101, 102])
+
+(run again x4 more, identical panic each time)
+REPRODUCED - panicked: called `Result::unwrap()` on an `Err` value: NulError(3, [97, 98, 99, 0, 100, 101, 102])
+REPRODUCED - panicked: called `Result::unwrap()` on an `Err` value: NulError(3, [97, 98, 99, 0, 100, 101, 102])
+REPRODUCED - panicked: called `Result::unwrap()` on an `Err` value: NulError(3, [97, 98, 99, 0, 100, 101, 102])
+REPRODUCED - panicked: called `Result::unwrap()` on an `Err` value: NulError(3, [97, 98, 99, 0, 100, 101, 102])
+
+=== Boundary-value variants in the same bug class (NUL at the very first byte, NUL as the last
+=== byte before the terminator) - both panic identically before the fix ===
+
+crafted = b"\0"      -> REPRODUCED (same NulError shape, index 0)
+crafted = b"xyz\0"   -> REPRODUCED (same NulError shape, index 3)
+
+=== After applying patch.diff (CString::new(buffer).unwrap() -> CString::new(buffer).map_err(|_|
+=== io::Errno::ILSEQ)), same 3 crafted inputs, 3/3 runs, no panic ===
+
+crafted = b"abc\0def" -> did not reproduce - io error Os { code: 84, kind: Uncategorized, message: "Invalid or incomplete multibyte or wide character" }
+crafted = b"\0"       -> did not reproduce - io error Os { code: 84, kind: Uncategorized, message: "Invalid or incomplete multibyte or wide character" }
+crafted = b"xyz\0"    -> did not reproduce - io error Os { code: 84, kind: Uncategorized, message: "Invalid or incomplete multibyte or wide character" }
+
+=== `just test` run from a completely fresh clone (this candidate folder's own self-contained
+=== justfile, repo_url/base_commit filled in) ===
+
+$ just test
+[... clone + checkout 287214b8 ...]
+cd clone && git apply ".../mock.patch"
+ulimit -c 0 && cd repro && cargo run
+   Compiling rustix v1.1.5 (.../clone)
+   Compiling repro v0.0.0 (.../repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.57s
+     Running `target/debug/repro`
+
+thread 'main' (88008) panicked at .../clone/src/fs/abs.rs:133:44:
+called `Result::unwrap()` on an `Err` value: NulError(3, [97, 98, 99, 0, 100, 101, 102])
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - panicked: called `Result::unwrap()` on an `Err` value: NulError(3, [97, 98, 99, 0, 100, 101, 102])
+cd clone && git apply ".../patch.diff"
+ulimit -c 0 && cd repro && cargo run
+   Compiling rustix v1.1.5 (.../clone)
+   Compiling repro v0.0.0 (.../repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.48s
+     Running `target/debug/repro`
+did not reproduce - readlink returned a clean error: Os { code: 84, kind: Uncategorized, message: "Invalid or incomplete multibyte or wide character" }
+
+=== Project test suite, `cargo test --workspace --features "std,all-apis,use-libc"`, run in the
+=== investigating worktree /tmp/rustix_wt_032 (not the standalone clone) ===
+
+BEFORE (pristine src/fs/abs.rs):
+test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test ioctl::test_int_setter ... FAILED  (pre-existing, unrelated: this container has no
+  /dev/net/tun - see ___BUGHUNT___/README.md's toolchain table)
+test result: FAILED. 16 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+TOTAL: 151 passed, 1 failed (pre-existing/unrelated)
+
+AFTER (patch.diff applied):
+test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test ioctl::test_int_setter ... FAILED  (same pre-existing, unrelated failure)
+test result: FAILED. 16 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+TOTAL: 151 passed, 1 failed (identical to before - fix changes nothing else)

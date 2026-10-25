@@ -1,0 +1,70 @@
+# Self-contained reproduction for this candidate.
+#
+# repro/repro.cpp and repro/repro_fixed.cpp reuse Godot's REAL
+# core/templates/hash_map.h, core/os/mutex.h and core/os/memory.cpp verbatim
+# (compiled directly from a fresh clone, no reimplementation) plus a minimal
+# class (MiniResourceUID) copying the exact method bodies of
+# ResourceUID::add_id/remove_id/get_path_id (core/io/resource_uid.cpp) - same
+# field types, same lock placement. repro.cpp mirrors the real (buggy)
+# get_path_id with no lock; repro_fixed.cpp mirrors the patched version with
+# MutexLock added, matching patch.diff exactly.
+#
+# IMPORTANT: patch.diff is the real fix applied to the actual
+# core/io/resource_uid.cpp - but MiniResourceUID does NOT link against that
+# file (it would require pulling in Object/ClassDB/the whole engine - see
+# RESULT.md). So `apply` here is for the record/for someone who wants to build
+# the real engine, not something this justfile's own repro rebuild depends on.
+# The "fix verified" claim rests on repro.cpp vs. repro_fixed.cpp (byte-for-byte
+# identical except for the one added MutexLock line, same as patch.diff).
+#
+# Everything needed is either already in this folder, or fetched by `just clone`
+# into ./clone (gitignored) - this whole folder can be copied anywhere
+# (including attached to a GitHub issue) and `just test` still works.
+
+repo_url := "https://github.com/qarmin/godot.git"
+base_commit := "e7cfa294a0b81bed7986be04a848cc1832a3f083"
+
+inc_flags := "-I./clone -I./clone/platform/linuxbsd -DASAN_ENABLED -DTHREADS_ENABLED"
+
+# Full cycle: clone pristine, prove the bug exists (repro.cpp), prove the fix
+# closes it (repro_fixed.cpp). `apply` is kept for the record (see header above).
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    # core/profiling/profiling.gen.h is normally SCons-generated at build time
+    # (gitignored); empty is correct here since the default build has no
+    # profiler enabled (profiling.h's macros all stay undefined either way).
+    touch clone/core/profiling/profiling.gen.h
+
+# Builds the real core/os/memory.cpp + the error-logging stub + the UNFIXED
+# repro.cpp against the pristine clone's real headers, under ASan, runs ~20s.
+# Expected (confirming) result: ASan aborts with heap-use-after-free/overflow
+# well before the timeout, so this recipe's own non-zero exit is success here -
+# `|| true` keeps it from failing the `test` chain.
+reproduce-before:
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c clone/core/os/memory.cpp -o memory.o
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c repro/err_stub.cpp -o err_stub.o
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c repro/repro.cpp -o repro.o
+    g++ -std=c++17 -fsanitize=address -g -O1 repro.o err_stub.o memory.o -o repro_before -lpthread
+    ulimit -c 0 && (timeout 20 ./repro_before || true)
+
+# Applies the real fix to the cloned engine source, for the record - not
+# consumed by reproduce-after (see header above).
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Builds and runs the FIXED mirror (repro_fixed.cpp, MutexLock added) against
+# the same pristine clone's real headers. Expected result: runs the full 20s
+# and prints "No crash within the time limit" - no ASan abort.
+reproduce-after:
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c clone/core/os/memory.cpp -o memory.o
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c repro/err_stub.cpp -o err_stub.o
+    g++ -std=c++17 -fsanitize=address -g -O1 {{inc_flags}} -c repro/repro_fixed.cpp -o repro_fixed.o
+    g++ -std=c++17 -fsanitize=address -g -O1 repro_fixed.o err_stub.o memory.o -o repro_after -lpthread
+    ulimit -c 0 && timeout 20 ./repro_after
+
+clean:
+    rm -rf clone *.o repro_before repro_after

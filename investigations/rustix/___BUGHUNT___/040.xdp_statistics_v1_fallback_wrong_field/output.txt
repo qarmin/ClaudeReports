@@ -1,0 +1,35 @@
+=== BEFORE (default build = pre-patch/buggy branch) ===
+$ cargo run
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running `target/debug/repro`
+--- Step 1: real AF_XDP socket creation attempt in this environment ---
+socket(AF_XDP, SOCK_RAW, 0) failed: Operation not permitted (os error 1)
+(this is why a genuine end-to-end repro against a real AF_XDP socket + a real pre-5.9 kernel is not practical in this sandbox - see the module doc comment)
+
+--- Step 2: synthetic pre-5.9-kernel XDP_STATISTICS response ---
+kernel writes (v1 layout): rx_dropped=111, rx_invalid_descs=222, tx_invalid_descs=333
+
+--- Step 3: what rustix's real (pre-patch, base_commit 287214b8) v1-fallback branch returns ---
+XdpStatistics { rx_dropped: 111, rx_invalid_descs: 111, tx_invalid_descs: 111, rx_ring_full: None, rx_fill_ring_empty_descs: None, tx_ring_empty_descs: None }
+
+BUG CONFIRMED: rx_invalid_descs=111 (expected 222) and tx_invalid_descs=111 (expected 333) - both silently replaced by rx_dropped=111.
+
+exit code: 1
+
+=== AFTER (--features fixed = post-patch branch) ===
+$ cargo run --features fixed
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running `target/debug/repro`
+--- Step 1: real AF_XDP socket creation attempt in this environment ---
+socket(AF_XDP, SOCK_RAW, 0) failed: Operation not permitted (os error 1)
+(this is why a genuine end-to-end repro against a real AF_XDP socket + a real pre-5.9 kernel is not practical in this sandbox - see the module doc comment)
+
+--- Step 2: synthetic pre-5.9-kernel XDP_STATISTICS response ---
+kernel writes (v1 layout): rx_dropped=111, rx_invalid_descs=222, tx_invalid_descs=333
+
+--- Step 3: what rustix's real (post-patch, this candidate's patch.diff) v1-fallback branch returns ---
+XdpStatistics { rx_dropped: 111, rx_invalid_descs: 222, tx_invalid_descs: 333, rx_ring_full: None, rx_fill_ring_empty_descs: None, tx_ring_empty_descs: None }
+
+CORRECT: rx_invalid_descs/tx_invalid_descs match the real kernel-reported values.
+
+exit code: 0

@@ -1,0 +1,96 @@
+Real captured output of `just test` (fresh clone of bytecodealliance/rustix @
+287214b889865d8e1406a0ee71cc409b6f6191c8, built with
+`x86_64-unknown-linux-musl` + `-C relocation-model=static`, corrupted via
+`corrupt_phdr.py`), run from this candidate folder on 2026-10-01:
+
+rm -rf clone
+git clone https://github.com/bytecodealliance/rustix.git clone
+Cloning into 'clone'...
+cd clone && git checkout 287214b889865d8e1406a0ee71cc409b6f6191c8
+Note: switching to '287214b889865d8e1406a0ee71cc409b6f6191c8'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at 287214b8 chore: Release rustix version 1.1.5
+rustup target add x86_64-unknown-linux-musl
+info: component rust-std for target x86_64-unknown-linux-musl is up to date
+cd repro && rm -f target/x86_64-unknown-linux-musl/debug/repro
+cd repro && RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static" cargo build --target x86_64-unknown-linux-musl
+    Updating crates.io index
+     Locking 7 packages to latest compatible versions
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+   Compiling rustix v1.1.5 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/034.auxv_pointer_validation_unwrap_panic/clone)
+   Compiling linux-raw-sys v0.12.1
+   Compiling bitflags v2.13.2
+   Compiling repro v0.1.0 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/034.auxv_pointer_validation_unwrap_panic/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.51s
+cd repro && python3 corrupt_phdr.py target/x86_64-unknown-linux-musl/debug/repro ./corrupted-before 1
+corrupted ./corrupted-before: AT_PHDR will report 0x992541 (mod 8 = 1)
+cd repro && ulimit -c 0 && (./corrupted-before; echo "exit code: $?")
+
+thread 'main' (122838) panicked at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/034.auxv_pointer_validation_unwrap_panic/clone/src/backend/linux_raw/param/auxv.rs:301:68:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit code: 101
+cd clone && git apply "/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/034.auxv_pointer_validation_unwrap_panic/patch.diff"
+cd repro && rm -f target/x86_64-unknown-linux-musl/debug/repro
+cd repro && RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static" cargo build --target x86_64-unknown-linux-musl
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+   Compiling rustix v1.1.5 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/034.auxv_pointer_validation_unwrap_panic/clone)
+   Compiling repro v0.1.0 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/034.auxv_pointer_validation_unwrap_panic/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.56s
+cd repro && python3 corrupt_phdr.py target/x86_64-unknown-linux-musl/debug/repro ./corrupted-after 1
+corrupted ./corrupted-after: AT_PHDR will report 0x990549 (mod 8 = 1)
+cd repro && ulimit -c 0 && (./corrupted-after; echo "exit code: $?")
+phdr=0x0 phent=0 phnum=10
+exit code: 0
+
+---
+
+Additional repeat/variation runs captured during investigation (separate
+scratch worktree at /tmp/rustix-worktree-034, same base commit, same
+corruption technique, not re-paraphrased):
+
+Before fix, residue (e_phoff mod 8) = 1, 5 consecutive runs, all panicked
+identically at auxv.rs:301:68 ("called `Option::unwrap()` on a `None`
+value"), exit code 101 every time.
+
+Before fix, residue (e_phoff mod 8) = 3 (a different misaligned value, to
+rule out the exact byte offset being special-cased by anything):
+
+    T= 0x590723 T%8= 3 AT_PHDR= 0x990723
+    thread 'main' (121757) panicked at /tmp/rustix-worktree-034/src/backend/linux_raw/param/auxv.rs:301:68:
+    called `Option::unwrap()` on a `None` value
+    before(residue3) exit:101
+
+After fix, residue = 3, 3 consecutive runs:
+
+    phdr=0x0 phent=0 phnum=10
+    after(residue3) run 1 exit:0
+    phdr=0x0 phent=0 phnum=10
+    after(residue3) run 2 exit:0
+    phdr=0x0 phent=0 phnum=10
+    after(residue3) run 3 exit:0
+
+Project test suite, both before and after the fix (same command,
+`cargo test --workspace --features "std,all-apis,use-libc" --no-fail-fast`):
+identical result both times - 411 passed, 1 failed (the single failure is a
+pre-existing, environment-caused one unrelated to this fix:
+`ioctl::test_int_setter`, `NotFound` opening `/dev/net/tun`, which does not
+exist in this sandboxed container - documented in
+`___BUGHUNT___/projects/rustix.md` as the expected baseline on this host).
+No new failures introduced by the fix.

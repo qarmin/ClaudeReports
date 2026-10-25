@@ -1,0 +1,119 @@
+diff --git a/crates/egui/src/context.rs b/crates/egui/src/context.rs
+index 9f6518cde..fd4936e3c 100644
+--- a/crates/egui/src/context.rs
++++ b/crates/egui/src/context.rs
+@@ -446,6 +446,9 @@ struct ContextImpl {
+     viewport_parents: ViewportIdMap<ViewportId>,
+     viewports: ViewportIdMap<ViewportState>,
+ 
++    /// Per viewport: sizes of last frame's tessellated meshes, used to reserve capacity.
++    mesh_size_hints: ViewportIdMap<Vec<(usize, usize)>>,
++
+     embed_viewports: bool,
+ 
+     is_accesskit_enabled: bool,
+@@ -3380,16 +3383,22 @@ impl Context {
+             };
+ 
+             let paint_stats = PaintStats::from_shapes(&shapes);
++            let viewport_id = ctx.viewport_id();
++            let hints = ctx.mesh_size_hints.remove(&viewport_id).unwrap_or_default();
++            let mut tessellator = tessellator::Tessellator::new(
++                pixels_per_point,
++                tessellation_options,
++                texture_atlas.size(),
++                texture_atlas.prepared_discs(),
++            )
++            .with_mesh_size_hints(hints);
+             let clipped_primitives = {
+                 profiling::scope!("tessellator::tessellate_shapes");
+-                tessellator::Tessellator::new(
+-                    pixels_per_point,
+-                    tessellation_options,
+-                    texture_atlas.size(),
+-                    texture_atlas.prepared_discs(),
+-                )
+-                .tessellate_shapes(shapes)
++                tessellator.tessellate_shapes(shapes)
+             };
++            let mut hints = tessellator.take_mesh_size_hints();
++            tessellator::mesh_sizes(&clipped_primitives, &mut hints);
++            ctx.mesh_size_hints.insert(viewport_id, hints);
+             ctx.paint_stats = paint_stats.with_clipped_primitives(&clipped_primitives);
+             clipped_primitives
+         })
+diff --git a/crates/epaint/src/tessellator.rs b/crates/epaint/src/tessellator.rs
+index 22ba5c814..36e1dbd39 100644
+--- a/crates/epaint/src/tessellator.rs
++++ b/crates/epaint/src/tessellator.rs
+@@ -1413,6 +1413,19 @@ fn mul_color(color: Color32, factor: f32) -> Color32 {
+ 
+ // ----------------------------------------------------------------------------
+ 
++/// The `(vertices, indices)` of every primitive, for [`Tessellator::with_mesh_size_hints`].
++pub fn mesh_sizes(primitives: &[ClippedPrimitive], out: &mut Vec<(usize, usize)>) {
++    out.clear();
++    out.extend(
++        primitives
++            .iter()
++            .map(|primitive| match &primitive.primitive {
++                Primitive::Mesh(mesh) => (mesh.vertices.len(), mesh.indices.len()),
++                Primitive::Callback(_) => (0, 0),
++            }),
++    );
++}
++
+ /// Converts [`Shape`]s into triangles ([`Mesh`]).
+ ///
+ /// For performance reasons it is smart to reuse the same [`Tessellator`].
+@@ -1433,6 +1446,9 @@ pub struct Tessellator {
+ 
+     scratchpad_points: Vec<Pos2>,
+     scratchpad_path: Path,
++
++    /// `(vertices, indices)` of the meshes of a previous, similar run, by primitive index.
++    mesh_size_hints: Vec<(usize, usize)>,
+ }
+ 
+ impl Tessellator {
+@@ -1464,9 +1480,24 @@ impl Tessellator {
+             clip_rect: Rect::EVERYTHING,
+             scratchpad_points: Default::default(),
+             scratchpad_path: Default::default(),
++            mesh_size_hints: Vec::new(),
+         }
+     }
+ 
++    /// Reserve mesh capacity up front, from the sizes of the primitives of an earlier run.
++    ///
++    /// Use [`mesh_sizes`] on the previous output. Only a performance hint: wrong hints are harmless.
++    #[must_use]
++    pub fn with_mesh_size_hints(mut self, hints: Vec<(usize, usize)>) -> Self {
++        self.mesh_size_hints = hints;
++        self
++    }
++
++    /// Take the mesh size hints back out (e.g. to reuse the allocation).
++    pub fn take_mesh_size_hints(&mut self) -> Vec<(usize, usize)> {
++        core::mem::take(&mut self.mesh_size_hints)
++    }
++
+     /// Set the [`Rect`] to use for culling.
+     pub fn set_clip_rect(&mut self, clip_rect: Rect) {
+         self.clip_rect = clip_rect;
+@@ -1531,7 +1562,14 @@ impl Tessellator {
+         if start_new_mesh {
+             out_primitives.push(ClippedPrimitive {
+                 clip_rect,
+-                primitive: Primitive::Mesh(Mesh::default()),
++                primitive: Primitive::Mesh(match self.mesh_size_hints.get(out_primitives.len()) {
++                    Some(&(vertices, indices)) => Mesh {
++                        vertices: Vec::with_capacity(vertices),
++                        indices: Vec::with_capacity(indices),
++                        ..Default::default()
++                    },
++                    None => Mesh::default(),
++                }),
+             });
+         }
+ 

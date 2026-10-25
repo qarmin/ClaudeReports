@@ -1,0 +1,87 @@
+diff --git a/src/backend/linux_raw/vdso.rs b/src/backend/linux_raw/vdso.rs
+index 4fa1d1cc..b7104f42 100644
+--- a/src/backend/linux_raw/vdso.rs
++++ b/src/backend/linux_raw/vdso.rs
+@@ -542,4 +542,82 @@ mod tests {
+             assert!(!ptr.is_null());
+         }
+     }
++
++    // Candidate 047: `vdso_wrappers.rs::init()` used to hardcode
++    // `let ok = true;` on every `target_pointer_width = "64"` architecture
++    // right before doing a real (non-`debug_assert`) `assert!(!ptr.is_null())`
++    // on `vdso.sym(...)`'s result - unlike the 32-bit branches, which guarded
++    // the same assert with `let ok = !ptr.is_null();`. This assumed every
++    // vDSO that passes ELF-header validation necessarily exports the exact
++    // expected symbol+version, which doesn't hold for a vDSO that's mapped
++    // but genuinely doesn't export it (a minimal vDSO under gVisor/runsc or
++    // a similarly restricted kernel/sandbox, for example).
++    //
++    // This builds a minimal, otherwise well-formed, single-bucket classic
++    // `DT_HASH` vDSO with *no* symbols at all (`bucket[0] == 0`, the
++    // standard "nothing hashed to this bucket" terminator) - modelling a
++    // genuinely minimal vDSO that exports nothing matching the query, not a
++    // hand-tuned hash collision, and not candidate 036's `.unwrap()`-before-
++    // `assert!` overflow path. `sym()`'s own normal "not found" path then
++    // legitimately returns a null pointer, exactly as documented.
++    //
++    // Per CONFIRMATION.md section 11, the vDSO image is a single external
++    // artifact handed to this parser (like a malformed file), not a live
++    // interactive second participant. Getting a *genuine* kernel (gVisor/
++    // runsc, a stripped-down embedded kernel, certain emulators) to supply
++    // this for real was attempted this session: gVisor's ptrace platform
++    // needs `CAP_SYS_PTRACE` (absent from this container's capability
++    // bounding set - verified via `/proc/self/status`) and its KVM platform
++    // needs `/dev/kvm` (also absent here) - both infeasible in this
++    // sandboxed environment, so this test stands in for that real input the
++    // same way candidate 036's does. This test reproduces the *pre-patch*
++    // shape of `init()`'s logic verbatim; the real, patched logic (which
++    // this exact scenario no longer panics with) is exercised directly, not
++    // via a frozen copy, by `vdso_wrappers::tests::
++    // vdso_sym_is_ok_rejects_null_and_accepts_nonnull`.
++    #[cfg(linux_raw)]
++    #[cfg(target_pointer_width = "64")]
++    #[test]
++    fn test_vdso_missing_symbol_then_hard_assert_panics() {
++        let name = cstr!("__vdso_clock_gettime");
++        let version = cstr!("LINUX_2.6");
++
++        let load_addr_placeholder = [0u8; 1];
++        let load_addr = load_addr_placeholder.as_ptr() as usize;
++
++        // Nothing hashes to this bucket: an empty symbol table.
++        let bucket: [ElfHashEntry; 1] = [0];
++        let chain: [ElfHashEntry; 1] = [0];
++
++        let vdso = Vdso {
++            load_addr: load_addr as *const Elf_Ehdr,
++            load_end: load_addr as *const c_void,
++            pv_offset: 0,
++            symtab: null(),
++            symstrings: null(),
++            gnu_hash: null(),
++            bucket: bucket.as_ptr(),
++            chain: chain.as_ptr(),
++            nbucket: 1,
++            versym: null(),
++            verdef: null(),
++        };
++
++        // `sym()`'s real, unmodified "not found" path: nothing hashes to
++        // bucket 0, so the chain loop never executes and it falls through
++        // to the trailing `null_mut()`.
++        let ptr = vdso.sym(version, name);
++        assert!(ptr.is_null());
++
++        // `vdso_wrappers.rs::init()`'s exact *pre-patch* logic for
++        // `target_pointer_width = "64"` (the `clock_gettime` branch),
++        // copied verbatim rather than reimplemented: `ok` is hardcoded
++        // `true` with no null check, so the following *real*
++        // (non-`debug_assert`) `assert!` aborts the whole process instead
++        // of falling back to the syscall path.
++        let ok = true;
++        if ok {
++            assert!(!ptr.is_null());
++        }
++    }
+ }

@@ -1,0 +1,134 @@
+diff --git a/src/backend/linux_raw/vdso_wrappers.rs b/src/backend/linux_raw/vdso_wrappers.rs
+index 338f4548..69e695e3 100644
+--- a/src/backend/linux_raw/vdso_wrappers.rs
++++ b/src/backend/linux_raw/vdso_wrappers.rs
+@@ -493,6 +493,25 @@ fn minimal_init() {
+     }
+ }
+ 
++/// Whether a vDSO-resolved symbol pointer should be trusted and stored, or
++/// treated as "this vDSO doesn't export that symbol" and left to the
++/// syscall fallback `minimal_init` already installed.
++///
++/// A vDSO that passes ELF-header validation (`vdso::Vdso::new()` returned
++/// `Some`) doesn't necessarily export every symbol+version this crate looks
++/// up afterward - a vDSO that's genuinely minimal (a sandboxed kernel like
++/// gVisor/runsc, certain emulators) can map successfully while still
++/// lacking a given symbol, which makes `Vdso::sym()` legitimately return a
++/// null pointer. `init()` below used to special-case this per
++/// architecture, several call sites hardcoding "trust it unconditionally"
++/// with no null check at all, so a genuinely missing symbol hit a hard
++/// (non-`debug_assert`) `assert!` right after and aborted the whole
++/// process, instead of falling back gracefully the way every other call
++/// site already did.
++fn vdso_sym_is_ok<T>(ptr: *mut T) -> bool {
++    !ptr.is_null()
++}
++
+ fn init() {
+     minimal_init();
+ 
+@@ -526,24 +545,10 @@ fn init() {
+             let ptr = vdso.sym(cstr!("LINUX_2.6"), cstr!("__vdso_clock_gettime"));
+ 
+             // On all 64-bit platforms, the 64-bit `clock_gettime` symbols are
+-            // always available.
+-            #[cfg(target_pointer_width = "64")]
+-            let ok = true;
+-
+-            // On some 32-bit platforms, the 64-bit `clock_gettime` symbols are
+-            // not available on older kernel versions.
+-            #[cfg(any(
+-                target_arch = "arm",
+-                target_arch = "mips",
+-                target_arch = "mips32r6",
+-                target_arch = "powerpc",
+-                target_arch = "x86"
+-            ))]
+-            let ok = !ptr.is_null();
+-
+-            if ok {
+-                assert!(!ptr.is_null());
+-
++            // normally always available; on some 32-bit platforms, they're
++            // not available on older kernel versions. Either way, only
++            // trust and store a symbol this vDSO actually exports.
++            if vdso_sym_is_ok(ptr) {
+                 // Store the computed function addresses in static storage so
+                 // that we don't need to compute them again (but if we do, it
+                 // doesn't hurt anything).
+@@ -576,32 +581,11 @@ fn init() {
+             #[cfg(target_arch = "s390x")]
+             let ptr = vdso.sym(cstr!("LINUX_2.6.29"), cstr!("__kernel_getcpu"));
+ 
+-            #[cfg(any(
+-                target_arch = "x86_64",
+-                target_arch = "riscv64",
+-                target_arch = "powerpc",
+-                target_arch = "powerpc64",
+-                target_arch = "s390x"
+-            ))]
+-            let ok = true;
+-
+-            // On 32-bit x86, the symbol doesn't appear present sometimes.
+-            #[cfg(target_arch = "x86")]
+-            let ok = !ptr.is_null();
+-
+-            #[cfg(any(
+-                target_arch = "aarch64",
+-                target_arch = "arm",
+-                target_arch = "mips",
+-                target_arch = "mips32r6",
+-                target_arch = "mips64",
+-                target_arch = "mips64r6",
+-            ))]
+-            let ok = false;
+-
+-            if ok {
+-                assert!(!ptr.is_null());
+-
++            // Normally always available on these architectures (except
++            // 32-bit x86, where the symbol doesn't appear present
++            // sometimes) - but only trust and store a symbol this vDSO
++            // actually exports.
++            if vdso_sym_is_ok(ptr) {
+                 // Store the computed function addresses in static storage so
+                 // that we don't need to compute them again (but if we do, it
+                 // doesn't hurt anything).
+@@ -613,11 +597,32 @@ fn init() {
+         #[cfg(target_arch = "x86")]
+         {
+             let ptr = vdso.sym(cstr!("LINUX_2.5"), cstr!("__kernel_vsyscall"));
+-            assert!(!ptr.is_null());
+ 
+-            // As above, store the computed function addresses in
+-            // static storage.
+-            SYSCALL.store(ptr.cast(), Relaxed);
++            // As above, only trust and store a symbol this vDSO actually
++            // exports; otherwise, leave the `int 0x80` fallback
++            // `minimal_init` already installed in place.
++            if vdso_sym_is_ok(ptr) {
++                SYSCALL.store(ptr.cast(), Relaxed);
++            }
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::vdso_sym_is_ok;
++    use core::ptr::null_mut;
++
++    // Candidate 047: `init()` used to hardcode "trust it unconditionally"
++    // (no null check at all) for several call sites, assuming every vDSO
++    // that passes ELF-header validation necessarily exports the exact
++    // expected symbol+version. `vdso_sym_is_ok` is what all of them route
++    // through now; this is the fixed behavior, exercised directly against
++    // the real function `init()` itself calls (not a frozen copy of it).
++    #[test]
++    fn vdso_sym_is_ok_rejects_null_and_accepts_nonnull() {
++        assert!(!vdso_sym_is_ok(null_mut::<u8>()));
++        let mut x = 0u8;
++        assert!(vdso_sym_is_ok(core::ptr::from_mut(&mut x)));
++    }
++}

@@ -1,8 +1,8 @@
 diff --git a/ul/src/association/pdata.rs b/ul/src/association/pdata.rs
-index dcb4eb20..dfcd2c5f 100644
+index dcb4eb20..05a4a2bd 100644
 --- a/ul/src/association/pdata.rs
 +++ b/ul/src/association/pdata.rs
-@@ -16,9 +16,13 @@ use crate::{
+@@ -16,9 +16,9 @@ use crate::{
  const PDU_PDV_HEADER_SIZE: usize = (PDU_HEADER_SIZE + PDV_HEADER_SIZE) as usize;
  
  /// Set up the P-Data PDU header for sending.
@@ -10,16 +10,12 @@ index dcb4eb20..dfcd2c5f 100644
 -    let data_len = (buffer.len() - PDU_PDV_HEADER_SIZE) as u32;
 -
 +///
-+/// `data_len` is the length of the payload that follows this header, given explicitly
-+/// (rather than inferred from a combined header+payload buffer's length) so this can be used
-+/// both for the header-and-payload-in-one-buffer case and for the vectored-write case, where
-+/// the payload is never copied into the same buffer as the header at all - see
-+/// `PDataWriter::dispatch_pdu_borrowed`.
++/// `data_len` is given explicitly (not inferred from buffer length) so this also works for the vectored-write case in `PDataWriter::dispatch_pdu_borrowed`, where the payload is never copied into `buffer`.
 +fn setup_pdata_header(buffer: &mut [u8], data_len: u32, is_last: bool) {
      // full PDU length (minus PDU type and reserved byte)
      let pdu_len = data_len + 4 + 2;
      let pdu_len_bytes = pdu_len.to_be_bytes();
-@@ -141,7 +145,8 @@ where
+@@ -141,7 +141,8 @@ where
      fn finish_impl(&mut self) -> std::io::Result<()> {
          if !self.buffer.is_empty() {
              // send last PDU
@@ -29,7 +25,7 @@ index dcb4eb20..dfcd2c5f 100644
              self.stream.write_all(&self.buffer[..])?;
              // clear buffer so that subsequent calls to `finish_impl`
              // do not send any more PDUs
-@@ -157,7 +162,8 @@ where
+@@ -157,7 +158,8 @@ where
      fn dispatch_pdu(&mut self) -> std::io::Result<()> {
          debug_assert!(self.buffer.len() >= PDU_PDV_HEADER_SIZE);
          // send PDU now
@@ -39,21 +35,12 @@ index dcb4eb20..dfcd2c5f 100644
          self.stream.write_all(&self.buffer)?;
  
          // back to just the header
-@@ -165,6 +171,25 @@ where
+@@ -165,6 +167,16 @@ where
  
          Ok(())
      }
 +
-+    /// Send a full PDU built from a borrowed payload slice directly,
-+    /// without first copying that payload into `self.buffer`.
-+    ///
-+    /// Only valid when `self.buffer` currently holds nothing but the header skeleton (no
-+    /// partial payload already accumulated from a previous small `write` call) - the caller
-+    /// (`Write::write`) only takes this path in exactly that situation. The header and payload
-+    /// are written to the stream as two separate `write_all` calls instead of one combined
-+    /// buffer, trading one extra syscall for skipping a `memcpy` of the entire payload - a good
-+    /// trade whenever the payload is large relative to syscall overhead, which is exactly the
-+    /// case this path is reserved for (see the size check in `Write::write`).
++    /// Send a full PDU built from a borrowed payload slice directly, without copying it into `self.buffer` first. Only valid when `self.buffer` holds just the header skeleton.
 +    fn dispatch_pdu_borrowed(&mut self, payload: &[u8]) -> std::io::Result<()> {
 +        debug_assert_eq!(self.buffer.len(), PDU_PDV_HEADER_SIZE);
 +        setup_pdata_header(&mut self.buffer, payload.len() as u32, false);
@@ -65,18 +52,12 @@ index dcb4eb20..dfcd2c5f 100644
  }
  
  impl<W> Write for PDataWriter<W>
-@@ -177,6 +202,18 @@ where
+@@ -177,6 +189,12 @@ where
              // accumulate into buffer, do nothing
              self.buffer.extend(buf);
              Ok(buf.len())
 +        } else if self.buffer.len() == PDU_PDV_HEADER_SIZE {
-+            // fresh PDU (no partial payload already accumulated) and this write alone
-+            // overflows it - take this PDU's whole payload capacity straight from `buf`
-+            // and send it without copying it into `self.buffer` first. This is the hot path
-+            // for a single large `write_all` call (e.g. writing a large CIOD's pixel data),
-+            // where the naive copy-then-send approach would `memcpy` the entire object's
-+            // worth of bytes into `self.buffer` across many dispatches for no reason - see
-+            // this candidate's RESULT.md.
++            // Fresh PDU overflowed by this write alone - dispatch straight from `buf` instead of copying into `self.buffer` first (hot path for one large write_all, e.g. pixel data).
 +            let take = total_len - PDU_PDV_HEADER_SIZE;
 +            let payload = &buf[..take];
 +            self.dispatch_pdu_borrowed(payload)?;
@@ -84,7 +65,7 @@ index dcb4eb20..dfcd2c5f 100644
          } else {
              // fill in the rest of the buffer, send PDU,
              // and leave out the rest for subsequent writes
-@@ -498,7 +535,8 @@ pub mod non_blocking {
+@@ -498,7 +516,8 @@ pub mod non_blocking {
              }
              if !self.buffer.is_empty() {
                  // send last PDU
@@ -94,7 +75,7 @@ index dcb4eb20..dfcd2c5f 100644
                  self.stream.write_all(&self.buffer[..]).await?;
                  // clear buffer so that subsequent calls to `finish_impl`
                  // do not send any more PDUs
-@@ -536,7 +574,8 @@ pub mod non_blocking {
+@@ -536,7 +555,8 @@ pub mod non_blocking {
                          self.buffer.extend(slice);
                          let consumed = slice.len();
                          debug_assert_eq!(self.buffer.len(), total_len);

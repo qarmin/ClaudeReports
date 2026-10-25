@@ -1,0 +1,91 @@
+# Captured by 'just test' in this folder on 2026-10-25 09:30 CET (fresh clone of kmod at 692c5a0f731f31c1da49cce12b231be35c76b7fe, clang 21 ASAN/UBSAN build-dev.ini, asserts on).
+
+########## BEFORE patch.diff (reproduce-before) ##########
+== public API: kmod_module_new_from_path() + kmod_module_get_info() ==
+repro: ../libkmod/libkmod-elf.c:212: uint64_t elf_get_section_header_offset(const struct kmod_elf *, uint16_t): Assertion `idx < elf->header.section.count' failed.
+shstrndx-oob       e_shstrndx=24361 CHILD KILLED BY SIGNAL 6 (Aborted)
+repro: ../libkmod/libkmod-elf.c:212: uint64_t elf_get_section_header_offset(const struct kmod_elf *, uint16_t): Assertion `idx < elf->header.section.count' failed.
+shstrndx-eq-count  e_shstrndx=2     CHILD KILLED BY SIGNAL 6 (Aborted)
+repro: ../libkmod/libkmod-elf.c:211: uint64_t elf_get_section_header_offset(const struct kmod_elf *, uint16_t): Assertion `idx != SHN_UNDEF' failed.
+shstrndx-undef     e_shstrndx=0     CHILD KILLED BY SIGNAL 6 (Aborted)
+shstrndx-valid     e_shstrndx=1     kmod_module_get_info() = -61 (No data available)
+RESULT: bug reproduced
+
+== real modinfo binary (clone/_b/modinfo) ==
+repro/run.sh: line 29:  8456 Aborted                    "$bld/modinfo" "$work/$f.ko" > "$work/out" 2>&1
+modinfo shstrndx-oob.ko -> exit 134
+    modinfo: ../libkmod/libkmod-elf.c:212: uint64_t elf_get_section_header_offset(const struct kmod_elf *, uint16_t): Assertion `idx < elf->header.section.count' failed.
+repro/run.sh: line 29:  8458 Aborted                    "$bld/modinfo" "$work/$f.ko" > "$work/out" 2>&1
+modinfo shstrndx-eq-count.ko -> exit 134
+    modinfo: ../libkmod/libkmod-elf.c:212: uint64_t elf_get_section_header_offset(const struct kmod_elf *, uint16_t): Assertion `idx < elf->header.section.count' failed.
+repro/run.sh: line 29:  8460 Aborted                    "$bld/modinfo" "$work/$f.ko" > "$work/out" 2>&1
+modinfo shstrndx-undef.ko -> exit 134
+    modinfo: ../libkmod/libkmod-elf.c:211: uint64_t elf_get_section_header_offset(const struct kmod_elf *, uint16_t): Assertion `idx != SHN_UNDEF' failed.
+modinfo shstrndx-valid.ko -> exit 1
+    modinfo: ERROR: could not get modinfo from 'shstrndx_valid': No data available
+    filename:       /tmp/tmp.XvTKWrsdlg/shstrndx-valid.ko
+
+== real depmod binary on a module tree containing shstrndx-oob.ko ==
+repro/run.sh: line 41:  8466 Aborted                    "$bld/depmod" -b "$work/root" 9.9.9 > "$work/out" 2>&1
+depmod -b <root> 9.9.9 -> exit 134
+    depmod: WARNING: could not open modules.order at /tmp/tmp.XvTKWrsdlg/root/lib/modules/9.9.9: No such file or directory
+    depmod: ../libkmod/libkmod-elf.c:212: uint64_t elf_get_section_header_offset(const struct kmod_elf *, uint16_t): Assertion `idx < elf->header.section.count' failed.
+
+OVERALL: bug reproduced
+
+########## AFTER patch.diff (reproduce-after) ##########
+== public API: kmod_module_new_from_path() + kmod_module_get_info() ==
+shstrndx-oob       e_shstrndx=24361 kmod_module_get_info() = -22 (Invalid argument)
+shstrndx-eq-count  e_shstrndx=2     kmod_module_get_info() = -22 (Invalid argument)
+shstrndx-undef     e_shstrndx=0     kmod_module_get_info() = -22 (Invalid argument)
+shstrndx-valid     e_shstrndx=1     kmod_module_get_info() = -61 (No data available)
+RESULT: bug not present
+
+== real modinfo binary (clone/_b/modinfo) ==
+modinfo shstrndx-oob.ko -> exit 1
+    modinfo: ERROR: could not get modinfo from 'shstrndx_oob': Invalid argument
+    filename:       /tmp/tmp.qUyKvtr7b6/shstrndx-oob.ko
+modinfo shstrndx-eq-count.ko -> exit 1
+    modinfo: ERROR: could not get modinfo from 'shstrndx_eq_count': Invalid argument
+    filename:       /tmp/tmp.qUyKvtr7b6/shstrndx-eq-count.ko
+modinfo shstrndx-undef.ko -> exit 1
+    modinfo: ERROR: could not get modinfo from 'shstrndx_undef': Invalid argument
+    filename:       /tmp/tmp.qUyKvtr7b6/shstrndx-undef.ko
+modinfo shstrndx-valid.ko -> exit 1
+    modinfo: ERROR: could not get modinfo from 'shstrndx_valid': No data available
+    filename:       /tmp/tmp.qUyKvtr7b6/shstrndx-valid.ko
+
+== real depmod binary on a module tree containing shstrndx-oob.ko ==
+depmod -b <root> 9.9.9 -> exit 0
+    depmod: WARNING: could not open modules.order at /tmp/tmp.qUyKvtr7b6/root/lib/modules/9.9.9: No such file or directory
+    depmod: ERROR: failed to load symbols from /tmp/tmp.qUyKvtr7b6/root/lib/modules/9.9.9/kernel/evil.ko: Invalid argument
+    depmod: WARNING: could not open modules.builtin at /tmp/tmp.qUyKvtr7b6/root/lib/modules/9.9.9: No such file or directory
+    depmod: WARNING: could not open modules.builtin.modinfo at /tmp/tmp.qUyKvtr7b6/root/lib/modules/9.9.9: No such file or directory
+
+OVERALL: bug not present
+
+
+########## Repeatability: tools/confirm_repro.sh (RUNS=10) on bash repro/run.sh <main tree> __build-asan, unpatched ##########
+run 1/10: REPRODUCED
+run 2/10: REPRODUCED
+run 3/10: REPRODUCED
+run 4/10: REPRODUCED
+run 5/10: REPRODUCED
+run 6/10: REPRODUCED
+run 7/10: REPRODUCED
+run 8/10: REPRODUCED
+run 9/10: REPRODUCED
+run 10/10: REPRODUCED
+
+reproduced 10/10 runs
+verdict: fully deterministic reproduction (10/10) - safe to write Confirmed.
+
+########## Project test suite (tools/run_tests.sh __build-asan) - identical before and after the patch ##########
+1/7 kmod:test-depmod       OK
+2/7 kmod:test-libkmod      OK
+3/7 kmod:test-libkmod-list OK
+4/7 kmod:test-modinfo      OK
+5/7 kmod:test-modprobe     OK
+6/7 kmod:test-shared       OK
+7/7 kmod:test-testsuite    OK
+Ok: 7  Fail: 0

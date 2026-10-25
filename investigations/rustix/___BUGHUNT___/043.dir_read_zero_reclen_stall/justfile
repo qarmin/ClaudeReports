@@ -1,0 +1,49 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# Deviation from the standard candidate_justfile template: the bug can only be triggered by a
+# buggy/malicious getdents64 backend (see repro/README.md and RESULT.md for why a real one
+# couldn't be built in this sandbox), so `repro/` is not a standalone public-API crate - it's a
+# patch (`repro/repro_test.patch`) that adds a #[cfg(test)] test directly into the crate's own
+# src/backend/linux_raw/fs/dir.rs, reusing that file's own private-field-reaching test technique.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test_cmd := "cargo test --features=all-apis --lib -- backend::fs::dir::tests::dir_read_zero_reclen_stalls_forever --exact --nocapture"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+# `reproduce-before` is expected to FAIL (that's the proof the bug is present) - run it with `-`
+# so `just` doesn't abort the chain before reaching the fix/reproduce-after steps.
+test: clone
+    -just reproduce-before
+    just apply
+    just reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && git apply "{{justfile_directory()}}/repro/repro_test.patch"
+
+# Run the repro test against the pristine (test-only) clone - expected to FAIL/panic with a
+# "REPRODUCED: ..." message, since the bug is still present. A non-zero exit here is success for
+# this recipe's purpose (demonstrating the bug), not a broken justfile.
+reproduce-before:
+    ulimit -c 0 && cd clone && {{test_cmd}}
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro test again, now against the patched clone - expected to pass (`ok`), since
+# `Dir::read` now errors out on a zero `d_reclen` instead of stalling.
+reproduce-after:
+    ulimit -c 0 && cd clone && {{test_cmd}}
+
+clean:
+    rm -rf clone

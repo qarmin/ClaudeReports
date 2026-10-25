@@ -1,0 +1,33 @@
+# This candidate's bug only manifests under Miri's validity checker,
+# not as a process crash on real hardware - the "before"/"after" comparison
+# is Miri's own diagnostic output (UB abort vs. a clean, correct result),
+# not a plain process exit code. Requires a nightly toolchain with `miri`
+# and `rust-src` components, and a Miri sysroot for `x86_64-apple-darwin`
+# (`cargo +nightly miri setup --target x86_64-apple-darwin` once, cached
+# under `~/.cache/miri` thereafter).
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Cross-interprets the real `x86_64-apple-darwin` target on any host (Miri
+# interprets MIR, it doesn't need real Apple hardware or a native sysroot) -
+# this is what lets the real apple-only code path (and Miri's real libc
+# shim for `fstat` on that target) run without macOS hardware.
+reproduce-before:
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri run --target x86_64-apple-darwin
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+reproduce-after:
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri run --target x86_64-apple-darwin
+
+clean:
+    rm -rf clone

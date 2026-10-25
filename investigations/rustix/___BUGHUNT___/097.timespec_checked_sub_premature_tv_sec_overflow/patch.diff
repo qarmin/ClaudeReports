@@ -1,0 +1,85 @@
+diff --git a/src/timespec.rs b/src/timespec.rs
+index 9d06f203..5bd625b0 100644
+--- a/src/timespec.rs
++++ b/src/timespec.rs
+@@ -104,20 +104,24 @@ impl Timespec {
+     /// );
+     /// ```
+     pub const fn checked_add(self, rhs: Self) -> Option<Self> {
+-        if let Some(mut tv_sec) = self.tv_sec.checked_add(rhs.tv_sec) {
+-            let mut tv_nsec = self.tv_nsec + rhs.tv_nsec;
+-            if tv_nsec >= 1_000_000_000 {
+-                tv_nsec -= 1_000_000_000;
+-                if let Some(carried_sec) = tv_sec.checked_add(1) {
+-                    tv_sec = carried_sec;
+-                } else {
+-                    return None;
+-                }
+-            }
+-            Some(Self { tv_sec, tv_nsec })
+-        } else {
+-            None
++        // Widen to `i128` so that a carry into `tv_sec` is accounted for
++        // *before* checking whether the result fits in `i64`, rather than
++        // checking `tv_sec` overflow first and only then applying the carry
++        // (which can falsely report overflow - see `checked_sub` below for
++        // the mirror-image case that actually triggers in practice).
++        let mut tv_sec = self.tv_sec as i128 + rhs.tv_sec as i128;
++        let mut tv_nsec = self.tv_nsec + rhs.tv_nsec;
++        if tv_nsec >= 1_000_000_000 {
++            tv_nsec -= 1_000_000_000;
++            tv_sec += 1;
+         }
++        if tv_sec < Secs::MIN as i128 || tv_sec > Secs::MAX as i128 {
++            return None;
++        }
++        Some(Self {
++            tv_sec: tv_sec as Secs,
++            tv_nsec,
++        })
+     }
+ 
+     /// Checked `Timespec` subtraction. Returns `None` if overflow occurred.
+@@ -173,20 +177,29 @@ impl Timespec {
+     /// );
+     /// ```
+     pub const fn checked_sub(self, rhs: Self) -> Option<Self> {
+-        if let Some(mut tv_sec) = self.tv_sec.checked_sub(rhs.tv_sec) {
+-            let mut tv_nsec = self.tv_nsec - rhs.tv_nsec;
+-            if tv_nsec < 0 {
+-                tv_nsec += 1_000_000_000;
+-                if let Some(borrowed_sec) = tv_sec.checked_sub(1) {
+-                    tv_sec = borrowed_sec;
+-                } else {
+-                    return None;
+-                }
+-            }
+-            Some(Self { tv_sec, tv_nsec })
+-        } else {
+-            None
++        // Widen to `i128` so that a borrow out of `tv_sec` is accounted for
++        // *before* checking whether the result fits in `i64`. Checking
++        // `self.tv_sec.checked_sub(rhs.tv_sec)` for overflow first (the
++        // previous implementation) can falsely report overflow (`None`) for
++        // an input whose true difference, after the nsec borrow is applied,
++        // fits in `i64` just fine - e.g. `tv_sec: 0, tv_nsec: 0` minus
++        // `tv_sec: i64::MIN, tv_nsec: 1`: `0 - i64::MIN` alone overflows
++        // `i64`, but the correct result (`tv_sec: i64::MAX, tv_nsec:
++        // 999_999_999`, after borrowing 1 second for the nsec underflow) is
++        // perfectly representable.
++        let mut tv_sec = self.tv_sec as i128 - rhs.tv_sec as i128;
++        let mut tv_nsec = self.tv_nsec - rhs.tv_nsec;
++        if tv_nsec < 0 {
++            tv_nsec += 1_000_000_000;
++            tv_sec -= 1;
+         }
++        if tv_sec < Secs::MIN as i128 || tv_sec > Secs::MAX as i128 {
++            return None;
++        }
++        Some(Self {
++            tv_sec: tv_sec as Secs,
++            tv_nsec,
++        })
+     }
+ 
+     /// Convert from `Timespec` to `c::c_int` milliseconds, rounded up.

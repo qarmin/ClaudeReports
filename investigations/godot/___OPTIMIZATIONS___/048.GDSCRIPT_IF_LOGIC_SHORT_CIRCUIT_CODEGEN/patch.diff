@@ -1,0 +1,521 @@
+diff --git a/modules/gdscript/gdscript_byte_codegen.cpp b/modules/gdscript/gdscript_byte_codegen.cpp
+index 12891df0f7..2f3434c198 100644
+--- a/modules/gdscript/gdscript_byte_codegen.cpp
++++ b/modules/gdscript/gdscript_byte_codegen.cpp
+@@ -415,6 +415,49 @@ GDScriptFunction *GDScriptByteCodeGenerator::write_end() {
+ 	return function;
+ }
+ 
++void GDScriptByteCodeGenerator::start_expr_cond_buffer(BranchType p_type) {
++	expr_cond_buffer_restore_point[p_type].push_back(expr_cond_jumps[p_type].size());
++}
++
++void GDScriptByteCodeGenerator::flush_expr_cond_buffer(BranchType p_type) {
++	int target = expr_cond_buffer_restore_point[p_type].back()->get();
++
++	while (expr_cond_jumps[p_type].size() > target) {
++		patch_jump(expr_cond_jumps[p_type].back()->get());
++		expr_cond_jumps[p_type].pop_back();
++	}
++	expr_cond_buffer_restore_point[p_type].pop_back();
++}
++
++void GDScriptByteCodeGenerator::write_expr_cond_jump_if(BranchType p_type, const Address &p_condition) {
++	if (p_type == BranchType::TAKEN) {
++		append_opcode(GDScriptFunction::OPCODE_JUMP_IF);
++	} else {
++		// p_type == BranchType::NOT_TAKEN
++		append_opcode(GDScriptFunction::OPCODE_JUMP_IF_NOT);
++	}
++	append(p_condition);
++	expr_cond_jumps[p_type].push_back(opcodes.size());
++	append(0);
++}
++
++void GDScriptByteCodeGenerator::write_expr_cond_jump(BranchType p_type) {
++	append_opcode(GDScriptFunction::OPCODE_JUMP);
++	expr_cond_jumps[p_type].push_back(opcodes.size());
++	append(0);
++}
++
++void GDScriptByteCodeGenerator::write_expr_cond_jump_end() {
++	append_opcode(GDScriptFunction::OPCODE_JUMP);
++	expr_cond_end_jumps.push_back(opcodes.size());
++	append(0);
++}
++
++void GDScriptByteCodeGenerator::write_expr_cond_end() {
++	patch_jump(expr_cond_end_jumps.back()->get());
++	expr_cond_end_jumps.pop_back();
++}
++
+ #ifdef DEBUG_ENABLED
+ void GDScriptByteCodeGenerator::set_signature(const String &p_signature) {
+ 	function->profile.signature = p_signature;
+diff --git a/modules/gdscript/gdscript_byte_codegen.h b/modules/gdscript/gdscript_byte_codegen.h
+index 92a3982dbb..aab0c4b66f 100644
+--- a/modules/gdscript/gdscript_byte_codegen.h
++++ b/modules/gdscript/gdscript_byte_codegen.h
+@@ -149,6 +149,12 @@ class GDScriptByteCodeGenerator : public GDScriptCodeGenerator {
+ 	List<int> logic_op_jump_pos1;
+ 	List<int> logic_op_jump_pos2;
+ 
++	// Used to patch jumps for conditional statements with `and` and `or` operators with short-circuit.
++	// These jump directly to the conditional success/fail branches.
++	List<int> expr_cond_jumps[2] = {};
++	List<int> expr_cond_buffer_restore_point[2] = {};
++	List<int> expr_cond_end_jumps;
++
+ 	List<Address> ternary_result;
+ 	List<int> ternary_jump_fail_pos;
+ 	List<int> ternary_jump_skip_pos;
+@@ -469,6 +475,13 @@ public:
+ 	virtual void write_start(GDScript *p_script, const StringName &p_function_name, bool p_static, Variant p_rpc_config, const GDScriptDataType &p_return_type) override;
+ 	virtual GDScriptFunction *write_end() override;
+ 
++	virtual void start_expr_cond_buffer(BranchType p_type) override;
++	virtual void flush_expr_cond_buffer(BranchType p_type) override;
++	virtual void write_expr_cond_jump_if(BranchType p_type, const Address &p_condition) override;
++	virtual void write_expr_cond_jump(BranchType p_type) override;
++	virtual void write_expr_cond_jump_end() override;
++	virtual void write_expr_cond_end() override;
++
+ #ifdef DEBUG_ENABLED
+ 	virtual void set_signature(const String &p_signature) override;
+ #endif
+diff --git a/modules/gdscript/gdscript_codegen.h b/modules/gdscript/gdscript_codegen.h
+index 05f69a98d7..fe579b0e2e 100644
+--- a/modules/gdscript/gdscript_codegen.h
++++ b/modules/gdscript/gdscript_codegen.h
+@@ -64,6 +64,11 @@ public:
+ 		}
+ 	};
+ 
++	enum BranchType {
++		NOT_TAKEN,
++		TAKEN,
++	};
++
+ 	virtual uint32_t add_parameter(const StringName &p_name, bool p_is_optional, const GDScriptDataType &p_type) = 0;
+ 	virtual uint32_t add_local(const StringName &p_name, const GDScriptDataType &p_type) = 0;
+ 	virtual uint32_t add_local_constant(const StringName &p_name, const Variant &p_constant) = 0;
+@@ -84,6 +89,20 @@ public:
+ 	virtual void write_start(GDScript *p_script, const StringName &p_function_name, bool p_static, Variant p_rpc_config, const GDScriptDataType &p_return_type) = 0;
+ 	virtual GDScriptFunction *write_end() = 0;
+ 
++	// Keeps track of the number of jumps so any new ones can be patched later.
++	virtual void start_expr_cond_buffer(BranchType p_type) = 0;
++	// Patches all the jumps since calling the appropriate `start_expr_cond_buffer`.
++	virtual void flush_expr_cond_buffer(BranchType p_type) = 0;
++	// Writes a conditional jump for the type. The other case will fall-through.
++	// If TAKEN, jumps on p_condition = true, when NOT_TAKEN, jumps on p_condition = false.
++	virtual void write_expr_cond_jump_if(BranchType p_type, const Address &p_condition) = 0;
++	// Writes an unconditional jump. Useful to handle fall-throughs.
++	virtual void write_expr_cond_jump(BranchType p_type) = 0;
++	// Marks the end of the success block. Similar to `write_else`.
++	virtual void write_expr_cond_jump_end() = 0;
++	// Marks the end of the failure block. Similar to `write_endif`.
++	virtual void write_expr_cond_end() = 0;
++
+ #ifdef DEBUG_ENABLED
+ 	virtual void set_signature(const String &p_signature) = 0;
+ #endif
+diff --git a/modules/gdscript/gdscript_compiler.cpp b/modules/gdscript/gdscript_compiler.cpp
+index 790b25ced5..5d72f3e39a 100644
+--- a/modules/gdscript/gdscript_compiler.cpp
++++ b/modules/gdscript/gdscript_compiler.cpp
+@@ -1434,6 +1434,105 @@ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression(CodeGen &code
+ 	}
+ }
+ 
++// This function is an optimized version of `_parse_expression` when the result will be used as a jump condition.
++//
++// It optimizes the expansion of logical operators to jump directly to where they need to go instead of setting a boolean value.
++// `NOT_TAKEN` jumps are used when the expression is `false` and `TAKEN` jumps are used when the expression is `true`.
++//
++// It currently only supports `OP_LOGIC_AND` and `OP_LOGIC_OR`. All other expression types will defer to `_parse_expression`.
++//
++// Use `start_expr_cond_buffer` before calling this. Then call `flush_expr_cond_buffer` afterwards to patch all the jump locations.
++//
++// When this function returns a valid Address, the result of the expression is stored there. Otherwise, success (TAKEN) may fall-through.
++GDScriptCodeGenerator::Address GDScriptCompiler::_parse_expression_cond(CodeGen &codegen, Error &r_error, const GDScriptParser::ExpressionNode *p_expression) {
++	if (p_expression->is_constant && !(p_expression->type_constraint.is_meta_type && p_expression->type_constraint.kind == GDScriptParser::DataType::CLASS)) {
++		return codegen.add_constant(p_expression->reduced_value);
++	}
++
++	GDScriptCodeGenerator *gen = codegen.generator;
++
++	if (p_expression->type == GDScriptParser::Node::BINARY_OPERATOR) {
++		const GDScriptParser::BinaryOpNode *binary = static_cast<const GDScriptParser::BinaryOpNode *>(p_expression);
++
++		switch (binary->operation) {
++			case GDScriptParser::BinaryOpNode::OP_LOGIC_AND: {
++				// Short-circuit when left operand is `false`. We don't touch NOT_TAKEN jumps.
++				// Meanwhile when left operand is `true`, we still need to check the right operand
++				// so we patch TAKEN jumps to the right operand.
++				gen->start_expr_cond_buffer(GDScriptCodeGenerator::BranchType::TAKEN);
++				GDScriptCodeGenerator::Address left_addr = _parse_expression_cond(codegen, r_error, binary->left_operand);
++				if (r_error) {
++					return GDScriptCodeGenerator::Address();
++				}
++				if (left_addr.mode != GDScriptCodeGenerator::Address::NIL) {
++					// Check the result, if false, take NOT_TAKEN jump shortcut.
++					// True falls-through to right operand.
++					gen->write_expr_cond_jump_if(GDScriptCodeGenerator::BranchType::NOT_TAKEN, left_addr);
++					if (left_addr.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
++						gen->pop_temporary();
++					}
++				}
++				// Right operand starts here. Patch all left `true` jumps here.
++				gen->flush_expr_cond_buffer(GDScriptCodeGenerator::BranchType::TAKEN);
++
++				GDScriptCodeGenerator::Address right_addr = _parse_expression_cond(codegen, r_error, binary->right_operand);
++				if (r_error) {
++					return GDScriptCodeGenerator::Address();
++				}
++				if (right_addr.mode != GDScriptCodeGenerator::Address::NIL) {
++					// `false` jumps to else branch, `true` falls-through.
++					gen->write_expr_cond_jump_if(GDScriptCodeGenerator::BranchType::NOT_TAKEN, right_addr);
++					if (right_addr.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
++						gen->pop_temporary();
++					}
++				}
++				// No result stored, all handled through jumps.
++				return GDScriptCodeGenerator::Address();
++			} break;
++			case GDScriptParser::BinaryOpNode::OP_LOGIC_OR: {
++				// Short-circuit when left operand is `true`. We don't touch TAKEN jumps.
++				// Meanwhile when left operand is `false`, we still need to check the right operand
++				// so we patch NOT_TAKEN jumps to the right operand.
++				gen->start_expr_cond_buffer(GDScriptCodeGenerator::BranchType::NOT_TAKEN);
++				GDScriptCodeGenerator::Address left_addr = _parse_expression_cond(codegen, r_error, binary->left_operand);
++				if (r_error) {
++					return GDScriptCodeGenerator::Address();
++				}
++				if (left_addr.mode != GDScriptCodeGenerator::Address::NIL) {
++					// Let `false` fall-through and when `true` take shortcut jump.
++					gen->write_expr_cond_jump_if(GDScriptCodeGenerator::BranchType::TAKEN, left_addr);
++					if (left_addr.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
++						gen->pop_temporary();
++					}
++				} else {
++					// In the case that left operand is `true` and falls-through, we unconditionally go to TAKEN branch.
++					gen->write_expr_cond_jump(GDScriptCodeGenerator::BranchType::TAKEN);
++				}
++				// Right operand starts here. Patch all left `false` jumps here.
++				gen->flush_expr_cond_buffer(GDScriptCodeGenerator::BranchType::NOT_TAKEN);
++
++				GDScriptCodeGenerator::Address right_addr = _parse_expression_cond(codegen, r_error, binary->right_operand);
++				if (r_error) {
++					return GDScriptCodeGenerator::Address();
++				}
++				if (right_addr.mode != GDScriptCodeGenerator::Address::NIL) {
++					// `false` jumps to NOT_TAKEN branch, `true` falls-through.
++					gen->write_expr_cond_jump_if(GDScriptCodeGenerator::BranchType::NOT_TAKEN, right_addr);
++					if (right_addr.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
++						gen->pop_temporary();
++					}
++				}
++				// No result stored, all handled through jumps.
++				return GDScriptCodeGenerator::Address();
++			} break;
++			default:
++				break;
++		}
++	}
++	// Unhandled case.
++	return _parse_expression(codegen, r_error, p_expression);
++}
++
+ GDScriptCodeGenerator::Address GDScriptCompiler::_parse_match_pattern(CodeGen &codegen, Error &r_error, const GDScriptParser::PatternNode *p_pattern, const GDScriptCodeGenerator::Address &p_value_addr, const GDScriptCodeGenerator::Address &p_type_addr, const GDScriptCodeGenerator::Address &p_previous_test, bool p_is_first, bool p_is_nested) {
+ 	switch (p_pattern->pattern_type) {
+ 		case GDScriptParser::PatternNode::PT_LITERAL: {
+@@ -2006,32 +2105,50 @@ Error GDScriptCompiler::_parse_block(CodeGen &codegen, const GDScriptParser::Sui
+ 			} break;
+ 			case GDScriptParser::Node::IF: {
+ 				const GDScriptParser::IfNode *if_n = static_cast<const GDScriptParser::IfNode *>(s);
+-				GDScriptCodeGenerator::Address condition = _parse_expression(codegen, err, if_n->condition);
++
++				// TAKEN jumps to true_block
++				gen->start_expr_cond_buffer(GDScriptCodeGenerator::BranchType::TAKEN);
++				// NOT_TAKEN jumps to false_block
++				gen->start_expr_cond_buffer(GDScriptCodeGenerator::BranchType::NOT_TAKEN);
++
++				GDScriptCodeGenerator::Address condition = _parse_expression_cond(codegen, err, if_n->condition);
+ 				if (err) {
+ 					return err;
+ 				}
+ 
+-				gen->write_if(condition);
++				if (condition.mode != GDScriptCodeGenerator::Address::NIL) {
++					// Check the result of the condition. We choose to jump false to the else branch
++					// and let true fall-through.
++					gen->write_expr_cond_jump_if(GDScriptCodeGenerator::BranchType::NOT_TAKEN, condition);
+ 
+-				if (condition.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
+-					codegen.generator->pop_temporary();
++					if (condition.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
++						codegen.generator->pop_temporary();
++					}
+ 				}
+ 
++				// Our if branch starts here. Patch all taken jumps.
++				gen->flush_expr_cond_buffer(GDScriptCodeGenerator::BranchType::TAKEN);
++
+ 				err = _parse_block(codegen, if_n->true_block);
+ 				if (err) {
+ 					return err;
+ 				}
+ 
+ 				if (if_n->false_block) {
+-					gen->write_else();
++					// Success branch ends, jump to end.
++					gen->write_expr_cond_jump_end();
++					// Our failure branch starts here. Patch all failure jumps.
++					gen->flush_expr_cond_buffer(GDScriptCodeGenerator::BranchType::NOT_TAKEN);
+ 
+ 					err = _parse_block(codegen, if_n->false_block);
+ 					if (err) {
+ 						return err;
+ 					}
++					gen->write_expr_cond_end();
++				} else {
++					// Patch all failure jumps to after the statement.
++					gen->flush_expr_cond_buffer(GDScriptCodeGenerator::BranchType::NOT_TAKEN);
+ 				}
+-
+-				gen->write_endif();
+ 			} break;
+ 			case GDScriptParser::Node::FOR: {
+ 				const GDScriptParser::ForNode *for_n = static_cast<const GDScriptParser::ForNode *>(s);
+diff --git a/modules/gdscript/gdscript_compiler.h b/modules/gdscript/gdscript_compiler.h
+index ce832f249d..c8a0406db4 100644
+--- a/modules/gdscript/gdscript_compiler.h
++++ b/modules/gdscript/gdscript_compiler.h
+@@ -150,6 +150,7 @@ class GDScriptCompiler {
+ 	GDScriptDataType _gdtype_from_datatype(const GDScriptParser::DataType &p_datatype, GDScript *p_owner, bool p_handle_metatype = true);
+ 
+ 	GDScriptCodeGenerator::Address _parse_expression(CodeGen &codegen, Error &r_error, const GDScriptParser::ExpressionNode *p_expression, bool p_root = false, bool p_initializer = false);
++	GDScriptCodeGenerator::Address _parse_expression_cond(CodeGen &codegen, Error &r_error, const GDScriptParser::ExpressionNode *p_expression);
+ 	GDScriptCodeGenerator::Address _parse_match_pattern(CodeGen &codegen, Error &r_error, const GDScriptParser::PatternNode *p_pattern, const GDScriptCodeGenerator::Address &p_value_addr, const GDScriptCodeGenerator::Address &p_type_addr, const GDScriptCodeGenerator::Address &p_previous_test, bool p_is_first, bool p_is_nested);
+ 	List<GDScriptCodeGenerator::Address> _add_block_locals(CodeGen &codegen, const GDScriptParser::SuiteNode *p_block);
+ 	void _clear_block_locals(CodeGen &codegen, const List<GDScriptCodeGenerator::Address> &p_locals);
+diff --git a/modules/gdscript/tests/scripts/runtime/features/if_logical_op.gd b/modules/gdscript/tests/scripts/runtime/features/if_logical_op.gd
+new file mode 100644
+index 0000000000..17d635d616
+--- /dev/null
++++ b/modules/gdscript/tests/scripts/runtime/features/if_logical_op.gd
+@@ -0,0 +1,194 @@
++func test():
++    print("=== One binary operator ===")
++    one()
++    print("=== Three binary operators ===")
++    three()
++
++
++func one():
++    var fail = false
++
++    for i in 2**2:
++        var a : bool = i & 0x1 > 0
++        var b : bool = i & 0x2 > 0
++
++        var if_branch = false
++        var else_branch = false
++        if a and b:
++            if_branch = true
++        else:
++            else_branch = true
++
++        fail = fail or if_branch == else_branch or if_branch != (a and b)
++
++    prints("a and b:", "FAIL" if fail else "SUCCESS")
++
++
++    fail = false
++    for i in 2**2:
++        var a : bool = i & 0x1 > 0
++        var b : bool = i & 0x2 > 0
++
++        var if_branch = false
++        var else_branch = false
++        if a or b:
++            if_branch = true
++        else:
++            else_branch = true
++
++        fail = fail or if_branch == else_branch or if_branch != (a or b)
++
++    prints("a or b:", "FAIL" if fail else "SUCCESS")
++
++func three():
++    var fail = false
++
++    for i in 2**4:
++        var a : bool = i & 0x1 > 0
++        var b : bool = i & 0x2 > 0
++        var c : bool = i & 0x4 > 0
++        var d : bool = i & 0x8 > 0
++
++        var if_branch = false
++        var else_branch = false
++        if (a and b) and (c and d):
++            if_branch = true
++        else:
++            else_branch = true
++
++        fail = fail or if_branch == else_branch or if_branch != ((a and b) and (c and d))
++
++    prints("(a and b) and (c and d):", "FAIL" if fail else "SUCCESS")
++
++    fail = false
++
++    for i in 2**4:
++        var a : bool = i & 0x1 > 0
++        var b : bool = i & 0x2 > 0
++        var c : bool = i & 0x4 > 0
++        var d : bool = i & 0x8 > 0
++
++        var if_branch = false
++        var else_branch = false
++        if (a and b) and (c or d):
++            if_branch = true
++        else:
++            else_branch = true
++
++        fail = fail or if_branch == else_branch or if_branch != ((a and b) and (c or d))
++
++    prints("(a and b) and (c or d):", "FAIL" if fail else "SUCCESS")
++
++    fail = false
++
++    for i in 2**4:
++        var a : bool = i & 0x1 > 0
++        var b : bool = i & 0x2 > 0
++        var c : bool = i & 0x4 > 0
++        var d : bool = i & 0x8 > 0
++
++        var if_branch = false
++        var else_branch = false
++        if (a and b) or (c and d):
++            if_branch = true
++        else:
++            else_branch = true
++
++        fail = fail or if_branch == else_branch or if_branch != ((a and b) or (c and d))
++
++    prints("(a and b) or (c and d):", "FAIL" if fail else "SUCCESS")
++
++    fail = false
++
++    for i in 2**4:
++        var a : bool = i & 0x1 > 0
++        var b : bool = i & 0x2 > 0
++        var c : bool = i & 0x4 > 0
++        var d : bool = i & 0x8 > 0
++
++        var if_branch = false
++        var else_branch = false
++        if (a and b) or (c or d):
++            if_branch = true
++        else:
++            else_branch = true
++
++        fail = fail or if_branch == else_branch or if_branch != ((a and b) or (c or d))
++
++    prints("(a and b) or (c or d):", "FAIL" if fail else "SUCCESS")
++
++    fail = false
++
++    for i in 2**4:
++        var a : bool = i & 0x1 > 0
++        var b : bool = i & 0x2 > 0
++        var c : bool = i & 0x4 > 0
++        var d : bool = i & 0x8 > 0
++
++        var if_branch = false
++        var else_branch = false
++        if (a or b) and (c and d):
++            if_branch = true
++        else:
++            else_branch = true
++
++        fail = fail or if_branch == else_branch or if_branch != ((a or b) and (c and d))
++
++    prints("(a or b) and (c and d):", "FAIL" if fail else "SUCCESS")
++
++    fail = false
++
++    for i in 2**4:
++        var a : bool = i & 0x1 > 0
++        var b : bool = i & 0x2 > 0
++        var c : bool = i & 0x4 > 0
++        var d : bool = i & 0x8 > 0
++
++        var if_branch = false
++        var else_branch = false
++        if (a or b) and (c or d):
++            if_branch = true
++        else:
++            else_branch = true
++
++        fail = fail or if_branch == else_branch or if_branch != ((a or b) and (c or d))
++
++    prints("(a or b) and (c or d):", "FAIL" if fail else "SUCCESS")
++
++    fail = false
++
++    for i in 2**4:
++        var a : bool = i & 0x1 > 0
++        var b : bool = i & 0x2 > 0
++        var c : bool = i & 0x4 > 0
++        var d : bool = i & 0x8 > 0
++
++        var if_branch = false
++        var else_branch = false
++        if (a or b) or (c and d):
++            if_branch = true
++        else:
++            else_branch = true
++
++        fail = fail or if_branch == else_branch or if_branch != ((a or b) or (c and d))
++
++    prints("(a or b) or (c and d):", "FAIL" if fail else "SUCCESS")
++
++    fail = false
++
++    for i in 2**4:
++        var a : bool = i & 0x1 > 0
++        var b : bool = i & 0x2 > 0
++        var c : bool = i & 0x4 > 0
++        var d : bool = i & 0x8 > 0
++
++        var if_branch = false
++        var else_branch = false
++        if (a or b) or (c or d):
++            if_branch = true
++        else:
++            else_branch = true
++
++        fail = fail or if_branch == else_branch or if_branch != ((a or b) or (c or d))
++
++    prints("(a or b) or (c or d):", "FAIL" if fail else "SUCCESS")
+diff --git a/modules/gdscript/tests/scripts/runtime/features/if_logical_op.out b/modules/gdscript/tests/scripts/runtime/features/if_logical_op.out
+new file mode 100644
+index 0000000000..0310f1992d
+--- /dev/null
++++ b/modules/gdscript/tests/scripts/runtime/features/if_logical_op.out
+@@ -0,0 +1,13 @@
++GDTEST_OK
++=== One binary operator ===
++a and b: SUCCESS
++a or b: SUCCESS
++=== Three binary operators ===
++(a and b) and (c and d): SUCCESS
++(a and b) and (c or d): SUCCESS
++(a and b) or (c and d): SUCCESS
++(a and b) or (c or d): SUCCESS
++(a or b) and (c and d): SUCCESS
++(a or b) and (c or d): SUCCESS
++(a or b) or (c and d): SUCCESS
++(a or b) or (c or d): SUCCESS

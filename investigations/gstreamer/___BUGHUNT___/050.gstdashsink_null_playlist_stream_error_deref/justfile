@@ -1,0 +1,50 @@
+# Self-contained reproduction for this candidate.
+#
+# gst_dash_sink_write_mpd_file() is `static`, driven indirectly through the real, public
+# GstBinClass::handle_message vfunc + a real GST_MESSAGE_EOS, with a real public
+# "get-playlist-stream" signal handler returning NULL - see repro/repro.c and RESULT.md for why
+# g_signal_connect_after() (not plain g_signal_connect()) is required.
+# `just test`'s reproduce-before is expected to crash (SIGSEGV) - that IS the repro.
+
+repo_url := "https://github.com/GStreamer/gstreamer.git"
+base_commit := "65b9547519cdafce691e65777d4178280bf10808"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Builds+runs repro.c - should SIGSEGV inside gst_dash_sink_write_mpd_file() when
+# g_output_stream_write_all() is called with a NULL stream and the resulting NULL GError is
+# dereferenced.
+reproduce-before:
+    #!/usr/bin/env bash
+    set -o pipefail
+    OUT="$(SRC_DIR="{{justfile_directory()}}/clone" bash repro/build_and_run.sh 2>&1)"
+    echo "$OUT"
+    if ! grep -q "Segmentation fault" <<< "$OUT"; then
+        echo "expected a SIGSEGV crash" >&2
+        exit 1
+    fi
+    rm -f "{{justfile_directory()}}/clone"/dash.mpd "{{justfile_directory()}}"/dash.mpd
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should exit 0, no crash.
+reproduce-after:
+    #!/usr/bin/env bash
+    set -eo pipefail
+    OUT="$(SRC_DIR="{{justfile_directory()}}/clone" bash repro/build_and_run.sh 2>&1)"
+    echo "$OUT"
+    if ! grep -q "exit code: 0" <<< "$OUT"; then
+        echo "expected a clean exit with no crash after the fix" >&2
+        exit 1
+    fi
+    rm -f "{{justfile_directory()}}/clone"/dash.mpd "{{justfile_directory()}}"/dash.mpd
+
+clean:
+    rm -rf clone
+    rm -f dash.mpd

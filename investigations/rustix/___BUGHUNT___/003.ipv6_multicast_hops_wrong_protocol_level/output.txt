@@ -1,0 +1,39 @@
+=== BEFORE fix (pristine HEAD 287214b889865d8e1406a0ee71cc409b6f6191c8), both backends, 3 identical runs each ===
+BEFORE: real IPV6_MULTICAST_HOPS (IPPROTO_IPV6) = Ok(1)
+BEFORE: IP_PASSSEC (IPPROTO_IP, optname 18)     = Ok(0)
+rustix set_ipv6_multicast_hops(7) -> Ok(())
+rustix ipv6_multicast_hops() -> Ok(1)
+AFTER:  real IPV6_MULTICAST_HOPS (IPPROTO_IPV6) = Ok(1)
+AFTER:  IP_PASSSEC (IPPROTO_IP, optname 18)     = Ok(1)
+
+==> BUG CONFIRMED (kernel's real IPV6_MULTICAST_HOPS did NOT change to 7): true
+==> UNINTENDED SIDE EFFECT on unrelated IP_PASSSEC option: true
+
+=== AFTER fix (patch.diff applied), both backends, 3 identical runs each ===
+BEFORE: real IPV6_MULTICAST_HOPS (IPPROTO_IPV6) = Ok(1)
+BEFORE: IP_PASSSEC (IPPROTO_IP, optname 18)     = Ok(0)
+rustix set_ipv6_multicast_hops(7) -> Ok(())
+rustix ipv6_multicast_hops() -> Ok(7)
+AFTER:  real IPV6_MULTICAST_HOPS (IPPROTO_IPV6) = Ok(7)
+AFTER:  IP_PASSSEC (IPPROTO_IP, optname 18)     = Ok(0)
+
+==> BUG CONFIRMED (kernel's real IPV6_MULTICAST_HOPS did NOT change to 7): false
+==> UNINTENDED SIDE EFFECT on unrelated IP_PASSSEC option: false
+
+=== cargo test --features=all-apis --workspace --no-fail-fast -- --test-threads=1 ===
+Before fix (source only, unmodified test): net test binary: 83 passed, 1 failed
+(test_sockopts_ipv6 was actually PASSING before the fix, since the old test
+expected the buggy value 0 - it only "fails" in the sense of encoding wrong
+behavior, not a literal test-runner failure). io test binary: 16 passed, 1
+failed (ioctl::test_int_setter, pre-existing/environmental - needs
+/dev/net/tun, not present in this sandbox). All other test binaries passing.
+
+After fix (source + corrected test): net: 84 passed, 0 failed. io: still 16
+passed, 1 failed (same pre-existing environmental failure, confirmed
+unrelated - needs /dev/net/tun). All other test binaries unchanged, all
+passing.
+
+Net effect: one previously-latent-wrong-but-passing test now correctly
+exercises and passes against real correct behavior; no new failures
+introduced; the one remaining failure is a pre-existing sandbox limitation
+unrelated to networking sockopts.

@@ -1,0 +1,98 @@
+All runs below are `cargo +nightly miri run --target x86_64-apple-darwin [--features fixed]` -
+Miri cross-interpreting the real, unmodified `src/event/kqueue.rs` for the real `x86_64-apple-darwin`
+target (no BSD/Apple hardware or emulation available in this sandbox - see RESULT.md). Output
+trimmed of repeated `mostly-unused` profile-hint warnings/Cargo compile noise; nothing else edited.
+
+=== BEFORE (pristine tree, src/event/kqueue.rs unpatched) ===
+$ cargo +nightly miri run --target x86_64-apple-darwin
+   Compiling rustix v1.1.5 (.../rustix)
+   Compiling kq_unknown_filter_repro v0.1.0 (.../repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+     Running `.../cargo-miri runner target/miri/x86_64-apple-darwin/debug/kq_unknown_filter_repro`
+EVFILT_AIO (-3) decodes via Event::filter() to Unknown: true
+
+thread 'main' (1000) panicked at src/event/kqueue.rs:68:37:
+unknown filter
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+note: in Miri, you may have to set `MIRIFLAGS=-Zmiri-env-forward=RUST_BACKTRACE` for the environment variable to have an effect
+REPRODUCED for EVFILT_AIO: Event::new(EventFilter::Unknown, ..) panicked: "unknown filter"
+EVFILT_MACHPORT (-8) decodes via Event::filter() to Unknown: true
+
+thread 'main' (1000) panicked at src/event/kqueue.rs:68:37:
+unknown filter
+REPRODUCED for EVFILT_MACHPORT: Event::new(EventFilter::Unknown, ..) panicked: "unknown filter"
+EVFILT_VM (-12) decodes via Event::filter() to Unknown: true
+
+thread 'main' (1000) panicked at src/event/kqueue.rs:68:37:
+unknown filter
+REPRODUCED for EVFILT_VM: Event::new(EventFilter::Unknown, ..) panicked: "unknown filter"
+EVFILT_EXCEPT (-15) decodes via Event::filter() to Unknown: true
+
+thread 'main' (1000) panicked at src/event/kqueue.rs:68:37:
+unknown filter
+REPRODUCED for EVFILT_EXCEPT: Event::new(EventFilter::Unknown, ..) panicked: "unknown filter"
+REPRODUCED - see panics above
+$ echo $?
+1
+
+Repeated twice more (3/3 runs total), identical result and exit code each time (pure computation,
+no real syscall, no memory-layout/seed dependency - fully deterministic):
+
+=== repeat run 2/3 ===
+...(same four EVFILT_* blocks, identical panics)...
+REPRODUCED - see panics above
+$ echo $?
+1
+
+=== repeat run 3/3 ===
+...(same four EVFILT_* blocks, identical panics)...
+REPRODUCED - see panics above
+$ echo $?
+1
+
+=== AFTER (patch.diff applied, repro run with --features fixed) ===
+$ cargo +nightly miri run --target x86_64-apple-darwin --features fixed
+   Compiling rustix v1.1.5 (.../rustix, patched)
+   Compiling kq_unknown_filter_repro v0.1.0 (.../repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+     Running `.../cargo-miri runner target/miri/x86_64-apple-darwin/debug/kq_unknown_filter_repro`
+EVFILT_AIO (-3) decodes via Event::filter() to Unknown: true
+FIXED for EVFILT_AIO: Event::new(EventFilter::Unknown, ..) returned Err(INVAL), no panic
+EVFILT_MACHPORT (-8) decodes via Event::filter() to Unknown: true
+FIXED for EVFILT_MACHPORT: Event::new(EventFilter::Unknown, ..) returned Err(INVAL), no panic
+EVFILT_VM (-12) decodes via Event::filter() to Unknown: true
+FIXED for EVFILT_VM: Event::new(EventFilter::Unknown, ..) returned Err(INVAL), no panic
+EVFILT_EXCEPT (-15) decodes via Event::filter() to Unknown: true
+FIXED for EVFILT_EXCEPT: Event::new(EventFilter::Unknown, ..) returned Err(INVAL), no panic
+did not reproduce - fix verified, no panic for any tested input
+$ echo $?
+0
+
+=== `just test` run from a fresh `git clone` of repo_url @ base_commit (full chain: clone, reproduce-before, apply patch.diff, reproduce-after) ===
+cd repro && cargo +nightly miri run --target x86_64-apple-darwin
+[... same 4 panics as BEFORE above, from the freshly cloned checkout, same exit code 1 ...]
+REPRODUCED - see panics above
+cd clone && git apply ".../patch.diff"
+cd repro && cargo +nightly miri run --target x86_64-apple-darwin --features fixed
+[... same 4 Err(INVAL) lines as AFTER above ...]
+did not reproduce - fix verified, no panic for any tested input
+$ echo $?
+0
+
+=== cargo check cross-compile sanity (real x86_64-apple-darwin target, no Miri - confirms the
+    code is real/shipped/reachable, not dead code; linking is skipped since no Apple SDK/linker
+    is available in this sandbox, only `cargo check`) ===
+$ cargo +nightly check --target x86_64-apple-darwin --features "event,std,process,fs" --lib
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+$ cargo +nightly check --target x86_64-apple-darwin --features "event,std,process,fs" --examples
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+(examples/kq.rs, updated for the new `io::Result<Event>` signature, type-checks cleanly)
+
+=== Project test suite, before vs. after (cargo test --workspace --features "std,all-apis,use-libc" --no-fail-fast) ===
+Identical both before and after the patch (this module is cfg(bsd)-only, so none of its code runs
+or is even compiled on this x86_64-linux-gnu host either way):
+  411 passed; 1 failed; 5 ignored (across 21 test binaries)
+The 1 failure (`ioctl::test_int_setter`, NotFound opening /dev/net/tun) is the sandbox's own
+pre-existing, environment-caused failure, already documented in this workspace's own
+README.md ("/dev/net/tun" row) and the bug-hunt skill's own projects/rustix.md ("sandbox has no
+/dev/net/tun") - present identically before and after this patch.

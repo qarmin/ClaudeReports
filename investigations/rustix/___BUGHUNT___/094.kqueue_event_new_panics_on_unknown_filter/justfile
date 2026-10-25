@@ -1,0 +1,39 @@
+# Self-contained reproduction for candidate 094.
+#
+# This bug only lives in cfg(bsd)-only code (`kqueue`/`kevent` don't exist on Linux at all), and no
+# real BSD/Apple hardware or emulation is available in the environment this was investigated in -
+# see RESULT.md for why Miri cross-interpretation of the real, unmodified, shipped code for
+# `--target x86_64-apple-darwin` is the substitute used here instead of a real syscall. Requires a
+# nightly toolchain with the `miri` component and the `x86_64-apple-darwin` target installed
+# (`rustup +nightly component add miri`, `rustup +nightly target add x86_64-apple-darwin`).
+#
+# Uses https:// (not git@github.com:...) for repo_url - see projects/rustix.md's own gotcha entry:
+# SSH clone fails in this kind of sandbox (no SSH agent/known_hosts configured).
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Should panic ("unknown filter") for every tested real kernel filter value, exit code 1 - `-`
+# prefix so `just test`'s chain continues into `apply`/`reproduce-after` instead of stopping here
+# (a nonzero exit is the expected, correct result of this step).
+reproduce-before:
+    -cd repro && cargo +nightly miri run --target x86_64-apple-darwin
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone, with the `fixed` feature selecting the
+# post-patch (`Result`-returning) code path - should return `Err(Errno::INVAL)` instead of
+# panicking for every tested input, exit code 0.
+reproduce-after:
+    cd repro && cargo +nightly miri run --target x86_64-apple-darwin --features fixed
+
+clean:
+    rm -rf clone target

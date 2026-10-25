@@ -1,0 +1,155 @@
+Real FreeBSD kernel source consulted (fetched live from
+https://cgit.freebsd.org/src/plain/sys/kern/kern_procctl.c), confirming the exact `rk_fpid`
+sentinel value fed into the repro - `reap_kill()`:
+
+    error = ESRCH;
+    rk->rk_killed = 0;
+    rk->rk_fpid = -1;                                  /* <-- unconditional */
+    if ((rk->rk_flags & REAPER_KILL_CHILDREN) != 0) {
+            reap_kill_children(td, reaper, rk, &ksi, &error);
+    } else {
+            ...
+            reap_kill_subtree(td, p, &reaper, &w);
+            ...
+    }
+
+(`reap_kill_proc_locked`/`reap_kill_children` only ever do
+ `rk->rk_fpid = <target's real positive pid>` inside their own `if (error != 0)` branch, i.e. only
+ on an actual signal-delivery failure - confirmed by reading both functions directly)
+
+Captured by actually running `just test` (candidate's own self-contained justfile) end-to-end from
+a fresh scratch clone of https://github.com/bytecodealliance/rustix.git at
+287214b889865d8e1406a0ee71cc409b6f6191c8, exit code 0 overall:
+
+=== cross-compile check (unpatched clone, real FreeBSD target) ===
+$ cd clone && cargo check --target x86_64-unknown-freebsd --features "std,all-apis"
+   Compiling libc v0.2.189
+   Compiling rustix v1.1.5 (/tmp/096_justfile_test/clone)
+    Checking bitflags v2.9.1
+    Checking errno v0.3.14
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.96s
+
+=== repro (debug build, vulnerable mode) - REPRODUCED (panic) ===
+$ cd repro && cargo run -- vulnerable
+     Running `target/debug/repro vulnerable`
+Simulating a fully successful `reaper_kill()` call (0 processes failed to be signalled) against the real FreeBSD kernel's own `rk_fpid` sentinel value: -1
+(value sourced directly from sys/kern/kern_procctl.c's `reap_kill()`, not guessed)
+(selected mode: vulnerable)
+
+--- fixed formula (this candidate's patch.diff) ---
+first_failed = None  (correct: None, nothing failed)
+
+--- vulnerable formula (current HEAD, unpatched) ---
+
+thread 'main' (629118) panicked at /tmp/096_justfile_test/clone/src/pid.rs:44:9:
+assertion failed: raw >= 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - panicked (debug_assert in Pid::from_raw fired on the negative raw value): Any { .. }
+
+=== repro (release build, vulnerable mode) - REPRODUCED (bogus Some(Pid(-1))) ===
+$ cd repro && cargo run --release -- vulnerable
+     Running `target/release/repro vulnerable`
+Simulating a fully successful `reaper_kill()` call (0 processes failed to be signalled) against the real FreeBSD kernel's own `rk_fpid` sentinel value: -1
+(value sourced directly from sys/kern/kern_procctl.c's `reap_kill()`, not guessed)
+(selected mode: vulnerable)
+
+--- fixed formula (this candidate's patch.diff) ---
+first_failed = None  (correct: None, nothing failed)
+
+--- vulnerable formula (current HEAD, unpatched) ---
+REPRODUCED - wrong output: first_failed = Some(Pid(-1)) for a fully successful kill (0 failures) - the kernel's own "nothing failed" sentinel was silently mis-constructed into a bogus non-null Pid instead of None
+
+=== apply patch.diff to clone ===
+$ cd clone && git apply patch.diff        (clean apply, no errors)
+
+=== cross-compile check (patched clone, real FreeBSD target) ===
+$ cd clone && cargo check --target x86_64-unknown-freebsd --features "std,all-apis"
+    Checking rustix v1.1.5 (/tmp/096_justfile_test/clone)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.65s
+
+=== confirm the real patched source now has the sentinel check ===
+$ grep -q "if req.rk_fpid == -1" clone/src/process/procctl.rs && echo "OK: guard present in patched source"
+OK: guard present in patched source
+
+=== repro (release build, fixed mode) - correct, clean exit ===
+$ cd repro && cargo run --release -- fixed
+     Running `target/release/repro fixed`
+Simulating a fully successful `reaper_kill()` call (0 processes failed to be signalled) against the real FreeBSD kernel's own `rk_fpid` sentinel value: -1
+(value sourced directly from sys/kern/kern_procctl.c's `reap_kill()`, not guessed)
+(selected mode: fixed)
+
+--- fixed formula (this candidate's patch.diff) ---
+first_failed = None  (correct: None, nothing failed)
+
+--- vulnerable formula (current HEAD, unpatched) ---
+REPRODUCED - wrong output: first_failed = Some(Pid(-1)) for a fully successful kill (0 failures) - the kernel's own "nothing failed" sentinel was silently mis-constructed into a bogus non-null Pid instead of None
+
+(the "vulnerable formula" line is still printed for side-by-side comparison in "fixed" mode too -
+the exit code is what's driven by the selected mode, and `just test`'s overall exit code was 0,
+confirming the full before -> apply -> after cycle completed exactly as expected)
+
+=== Repeatability (run directly in the main project's own isolated worktree, 3/3 each) ===
+
+debug build (unpatched), 3 separate `cargo run` invocations: identical panic each time, same
+location `src/pid.rs:44:9` ("assertion failed: raw >= 0").
+
+release build (unpatched), 3 separate `cargo run --release` invocations: identical output each
+time - "REPRODUCED - wrong output: first_failed = Some(Pid(-1)) ...".
+
+=== Cross-compile check (both unpatched and patched trees compile for the real target) ===
+
+$ cargo check --target x86_64-unknown-freebsd --features "std,all-apis"     # unpatched tree
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.71s
+
+$ cargo check --target x86_64-unknown-freebsd --features "std,all-apis"     # patched tree
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.42s
+
+Both compile cleanly for the real FreeBSD target with rustc 1.98.1, confirming `reaper_kill`'s
+`first_failed` construction is real, reachable source for the actual affected platform (not
+dead/unreachable code), and that the patch doesn't break compilation for it.
+
+=== Project test suite (run in the isolated worktree, src/process/procctl.rs toggled via
+    `git stash` / `git stash pop` between runs - same commit, same build, only this one file's
+    state differs) ===
+
+cargo test --workspace --features "std,all-apis,use-libc" --no-fail-fast
+
+  Before (pristine, unpatched): 411 passed; 1 failed (ioctl::test_int_setter - pre-existing
+  /dev/net/tun NotFound environment gap, same failure already documented for every other
+  candidate in this ___BUGHUNT___ workspace, unrelated to this change)
+
+  After (patched):              411 passed; 1 failed (identical failure, same single test,
+  identical counts)
+
+=== rs_reaper (the other half of the original candidate description) - NOT reproducible ===
+
+Real FreeBSD kernel source for `reap_status()` (same file, same fetch):
+
+    static int
+    reap_status(struct thread *td, struct proc *p, void *data)
+    {
+            struct proc *reap, *p2, *first_p;
+            ...
+            reap = get_reaper_or_p(p);
+            if (reap == p)
+                    rs->rs_flags |= REAPER_STATUS_OWNED;
+            if (reap == initproc)
+                    rs->rs_flags |= REAPER_STATUS_REALINIT;
+            rs->rs_reaper = reap->p_pid;
+            ...
+    }
+
+    static struct proc *
+    get_reaper_or_p(struct proc *p)
+    {
+            sx_assert(&proctree_lock, SX_LOCKED);
+            return ((p->p_treeflag & P_TREE_REAPER) == 0 ? p->p_reaper : p);
+    }
+
+`reap` is always either `p` itself (a live, already-validated target process) or `p->p_reaper`
+(every live process has a reaper - it defaults to/terminates at `initproc`, pid 1, never NULL).
+`rs_reaper = reap->p_pid` is therefore always a real, positive (>= 1) pid for any process the
+kernel can locate at all - there is no code path in `reap_status()` that ever assigns `rs_reaper`
+to 0 or -1. The "spurious Err(RANGE) from a legitimately-reported 0/-1 `rs_reaper`" premise in the
+original candidate description does not hold; `get_reaper_status`'s existing
+`Pid::from_raw(raw.rs_reaper).ok_or(io::Errno::RANGE)?` is correct as written.

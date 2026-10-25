@@ -1,0 +1,36 @@
+=== Environment ===
+uname -r: 7.0.0-34-generic
+/proc/sys/kernel/osrelease: 7.0.0-34-generic
+/proc/sys/fs/nr_open: 2147483584
+i32::MAX = 2147483647
+round_down(i32::MAX, 64) = 2147483584
+
+=== 1. Raw C syscall test: syscall(SYS_futex, &uaddr, FUTEX_FD, 0, NULL, NULL, 0) ===
+ret=-1 errno=38 (Function not implemented)
+
+=== 2. Real end-to-end via rustix's public API: repro (release build) ===
+futex::fd() returned Err(Os { code: 38, kind: Unsupported, message: "Function not implemented" })
+raw_os_error = 38
+kernel release (uname -r / /proc/sys/kernel/osrelease) and fs.nr_open are printed by output.txt's surrounding shell commands, not this binary
+did not reproduce via the real end-to-end path - see RESULT.md for why FUTEX_FD is unreachable on any supported modern kernel, and why even a hypothetical success return is structurally bounded well below the i32 boundary by the kernel's own fs.nr_open cap
+
+=== 3. Real end-to-end via rustix's public API: repro (debug build) ===
+futex::fd() returned Err(Os { code: 38, kind: Unsupported, message: "Function not implemented" })
+raw_os_error = 38
+kernel release (uname -r / /proc/sys/kernel/osrelease) and fs.nr_open are printed by output.txt's surrounding shell commands, not this binary
+did not reproduce via the real end-to-end path - see RESULT.md for why FUTEX_FD is unreachable on any supported modern kernel, and why even a hypothetical success return is structurally bounded well below the i32 boundary by the kernel's own fs.nr_open cap
+
+=== 4. Isolated cast+debug_assert mechanism (debug build) - NOT a reproduction, see RESULT.md ===
+hypothetical FUTEX_FD return val = 4294967294 (usize) as RawFd = -2 (negative: true)
+
+thread 'main' (373726) panicked at src/boundary_mechanism.rs:22:5:
+assertion `left == right` failed: return value should be a valid fd
+  left: 18446744073709551614
+ right: 4294967294
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit code: 101
+
+=== 5. Isolated cast+debug_assert mechanism (release build) - NOT a reproduction, see RESULT.md ===
+hypothetical FUTEX_FD return val = 4294967294 (usize) as RawFd = -2 (negative: true)
+reached past debug_assert (only possible in a release build, where debug_assert! is compiled out): fd=-2 would be handed to OwnedFd::from_raw_fd(fd)
+exit code: 0

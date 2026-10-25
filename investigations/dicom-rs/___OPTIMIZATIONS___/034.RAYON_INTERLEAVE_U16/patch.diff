@@ -1,14 +1,12 @@
 diff --git a/pixeldata/src/lib.rs b/pixeldata/src/lib.rs
-index 6ede5847..5a7ef1f4 100644
+index 6ede5847..da487dbc 100644
 --- a/pixeldata/src/lib.rs
 +++ b/pixeldata/src/lib.rs
-@@ -2015,13 +2015,56 @@ fn convert_colorspace_u8(i: &mut [u8]) {
+@@ -2015,13 +2015,46 @@ fn convert_colorspace_u8(i: &mut [u8]) {
      });
  }
  
-+// Caches whether this process has more than one available core - on a single-core (or
-+// affinity-restricted to one core) host, dispatching to rayon can never pay for its own
-+// overhead regardless of input size.
++// Skip rayon on a single-core host - dispatch overhead can never pay for itself there.
 +#[cfg(all(feature = "rayon", feature = "image"))]
 +fn rayon_worth_it() -> bool {
 +    use std::sync::OnceLock;
@@ -20,10 +18,7 @@ index 6ede5847..5a7ef1f4 100644
 +    })
 +}
 +
-+// interleave()'s per-element work is just a copy (no arithmetic), so rayon's fixed per-call
-+// dispatch overhead stays dominant far further out in element count than for
-+// convert_colorspace_u8/u16 (~150-200x further, empirically) - the threshold here is
-+// correspondingly much higher.
++// Copy-only work, so the rayon threshold sits far higher than convert_colorspace's (~150-200x, measured).
 +#[cfg(all(feature = "rayon", feature = "image"))]
 +const INTERLEAVE_RAYON_PIXEL_THRESHOLD: usize = 3_000_000;
 +
@@ -39,12 +34,7 @@ index 6ede5847..5a7ef1f4 100644
 +    #[cfg(feature = "rayon")]
 +    {
 +        if rayon_worth_it() && component_len >= INTERLEAVE_RAYON_PIXEL_THRESHOLD {
-+            // Collecting directly into Vec<T> via a pre-zeroed buffer (`vec![T::default(); n]`)
-+            // adds a full extra write pass over the output (the zero-fill) that the sequential
-+            // `.collect()` below never pays - collecting into Vec<[T; 3]> instead uses rayon's
-+            // indexed collect, which writes each element exactly once, no pre-zeroing needed.
-+            // `[T; 3]` has the same size/alignment as 3 consecutive `T`s with no padding, so
-+            // reinterpreting the buffer as `Vec<T>` is safe for any `T: Copy`.
++            // Collect into Vec<[T; 3]> (rayon's indexed collect, no pre-zeroing pass) then reinterpret as Vec<T> - safe, same layout for T: Copy.
 +            let chunks: Vec<[T; 3]> = (0..component_len)
 +                .into_par_iter()
 +                .map(|i| [r[i], g[i], b[i]])

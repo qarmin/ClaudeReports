@@ -1,0 +1,48 @@
+# Self-contained reproduction for this candidate.
+#
+# repro/build_and_run.sh compiles gstxmlhelper.c directly (default visibility) alongside repro.c,
+# same rationale/pattern as candidate #058's hlsdemux-util repro. Requires valgrind on PATH -
+# ASAN does not reliably catch this specific 1-byte-past-allocation read in this environment (see
+# RESULT.md), valgrind does, precisely.
+
+repo_url := "https://github.com/GStreamer/gstreamer.git"
+base_commit := "65b9547519cdafce691e65777d4178280bf10808"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Builds+runs repro.c under valgrind - should report an "Invalid read" inside
+# gst_xml_helper_get_prop_dateTime() (strcspn -> str += pos+1 -> sscanf reads 1 byte past the
+# xmlStrndup'd attribute-value allocation).
+reproduce-before:
+    #!/usr/bin/env bash
+    set -o pipefail
+    OUT="$(SRC_DIR="{{justfile_directory()}}/clone" bash repro/build_and_run.sh 2>&1)"
+    RC=$?
+    echo "$OUT"
+    if ! grep -q "Invalid read" <<< "$OUT"; then
+        echo "expected valgrind to report an invalid read, exit=$RC" >&2
+        exit 1
+    fi
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - valgrind should report 0 errors.
+reproduce-after:
+    #!/usr/bin/env bash
+    set -eo pipefail
+    OUT="$(SRC_DIR="{{justfile_directory()}}/clone" bash repro/build_and_run.sh 2>&1)"
+    RC=$?
+    echo "$OUT"
+    if [ "$RC" != 0 ]; then
+        echo "expected valgrind to report 0 errors (exit 0) after the fix, got exit=$RC" >&2
+        exit 1
+    fi
+
+clean:
+    rm -rf clone build-dash-repro

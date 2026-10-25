@@ -1,0 +1,33 @@
+diff --git a/subprojects/gst-plugins-bad/ext/aes/gstaesdec.c b/subprojects/gst-plugins-bad/ext/aes/gstaesdec.c
+index 9386b94c01..20d0898d40 100644
+--- a/subprojects/gst-plugins-bad/ext/aes/gstaesdec.c
++++ b/subprojects/gst-plugins-bad/ext/aes/gstaesdec.c
+@@ -488,7 +488,7 @@ gst_aes_dec_transform (GstBaseTransform * base,
+         ("Error while updating openssl cipher"));
+     goto cleanup;
+   } else {
+-    if (filter->per_buffer_padding) {
++    if (filter->per_buffer_padding && plaintext_len > 0) {
+       gint k;
+ 
+       /* sanity check on padding value */
+@@ -545,7 +545,18 @@ gst_aes_dec_prepare_output_buffer (GstBaseTransform * base,
+   /* Since serialized IV is stripped from first buffer,
+    * reduce output buffer size by GST_AES_BLOCK_SIZE in this case */
+   if (filter->serialize_iv && filter->awaiting_first_buffer) {
+-    g_assert (in_size > GST_AES_BLOCK_SIZE);
++    /* in_size is attacker/peer-controlled (the size of the first buffer on
++     * the wire), not an internal invariant, so a short first buffer must be
++     * a normal streaming error, not a g_assert abort. Matches the same
++     * GST_AES_BLOCK_SIZE boundary gst_aes_dec_transform() itself accepts
++     * (== is valid: IV only, zero ciphertext bytes). */
++    if (in_size < GST_AES_BLOCK_SIZE) {
++      g_mutex_unlock (&filter->decoder_lock);
++      GST_ELEMENT_ERROR (filter, RESOURCE, FAILED, (NULL),
++          ("Cipher text too short"));
++      *outbuf = NULL;
++      return GST_FLOW_ERROR;
++    }
+     out_size -= GST_AES_BLOCK_SIZE;
+   }
+   g_mutex_unlock (&filter->decoder_lock);

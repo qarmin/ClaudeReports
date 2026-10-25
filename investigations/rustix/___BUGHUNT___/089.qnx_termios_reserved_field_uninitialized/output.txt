@@ -1,0 +1,368 @@
+Candidate 089: qnx_termios_reserved_field_uninitialized
+Real captured output from this session's investigation (2026-10-01). No execution of the
+suspected bug itself was possible (no QNX hardware/emulator, no Miri shim) - everything below is
+either (a) a genuine tool-run output, or (b) a genuine excerpt from a real, independently-sourced
+file, not reconstructed from memory.
+
+====================================================================
+1. Miri cross-interpretation attempt, re-run this session (same conclusion as candidate 050,
+   confirming the tooling gap still exists on today's nightly, rustc 1.101.0-nightly 2026-09-29):
+====================================================================
+rm -rf clone
+git clone https://github.com/bytecodealliance/rustix.git clone
+Cloning into 'clone'...
+cd clone && git checkout 287214b889865d8e1406a0ee71cc409b6f6191c8
+Note: switching to '287214b889865d8e1406a0ee71cc409b6f6191c8'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at 287214b8 chore: Release rustix version 1.1.5
+=== rustix::termios::tcgetattr() cross-interpreted for QNX (x86_64-pc-nto-qnx710) ===
+=== Expected: Miri has no shim for tcgetattr on OS nto - a tooling gap, not a verdict either way ===
+cd repro && RUSTFLAGS="--cfg rustix_no_linux_raw" MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-pc-nto-qnx710 --bin tcgetattr_public_api || true
+warning: ignoring `hints.mostly-unused`
+  --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/089.qnx_termios_reserved_field_uninitialized/clone/Cargo.toml:20:1
+   |
+20 | mostly-unused = true
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+warning: ignoring `hints.mostly-unused`
+  --> /home/rafal/Projekty/Obce/rustix/Cargo.toml:20:1
+   |
+20 | mostly-unused = true
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+   Compiling rustix v1.1.5 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/089.qnx_termios_reserved_field_uninitialized/clone)
+   Compiling repro v0.1.0 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/089.qnx_termios_reserved_field_uninitialized/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-pc-nto-qnx710/debug/tcgetattr_public_api`
+error: unsupported operation: can't call foreign function `tcgetattr` on OS `nto`
+   --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/089.qnx_termios_reserved_field_uninitialized/clone/src/backend/libc/termios/syscalls.rs:106:13
+    |
+106 |         ret(c::tcgetattr(borrowed_fd(fd), result.as_mut_ptr().cast()))?;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsupported operation occurred here
+    |
+    = help: this means the program tried to do something Miri does not support; it does not indicate a bug in the program
+    = note: stack backtrace:
+            0: rustix::backend::termios::syscalls::tcgetattr
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/089.qnx_termios_reserved_field_uninitialized/clone/src/backend/libc/termios/syscalls.rs:106:13: 106:70
+            1: rustix::termios::tcgetattr::<rustix::fd::BorrowedFd<'_>>
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/089.qnx_termios_reserved_field_uninitialized/clone/src/termios/tc.rs:31:5: 31:54
+            2: main
+                at src/bin/tcgetattr_public_api.rs:29:11: 29:41
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error
+
+
+====================================================================
+2. libc crate's own `Padding<T>` type (src/types.rs in libc 0.2.189, the version this repo's
+   Cargo.lock would resolve to via the `libc = "0.2.171"`/"0.2.182" constraints in Cargo.toml) -
+   a transparent MaybeUninit<T> wrapper the libc maintainers use specifically for C struct fields
+   whose contents "might be uninitialized" when returned from C:
+====================================================================
+//! Platform-agnostic support types.
+
+#[cfg(feature = "extra_traits")]
+use core::hash::Hash;
+use core::mem::MaybeUninit;
+
+use crate::prelude::*;
+
+/// A transparent wrapper over `MaybeUninit<T>` to represent uninitialized padding
+/// while providing `Default`.
+// This is restricted to `Copy` types since that's a loose indicator that zeros is actually
+// a valid bitpattern. There is no technical reason this is required, though, so it could be
+// lifted in the future if it becomes a problem.
+#[allow(dead_code)]
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub(crate) struct Padding<T: Copy>(MaybeUninit<T>);
+
+impl<T: Copy> Default for Padding<T> {
+    fn default() -> Self {
+        Self(MaybeUninit::zeroed())
+    }
+}
+
+impl<T: Copy> Padding<T> {
+    /// Create a `Padding` initialized with the given value.
+    #[allow(dead_code)]
+    pub(crate) const fn new(val: T) -> Self {
+        Self(MaybeUninit::new(val))
+    }
+
+Seminal rationale, libc issue #1453 "Wrap padding fields in Padding(MaybeUninit<T>)"
+(https://github.com/rust-lang/libc/issues/1453), quoted verbatim:
+
+  "libc uses integers and aggregates of integers for explicit padding byte fields. When these
+  fields are returned from C, they might be uninitialized. We currently do not have any wording
+  in the spec saying that an uninitialized integer is not instant undefined behavior, and there
+  are proposals that define them to both be ok, and to actually be instant undefined behavior.
+  These padding fields should use MaybeUninit<INT> instead."
+
+====================================================================
+3. libc 0.2.189's actual QNX (`target_os = "nto"`) `struct termios` definition
+   (src/unix/nto/mod.rs) - the exact field rustix's own `Termios::__reserved` mirrors, wrapped in
+   `Padding<[c_uint; 3]>` and kept PRIVATE (no `pub`) by libc's own maintainers:
+====================================================================
+450:    pub struct termios {
+451-        pub c_iflag: crate::tcflag_t,
+452-        pub c_oflag: crate::tcflag_t,
+453-        pub c_cflag: crate::tcflag_t,
+454-        pub c_lflag: crate::tcflag_t,
+455-        pub c_cc: [crate::cc_t; crate::NCCS],
+456-        __reserved: Padding<[c_uint; 3]>,
+457-        pub c_ispeed: crate::speed_t,
+458-        pub c_ospeed: crate::speed_t,
+459-    }
+460-
+
+====================================================================
+4. Real QNX6 userspace tcgetattr() source, from the OpenQNX open-source archive
+   (https://github.com/vocho/openqnx, trunk/lib/c/1/tcgetattr.c - QNX 6.3.0's own libc, released
+   under a QNX source license in 2007). Confirms tcgetattr() is a thin wrapper that forwards the
+   caller's own (uninitialized, in rustix's case) buffer pointer straight into a `_devctl()` call
+   - the actual byte-by-byte fill behavior lives entirely in the kernel-side io-char/tty resource
+   manager, whose source was NOT part of the open-sourced subset (confirmed: `git ls-tree -r
+   --name-only HEAD | grep devc-` in this clone lists only `devc-ditto`, a pseudo-terminal mirror
+   driver with no termios/DCMD_CHR_TCGETATTR handling of its own - the real serial/console drivers
+   implementing DCMD_CHR_TCGETATTR are not present in this mirror):
+====================================================================
+/*
+ * $QNXLicenseC:
+ * Copyright 2007, QNX Software Systems. All Rights Reserved.
+ * 
+ * You must obtain a written license from and pay applicable license fees to QNX 
+ * Software Systems before you may reproduce, modify or distribute this software, 
+ * or any work that includes all or part of this software.   Free development 
+ * licenses are available for evaluation and non-commercial purposes.  For more 
+ * information visit http://licensing.qnx.com or email licensing@qnx.com.
+ *  
+ * This file may contain contributions from others.  Please review this entire 
+ * file for other proprietary rights or license notices, as well as the QNX 
+ * Development Suite License Guide at http://licensing.qnx.com/license-guide/ 
+ * for other information.
+ * $
+ */
+
+
+
+
+#include <termios.h>
+#include <devctl.h>
+#include <sys/dcmd_chr.h>
+#include <errno.h>
+
+int tcgetattr(int fd, struct termios *termios_p) {
+	return _devctl(fd, DCMD_CHR_TCGETATTR, termios_p, sizeof *termios_p, _DEVCTL_FLAG_NORETVAL | _DEVCTL_FLAG_NOTTY);
+}
+
+__SRCVERSION("tcgetattr.c $Rev: 153052 $");
+
+====================================================================
+5. QNX's own official documentation (qnx.com, versions 6.4.1 through 7.1, consistent across all
+   of them) confirms the struct layout and names the field "reserved[3]", type `uint32_t`/
+   `_Uint32t`, sitting between `c_cc[NCCS]` and `c_ispeed`/`c_ospeed` - matching rustix's
+   `Termios::__reserved` placement exactly. Source (fetched 2026-10-01):
+   https://www.qnx.com/developers/docs/7.1/com.qnx.doc.neutrino.lib_ref/topic/t/termios.html
+   https://github.com/vocho/openqnx/blob/master/trunk/lib/c/public/termios.h
+   No official QNX documentation page states whether `tcgetattr()` writes a defined value into
+   this field - the field is documented only as present for ABI/future-extension purposes, with
+   no stated contract either way.
+
+====================================================================
+6. git log -S showing the commit that added `Termios::__reserved` to rustix's own struct
+   (src/termios/types.rs), in this repo's history - a real `git show` capture, not reconstructed:
+====================================================================
+commit c564105eca48f6297fe96c3e7d2b6acf8a6a6b72
+Author: Dan Gohman <dev@sunfishcode.online>
+Date:   Fri Jul 14 16:49:09 2023 -0700
+
+    Convert `assert_eq`+`size_of` asserts to `static_assertions`. (#738)
+    
+    * Convert `assert_eq`+`size_of` asserts to `static_assertions`.
+    
+    Convert `assert_eq` asserts using `size_of` and `align_of` to use
+    `static_assertions`' `assert_eq_size` and `assert_eq_align`, so that
+    they're checked at compile time instead of runtime, and adjust the
+    layout of the `Termios` struct to fix some differences with the
+    libc `termios` on some platforms.
+    
+    * Disable a test for `EXTA`/`EXTB` on Haiku, which omits those.
+
+diff --git a/src/termios/types.rs b/src/termios/types.rs
+index adad14b5..c59b134e 100644
+--- a/src/termios/types.rs
++++ b/src/termios/types.rs
+@@ -39,8 +39,12 @@ pub struct Termios {
+ 
+     /// How are various special control codes handled?
+     #[doc(alias = "c_cc")]
++    #[cfg(not(target_os = "haiku"))]
+     pub special_codes: SpecialCodes,
+ 
++    #[cfg(target_os = "nto")]
++    pub(crate) __reserved: [c::c_uint; 3],
++
+     /// Line discipline.
+     // On PowerPC, this field comes after `c_cc`.
+     #[doc(alias = "c_line")]
+@@ -51,13 +55,20 @@ pub struct Termios {
+     ///
+     /// On Linux and BSDs, this is the arbitrary integer speed value. On all
+     /// other platforms, this is the encoded speed value.
++    #[cfg(not(any(solarish, all(libc, target_env = "newlib"), target_os = "aix")))]
+     pub(crate) input_speed: c::speed_t,
+ 
+     /// See the `output_speed` and `set_output_seed` functions.
+     ///
+     /// On Linux and BSDs, this is the integer speed value. On all other
+     /// platforms, this is the encoded speed value.
++    #[cfg(not(any(solarish, all(libc, target_env = "newlib"), target_os = "aix")))]
+     pub(crate) output_speed: c::speed_t,
++
++    /// How are various special control codes handled?
++    #[doc(alias = "c_cc")]
++    #[cfg(target_os = "haiku")]
++    pub special_codes: SpecialCodes,
+ }
+ 
+ impl Termios {
+@@ -89,8 +100,20 @@ impl Termios {
+             self.input_speed as u32
+         }
+ 
++        // On Illumos, `input_speed` is not present.
++        #[cfg(any(solarish, all(libc, target_env = "newlib"), target_os = "aix"))]
++        unsafe {
++            speed::decode(c::cfgetispeed(crate::utils::as_ptr(self).cast())).unwrap()
++        }
++
+         // On other platforms, it's the encoded speed.
+-        #[cfg(not(any(linux_kernel, bsd)))]
++        #[cfg(not(any(
++            linux_kernel,
++            bsd,
++            solarish,
++            all(libc, target_env = "newlib"),
++            target_os = "aix"
++        )))]
+         {
+             speed::decode(self.input_speed).unwrap()
+         }
+@@ -110,8 +133,20 @@ impl Termios {
+             self.output_speed as u32
+         }
+ 
++        // On Illumos, `output_speed` is not present.
++        #[cfg(any(solarish, all(libc, target_env = "newlib"), target_os = "aix"))]
++        unsafe {
++            speed::decode(c::cfgetospeed(crate::utils::as_ptr(self).cast())).unwrap()
++        }
++
+         // On other platforms, it's the encoded speed.
+-        #[cfg(not(any(linux_kernel, bsd)))]
++        #[cfg(not(any(
++            linux_kernel,
++            bsd,
++            solarish,
++            all(libc, target_env = "newlib"),
++            target_os = "aix"
++        )))]
+         {
+             speed::decode(self.output_speed).unwrap()
+         }
+@@ -1233,24 +1268,40 @@ fn termios_layouts() {
+ 
+         // On PowerPC, `termios2` is `termios`.
+         #[cfg(any(target_arch = "powerpc", target_arch = "powerpc64"))]
+-        assert_eq!(
+-            core::mem::size_of::<c::termios2>(),
+-            core::mem::size_of::<c::termios>()
+-        );
++        assert_eq_size!(c::termios2, c::termios);
+     }
+ 
+     #[cfg(not(linux_raw))]
+     {
++        // On Mips, Sparc, and Android, the libc lacks the ospeed and ispeed
++        // fields.
++        #[cfg(all(
++            not(all(
++                target_env = "gnu",
++                any(
++                    target_arch = "mips",
++                    target_arch = "mips64",
++                    target_arch = "sparc",
++                    target_arch = "sparc64"
++                )
++            )),
++            not(all(libc, target_os = "android"))
++        ))]
++        check_renamed_type!(Termios, termios);
+         #[cfg(not(all(
+-            target_env = "gnu",
+-            any(
+-                target_arch = "mips",
+-                target_arch = "mips64",
+-                target_arch = "sparc",
+-                target_arch = "sparc64"
+-            )
++            not(all(
++                target_env = "gnu",
++                any(
++                    target_arch = "mips",
++                    target_arch = "mips64",
++                    target_arch = "sparc",
++                    target_arch = "sparc64"
++                )
++            )),
++            not(all(libc, target_os = "android"))
+         )))]
+-        check_renamed_type!(Termios, termios);
++        const_assert!(core::mem::size_of::<Termios>() >= core::mem::size_of::<c::termios>());
++
+         check_renamed_struct_renamed_field!(Termios, termios, input_modes, c_iflag);
+         check_renamed_struct_renamed_field!(Termios, termios, output_modes, c_oflag);
+         check_renamed_struct_renamed_field!(Termios, termios, control_modes, c_cflag);
+@@ -1287,7 +1338,12 @@ fn termios_layouts() {
+ }
+ 
+ #[test]
+-#[cfg(not(any(solarish, target_os = "emscripten", target_os = "redox")))]
++#[cfg(not(any(
++    solarish,
++    target_os = "emscripten",
++    target_os = "haiku",
++    target_os = "redox"
++)))]
+ fn termios_legacy() {
+     // Check that our doc aliases above are correct.
+     assert_eq!(c::EXTA, c::B19200);
+
+====================================================================
+7. rustix's own CI (.github/workflows/main.yml) QNX coverage - `cargo check` only, never
+   built+linked+run against a real QNX target, confirming this path has no execution-based CI
+   coverage of any kind, upstream or in this session:
+====================================================================
+255:    - run: cargo check -Z build-std --target=aarch64-unknown-nto-qnx710 --features=all-apis
+256:    - run: cargo check -Z build-std --target=x86_64-pc-nto-qnx710 --features=all-apis

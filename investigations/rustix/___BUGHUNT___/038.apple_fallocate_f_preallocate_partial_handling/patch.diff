@@ -1,0 +1,24 @@
+diff --git a/src/backend/libc/fs/syscalls.rs b/src/backend/libc/fs/syscalls.rs
+index c95eaf56..41b82fa5 100644
+--- a/src/backend/libc/fs/syscalls.rs
++++ b/src/backend/libc/fs/syscalls.rs
+@@ -1815,9 +1815,16 @@ pub(crate) fn fallocate(
+         fst_bytesalloc: 0,
+     };
+     unsafe {
+-        if c::fcntl(borrowed_fd(fd), c::F_PREALLOCATE, &store) == -1 {
+-            // Unable to allocate contiguous disk space; attempt to allocate
+-            // non-contiguously.
++        // `F_ALLOCATECONTIG` without `F_ALLOCATEALL` is not all-or-nothing: Apple's own
++        // `fcntl(2)` documents that on success (return value 0, not -1) the kernel may still
++        // allocate less than `fst_length` and report the real amount via `fst_bytesalloc`. If
++        // we only checked for `-1` here, a partial contiguous allocation would look identical
++        // to a full one and we'd go on to `ftruncate` the file to the requested size anyway,
++        // leaving a sparse file whose later writes are not actually backed by reserved space.
++        if c::fcntl(borrowed_fd(fd), c::F_PREALLOCATE, &store) == -1 || store.fst_bytesalloc < new_len {
++            // Unable to allocate the full range contiguously (or no contiguous
++            // allocation at all); fall back to `F_ALLOCATEALL`, which Apple documents as
++            // all-or-nothing: either the whole range is reserved, or this fails outright.
+             store.fst_flags = c::F_ALLOCATEALL;
+             let _ = ret_c_int(c::fcntl(borrowed_fd(fd), c::F_PREALLOCATE, &store))?;
+         }

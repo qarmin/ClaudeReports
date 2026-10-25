@@ -1,0 +1,72 @@
+diff --git a/src/backend/libc/net/sockopt.rs b/src/backend/libc/net/sockopt.rs
+index 97104883..8f86245c 100644
+--- a/src/backend/libc/net/sockopt.rs
++++ b/src/backend/libc/net/sockopt.rs
+@@ -4,14 +4,6 @@ use super::ext::{in6_addr_new, in_addr_new};
+ use crate::backend::c;
+ use crate::backend::conv::{borrowed_fd, ret};
+ use crate::fd::BorrowedFd;
+-#[cfg(feature = "alloc")]
+-#[cfg(any(
+-    linux_like,
+-    target_os = "freebsd",
+-    target_os = "fuchsia",
+-    target_os = "illumos"
+-))]
+-use crate::ffi::CStr;
+ use crate::io;
+ use crate::net::sockopt::Timeout;
+ #[cfg(linux_kernel)]
+@@ -1052,12 +1044,13 @@ pub(crate) fn tcp_congestion(fd: BorrowedFd<'_>) -> io::Result<String> {
+     unsafe {
+         let value = value.assume_init();
+         let slice: &[u8] = core::mem::transmute(&value[..optlen as usize]);
+-        assert!(slice.contains(&b'\0'));
+-        Ok(
+-            core::str::from_utf8(CStr::from_ptr(slice.as_ptr().cast()).to_bytes())
+-                .unwrap()
+-                .to_owned(),
+-        )
++        // The kernel's `name` buffer (`TCP_CA_NAME_MAX` bytes) isn't guaranteed to be
++        // NUL-terminated: a congestion-control algorithm whose name fills the whole buffer has
++        // no trailing NUL (the kernel's own `getsockopt(TCP_CONGESTION)` handler copies the
++        // field verbatim). Find the length ourselves instead of trusting a NUL to exist within
++        // `slice` - scanning past it for one would be an out-of-bounds read.
++        let len = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
++        Ok(core::str::from_utf8(&slice[..len]).unwrap().to_owned())
+     }
+ }
+ 
+diff --git a/src/backend/linux_raw/net/sockopt.rs b/src/backend/linux_raw/net/sockopt.rs
+index a8b28192..ceabf6b7 100644
+--- a/src/backend/linux_raw/net/sockopt.rs
++++ b/src/backend/linux_raw/net/sockopt.rs
+@@ -10,8 +10,6 @@ use crate::backend::conv::{by_mut, c_uint, ret, socklen_t};
+ #[cfg(all(target_os = "linux", feature = "time"))]
+ use crate::clockid::ClockId;
+ use crate::fd::BorrowedFd;
+-#[cfg(feature = "alloc")]
+-use crate::ffi::CStr;
+ use crate::io;
+ use crate::net::sockopt::{Ipv4PathMtuDiscovery, Ipv6PathMtuDiscovery, Timeout};
+ #[cfg(target_os = "linux")]
+@@ -854,12 +852,13 @@ pub(crate) fn tcp_congestion(fd: BorrowedFd<'_>) -> io::Result<String> {
+     unsafe {
+         let value = value.assume_init();
+         let slice: &[u8] = core::mem::transmute(&value[..optlen as usize]);
+-        assert!(slice.contains(&b'\0'));
+-        Ok(
+-            core::str::from_utf8(CStr::from_ptr(slice.as_ptr().cast()).to_bytes())
+-                .unwrap()
+-                .to_owned(),
+-        )
++        // The kernel's `name` buffer (`TCP_CA_NAME_MAX` bytes) isn't guaranteed to be
++        // NUL-terminated: a congestion-control algorithm whose name fills the whole buffer has
++        // no trailing NUL (the kernel's own `getsockopt(TCP_CONGESTION)` handler copies the
++        // field verbatim). Find the length ourselves instead of trusting a NUL to exist within
++        // `slice` - scanning past it for one would be an out-of-bounds read.
++        let len = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
++        Ok(core::str::from_utf8(&slice[..len]).unwrap().to_owned())
+     }
+ }
+ 

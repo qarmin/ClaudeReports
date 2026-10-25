@@ -1,0 +1,69 @@
+=== BEFORE fix (pristine HEAD 287214b889865d8e1406a0ee71cc409b6f6191c8) ===
+--- case: equal-size + TRUNC (buf_len=16, TRUNC=true) ---
+  recv_len = 16
+  init_data.len() = 16
+  init_data = [aa, aa, aa, aa, aa, aa, aa, aa, aa, aa, aa, aa, aa, aa, aa, aa]
+  => BUG: init_data is pure poison, falsely certified as real received data!
+--- case: larger-buffer + TRUNC (buf_len=64, TRUNC=true) ---
+  recv_len = 16
+  init_data.len() = 16
+  init_data = [aa, aa, aa, aa, aa, aa, aa, aa, aa, aa, aa, aa, aa, aa, aa, aa]
+  => BUG: init_data is pure poison, falsely certified as real received data!
+--- case: smaller-buffer + TRUNC (buf_len=8, TRUNC=true) ---
+  recv_len = 8
+  init_data.len() = 8
+  init_data = [aa, aa, aa, aa, aa, aa, aa, aa]
+  => BUG: init_data is pure poison, falsely certified as real received data!
+--- case: equal-size, no TRUNC (control) (buf_len=16, TRUNC=false) ---
+  recv_len = 16
+  init_data.len() = 16
+  init_data = [52, 45, 41, 4c, 44, 41, 54, 41, 31, 32, 33, 34, 35, 36, 37, 38]
+  => init_data matches real sent bytes (legitimate).
+
+Reproduced identically across 7 runs total (5 initial single-case runs of the
+first case, all showing init_data = [aa;16]/[aa;8] poison, plus 2 full
+four-case runs as above) - 21/21 individual TRUNC sub-case observations, 0
+misses.
+
+=== AFTER fix (patch.diff applied) ===
+--- case: equal-size + TRUNC (buf_len=16, TRUNC=true) ---
+  recv_len = 16
+  init_data.len() = 0
+  init_data = []
+  => 0 bytes claimed; safe regardless of TRUNC semantics.
+--- case: larger-buffer + TRUNC (buf_len=64, TRUNC=true) ---
+  recv_len = 16
+  init_data.len() = 0
+  init_data = []
+  => 0 bytes claimed; safe regardless of TRUNC semantics.
+--- case: smaller-buffer + TRUNC (buf_len=8, TRUNC=true) ---
+  recv_len = 8
+  init_data.len() = 0
+  init_data = []
+  => 0 bytes claimed; safe regardless of TRUNC semantics.
+--- case: equal-size, no TRUNC (control) (buf_len=16, TRUNC=false) ---
+  recv_len = 16
+  init_data.len() = 16
+  init_data = [52, 45, 41, 4c, 44, 41, 54, 41, 31, 32, 33, 34, 35, 36, 37, 38]
+  => init_data matches real sent bytes (legitimate).
+
+Reproduced (i.e. bug gone) identically across 3 runs. recv_len is preserved
+correctly in every case (16, 16, 8) even though no poison memory is ever
+certified as real data anymore. Non-TRUNC control case is unaffected.
+
+=== cargo test --workspace --no-fail-fast \
+    --features "std,net,fs,event,process,thread,time,mm,pipe,rand,stdio,system,termios,pty,shm,mount,use-libc" ===
+(default `cargo test --workspace` only enables `std` and does not exercise
+`net` at all, hence the broadened feature set below.)
+
+Before fix: 1 pre-existing unrelated failure (ioctl::test_int_setter,
+sandbox/environment-specific, unrelated to networking). All net tests passed
+(84/84), including the existing MSG_TRUNC tests.
+
+After fix: same pre-existing ioctl::test_int_setter failure, PLUS one new
+failure: tests/net/recv_trunc.rs::net_recv_uninit_trunc (83/84 net tests
+passed). This is a direct, expected consequence of the fix's conservative
+choice - see RESULT.md "What's not done / open questions" for why.
+net_recvmsg_trunc (the recvmsg variant) still passes both before and after -
+recvmsg takes pre-initialized IoSliceMut buffers, not MaybeUninit, so it has
+no assume_init call and is not part of this unsoundness.

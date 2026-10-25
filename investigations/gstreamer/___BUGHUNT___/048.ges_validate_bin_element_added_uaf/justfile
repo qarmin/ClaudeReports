@@ -1,0 +1,78 @@
+# Self-contained reproduction for candidate 048 (ges_validate_bin_element_added_uaf).
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored). This whole folder can be copied anywhere and `just test` still works.
+#
+# `just test` is a real, full build: it configures + builds a scoped, ASAN+UBSAN-instrumented
+# GStreamer tree (core + base + gst-editing-services + gst-devtools/validate, tracer hooks left at
+# their default-enabled setting) from a pristine clone, links the repro against the real compiled
+# `ges-validate.c.o`, runs the race (expect a crash), applies patch.diff, rebuilds just that one
+# object, re-links, and runs the race again (expect no crash). Expect this to take
+# 15-30 minutes for the first `clone`+`ninja` (meson fetches several small third-party
+# subprojects via wrap-db - needs network access) - subsequent re-runs of the same clone are fast.
+
+repo_url := "https://github.com/GStreamer/gstreamer.git"
+base_commit := "65b9547519cdafce691e65777d4178280bf10808"
+
+test: clone build reproduce-before apply rebuild reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Scoped build: core+base+ges+devtools(validate) enabled, ASAN+UBSAN, clang. good/bad/ugly plugins
+# stay disabled - the repro uses a plain custom GstElement, not a real codec plugin, so it needs no
+# demuxer/decoder. tracer_hooks is left at its default (true) - the bug is reached through
+# gst_tracing_register_hook(), which candidate 048's own investigation found disabled in this
+# workspace's other ASAN build scripts (tools/build_asan_fuzz.sh / build_asan_core.sh both pass
+# -Dgstreamer:tracer_hooks=false for unrelated reasons) - do not copy that flag here.
+build:
+    cd clone && CC=clang CXX=clang++ meson setup \
+        --buildtype=debugoptimized \
+        -Db_sanitize=address,undefined \
+        -Db_lundef=false \
+        -Dc_args=-fno-sanitize=function \
+        -Dcpp_args=-fno-sanitize=function \
+        -Dglib:tests=false \
+        -Ddoc=disabled \
+        -Dexamples=disabled \
+        -Dintrospection=disabled \
+        -Dgood=disabled \
+        -Dbad=disabled \
+        -Dugly=disabled \
+        -Dlibav=disabled \
+        -Dges=enabled \
+        -Dsharp=disabled \
+        -Drs=disabled \
+        -Dpython=disabled \
+        -Dlibnice=disabled \
+        -Ddevtools=enabled \
+        -Drtsp_server=disabled \
+        -Dgst-examples=disabled \
+        -Dqt5=disabled \
+        -Dorc=disabled \
+        -Dbase=enabled \
+        build-asan
+    cd clone && ninja -C build-asan subprojects/gst-editing-services/tools/ges-launch-1.0
+
+# Builds delay_shim.so + harness_test against the pristine clone's build, runs the race 5x -
+# every run should crash with a real ASAN heap-use-after-free in bin_element_added
+# (ges-validate.c:168-169), reported inline.
+reproduce-before:
+    bash "{{justfile_directory()}}/repro/build_and_run.sh" "{{justfile_directory()}}/clone/build-asan" "{{justfile_directory()}}/clone" 5
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+rebuild:
+    cd clone && ninja -C build-asan subprojects/gst-editing-services/tools/ges-launch-1.0.p/ges-validate.c.o
+    cd clone && ninja -C build-asan subprojects/gst-editing-services/tools/ges-launch-1.0
+
+# Same race again, now against the patched clone - all 5 runs should complete cleanly
+# (RACE_COMPLETED_NO_CRASH, exit 0).
+reproduce-after:
+    bash "{{justfile_directory()}}/repro/build_and_run.sh" "{{justfile_directory()}}/clone/build-asan" "{{justfile_directory()}}/clone" 5
+
+clean:
+    rm -rf clone repro/libdelay_shim.so repro/harness_test

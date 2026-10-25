@@ -1,0 +1,42 @@
+# Self-contained reproduction for candidate 080 (nonzero_backed_type_kernel_data_sweep).
+#
+# `real_tcgetsid` demonstrates, with REAL syscalls, that rustix's real public `tcgetsid()` is
+# live/reachable (a real pty + a real attached session -> a real nonzero sid through the actual
+# public API), then attempts to construct the real kernel cross-pid-namespace condition that makes
+# the raw ioctl return 0 (see RESULT.md) - this sandbox's `unshare(CLONE_NEWUSER)` is blocked with
+# EPERM, so that last step can't be completed end-to-end here. `miri_ub` isolates the one
+# remaining step (`Pid::from_raw_unchecked`) with the exact value Linux kernel source
+# (drivers/tty/tty_jobctrl.c::tiocgsid, kernel/pid.c::pid_nr_ns) proves is reachable, and shows it
+# is genuine, Miri-detectable Undefined Behavior. See RESULT.md's "Fully reproducible: No"
+# justification (CONFIRMATION.md section 11 hardware/privilege exception).
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Real end-to-end: proves tcgetsid() is live via a real pty+session (should PASS, both before and
+# after the patch - this part of the bug class isn't about the common case misbehaving).
+reproduce-before:
+    ulimit -c 0 && cd repro && cargo build --bin real_tcgetsid && ./target/debug/real_tcgetsid
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo build --bin real_tcgetsid && ./target/debug/real_tcgetsid
+
+# Requires `rustup component add miri --toolchain nightly` separately: isolates the vulnerable
+# construction step and confirms it's real Undefined Behavior under Miri with the value kernel
+# source proves `tcgetsid`'s raw ioctl can return. Should report "Undefined Behavior: entering
+# unreachable code" against the pristine clone.
+miri:
+    cd repro && cargo +nightly miri run --release --bin miri_ub
+
+clean:
+    rm -rf clone

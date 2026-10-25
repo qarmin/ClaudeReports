@@ -1,0 +1,37 @@
+# Self-contained reproduction for candidate 048.
+#
+# `fix_negative_nsecs` is `pub(crate)`, so there's no external-crate public API to drive it from -
+# the repro instead adds one `#[test]` (repro/add_test.diff) to the real, unmodified
+# `src/timespec.rs` inside a pristine clone, and runs it under Miri cross-interpreting
+# `x86_64-apple-darwin` (works on any host - Miri interprets MIR, it doesn't need real Apple
+# hardware). Requires a nightly toolchain with the `miri` and `rust-src` components, and a Miri
+# sysroot for `x86_64-apple-darwin` (`cargo +nightly miri setup --target x86_64-apple-darwin`
+# once, cached under `~/.cache/miri` thereafter).
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && git apply "{{justfile_directory()}}/repro/add_test.diff"
+
+# Runs the real `fix_negative_nsecs` (unmodified) against the documented `secs == 0` boundary
+# case - should panic (`assertion failed: *secs < 0`).
+# (prefixed with `-`: this step is EXPECTED to exit non-zero/panic - that's the bug reproducing -
+# `just` must not treat that as a reason to abort the rest of the `test` chain)
+reproduce-before:
+    -cd clone && MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --target x86_64-apple-darwin --no-default-features --features "std,all-apis,use-libc" --lib timespec::tests::test_negative_timestamp_secs_zero_boundary
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same test again, now against the patched clone - should pass.
+reproduce-after:
+    cd clone && MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --target x86_64-apple-darwin --no-default-features --features "std,all-apis,use-libc" --lib timespec::tests::test_negative_timestamp_secs_zero_boundary
+
+clean:
+    rm -rf clone

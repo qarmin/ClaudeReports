@@ -1,0 +1,52 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# This candidate's bug is macOS/XNU-kernel-runtime-behavior-specific (see RESULT.md "Fully
+# reproducible: No" for the full account) - this environment cannot execute Mach-O binaries at
+# all, so `repro/` does not call the real rustix API. Instead it extracts rustix's own real
+# control flow (both pre-fix and patched versions) verbatim and drives it with real,
+# externally-observed kernel-response numbers quoted from the upstream issue report. Separately,
+# `cross-check-before`/`cross-check-after` below DO build the real, unmodified rustix source
+# (before and after applying patch.diff) for the real `x86_64-apple-darwin` target, to confirm
+# patch.diff actually applies to and compiles against the real cfg(apple) code path - just not
+# run it, which is not possible in this environment.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone cross-check-before reproduce-before apply cross-check-after reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Confirms the real, unpatched rustix source actually contains the vulnerable code and that it
+# compiles for the real target this bug is specific to (requires `rustup target add
+# x86_64-apple-darwin`; no macOS SDK needed since `libc`'s Apple definitions are plain Rust).
+cross-check-before:
+    cd clone && cargo build --target x86_64-apple-darwin --features fs,std
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+cross-check-after:
+    cd clone && cargo build --target x86_64-apple-darwin --features fs,std
+
+# Runs the standalone logic-extraction repro (see repro/src/main.rs's header comment) -
+# demonstrates the pre-fix control flow reports Ok(()) after only a partial allocation, using the
+# exact numbers the issue reporter observed on real macOS/APFS hardware.
+reproduce-before:
+    cd repro && cargo run --release -- before plenty
+    cd repro && cargo run --release -- before scarce
+
+# Same repro, patched control flow - demonstrates success now implies full allocation, and an
+# under-allocatable request now fails with ENOSPC instead of silently truncating to a sparse file.
+reproduce-after:
+    cd repro && cargo run --release -- after plenty
+    cd repro && cargo run --release -- after scarce
+
+clean:
+    rm -rf clone

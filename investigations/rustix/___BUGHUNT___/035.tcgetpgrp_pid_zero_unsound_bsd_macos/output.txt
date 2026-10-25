@@ -1,0 +1,116 @@
+All output below was actually captured by running the commands shown, against the real published
+rustix commit 287214b889865d8e1406a0ee71cc409b6f6191c8 (via `just test`'s own fresh `git clone`,
+and separately against the main project's own worktree) - not reconstructed from memory.
+
+====================================================================
+1. `before`: real pty + real kernel tcgetpgrp(2) + rustix's own Pid::from_raw_unchecked
+   (mirrors the macOS/BSD-unguarded branch of tcgetpgrp() verbatim)
+   $ cd repro && cargo run --bin before   (debug build, debug_assertions on)
+====================================================================
+
+[repro] opened pty master, slave = /dev/pts/1 (never opened/attached)
+[repro] real libc::tcgetpgrp(master_fd) returned 0
+[repro] now executing the exact macOS/BSD-unguarded branch of tcgetpgrp() in src/backend/libc/termios/syscalls.rs with this real, kernel-produced pid=0 (the `#[cfg(linux_kernel)]`-gated `if pid == 0` check is skipped, exactly as it would be if this were actually compiled for target_os = "macos"/"freebsd"/etc.)
+
+thread 'main' (106011) panicked at /tmp/justcheck_035/clone/src/pid.rs:61:9:
+assertion failed: raw > 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+REPRODUCED - rustix::process::Pid::from_raw_unchecked(0) panicked (the exact construction the vulnerable macOS/BSD tcgetpgrp() branch performs): assertion failed: raw > 0
+
+Repeated 3/3 times (against the main project worktree, debug build) - identical panic every run:
+run 1: thread 'main' (104836) panicked at .../src/pid.rs:61:9: assertion failed: raw > 0
+run 2: thread 'main' (104859) panicked at .../src/pid.rs:61:9: assertion failed: raw > 0
+run 3: thread 'main' (104874) panicked at .../src/pid.rs:61:9: assertion failed: raw > 0
+
+====================================================================
+2. `after`: same real pty + real kernel pid==0, but exercising the PATCHED logic (patch.diff:
+   the pid==0 check generalized to every platform instead of `#[cfg(linux_kernel)]` only)
+   $ cd repro && cargo run --bin after   (same debug build)
+====================================================================
+
+[repro] opened pty master, slave = /dev/pts/1 (never opened/attached)
+[repro] real libc::tcgetpgrp(master_fd) returned 0
+did not reproduce - patched code correctly rejected pid==0 with Os { code: 95, kind: Unsupported, message: "Operation not supported" }, no `Pid::from_raw_unchecked(0)` was ever constructed
+
+Repeated 3/3 times - identical clean result every run, no panic.
+
+====================================================================
+3. Miri: isolates just the final construction step (`Pid::from_raw_unchecked(0)`, same value the
+   real pty step above genuinely produced) to confirm it is real, platform-independent Undefined
+   Behavior, not merely a documented-but-maybe-harmless contract violation. Run both against the
+   candidate's own fresh clone (`just miri`) and directly against the main project worktree -
+   identical result both times.
+   $ cargo +nightly miri run --release --bin miri_ub
+====================================================================
+
+$ rustc --version && cargo --version
+rustc 1.98.1 (48a229cea 2026-09-01)
+cargo 1.98.1 (797e8a9bc 2026-08-05)
+$ cargo +nightly miri --version
+miri 0.1.0 (5c543b0b8c 2026-09-29)
+
+error: Undefined Behavior: entering unreachable code
+  --> /tmp/justcheck_035/clone/src/pid.rs:62:14
+   |
+62 |         Self(NonZeroI32::new_unchecked(raw))
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Undefined Behavior occurred here
+   |
+   = help: this indicates a bug in the program: it performed an invalid operation, and caused Undefined Behavior
+   = help: see https://doc.rust-lang.org/nightly/reference/behavior-considered-undefined.html for further information
+   = note: stack backtrace:
+           0: rustix::process::Pid::from_raw_unchecked
+               at /tmp/justcheck_035/clone/src/pid.rs:62:14: 62:44
+           1: main
+               at src/bin/miri_ub.rs:13:22: 13:50
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error; 1 warning emitted
+
+(Note: Miri cannot perform the real pty syscalls itself - a direct attempt to run `before`'s own
+pty-opening code under Miri fails with "unsupported operation: can't call foreign function
+`posix_openpt` on OS `linux`", which is a Miri tooling limitation, not a finding. `miri_ub`
+isolates only the already-pty-confirmed value (0) fed into the exact same constructor, to get a
+platform-independent UB confirmation around that one tooling gap.)
+
+====================================================================
+4. Static cross-target check: does the real affected code (before/after the patch) actually
+   compile for a real non-Linux target this bug requires?
+   $ cargo check --target x86_64-apple-darwin --features "std,all-apis,use-libc"
+====================================================================
+
+Before patch.diff:
+    Compiling libc v0.2.189
+    Compiling rustix v1.1.5 (/tmp/rustix-worktree-035)
+    Checking bitflags v2.9.1
+    Checking errno v0.3.14
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.55s
+
+After patch.diff:
+    Checking rustix v1.1.5 (/tmp/rustix-worktree-035)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.79s
+
+Both compile cleanly for the real affected target (`x86_64-apple-darwin`, prebuilt rust-std
+available via `rustup target add`) - this confirms the vulnerable branch genuinely compiles as
+described and that the fix compiles too, without needing to execute either build (no macOS
+hardware/linker available in this environment - see RESULT.md's "Fully reproducible" section).
+
+====================================================================
+5. Project test suite, main project worktree, before and after applying patch.diff
+   $ cargo test --workspace --features "std,all-apis,use-libc" --no-fail-fast
+====================================================================
+
+Before: 411 passed; 1 failed (ioctl::test_int_setter - pre-existing, environment-caused: `NotFound`
+opening /dev/net/tun; same failure documented by candidate 028)
+After:  411 passed; 1 failed (identical failure, same test, no new failures)
+
+====================================================================
+6. `just test` (this candidate folder's own self-contained justfile, run from a fresh copy with a
+   genuine `git clone` of the real public repo over https, not the main project checkout)
+====================================================================
+
+$ just test
+(full transcript - clone succeeds, `before` panics as shown in section 1, patch.diff applies
+cleanly, `after` succeeds as shown in section 2)
+... exit code of `just test` itself: 0 (the `-` prefix on reproduce-before's command line lets the
+chain continue to apply/reproduce-after despite the expected panic)

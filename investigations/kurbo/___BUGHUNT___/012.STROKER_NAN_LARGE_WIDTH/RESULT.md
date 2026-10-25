@@ -2,7 +2,7 @@
 
 `kurbo::stroke()`'s cubic-offset math (`kurbo/src/offset.rs`, the new least-squares offset curve
 algorithm that replaced the old quartic-solver-based one in 0.12), suspected of a width-dependent
-division/normalization producing NaN, per issue #519 (source: `___BUGHUNT___/issues_raw/issues/519.json`).
+division/normalization producing NaN, per issue #519 (source: `___BUGHUNT___/__issues_raw/issues/519.json`).
 The reporter's own exact repro (a tiny, near-degenerate triangular path, `width: 10.0`) was used
 directly, without modification.
 

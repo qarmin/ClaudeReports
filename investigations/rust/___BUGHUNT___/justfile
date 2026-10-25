@@ -1,0 +1,87 @@
+# Root justfile for ___BUGHUNT___/. Run from inside this folder.
+#
+# Unlike the standard bug-hunt workspace, there is no verify-patches/rerun recipe here: no
+# candidate in this workspace ever has a patch.diff (see README.md's ground rule #2), so there is
+# nothing to re-apply against the main tree. Every candidate's own repro/justfile is fully
+# self-contained via rustup alone (no clone/ of this checkout needed either).
+
+crash_litter_excludes := '-x "*/core" -x "core" -x "*/core.[0-9]*" -x "core.[0-9]*" -x "*/vgcore.*" -x "vgcore.*" -x "*/perf.data" -x "*/perf.data.old" -x "*/*.stackdump" -x "*.stackdump"'
+
+# Re-run every candidate that has a repro/, one at a time, via its own justfile (just repro).
+rerun-all:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for d in */; do
+      d="${d%/}"
+      [ -d "$d/repro" ] || continue
+      [ -f "$d/justfile" ] || continue
+      echo "=== $d ==="
+      (cd "$d" && just repro) || echo "  (failed/no longer reproduces - see output above)"
+    done
+
+# Pack only candidates that have a finding (SUMMARY-SHORT.md row), plus the summary/readme files.
+pack: (_pack "SUMMARY-SHORT.md" "SUMMARY.md SUMMARY-SHORT.md README.md")
+
+# Pack everything: every candidate folder, IDEAS.md, issues_raw/, tools/.
+pack-full:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="{{justfile_directory()}}"
+    name="$(basename "$(dirname "$dir")")"
+    proj="$(printf '%s' "$name" | tr -c 'A-Za-z0-9' '_')"
+    out="${proj}_bughunt_full_$(date +%Y%m%d_%H%M%S).zip"
+    cd "$dir"
+    zip -rq "$out" . -x "*.zip" {{crash_litter_excludes}}
+    just _packcheck "$dir/$out"
+
+_pack filter_file extra_files:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="{{justfile_directory()}}"
+    name="$(basename "$(dirname "$dir")")"
+    proj="$(printf '%s' "$name" | tr -c 'A-Za-z0-9' '_')"
+    out="${proj}_bughunt_$(date +%Y%m%d_%H%M%S).zip"
+    cd "$dir"
+    [ -f "{{filter_file}}" ] || { echo "ERROR: {{filter_file}} not found" >&2; exit 1; }
+    to_add=()
+    for f in {{extra_files}}; do
+      [ -f "$f" ] && to_add+=("$f")
+    done
+    nums="$(grep -oE '^\| *[0-9]+ *\|' "{{filter_file}}" | grep -oE '[0-9]+' || true)"
+    for n in $nums; do
+      for d in "$n".*/; do
+        [ -d "$d" ] && to_add+=("${d%/}")
+      done
+    done
+    if [ "${#to_add[@]}" -eq 0 ]; then
+      echo "ERROR: nothing matched to pack" >&2
+      exit 1
+    fi
+    zip -rq "$out" "${to_add[@]}" {{crash_litter_excludes}}
+    just _packcheck "$dir/$out"
+
+_packcheck zippath:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    limit=$((10*1024*1024))
+    size=$(stat -c%s "{{zippath}}" 2>/dev/null || stat -f%z "{{zippath}}")
+    echo "wrote {{zippath}}"
+    du -h "{{zippath}}"
+    if [ "$size" -gt "$limit" ]; then
+      echo "ERROR: over GitHub's 10MB attachment limit." >&2
+      exit 1
+    fi
+
+clean:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    find "{{justfile_directory()}}" -type d -name target -prune -exec rm -rf {} +
+    just tidy
+
+tidy *args:
+    python3 "{{justfile_directory()}}/tools/tidy.py" \
+        --workspace "{{justfile_directory()}}" --project-root "{{justfile_directory()}}/.." {{args}}
+
+sort-summaries *args:
+    python3 "{{justfile_directory()}}/tools/tidy.py" \
+        --workspace "{{justfile_directory()}}" --sort {{args}}

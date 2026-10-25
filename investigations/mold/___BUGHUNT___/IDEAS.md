@@ -31,7 +31,7 @@ expensive) kind of work.
 The productive sources from here are (a) fresh code-reading in never-audited areas, especially the
 output/layout side (see the `passes.cc`/`output-chunks.cc` row above), (b) real upstream GitHub
 issues (the sync is now watermarked at #1620 - 168 open issues, 16 open PRs cached in
-`issues_raw/`), and (c) bug classes this project has never attempted at all: **data races**
+`__issues_raw/`), and (c) bug classes this project has never attempted at all: **data races**
 (mold is heavily TBB-parallel and nothing here has run TSAN yet - `README.md` notes
 `-DMOLD_USE_TSAN=ON` exists but has never been configured) and **differential correctness testing
 against GNU ld** (candidates 028/031 both used ld as an oracle successfully, so the harness pattern

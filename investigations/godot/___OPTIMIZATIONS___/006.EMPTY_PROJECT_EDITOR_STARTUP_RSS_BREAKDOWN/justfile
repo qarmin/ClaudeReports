@@ -1,0 +1,76 @@
+# Self-contained reproduction for this candidate.
+#
+# This is a MEASUREMENT-ONLY candidate (no patch.diff - see RESULT.md's "Does it change
+# behavior/output?" section). `just test` clones Godot at the pinned commit, builds it twice
+# (plain, and with the temporary Memory::get_mem_usage() probes from bench/instrumentation.diff
+# applied), and reproduces both the peak-RSS number and the per-phase/per-plugin breakdown.
+#
+# Uses the shared empty-project fixture at ../harness/empty_project/ (see README.md's harness
+# shape 3 note - this candidate is self-contained given the whole ___OPTIMIZATIONS___ folder,
+# not as an isolated single subfolder).
+#
+# A full from-scratch SCons build takes 15-25 minutes on a modern multi-core machine - there is
+# no lighter way to get this binary from a pristine clone.
+
+repo_url := "https://github.com/godotengine/godot.git"
+base_commit := "9552dfb6859a1aaba1e570b8e0ef5c599b830f19"
+harness_dir := "../harness/empty_project"
+
+test: clone build-plain measure-rss apply build-instrumented measure-breakdown
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/_empty_project
+
+build-plain:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v scons >/dev/null 2>&1 || pip3 install scons --break-system-packages
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+
+# Peak RSS via /proc/<pid>/status's VmHWM (no /usr/bin/time in this project's own dev container -
+# adapt to `/usr/bin/time -v` if available on the machine running this).
+measure-rss:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export XDG_DATA_HOME="{{justfile_directory()}}/clone/_xdg_data"
+    export XDG_CONFIG_HOME="{{justfile_directory()}}/clone/_xdg_config"
+    mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME"
+    cd clone
+    for i in 1 2 3; do
+      ./bin/godot.linuxbsd.editor.x86_64 --headless --editor --path _empty_project --quit-after 1 > /tmp/_rss_run.log 2>&1 &
+      PID=$!
+      PEAK=""
+      while kill -0 $PID 2>/dev/null; do
+        V=$(grep VmHWM /proc/$PID/status 2>/dev/null || true)
+        if [ -n "$V" ]; then PEAK="$V"; fi
+        sleep 0.02
+      done
+      wait $PID
+      echo "peak RSS run $i: $PEAK"
+    done
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/bench/instrumentation.diff"
+
+build-instrumented:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+
+measure-breakdown:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export XDG_DATA_HOME="{{justfile_directory()}}/clone/_xdg_data"
+    export XDG_CONFIG_HOME="{{justfile_directory()}}/clone/_xdg_config"
+    cd clone
+    ./bin/godot.linuxbsd.editor.x86_64 --headless --editor --path _empty_project --quit-after 1 2>&1 | grep PERFPROBE
+
+clean:
+    rm -rf clone

@@ -1,0 +1,21 @@
+diff --git a/src/backend/libc/event/syscalls.rs b/src/backend/libc/event/syscalls.rs
+index 26863828..886a646d 100644
+--- a/src/backend/libc/event/syscalls.rs
++++ b/src/backend/libc/event/syscalls.rs
+@@ -389,7 +389,15 @@ pub(crate) fn port_get(port: BorrowedFd<'_>, timeout: Option<&Timespec>) -> io::
+         }
+     };
+ 
+-    let mut event = MaybeUninit::<c::port_event>::uninit();
++    // Use `zeroed()`, not `uninit()`: the real kernel's `port_get`/`port_getn`
++    // implementation (`port_copy_event()` in illumos-gate's
++    // `usr/src/uts/common/fs/portfs/port.c`) only ever writes `portev_events`,
++    // `portev_source`, `portev_object`, and `portev_user` - never
++    // `portev_pad` - and the backing buffer it copies out of is allocated via
++    // `kmem_alloc()` (not `kmem_zalloc()`), so `portev_pad` holds whatever
++    // kernel heap byte was already there. `assume_init()` on the whole
++    // struct is UB unless every byte is known-initialized first.
++    let mut event = MaybeUninit::<c::port_event>::zeroed();
+ 
+     // In Rust ≥ 1.65, the `as _` can be `.cast_mut()`.
+     unsafe {

@@ -1,20 +1,13 @@
 diff --git a/pixeldata/src/lib.rs b/pixeldata/src/lib.rs
-index 6ede5847..8b98988f 100644
+index 6ede5847..2365f26a 100644
 --- a/pixeldata/src/lib.rs
 +++ b/pixeldata/src/lib.rs
-@@ -1985,34 +1985,178 @@ fn bytes_to_vec_u16(data: &[u8]) -> Vec<u16> {
+@@ -1985,34 +1985,160 @@ fn bytes_to_vec_u16(data: &[u8]) -> Vec<u16> {
  
  // Convert u8 pixel array from YBR_FULL or YBR_FULL_422 to RGB
  // Every pixel is replaced with an RGB value
 +//
-+// Fixed-point (Q16.16, i32) reimplementation of the matrix multiplication from
-+// https://github.com/pydicom/pydicom/blob/f36517e10/pydicom/pixel_data_handlers/util.py#L576 -
-+// coefficients below are the same constants rounded to the nearest 1/65536: 1.402,
-+// (0.114*1.772/0.587), (-0.299*1.402/0.587), 1.772. `chunks_mut(3)`/`par_chunks_mut(3)` handing
-+// one pixel per closure call blocks auto-vectorization (confirmed via disassembly in a prior
-+// session), so this batches into large chunks for rayon and hand-vectorizes the arithmetic with
-+// x86-64 SSE4.1 intrinsics processing 4 pixels/iteration, falling back to the scalar loop for the
-+// tail and on non-x86_64/older CPUs.
++// Fixed-point (Q16.16) reimplementation of the pydicom matrix multiply (see 002's RESULT.md), hand-vectorized with SSE4.1 (4 pixels/iteration) since per-pixel chunks_mut blocks auto-vectorization.
 +#[cfg(feature = "image")]
 +const YBR_SHIFT: u32 = 16;
 +#[cfg(feature = "image")]
@@ -45,19 +38,13 @@ index 6ede5847..8b98988f 100644
 +    }
 +}
 +
-+/// Vectorized (SSE4.1) version of `convert_colorspace_u8_scalar`, processing 4 pixels (12 bytes)
-+/// per iteration. Caller must have verified "sse4.1" and "ssse3" are available at runtime -
-+/// this is what makes the function safe to invoke; it performs no unsafe operations that could
-+/// go out of bounds by itself (the only unsafe primitives used are the intrinsics themselves and
-+/// a bounds-checked-by-the-loop-condition unaligned load).
++/// Vectorized (SSE4.1) version of `convert_colorspace_u8_scalar`, 4 pixels/iteration. Caller must have verified "sse4.1" and "ssse3" are available at runtime.
 +#[cfg(all(feature = "image", target_arch = "x86_64"))]
 +#[target_feature(enable = "sse4.1,ssse3")]
 +unsafe fn convert_colorspace_u8_sse41(i: &mut [u8]) {
 +    use std::arch::x86_64::*;
 +
-+    // Byte-gather + zero-extend-to-i32-lane shuffle masks: pixel k's Y/B/R byte lives at offset
-+    // 3k/3k+1/3k+2; each output lane's other 3 bytes are zeroed by the 0x80-marked (-128i8) mask
-+    // entries per _mm_shuffle_epi8's documented "MSB set => zero" behavior.
++    // Byte-gather + zero-extend shuffle masks: pixel k's Y/B/R byte is at offset 3k/3k+1/3k+2; 0x80-marked bytes zero the other 3 lanes (per _mm_shuffle_epi8's "MSB set => zero" behavior).
 +    const MASK_Y: [i8; 16] = [
 +        0, -128, -128, -128, 3, -128, -128, -128, 6, -128, -128, -128, 9, -128, -128, -128,
 +    ];
@@ -68,8 +55,7 @@ index 6ede5847..8b98988f 100644
 +        2, -128, -128, -128, 5, -128, -128, -128, 8, -128, -128, -128, 11, -128, -128, -128,
 +    ];
 +
-+    // SAFETY: caller (convert_colorspace_u8_slice) has verified sse4.1+ssse3 at runtime before
-+    // calling this function.
++    // SAFETY: caller (convert_colorspace_u8_slice) has verified sse4.1+ssse3 at runtime.
 +    unsafe {
 +        let mask_y = _mm_loadu_si128(MASK_Y.as_ptr() as *const __m128i);
 +        let mask_b = _mm_loadu_si128(MASK_B.as_ptr() as *const __m128i);
@@ -85,9 +71,7 @@ index 6ede5847..8b98988f 100644
 +        let vmax = _mm_set1_epi32(u8::MAX as i32);
 +
 +        let mut off = 0usize;
-+        // +16 (not +12): the trailing 4 bytes of the unaligned 16-byte load are read but
-+        // discarded (never touched by the gather masks above) - requiring them to be in-bounds
-+        // is what keeps this loadu safe without needing a separate masked/partial load.
++        // +16 (not +12): the loadu reads 4 trailing bytes it discards, so they must be in-bounds too.
 +        while off + 16 <= i.len() {
 +            let raw = _mm_loadu_si128(i.as_ptr().add(off) as *const __m128i);
 +
@@ -165,9 +149,7 @@ index 6ede5847..8b98988f 100644
 +
  #[cfg(feature = "image")]
  fn convert_colorspace_u8(i: &mut [u8]) {
-+    // Large batches so each rayon task does real vectorizable work instead of one 3-byte pixel
-+    // per call - per-pixel par_chunks_mut(3) dispatch would leave the SIMD loop above with only
-+    // one pixel to work on per call, defeating the point of batching.
++    // Large batches so each rayon task has enough pixels for the SIMD loop above to vectorize.
      #[cfg(feature = "rayon")]
 -    let iter = i.par_chunks_mut(3);
 +    {
@@ -205,17 +187,12 @@ index 6ede5847..8b98988f 100644
  }
  
  #[cfg(feature = "image")]
-@@ -2031,34 +2175,151 @@ fn interleave<T: Copy>(data: &[T]) -> Vec<T> {
+@@ -2031,34 +2157,136 @@ fn interleave<T: Copy>(data: &[T]) -> Vec<T> {
  
  // Convert u16 pixel array from YBR_FULL or YBR_FULL_422 to RGB
  // Every pixel is replaced with an RGB value
 +//
-+// Same fixed-point reimplementation approach as convert_colorspace_u8 above, but i64 accumulator
-+// (unlike u8's i32): y<<16 alone can reach ~4.3e9 for 16-bit samples, already over i32::MAX
-+// before adding the other terms. The SSE4.1 kernel below processes 2 pixels/iteration (using
-+// _mm_mul_epi32 as a strided 32x32->64 multiply, half the pixels/iteration of the u8 kernel's
-+// 4, since it needs twice the accumulator width) and does the final shift+clamp in scalar code
-+// after extracting the 64-bit accumulator - only the multiply-add portion is vectorized.
++// Same approach as convert_colorspace_u8, but i64 accumulator (y<<16 can exceed i32::MAX for 16-bit samples); the SSE4.1 kernel processes 2 pixels/iteration (double the accumulator width needs half the lanes) and finishes shift+clamp in scalar code.
 +#[cfg(feature = "image")]
 +const YBR16_C_CR_R: i64 = 91881;
 +#[cfg(feature = "image")]
@@ -244,17 +221,13 @@ index 6ede5847..8b98988f 100644
 +    }
 +}
 +
-+/// Vectorized (SSE4.1) version of `convert_colorspace_u16_scalar`, processing 2 pixels
-+/// (6 u16s / 12 bytes) per iteration. Caller must have verified "sse4.1" is available.
++/// Vectorized (SSE4.1) version of `convert_colorspace_u16_scalar`, 2 pixels/iteration. Caller must have verified "sse4.1" is available.
 +#[cfg(all(feature = "image", target_arch = "x86_64"))]
 +#[target_feature(enable = "sse4.1,ssse3")]
 +unsafe fn convert_colorspace_u16_sse41(i: &mut [u16]) {
 +    use std::arch::x86_64::*;
 +
-+    // Byte layout per 2 pixels (12 bytes = 6 u16): Y0 B0 R0 Y1 B1 R1. Each mask gathers one
-+    // channel's 2 u16 values (as raw little-endian byte pairs) into 32-bit lanes 0 and 2 (the
-+    // lanes _mm_mul_epi32 reads), zero-extending via the 0x80-marked bytes - safe since a DICOM
-+    // u16 sample is always non-negative before the per-channel offset below.
++    // Byte layout per 2 pixels: Y0 B0 R0 Y1 B1 R1. Each mask gathers one channel's 2 u16 values into 32-bit lanes 0/2 (the lanes _mm_mul_epi32 reads), zero-extending via the 0x80-marked bytes.
 +    const MASK_Y: [i8; 16] = [
 +        0, 1, -128, -128, -128, -128, -128, -128, 6, 7, -128, -128, -128, -128, -128, -128,
 +    ];
@@ -265,9 +238,7 @@ index 6ede5847..8b98988f 100644
 +        4, 5, -128, -128, -128, -128, -128, -128, 10, 11, -128, -128, -128, -128, -128, -128,
 +    ];
 +
-+    // Only a read-only byte view of `i` is needed (the widening shuffle loads raw bytes); all
-+    // writes below go through `i` directly, as u16s - never materializing a second `&mut` view
-+    // over the same memory, which would alias `i` and be unsound.
++    // Only a read-only byte view of `i` is used for the shuffle loads; writes go through `i` directly as u16s, never a second aliasing &mut view.
 +    let byte_len = std::mem::size_of_val(i);
 +
 +    // SAFETY: caller (convert_colorspace_u16_slice) has verified sse4.1+ssse3 at runtime.
@@ -285,18 +256,14 @@ index 6ede5847..8b98988f 100644
 +
 +        let mut off = 0usize;
 +        while off + 16 <= byte_len {
-+            // SAFETY: off+16 <= byte_len == i.len()*2, so this reads entirely within i's
-+            // allocation; the read-only byte pointer never aliases a second live &mut.
++            // SAFETY: off+16 <= byte_len == i.len()*2, so this reads entirely within i's allocation.
 +            let raw = _mm_loadu_si128(i.as_ptr().cast::<u8>().add(off) as *const __m128i);
 +
 +            let y = _mm_shuffle_epi8(raw, mask_y);
 +            let b = _mm_sub_epi32(_mm_shuffle_epi8(raw, mask_b), v32768);
 +            let r = _mm_sub_epi32(_mm_shuffle_epi8(raw, mask_r), v32768);
 +
-+            // Widen y (currently in 32-bit lanes 0/2) to real 64-bit lanes via a x1 multiply -
-+            // _mm_mul_epi32 reads lanes 0/2 of each input and produces the full 64-bit products
-+            // in 64-bit lanes 0/1, which is also the exact lane arrangement mullo-of-b/r below
-+            // need to be added against.
++            // Widen y (32-bit lanes 0/2) to 64-bit lanes via a x1 multiply - matches the lane arrangement of the b/r products below.
 +            let y64 = _mm_mul_epi32(y, one);
 +            let y64_shifted = _mm_slli_epi64::<{ YBR_SHIFT as i32 }>(y64);
 +

@@ -1,0 +1,5 @@
+use png::Adam7Info;
+
+fn main() {
+    png::splat_interlaced_row(&mut vec![], 1usize, &vec![], &Adam7Info::new(1u8, 1000000000u32, 1u32), 0u8);
+}

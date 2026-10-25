@@ -1,0 +1,58 @@
+=== BEFORE fix (just test -> reproduce-before), real captured output ===
+
+Calling gst_meta_deserialize() with 16-byte buffer, total_size=16, name_len=0xffffffff ...
+AddressSanitizer:DEADLYSIGNAL
+=================================================================
+==44073==ERROR: AddressSanitizer: SEGV on unknown address 0x6f4528000027 (pc 0x73442ad45aa6 bp 0x7ffd3fb9a290 sp 0x7ffd3fb9a230 T0)
+==44073==The signal is caused by a READ memory access.
+    #0 0x73442ad45aa6 in gst_meta_deserialize /tmp/candidate022_verify/clone/build-asan/../subprojects/gstreamer/gst/gstmeta.c:875:22
+    #1 0x58d44959dd6c in main /tmp/candidate022_verify/repro/repro.c:47:19
+    #2 0x73442a44a600 in __libc_start_call_main csu/../sysdeps/nptl/libc_start_call_main.h:59:16
+    #3 0x73442a44a717 in __libc_start_main csu/../csu/libc-start.c:360:3
+    #4 0x58d4494b43a4 in _start (/tmp/candidate022_verify/repro/repro+0x2d3a4) (BuildId: 9d56bcacc634cdd52475ec6b378bb4433fbca678)
+
+==44073==Register values:
+rax = 0x0000000000000000  rbx = 0x00006f4428000028  rcx = 0x00006f4428000040  rdx = 0x0000000000000010
+rdi = 0x00007064293e13c0  rsi = 0x00006f4428000020  rbp = 0x00007ffd3fb9a290  rsp = 0x00007ffd3fb9a230
+ r8 = 0x0000000028000000   r9 = 0x0000000000000000  r10 = 0x0000000000000007  r11 = 0x000073442ad45940
+r12 = 0x00000de885000008  r13 = 0x0000000000000010  r14 = 0x00006f4528000027  r15 = 0x0000000000000009
+AddressSanitizer can not provide additional info.
+SUMMARY: AddressSanitizer: SEGV /tmp/candidate022_verify/clone/build-asan/../subprojects/gstreamer/gst/gstmeta.c:875:22 in gst_meta_deserialize
+==44073==ABORTING
+
+=== apply + rebuild (just test -> apply), real captured output ===
+
+cd clone && git apply "/tmp/candidate022_verify/patch.diff"
+cd clone && export PATH="$HOME/.local/bin:$PATH" && ninja -C build-asan subprojects/gstreamer/gst/libgstreamer-1.0.so.0.2902.0
+ninja: Entering directory `build-asan'
+[1/2] Compiling C object subprojects/gstreamer/gst/libgstreamer-1.0.so.0.2902.0.p/gstmeta.c.o
+[2/2] Linking target subprojects/gstreamer/gst/libgstreamer-1.0.so.0.2902.0
+
+=== AFTER fix (just test -> reproduce-after), real captured output ===
+
+Calling gst_meta_deserialize() with 16-byte buffer, total_size=16, name_len=0xffffffff ...
+Returned without crashing: meta=(nil) consumed=0
+
+=== Repeatability check (repeated directly against the ASAN build, not through `just`) ===
+
+5/5 repeat runs of the exact same 16-byte input against the unpatched build all crashed with the
+identical signature (SEGV on unknown address, "in gst_meta_deserialize ... gstmeta.c:875:22" -
+only the leaked heap address itself differs run to run, as expected under ASLR):
+
+run 1 exit=1 SEGV on unknown address 0x6cd1e1400027
+run 2 exit=1 SEGV on unknown address 0x777d38600027
+run 3 exit=1 SEGV on unknown address 0x72c03d600027
+run 4 exit=1 SEGV on unknown address 0x74572e000027
+run 5 exit=1 SEGV on unknown address 0x79ad79600027
+
+Boundary-value check against the PATCHED build (3 name_len values, same 16-byte total_size,
+via repro_variants.c - not shipped in repro/, kept minimal to the one input above):
+
+name_len=0xfffffff6 -> no crash, meta=(nil) consumed=0   (old buggy header_size wraps to 0)
+name_len=0xffffffff -> no crash, meta=(nil) consumed=0   (old buggy header_size wraps to 9)
+name_len=0x00000000 -> no crash, meta=(nil) consumed=16  (legitimate small case still works)
+
+Against the UNPATCHED build, name_len=0xfffffff6 also crashes the same way (SEGV at
+gstmeta.c:873:20, inside `guint8 version = data[header_size - 1];`, since header_size wraps to 0
+there instead of 9) - confirming this is a class of bug (any name_len that makes
+`2*sizeof(guint32) + name_len + 2` overflow 32 bits), not one single magic input.

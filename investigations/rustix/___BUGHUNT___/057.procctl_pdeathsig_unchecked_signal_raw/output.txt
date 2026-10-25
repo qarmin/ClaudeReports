@@ -1,0 +1,95 @@
+=== Step 1: code reading - from_raw_nonzero_unchecked's actual body (src/signal.rs:255-257) ===
+    /// Convert a raw non-zero signal number into a `Signal` without checks.
+    ///
+    /// For a safe checked version, see [`Signal::from_raw_nonzero`] in
+    /// [rustix-libc-wrappers].
+    ///
+    /// # Safety
+    ///
+    /// `sig` must be a valid signal number.
+    ///
+    /// And, if `sig` is a signal number reserved by the libc, such as a value
+    /// from [`SIGRTMIN`] to [`SIGRTMAX`] inclusive, then the resulting
+    /// `Signal` must not be used to send, consume, or block any signals or
+    /// alter any signal handlers.
+    ///
+    /// [`Signal::from_raw_nonzero`]: https://docs.rs/rustix-libc-wrappers/*/rustix_libc_wrappers/trait.SignalExt.html#tymethod.from_raw_nonzero
+    /// [rustix-libc-wrappers]: https://docs.rs/rustix-libc-wrappers
+    /// [`SIGRTMIN`]: https://docs.rs/libc/*/libc/fn.SIGRTMIN.html
+    /// [`SIGRTMAX`]: https://docs.rs/libc/*/libc/fn.SIGRTMAX.html
+    #[inline]
+    pub const unsafe fn from_raw_nonzero_unchecked(sig: NonZeroI32) -> Self {
+        Self(sig)
+    }
+
+=== Step 1b: the call site under test (src/process/procctl.rs:94-107) ===
+#[inline]
+pub fn parent_process_death_signal() -> io::Result<Option<Signal>> {
+    let raw = unsafe { procctl_get_optional::<c_int>(PROC_PDEATHSIG_STATUS, None) }?;
+    if let Some(non_zero) = NonZeroI32::new(raw) {
+        // SAFETY: The only way to get a libc-reserved signal number in
+        // here would be to do something equivalent to
+        // `set_parent_process_death_signal`, but that would have required
+        // using a `Signal` with a libc-reserved value.
+        Ok(Some(unsafe {
+            Signal::from_raw_nonzero_unchecked(non_zero)
+        }))
+    } else {
+        Ok(None)
+    }
+
+=== Step 2: does libc crate model a 'reserved real-time signal range' for FreeBSD at all? ===
+(grepping the actual libc-0.2.189 crate used by this build for SIGRTMIN/SIGRTMAX across all non-Linux unix backends)
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/new/qurt/signal.rs
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/aix/mod.rs
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/hurd/mod.rs
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/linux_like/mod.rs
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/newlib/rtems/mod.rs
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/solarish/mod.rs
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/vxworks/mod.rs
+--- FreeBSD's own full named signal set, as modeled by the libc crate (freebsdlike/mod.rs + freebsd/mod.rs) ---
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:414:pub const SIGEV_NONE: c_int = 0;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:415:pub const SIGEV_SIGNAL: c_int = 1;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:416:pub const SIGEV_THREAD: c_int = 2;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:417:pub const SIGEV_KEVENT: c_int = 3;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:555:pub const SIGHUP: c_int = 1;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:556:pub const SIGINT: c_int = 2;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:557:pub const SIGQUIT: c_int = 3;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:558:pub const SIGILL: c_int = 4;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:559:pub const SIGABRT: c_int = 6;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:560:pub const SIGEMT: c_int = 7;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:561:pub const SIGFPE: c_int = 8;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:562:pub const SIGKILL: c_int = 9;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:563:pub const SIGSEGV: c_int = 11;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:564:pub const SIGPIPE: c_int = 13;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:565:pub const SIGALRM: c_int = 14;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:566:pub const SIGTERM: c_int = 15;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/mod.rs:732:pub const SIGTRAP: c_int = 5;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/freebsd/mod.rs:2092:pub const SIGEV_THREAD_ID: c_int = 4;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/freebsd/mod.rs:2102:pub const SIGSTKSZ: size_t = MINSIGSTKSZ + 32768;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/freebsd/mod.rs:4252:pub const SIGTHR: c_int = 32;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/freebsd/mod.rs:4253:pub const SIGLWP: c_int = SIGTHR;
+/home/rafal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.189/src/unix/bsd/freebsdlike/freebsd/mod.rs:4254:pub const SIGLIBRT: c_int = 33;
+
+=== Step 3: cross-target compile check - does the real procctl.rs/signal.rs actually build for FreeBSD? ===
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+    Checking rustix v1.1.5 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/057)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.58s
+
+=== Step 4: Miri boundary-value test - does from_raw_nonzero_unchecked produce UB for ANY nonzero i32? ===
+Command: RUSTFLAGS="--cfg rustix_no_linux_raw" cargo +nightly miri test --features "std,all-apis,use-libc" --lib candidate_057
+running 1 test
+test signal::tests::candidate_057_from_raw_nonzero_unchecked_never_ub_for_any_nonzero_value ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.15s
+
+=== Step 4b: repeat runs (determinism check) ===
+--- run 1 ---
+test signal::tests::candidate_057_from_raw_nonzero_unchecked_never_ub_for_any_nonzero_value ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.15s
+--- run 2 ---
+test signal::tests::candidate_057_from_raw_nonzero_unchecked_never_ub_for_any_nonzero_value ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.15s
+--- run 3 ---
+test signal::tests::candidate_057_from_raw_nonzero_unchecked_never_ub_for_any_nonzero_value ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.15s

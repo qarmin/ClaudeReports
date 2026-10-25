@@ -1,0 +1,20 @@
+diff --git a/src/backend/linux_raw/fs/dir.rs b/src/backend/linux_raw/fs/dir.rs
+index ef02b470..afedcc93 100644
+--- a/src/backend/linux_raw/fs/dir.rs
++++ b/src/backend/linux_raw/fs/dir.rs
+@@ -177,6 +177,15 @@ impl Dir {
+             self.buf[pos + offsetof_d_reclen],
+             self.buf[pos + offsetof_d_reclen + 1],
+         ]);
++        // A `d_reclen` of 0 would leave `self.pos` unchanged, causing every
++        // subsequent call to re-parse the exact same bytes forever. The
++        // kernel's own VFS never emits this, but a buggy or malicious
++        // filesystem backend (e.g. a broken FUSE/9p driver) could, so guard
++        // against it explicitly rather than looping indefinitely.
++        if d_reclen == 0 {
++            self.any_errors = true;
++            return Some(Err(io::Errno::BADMSG));
++        }
+         assert!(self.buf.len() - pos >= d_reclen as usize);
+         self.pos += d_reclen as usize;
+ 

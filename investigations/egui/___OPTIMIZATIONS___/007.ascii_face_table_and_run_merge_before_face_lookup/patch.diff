@@ -1,0 +1,80 @@
+diff --git a/crates/epaint/src/text/family.rs b/crates/epaint/src/text/family.rs
+index 3f7d07103..b1fdddcf5 100644
+--- a/crates/epaint/src/text/family.rs
++++ b/crates/epaint/src/text/family.rs
+@@ -32,6 +32,9 @@ pub(crate) struct Family {
+     /// not on variation coordinates).
+     face_cache: ahash::HashMap<char, FontFaceKey>,
+ 
++    /// Direct-indexed front of [`Self::face_cache`] for ASCII, which is most text.
++    ascii_face_cache: [Option<FontFaceKey>; 128],
++
+     /// Lazily calculated: every supported char, and the names of the faces that have it.
+     characters: Option<BTreeMap<char, Vec<String>>>,
+ }
+@@ -69,6 +72,7 @@ impl Family {
+             name: name.clone(),
+             chain,
+             face_cache: Default::default(),
++            ascii_face_cache: [None; 128],
+             characters: None,
+         }
+     }
+@@ -114,6 +118,14 @@ impl Family {
+         let Some(base_char) = cluster.chars().next() else {
+             return self.notdef_face();
+         };
++        if let Some(font_key) = self
++            .ascii_face_cache
++            .get(base_char as usize)
++            .copied()
++            .flatten()
++        {
++            return font_key;
++        }
+         if let Some(font_key) = self.face_cache.get(&base_char) {
+             return *font_key;
+         }
+@@ -144,6 +156,9 @@ impl Family {
+                 self.notdef_face()
+             });
+         self.face_cache.insert(c, font_key);
++        if let Some(slot) = self.ascii_face_cache.get_mut(c as usize) {
++            *slot = Some(font_key);
++        }
+         font_key
+     }
+ 
+diff --git a/crates/epaint/src/text/text_layout.rs b/crates/epaint/src/text/text_layout.rs
+index 3482c80f8..47e23294f 100644
+--- a/crates/epaint/src/text/text_layout.rs
++++ b/crates/epaint/src/text/text_layout.rs
+@@ -1532,6 +1532,14 @@ fn segment_into_runs(
+ 
+         let font_key = fonts.resolve_cluster_face(ctx.family, grapheme_str);
+ 
++        if let Some(last_run) = out.last_mut()
++            && last_run.raster.is_none()
++            && last_run.font_key == font_key
++        {
++            last_run.byte_range.end = byte_end;
++            continue;
++        }
++
+         if fonts.face(font_key).is_none() {
+             // The family has no font at all, so there is nothing to shape with.
+             // Still emit a glyph per cluster, or cursors and selections break.
+@@ -1549,13 +1557,6 @@ fn segment_into_runs(
+             continue;
+         }
+ 
+-        if let Some(last_run) = out.last_mut()
+-            && last_run.raster.is_none()
+-            && last_run.font_key == font_key
+-        {
+-            last_run.byte_range.end = byte_end;
+-            continue;
+-        }
+         out.push(TextRun {
+             font_key,
+             byte_range: byte_offset..byte_end,

@@ -1,0 +1,56 @@
+diff --git a/modules/gdscript/gdscript_byte_codegen.cpp b/modules/gdscript/gdscript_byte_codegen.cpp
+index 2f3434c198..4073052c91 100644
+--- a/modules/gdscript/gdscript_byte_codegen.cpp
++++ b/modules/gdscript/gdscript_byte_codegen.cpp
+@@ -1851,9 +1851,10 @@ void GDScriptByteCodeGenerator::write_endwhile() {
+ 	append(continue_addrs.back()->get());
+ 	continue_addrs.pop_back();
+ 
+-	// Patch end jump.
+-	patch_jump(while_jmp_addrs.back()->get());
+-	while_jmp_addrs.pop_back();
++	// Loop exit starts here. Patch all NOT_TAKEN short-circuit jumps from the condition -
++	// this replaces the old single write_while()-pushed while_jmp_addrs patch, which is no
++	// longer used now that the condition is compiled via the expr_cond short-circuit jumps.
++	flush_expr_cond_buffer(BranchType::NOT_TAKEN);
+ 
+ 	// Patch break statements.
+ 	for (const int &E : current_breaks_to_patch.back()->get()) {
+diff --git a/modules/gdscript/gdscript_compiler.cpp b/tmp/while_diff_work/compiler_with_while.cpp
+index 5d72f3e39a..cd89d7935e 100644
+--- a/modules/gdscript/gdscript_compiler.cpp
++++ b/modules/gdscript/gdscript_compiler.cpp
+@@ -2241,17 +2241,29 @@ Error GDScriptCompiler::_parse_block(CodeGen &codegen, const GDScriptParser::Sui
+ 
+ 				gen->start_while_condition();
+ 
+-				GDScriptCodeGenerator::Address condition = _parse_expression(codegen, err, while_n->condition);
++				// TAKEN jumps fall through to the loop body.
++				gen->start_expr_cond_buffer(GDScriptCodeGenerator::BranchType::TAKEN);
++				// NOT_TAKEN jumps go to the loop exit (patched in write_endwhile()).
++				gen->start_expr_cond_buffer(GDScriptCodeGenerator::BranchType::NOT_TAKEN);
++
++				GDScriptCodeGenerator::Address condition = _parse_expression_cond(codegen, err, while_n->condition);
+ 				if (err) {
+ 					return err;
+ 				}
+ 
+-				gen->write_while(condition);
++				if (condition.mode != GDScriptCodeGenerator::Address::NIL) {
++					// Check the result of the condition. `false` jumps to the loop exit,
++					// `true` falls through to the loop body.
++					gen->write_expr_cond_jump_if(GDScriptCodeGenerator::BranchType::NOT_TAKEN, condition);
+ 
+-				if (condition.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
+-					codegen.generator->pop_temporary();
++					if (condition.mode == GDScriptCodeGenerator::Address::TEMPORARY) {
++						codegen.generator->pop_temporary();
++					}
+ 				}
+ 
++				// Our loop body starts here. Patch all taken jumps.
++				gen->flush_expr_cond_buffer(GDScriptCodeGenerator::BranchType::TAKEN);
++
+ 				// Loop variables must be cleared even when `break`/`continue` is used.
+ 				List<GDScriptCodeGenerator::Address> loop_locals = _add_block_locals(codegen, while_n->loop);
+ 

@@ -1,0 +1,57 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# Only subprojects/gstreamer (core) is built, under clang ASAN+UBSAN - this bug lives entirely in
+# gstevent.c/gststructure.c/gstidstr-private.h, no plugin is needed to reach it.
+
+repo_url := "git@github.com:GStreamer/gstreamer.git"
+base_commit := "65b9547519cdafce691e65777d4178280bf10808"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && export PATH="$HOME/.local/bin:$PATH" && CC=clang CXX=clang++ meson setup \
+        --buildtype=debugoptimized \
+        -Db_sanitize=address,undefined \
+        -Db_lundef=false \
+        -Dc_args=-fno-sanitize=function \
+        -Dcpp_args=-fno-sanitize=function \
+        -Dglib:tests=false \
+        -Ddoc=disabled \
+        -Dexamples=disabled \
+        -Dintrospection=disabled \
+        -Dgood=disabled \
+        -Dbad=disabled \
+        -Dugly=disabled \
+        -Dlibav=disabled \
+        -Ddevtools=disabled \
+        -Dbase=disabled \
+        -Drtsp_server=disabled \
+        -Dgst-examples=disabled \
+        build-asan-core
+    cd clone && export PATH="$HOME/.local/bin:$PATH" && ninja -C build-asan-core subprojects/gstreamer/gst/libgstreamer-1.0.so.0.2902.0
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug
+# (AddressSanitizer: heap-use-after-free).
+reproduce-before:
+    BUILD_DIR="{{justfile_directory()}}/clone/build-asan-core" bash repro/run.sh
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && export PATH="$HOME/.local/bin:$PATH" && ninja -C build-asan-core subprojects/gstreamer/gst/libgstreamer-1.0.so.0.2902.0
+
+# Same repro again, now against the patched clone - should no longer demonstrate the bug (clean
+# exit, no ASAN report).
+reproduce-after:
+    BUILD_DIR="{{justfile_directory()}}/clone/build-asan-core" bash repro/run.sh
+
+clean:
+    rm -rf clone repro/repro

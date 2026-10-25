@@ -1,0 +1,48 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# The affected code (`vdso_wrappers.rs::init()`) is private and non-parameterized, and always
+# calls the real `pub(super)` `vdso::Vdso::new()` (no public entry point at all - see
+# repro/README.md). So there's no standalone external `repro/` crate here. Instead,
+# `repro/add_test.patch` adds a `#[cfg(test)]` test directly into the clone's own
+# `src/backend/linux_raw/vdso.rs` that reproduces the bug's pre-patch code shape (a frozen
+# snapshot, not a call into live source - see repro/README.md for why this candidate needs that,
+# unlike candidate 036's single shared test), and `patch.diff` bundles its own regression test
+# (`vdso_sym_is_ok_rejects_null_and_accepts_nonnull`) that calls the real, patched function
+# directly - this is what `reproduce-after` runs to prove the real fix.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+# Full cycle: clone pristine, add the repro test, prove the bug exists, apply the fix, prove it's gone.
+test: clone add-test reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+add-test:
+    cd clone && git apply "{{justfile_directory()}}/repro/add_test.patch"
+
+# Should FAIL (panic) on the pristine (unpatched) tree - that's the bug. This is a frozen
+# snapshot of the pre-patch code shape (see repro/README.md), so it keeps failing even after
+# `apply` below - that's expected, `reproduce-after` checks the real fix via a different test.
+reproduce-before:
+    cd clone && cargo test --lib --features time,stdio,fs backend::vdso::tests::test_vdso_missing_symbol_then_hard_assert_panics || true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Should PASS on the patched tree - this test (bundled in patch.diff itself) calls the real,
+# patched `vdso_sym_is_ok` function directly, not a frozen copy.
+reproduce-after:
+    cd clone && cargo test --lib --features time,stdio,fs backend::vdso_wrappers::tests::vdso_sym_is_ok_rejects_null_and_accepts_nonnull
+
+clean:
+    rm -rf clone

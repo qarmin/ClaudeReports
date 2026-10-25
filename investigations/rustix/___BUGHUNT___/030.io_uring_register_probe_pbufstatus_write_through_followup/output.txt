@@ -1,0 +1,100 @@
+Environment
+===========
+$ uname -a
+Linux claude-sandbox 7.0.0-34-generic #34-Ubuntu SMP PREEMPT_DYNAMIC Wed Sep 2 14:29:37 UTC 2026 x86_64 GNU/Linux
+$ cat /etc/os-release | head -1
+PRETTY_NAME="Ubuntu 26.04 LTS"
+$ cat /proc/sys/kernel/io_uring_disabled
+0
+$ grep -i cap /proc/self/status
+CapInh: 0000000000000000
+CapPrm: 0000000000000000
+CapEff: 0000000000000000
+CapBnd: 00000000000000cb
+CapAmb: 0000000000000000
+
+(Note: same restricted-looking kernel version family as candidate 008's session, now at
+7.0.0-34-generic instead of 7.0.0-31-generic - three point releases later, same behavior.)
+
+Approach 1: direct raw syscall, IORING_REGISTER_PROBE with a poisoned buffer
+=============================================================================
+$ gcc -o test test.c && ./test
+io_uring_setup fd=3
+PROBE ret=-1 errno=22 (Invalid argument)
+
+(ret < 0, so the "buffer changed from poison" check branch in test.c was never reached - the
+kernel rejected the call before it could have written anything through the `arg` pointer.)
+
+Approach 2: direct raw syscall, IORING_REGISTER_PBUF_RING (prerequisite) + IORING_REGISTER_PBUF_STATUS
+========================================================================================================
+$ gcc -o test3 test3.c && ./test3
+PBUF_RING register ret=0 errno=0 (Success)
+PBUF_STATUS ret=-1 errno=22 (Invalid argument)
+  status.head after call = 0xabababab (poison was 0xABABABAB)
+
+(The prerequisite IORING_REGISTER_PBUF_RING call succeeds for real - bgid 42, 8 entries, real
+mmap'd ring memory - so the ring/buffer-group machinery itself works on this kernel. The
+subsequent PBUF_STATUS call still returns -EINVAL and status.head is provably untouched,
+still exactly the poison pattern 0xABABABAB.)
+
+Approach 3: sanity sweep to rule out "io_uring itself is sandboxed/blocked"
+============================================================================
+$ gcc -o test2 test2.c && ./test2
+PERSONALITY ret=1 errno=0 (Success)
+ENABLE_RINGS ret=-1 errno=77 (File descriptor in bad state)
+BOGUS(999) ret=-1 errno=22 (Invalid argument)
+
+(IORING_REGISTER_PERSONALITY succeeds for real (returns a fresh personality id, 1) and
+IORING_REGISTER_ENABLE_RINGS gives a distinct, semantically-real error (EBADFD, because
+IORING_SETUP_R_DISABLED was never set) - both prove io_uring_register as a syscall is NOT
+blanket-blocked by a seccomp filter or similar in this container: real opcodes reach real kernel
+logic and get real, opcode-specific answers. A genuinely bogus opcode (999) gets -EINVAL -
+exactly the same code PROBE and PBUF_STATUS get.)
+
+Approach 3b (escalation): full opcode sweep 0..36 with arg=NULL, nr_args=0
+============================================================================
+$ gcc -o test4 test4.c && ./test4
+op= 0 ret=-1 errno=14 (Bad address)
+op= 1 ret=-1 errno=6 (No such device or address)
+op= 2 ret=-1 errno=14 (Bad address)
+op= 3 ret=-1 errno=6 (No such device or address)
+op= 4 ret=-1 errno=22 (Invalid argument)
+op= 5 ret=-1 errno=6 (No such device or address)
+op= 6 ret=-1 errno=22 (Invalid argument)
+op= 7 ret=-1 errno=22 (Invalid argument)
+op= 8 ret=-1 errno=22 (Invalid argument)      <- IORING_REGISTER_PROBE
+op= 9 ret=1 errno=0 (-)
+op=10 ret=-1 errno=22 (Invalid argument)
+op=11 ret=-1 errno=77 (File descriptor in bad state)
+op=12 ret=-1 errno=77 (File descriptor in bad state)
+op=13 ret=-1 errno=22 (Invalid argument)
+op=14 ret=-1 errno=22 (Invalid argument)
+op=15 ret=-1 errno=22 (Invalid argument)
+op=16 ret=-1 errno=22 (Invalid argument)
+op=17 ret=-1 errno=22 (Invalid argument)
+op=18 ret=0 errno=0 (-)
+op=19 ret=-1 errno=22 (Invalid argument)
+op=20 ret=-1 errno=22 (Invalid argument)
+op=21 ret=-1 errno=22 (Invalid argument)
+op=22 ret=-1 errno=22 (Invalid argument)
+op=23 ret=-1 errno=22 (Invalid argument)
+op=24 ret=-1 errno=22 (Invalid argument)
+op=25 ret=-1 errno=22 (Invalid argument)
+op=26 ret=-1 errno=22 (Invalid argument)      <- IORING_REGISTER_PBUF_STATUS
+op=27 ret=-1 errno=22 (Invalid argument)
+op=28 ret=-1 errno=22 (Invalid argument)
+op=29 ret=-1 errno=22 (Invalid argument)
+op=30 ret=-1 errno=22 (Invalid argument)
+op=31 ret=-1 errno=22 (Invalid argument)
+op=32 ret=-1 errno=22 (Invalid argument)
+op=33 ret=-1 errno=22 (Invalid argument)
+op=34 ret=-1 errno=22 (Invalid argument)
+op=35 ret=0 errno=0 (-)
+op=36 ret=-1 errno=14 (Bad address)
+
+(This sweep (added this session, not run in candidate 008) shows ops 0,2,36 getting EFAULT, ops
+1,3,5 getting ENXIO, ops 11,12 getting EBADFD, ops 9,18,35 succeeding outright with NULL/0 args -
+all of these are plausible, opcode-specific real validation responses for a NULL pointer / zero
+count combination. Only opcode 8 (PROBE) and opcode 26 (PBUF_STATUS) fall back to the flat
+-EINVAL that a completely unrecognized opcode (999, tested separately) also produces - consistent
+with these two opcodes hitting a default/unimplemented case rather than their real handler.)

@@ -1,0 +1,28 @@
+diff --git a/crates/epaint/src/text/text_layout.rs b/crates/epaint/src/text/text_layout.rs
+index 3482c80f8..9de8bd6b1 100644
+--- a/crates/epaint/src/text/text_layout.rs
++++ b/crates/epaint/src/text/text_layout.rs
+@@ -1511,8 +1511,21 @@ fn segment_into_runs(
+ 
+     out.clear();
+ 
+-    for (byte_offset, grapheme_str) in text.grapheme_indices(true) {
+-        let byte_offset = ByteIndex(byte_offset);
++    let bytes = text.as_bytes();
++    let mut offset = 0;
++    while offset < text.len() {
++        // An ASCII byte followed by ASCII (or the end) is its own grapheme cluster, except for "\r\n".
++        let is_lone_ascii = bytes[offset].is_ascii()
++            && bytes.get(offset + 1).is_none_or(|next| {
++                next.is_ascii() && !(bytes[offset] == b'\r' && *next == b'\n')
++            });
++        let grapheme_str = if is_lone_ascii {
++            &text[offset..=offset]
++        } else {
++            text[offset..].graphemes(true).next().unwrap_or_default()
++        };
++        let byte_offset = ByteIndex(offset);
++        offset += grapheme_str.len().max(1);
+         let byte_end = byte_offset + grapheme_str.len();
+ 
+         if let Some(raster) = fonts.rasterize_cluster(

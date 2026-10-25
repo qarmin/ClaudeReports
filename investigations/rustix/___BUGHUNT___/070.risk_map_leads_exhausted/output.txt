@@ -1,0 +1,69 @@
+$ cat ~/.claude/skills/bug-hunt/projects/rustix.md | sed -n '/## Risk map/,/^## /p' | head -n -1
+## Risk map / where to look next
+
+- The project's own open-issues AND open-PRs backlog is a much better source of leads here than
+  cold reading - most of this session's 7 confirmed bugs came from GitHub, not code-reading, and
+  several already had a reporter-provided repro or an existing (unmerged) fix PR to cross-check
+  against. Worth re-running the GitHub sync (`fetch_issues.py raw-sync`) on a future session and
+  reading through new issues/PRs since the last watermark (`#1682` as of this session) before doing
+  fresh code reading. Don't just check issues - open PRs with "fix"-shaped titles are equally
+  valuable leads (candidate 007 came from a PR, not an issue).
+- **Systemic lead, not yet swept**: `grep -rn "& .*Flags::all()"` across `src/backend/` for other
+  call sites relying on `SomeFlags::all()` as a *filtering* guard (not a validity/range check) -
+  every one of them silently became a no-op the moment that flags type opted into bitflags'
+  externally-defined-flags support (`const _ = !0;`, added crate-wide by commit 7ff96318/#787
+  across ~44 files: epoll, poll, inotify, mm, mount, net send/recv, pipe, rand, time, xattr,
+  io_uring, membarrier, pidfd, prctl, procctl, termios, thread/libcap/setns, etc.). Only `statx`'s
+  instance (candidate 007) was checked and confirmed this session.
+- `src/net/send_recv/msg.rs::recvmsg`'s sibling `recv`/`recvfrom` doc comments (`src/net/send_recv/
+  mod.rs`) still use UDP-shaped `MSG_TRUNC` language with no TCP stale-data caveat - candidate 005
+  added the caveat to `recvmsg` only.
+- Other call sites constructing `Errno::from_raw_os_error` from a raw C-library value without
+  pre-checking for `0` (`src/backend/libc/pty/syscalls.rs`, `src/backend/libc/termios/syscalls.rs`,
+  `src/net/wsa.rs`) - harmless today on the `libc` backend (never panicked), but worth a second
+  look if a similar range guard is ever added there.
+- Platform-specific issues (macOS/BSD/sparc/riscv/loongarch/Android) reported upstream (#1668,
+  #1678, #1682, #1518, #1461, #1462, #1496, #1519, #1521, #1576, #1626, #1645, #1652) were **not**
+  investigated this session - this environment is x86_64 Linux only, no cross-compilation/emulation
+  set up for those targets.
+- This container's kernel (`7.0.0-31-generic`, 2026-era) is unusually new/exotic - it has already
+  superseded `IORING_REGISTER_PROBE`/`IORING_REGISTER_PBUF_STATUS` with a newer
+  `IORING_REGISTER_QUERY` mechanism not yet in the vendored `linux-raw-sys` 0.12.1 (see candidate
+  008) - a future session on an older/more standard kernel may be able to confirm things this one
+  couldn't, and should treat "kernel returns -EINVAL unconditionally regardless of arguments" as a
+  signal to check for this exact situation rather than assuming the crate is at fault.
+  **Update 2026-10-01 (candidate 030)**: re-checked on a later session, kernel had moved to
+  `7.0.0-34-generic` (same container family, 3 point releases later) - identical behavior, now
+  confirmed via a full 0-36 `io_uring_register` opcode sweep (not just these 2 opcodes in
+  isolation) that *only* opcodes 8 (PROBE) and 26 (PBUF_STATUS) fall back to a generic
+  "unimplemented opcode" `-EINVAL`, while every neighboring opcode gets a distinct, real,
+  opcode-specific validation error for the same null/zero-arg call. This is now the *second*
+  consecutive session hitting this exact wall on this container type - treat a third identical
+  attempt without a genuinely different kernel available (a VM, a different container runtime) as
+  low-value; this is very likely a stable property of this sandbox's kernel, not something that
+  will change session-to-session.
+
+
+$ for n in 008 009 014 023 028 029 030 035 038 039 045; do grep -c "^| $n |" ___BUGHUNT___/SUMMARY.md; done
+008: 1 row(s) in SUMMARY.md
+009: 1 row(s) in SUMMARY.md
+014: 1 row(s) in SUMMARY.md
+023: 1 row(s) in SUMMARY.md
+028: 1 row(s) in SUMMARY.md
+029: 1 row(s) in SUMMARY.md
+030: 1 row(s) in SUMMARY.md
+035: 1 row(s) in SUMMARY.md
+038: 1 row(s) in SUMMARY.md
+039: 1 row(s) in SUMMARY.md
+045: 1 row(s) in SUMMARY.md
+
+$ cat ___BUGHUNT___/IDEAS.md (backlog section)
+## Backlog (not yet investigated)
+
+Consumed top-to-bottom by default when a session isn't given a specific target - see `SKILL.md`.
+
+| Added | Suspect | Why it looks suspicious | Source |
+|---|---|---|---|
+
+$ ls ___BUGHUNT___ | grep -E '^[0-9]{3}\.' | wc -l   # total candidate folders so far
+68

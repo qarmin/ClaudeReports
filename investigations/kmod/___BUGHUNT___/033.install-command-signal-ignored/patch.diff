@@ -1,0 +1,33 @@
+diff --git a/libkmod/libkmod-module.c b/libkmod/libkmod-module.c
+index 17dce97..d5098d0 100644
+--- a/libkmod/libkmod-module.c
++++ b/libkmod/libkmod-module.c
+@@ -822,6 +822,12 @@ static int command_do(struct kmod_module *mod, const char *type, const char *cmd
+ 		return -EINVAL;
+ 	}
+ 
++	if (WIFSIGNALED(err)) {
++		ERR(mod->ctx, "%s command '%s' for module %s killed by signal %d\n", type,
++		    cmd, modname, WTERMSIG(err));
++		return -EINVAL;
++	}
++
+ 	if (WEXITSTATUS(err)) {
+ 		ERR(mod->ctx, "Error running %s command '%s' for module %s: retcode %d\n",
+ 		    type, cmd, modname, WEXITSTATUS(err));
+diff --git a/tools/modprobe.c b/tools/modprobe.c
+index b807529..92d3b7a 100644
+--- a/tools/modprobe.c
++++ b/tools/modprobe.c
+@@ -352,7 +352,10 @@ static int command_do(struct kmod_module *module, const char *type, const char *
+ 	setenv("MODPROBE_MODULE", modname, 1);
+ 	ret = system(cmd);
+ 	unsetenv("MODPROBE_MODULE");
+-	if (ret == -1 || WEXITSTATUS(ret)) {
++	if (ret != -1 && WIFSIGNALED(ret)) {
++		LOG("%s command for %s killed by signal %d\n", type, modname, WTERMSIG(ret));
++		ret = -EINVAL;
++	} else if (ret == -1 || WEXITSTATUS(ret)) {
+ 		LOG("Error running %s command for %s\n", type, modname);
+ 		if (ret != -1)
+ 			ret = -WEXITSTATUS(ret);

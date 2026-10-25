@@ -1,0 +1,65 @@
+diff --git a/tests/scene/test_text_edit.cpp b/tests/scene/test_text_edit.cpp
+index a7a2a02b5f..ad0ecdfbdd 100644
+--- a/tests/scene/test_text_edit.cpp
++++ b/tests/scene/test_text_edit.cpp
+@@ -35,6 +35,7 @@ TEST_FORCE_LINK(test_text_edit)
+ #ifndef ADVANCED_GUI_DISABLED
+ 
+ #include "core/input/input_map.h"
++#include "core/os/os.h"
+ #include "scene/gui/text_edit.h"
+ #include "scene/main/scene_tree.h"
+ #include "tests/display_server_mock.h"
+@@ -8406,6 +8407,52 @@ TEST_CASE("[SceneTree][TextEdit] gutters") {
+ 	memdelete(text_edit);
+ }
+ 
++// SCRATCH BENCHMARK for ___OPTIMIZATIONS___/008 - not a real correctness test, temporary only.
++TEST_CASE("[SceneTree][TextEdit][Benchmark] SCRATCH syntax highlighting cache read cost") {
++	TextEdit *text_edit = memnew(TextEdit);
++	SceneTree::get_singleton()->get_root()->add_child(text_edit);
++
++	Ref<CodeHighlighter> highlighter;
++	highlighter.instantiate();
++	highlighter->add_keyword_color("func", Color(1, 0, 0));
++	highlighter->add_keyword_color("return", Color(0, 1, 0));
++	highlighter->add_keyword_color("if", Color(0, 0, 1));
++	highlighter->add_keyword_color("else", Color(1, 1, 0));
++	highlighter->add_keyword_color("var", Color(1, 0, 1));
++	highlighter->set_number_color(Color(0, 1, 1));
++	highlighter->set_symbol_color(Color(0.5, 0.5, 0.5));
++	highlighter->add_color_region("#", "", Color(0.3, 0.3, 0.3), true);
++	text_edit->set_syntax_highlighter(highlighter);
++
++	const String line_unit = "func foo(a, b): return a + b if a > b else b - a # comment 12345 var x = 1";
++	const int n_lines = 500;
++	for (int i = 0; i < n_lines; i++) {
++		text_edit->insert_line_at(i, line_unit);
++	}
++	text_edit->set_size(Size2(800, 20000));
++	text_edit->set_draw_minimap(true);
++	MessageQueue::get_singleton()->flush();
++
++	CHECK(text_edit->get_visible_line_count() > 400);
++
++	// Warm up: populate syntax_highlighting_cache for every visible line (main + minimap).
++	for (int i = 0; i < 5; i++) {
++		text_edit->notification(Control::NOTIFICATION_DRAW);
++	}
++
++	// From here on every redraw is a pure cache-hit read (text/highlighter unchanged), which is
++	// exactly the steady-state per-frame cost this candidate targets - twice per drawn line.
++	const int iterations = 300;
++	uint64_t start = OS::get_singleton()->get_ticks_usec();
++	for (int i = 0; i < iterations; i++) {
++		text_edit->notification(Control::NOTIFICATION_DRAW);
++	}
++	uint64_t elapsed = OS::get_singleton()->get_ticks_usec() - start;
++	MESSAGE("SCRATCH_BENCH lines=", n_lines, " iterations=", iterations, " total_us=", elapsed, " us_per_iter=", (double)elapsed / iterations);
++
++	memdelete(text_edit);
++}
++
+ } // namespace TestTextEdit
+ 
+ #endif // ADVANCED_GUI_DISABLED

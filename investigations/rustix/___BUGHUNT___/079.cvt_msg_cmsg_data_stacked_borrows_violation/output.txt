@@ -1,0 +1,245 @@
+=== plain debug build (end_to_end, patched tree - no crash either way) ===
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+   Compiling rustix v1.1.5 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079)
+   Compiling repro079 v0.1.0 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/_scratch_repro079)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.63s
+     Running `target/debug/end_to_end`
+recvmsg bytes=1
+received fd = OwnedFd { fd: 5 }
+done (no crash in a plain, non-Miri build)
+genuine captured cmsg bytes = [14, 00, 00, 00, 00, 00, 00, 00, 01, 00, 00, 00, 01, 00, 00, 00, 05, 00, 00, 00, 01, 01, 01, 01, 01, 01, 01, 01, 01, 01, 01, 01]
+
+=== Miri BEFORE fix (pristine tree), 3 runs, no -Zmiri-disable-stacked-borrows ===
+--- run 1 ---
+warning: ignoring `hints.mostly-unused`
+  --> /home/rafal/Projekty/Obce/rustix/Cargo.toml:20:1
+   |
+20 | mostly-unused = true
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+warning: ignoring `hints.mostly-unused`
+  --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/Cargo.toml:20:1
+   |
+20 | mostly-unused = true
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+   Compiling rustix v1.1.5 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079)
+   Compiling repro079 v0.1.0 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/_scratch_repro079)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.42s
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-unknown-linux-gnu/debug/miri_check`
+error: Undefined Behavior: trying to retag from <620> for Unique permission at alloc205[0x10], but that tag does not exist in the borrow stack for this location
+   --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/src/net/send_recv/msg.rs:558:43
+    |
+558 |             let payload: &'buf mut [u8] = slice::from_raw_parts_mut(payload, payload_len);
+    |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this error occurs as part of retag at alloc205[0x10..0x14]
+    |
+    = help: this indicates a potential bug in the program: it performed an invalid operation, but the Stacked Borrows rules it violated are still experimental
+    = help: see https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/stacked-borrows.md for further information
+help: <620> was created by a SharedReadOnly retag at offsets [0x0..0x10]
+   --> src/bin/miri_check.rs:47:11
+    |
+ 47 |     match drain.next() {
+    |           ^^^^^^^^^^^^
+    = note: stack backtrace:
+            0: rustix::net::AncillaryDrain::<'_>::cvt_msg
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/src/net/send_recv/msg.rs:558:43: 558:90
+            1: rustix::net::AncillaryDrain::<'_>::advance
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/src/net/send_recv/msg.rs:547:9: 547:27
+            2: <rustix::net::AncillaryDrain<'_> as std::iter::Iterator>::next::{closure#0}
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/src/net/send_recv/msg.rs:589:28: 589:72
+            3: std::iter::Iterator::find_map::check::<&mut libc::unix::linux_like::linux::gnu::cmsghdr, rustix::net::RecvAncillaryMessage<'_>, {closure@<rustix::net::AncillaryDrain<'_> as std::iter::Iterator>::next::{closure#0}}>::{closure#0}
+                at /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:3010:32: 3010:36
+            4: <rustix::net::send_recv::msg::messages::Messages<'_> as std::iter::Iterator>::try_fold::<(), {closure@std::iter::Iterator::find_map::check<&mut libc::unix::linux_like::linux::gnu::cmsghdr, rustix::net::RecvAncillaryMessage<'_>, {closure@<rustix::net::AncillaryDrain<'_> as std::iter::Iterator>::next::{closure#0}}>::{closure#0}}, std::ops::ControlFlow<rustix::net::RecvAncillaryMessage<'_>>>
+                at /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2504:21: 2504:32
+            5: <rustix::net::send_recv::msg::messages::Messages<'_> as std::iter::Iterator>::find_map::<rustix::net::RecvAncillaryMessage<'_>, {closure@<rustix::net::AncillaryDrain<'_> as std::iter::Iterator>::next::{closure#0}}>
+                at /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:3016:9: 3016:36
+            6: <rustix::net::AncillaryDrain<'_> as std::iter::Iterator>::next
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/src/net/send_recv/msg.rs:588:9: 589:73
+            7: main
+                at src/bin/miri_check.rs:47:11: 47:23
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error
+
+exit code: 1
+--- run 2 ---
+warning: ignoring `hints.mostly-unused`
+  --> /home/rafal/Projekty/Obce/rustix/Cargo.toml:20:1
+   |
+20 | mostly-unused = true
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+warning: ignoring `hints.mostly-unused`
+  --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/Cargo.toml:20:1
+   |
+20 | mostly-unused = true
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-unknown-linux-gnu/debug/miri_check`
+error: Undefined Behavior: trying to retag from <620> for Unique permission at alloc205[0x10], but that tag does not exist in the borrow stack for this location
+   --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/src/net/send_recv/msg.rs:558:43
+    |
+558 |             let payload: &'buf mut [u8] = slice::from_raw_parts_mut(payload, payload_len);
+    |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this error occurs as part of retag at alloc205[0x10..0x14]
+    |
+    = help: this indicates a potential bug in the program: it performed an invalid operation, but the Stacked Borrows rules it violated are still experimental
+    = help: see https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/stacked-borrows.md for further information
+help: <620> was created by a SharedReadOnly retag at offsets [0x0..0x10]
+   --> src/bin/miri_check.rs:47:11
+    |
+ 47 |     match drain.next() {
+    |           ^^^^^^^^^^^^
+    = note: stack backtrace:
+            0: rustix::net::AncillaryDrain::<'_>::cvt_msg
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/src/net/send_recv/msg.rs:558:43: 558:90
+            1: rustix::net::AncillaryDrain::<'_>::advance
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/src/net/send_recv/msg.rs:547:9: 547:27
+            2: <rustix::net::AncillaryDrain<'_> as std::iter::Iterator>::next::{closure#0}
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/src/net/send_recv/msg.rs:589:28: 589:72
+            3: std::iter::Iterator::find_map::check::<&mut libc::unix::linux_like::linux::gnu::cmsghdr, rustix::net::RecvAncillaryMessage<'_>, {closure@<rustix::net::AncillaryDrain<'_> as std::iter::Iterator>::next::{closure#0}}>::{closure#0}
+                at /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:3010:32: 3010:36
+            4: <rustix::net::send_recv::msg::messages::Messages<'_> as std::iter::Iterator>::try_fold::<(), {closure@std::iter::Iterator::find_map::check<&mut libc::unix::linux_like::linux::gnu::cmsghdr, rustix::net::RecvAncillaryMessage<'_>, {closure@<rustix::net::AncillaryDrain<'_> as std::iter::Iterator>::next::{closure#0}}>::{closure#0}}, std::ops::ControlFlow<rustix::net::RecvAncillaryMessage<'_>>>
+                at /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2504:21: 2504:32
+            5: <rustix::net::send_recv::msg::messages::Messages<'_> as std::iter::Iterator>::find_map::<rustix::net::RecvAncillaryMessage<'_>, {closure@<rustix::net::AncillaryDrain<'_> as std::iter::Iterator>::next::{closure#0}}>
+                at /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:3016:9: 3016:36
+            6: <rustix::net::AncillaryDrain<'_> as std::iter::Iterator>::next
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/src/net/send_recv/msg.rs:588:9: 589:73
+            7: main
+                at src/bin/miri_check.rs:47:11: 47:23
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error
+
+exit code: 1
+--- run 3 ---
+warning: ignoring `hints.mostly-unused`
+  --> /home/rafal/Projekty/Obce/rustix/Cargo.toml:20:1
+   |
+20 | mostly-unused = true
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+warning: ignoring `hints.mostly-unused`
+  --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/Cargo.toml:20:1
+   |
+20 | mostly-unused = true
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-unknown-linux-gnu/debug/miri_check`
+error: Undefined Behavior: trying to retag from <620> for Unique permission at alloc205[0x10], but that tag does not exist in the borrow stack for this location
+   --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/src/net/send_recv/msg.rs:558:43
+    |
+558 |             let payload: &'buf mut [u8] = slice::from_raw_parts_mut(payload, payload_len);
+    |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this error occurs as part of retag at alloc205[0x10..0x14]
+    |
+    = help: this indicates a potential bug in the program: it performed an invalid operation, but the Stacked Borrows rules it violated are still experimental
+    = help: see https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/stacked-borrows.md for further information
+help: <620> was created by a SharedReadOnly retag at offsets [0x0..0x10]
+   --> src/bin/miri_check.rs:47:11
+    |
+ 47 |     match drain.next() {
+    |           ^^^^^^^^^^^^
+    = note: stack backtrace:
+            0: rustix::net::AncillaryDrain::<'_>::cvt_msg
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/src/net/send_recv/msg.rs:558:43: 558:90
+            1: rustix::net::AncillaryDrain::<'_>::advance
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/src/net/send_recv/msg.rs:547:9: 547:27
+            2: <rustix::net::AncillaryDrain<'_> as std::iter::Iterator>::next::{closure#0}
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/src/net/send_recv/msg.rs:589:28: 589:72
+            3: std::iter::Iterator::find_map::check::<&mut libc::unix::linux_like::linux::gnu::cmsghdr, rustix::net::RecvAncillaryMessage<'_>, {closure@<rustix::net::AncillaryDrain<'_> as std::iter::Iterator>::next::{closure#0}}>::{closure#0}
+                at /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:3010:32: 3010:36
+            4: <rustix::net::send_recv::msg::messages::Messages<'_> as std::iter::Iterator>::try_fold::<(), {closure@std::iter::Iterator::find_map::check<&mut libc::unix::linux_like::linux::gnu::cmsghdr, rustix::net::RecvAncillaryMessage<'_>, {closure@<rustix::net::AncillaryDrain<'_> as std::iter::Iterator>::next::{closure#0}}>::{closure#0}}, std::ops::ControlFlow<rustix::net::RecvAncillaryMessage<'_>>>
+                at /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2504:21: 2504:32
+            5: <rustix::net::send_recv::msg::messages::Messages<'_> as std::iter::Iterator>::find_map::<rustix::net::RecvAncillaryMessage<'_>, {closure@<rustix::net::AncillaryDrain<'_> as std::iter::Iterator>::next::{closure#0}}>
+                at /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:3016:9: 3016:36
+            6: <rustix::net::AncillaryDrain<'_> as std::iter::Iterator>::next
+                at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/src/net/send_recv/msg.rs:588:9: 589:73
+            7: main
+                at src/bin/miri_check.rs:47:11: 47:23
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error
+
+exit code: 1
+=== Miri AFTER fix (patched tree), 3 runs ===
+--- run 1 ---
+warning: ignoring `hints.mostly-unused`
+  --> /home/rafal/Projekty/Obce/rustix/Cargo.toml:20:1
+   |
+20 | mostly-unused = true
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+warning: ignoring `hints.mostly-unused`
+  --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/Cargo.toml:20:1
+   |
+20 | mostly-unused = true
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+   Compiling rustix v1.1.5 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079)
+   Compiling repro079 v0.1.0 (/home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/_scratch_repro079)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.38s
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-unknown-linux-gnu/debug/miri_check`
+FIXED: reached past cvt_msg without a Stacked Borrows abort, fd=Some(ManuallyDrop { value: OwnedFd { fd: 5 } })
+exit code: 0
+--- run 2 ---
+warning: ignoring `hints.mostly-unused`
+  --> /home/rafal/Projekty/Obce/rustix/Cargo.toml:20:1
+   |
+20 | mostly-unused = true
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+warning: ignoring `hints.mostly-unused`
+  --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/Cargo.toml:20:1
+   |
+20 | mostly-unused = true
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-unknown-linux-gnu/debug/miri_check`
+FIXED: reached past cvt_msg without a Stacked Borrows abort, fd=Some(ManuallyDrop { value: OwnedFd { fd: 5 } })
+exit code: 0
+--- run 3 ---
+warning: ignoring `hints.mostly-unused`
+  --> /home/rafal/Projekty/Obce/rustix/Cargo.toml:20:1
+   |
+20 | mostly-unused = true
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+warning: ignoring `hints.mostly-unused`
+  --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/.worktrees/079/Cargo.toml:20:1
+   |
+20 | mostly-unused = true
+   | ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+warning: `rustix` (manifest) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-unknown-linux-gnu/debug/miri_check`
+FIXED: reached past cvt_msg without a Stacked Borrows abort, fd=Some(ManuallyDrop { value: OwnedFd { fd: 5 } })
+exit code: 0

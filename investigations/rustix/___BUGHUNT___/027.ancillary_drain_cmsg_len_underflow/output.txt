@@ -1,0 +1,102 @@
+Captured by actually running `just test` (clone -> reproduce-before -> apply -> reproduce-after)
+from this candidate folder, 2026-10-01, against a fresh `git clone` of
+https://github.com/bytecodealliance/rustix.git at 287214b889865d8e1406a0ee71cc409b6f6191c8.
+
+=== reproduce-before (pristine tree, debug build, `cargo run`) ===
+exit code: 134 (SIGABRT)
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running `target/debug/repro`
+    real recvmsg(): bytes=5 flags=ReturnFlags(CTRUNC)
+    simulated macOS-style stale cmsg_len = 80
+
+    thread 'main' (52515) panicked at .../clone/src/net/send_recv/msg.rs:544:13:
+    attempt to subtract with overflow
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'main' (52515) panicked at .../clone/src/net/send_recv/msg.rs:484:63:
+    range start index 80 out of range for slice of length 48
+    stack backtrace:
+       (... full backtrace omitted here, captured in full during the session ...)
+
+    thread 'main' (52515) panicked at /rustc/.../library/core/src/panicking.rs:233:5:
+    panic in a destructor during cleanup
+    thread caused non-unwinding panic. aborting.
+    Aborted
+
+This is the exact two-panics-then-abort shape the candidate description and GitHub issue #1683
+describe: the first panic is `AncillaryDrain::advance`'s `**length -= msg_len` underflowing
+(src/net/send_recv/msg.rs:544) because the simulated macOS-style `cmsg_len` (80 - the untruncated
+size for 16 file descriptors) is larger than the 48-byte buffer actually has room for; unwinding
+that panic runs `RecvAncillaryBuffer`'s `Drop` impl, which calls `clear()` -> `drain()` again on
+the now-corrupted `(read, length)` bookkeeping, producing a second panic (an out-of-range slice
+index, msg.rs:484) while the first one is still unwinding - which Rust turns into a hard process
+abort ("panic in a destructor during cleanup").
+
+=== reproduce-after (same clone, patch.diff applied, debug build, `cargo run`) ===
+exit code: 0
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.20s
+     Running `target/debug/repro`
+    real recvmsg(): bytes=5 flags=ReturnFlags(CTRUNC)
+    simulated macOS-style stale cmsg_len = 80
+    first drain() completed, received 8 fds (not yet conclusive - see below)
+    did not reproduce - both drains completed without panicking, received 8 fds
+
+8 is exactly `(48 - CMSG_LEN(0)) / size_of::<RawFd>()` = `(48 - 16) / 4` - the real number of
+whole file descriptors that fit in the real 48-byte buffer the real Linux kernel actually wrote,
+confirming the fix correctly clamps to the buffer instead of trusting the simulated oversized
+`cmsg_len`.
+
+=== Additional signal gathered during investigation (not part of the mandatory repro/, but
+    informs "what's not done" below): release-build behavior on the pristine tree ===
+
+A `cargo run --release` of the same scenario (ad hoc, in the main working copy, not in repro/)
+does NOT hit the debug-only overflow-check panic, and instead silently continues:
+
+    recvmsg: bytes=5 flags=ReturnFlags(CTRUNC)
+    simulated macOS-style stale cmsg_len = 80
+    drained without panicking, received 16 fds       <- all 16, including 8 read from OUT OF
+                                                         BOUNDS past the real 48-byte buffer
+    thread 'main' (...) panicked at .../msg.rs:484:63:
+    range start index 80 out of range for slice of length 48
+    (single panic this time - no destructor-during-unwind, so the process exits with code 101
+    instead of aborting - still a crash, and the 16 "received" fds before that point are real
+    memory-safety UB: `cvt_msg`'s payload slice was built via `slice::from_raw_parts_mut(payload,
+    64)` starting inside a 48-byte array, so 16 of those 64 bytes were read from adjacent memory
+    and interpreted as a 17th-32nd `RawFd`/`OwnedFd` - exactly the "cvt_msg instead slices past
+    the buffer and yields OwnedFds read from uninitialized memory" effect PR #1684's own
+    description mentions).
+
+=== Negative control (same harness, no simulated cmsg_len overwrite - i.e. trusting the real,
+    correctly-truncated Linux kernel output as-is) ===
+
+    recvmsg: bytes=5 flags=ReturnFlags(CTRUNC)
+    drained without panicking, received 8 fds
+    (no panic at all, debug or release build - confirms the bug needs the macOS-specific stale
+    `cmsg_len`, consistent with this project's own candidate 017
+    (recvmsg_ctrunc_ancillary_not_reproducible), which found the real Linux kernel always keeps
+    `cmsg_len` consistent with the truncated data it actually writes)
+
+=== Repeat-run confirmation (debug build, pristine tree, 5/5) ===
+
+Five consecutive runs of the scratch harness (functionally identical to repro/, run directly
+against the main working copy before repro/ was assembled) all produced the identical two-panic
+sequence and abort:
+
+    run 1: panicked at msg.rs:544:13 -> panicked at msg.rs:484:63 -> aborting
+    run 2: panicked at msg.rs:544:13 -> panicked at msg.rs:484:63 -> aborting
+    run 3: panicked at msg.rs:544:13 -> panicked at msg.rs:484:63 -> aborting
+    run 4: panicked at msg.rs:544:13 -> panicked at msg.rs:484:63 -> aborting
+    run 5: panicked at msg.rs:544:13 -> panicked at msg.rs:484:63 -> aborting
+
+=== Varied input (different NUM_FDS/NUM_SLOTS, same bug class, patched tree) ===
+
+NUM_FDS=7, NUM_SLOTS=3 (vs. the repro's NUM_FDS=16, NUM_SLOTS=5) against the patched tree:
+
+    recvmsg: bytes=5 flags=ReturnFlags(CTRUNC)
+    simulated macOS-style stale cmsg_len = 44
+    drained without panicking, received 6 fds
+
+No panic - the fix holds at a different boundary, not just the exact numbers the repro happens
+to use (CONFIRMATION.md section 7).

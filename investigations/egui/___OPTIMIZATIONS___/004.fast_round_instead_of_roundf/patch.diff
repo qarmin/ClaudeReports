@@ -1,0 +1,65 @@
+diff --git a/crates/emath/src/gui_rounding.rs b/crates/emath/src/gui_rounding.rs
+index ac624792a..6a66bc0a2 100644
+--- a/crates/emath/src/gui_rounding.rs
++++ b/crates/emath/src/gui_rounding.rs
+@@ -53,10 +53,31 @@ pub trait GuiRounding {
+     fn round_to_pixel_center(self, pixels_per_point: f32) -> Self;
+ }
+ 
++/// Bit-identical to [`f32::round`], but avoids the `roundf` libm call
++/// (LLVM cannot lower ties-away rounding to a single baseline x86-64 instruction).
++#[inline(always)]
++fn fast_round(x: f32) -> f32 {
++    // Above 2^23 every float is already an integer (and NaN/inf are passed through).
++    if x.abs() < 8_388_608.0 {
++        let truncated = x as i32 as f32;
++        let fraction = x - truncated; // exact
++        let rounded = if fraction >= 0.5 {
++            truncated + 1.0
++        } else if fraction <= -0.5 {
++            truncated - 1.0
++        } else {
++            truncated
++        };
++        rounded.copysign(x) // keeps the sign of zero, like `f32::round`
++    } else {
++        x
++    }
++}
++
+ impl GuiRounding for f32 {
+     #[inline]
+     fn round_ui(self) -> Self {
+-        (self / GUI_ROUNDING).round() * GUI_ROUNDING
++        fast_round(self / GUI_ROUNDING) * GUI_ROUNDING
+     }
+ 
+     #[inline]
+@@ -66,12 +87,12 @@ impl GuiRounding for f32 {
+ 
+     #[inline]
+     fn round_to_pixels(self, pixels_per_point: f32) -> Self {
+-        (self * pixels_per_point).round() / pixels_per_point
++        fast_round(self * pixels_per_point) / pixels_per_point
+     }
+ 
+     #[inline]
+     fn round_to_pixel_center(self, pixels_per_point: f32) -> Self {
+-        ((self * pixels_per_point - 0.5).round() + 0.5) / pixels_per_point
++        (fast_round(self * pixels_per_point - 0.5) + 0.5) / pixels_per_point
+     }
+ }
+ 
+diff --git a/crates/epaint/src/text/text_layout.rs b/crates/epaint/src/text/text_layout.rs
+index 3482c80f8..b621d7ef3 100644
+--- a/crates/epaint/src/text/text_layout.rs
++++ b/crates/epaint/src/text/text_layout.rs
+@@ -46,7 +46,7 @@ impl PointScale {
+ 
+     #[inline(always)]
+     pub fn round_to_pixel(&self, point: f32) -> f32 {
+-        (point * self.pixels_per_point).round() / self.pixels_per_point
++        point.round_to_pixels(self.pixels_per_point)
+     }
+ 
+     #[inline(always)]

@@ -1,0 +1,130 @@
+diff --git a/editor/editor_node.cpp b/editor/editor_node.cpp
+index 9baff90c7d..88a45f2bfa 100644
+--- a/editor/editor_node.cpp
++++ b/editor/editor_node.cpp
+@@ -35,6 +35,7 @@
+ #include "core/extension/gdextension_manager.h"
+ #include "core/input/input.h"
+ #include "core/io/config_file.h"
++#include "core/os/memory.h"
+ #include "core/io/file_access.h"
+ #include "core/io/image.h"
+ #include "core/io/missing_resource.h"
+@@ -8445,6 +8446,7 @@ HashMap<String, Variant> EditorNode::get_initial_settings() {
+ }
+ 
+ EditorNode::EditorNode() {
++	print_line(vformat("PERFPROBE start %d", Memory::get_mem_usage()));
+ 	DEV_ASSERT(!singleton);
+ 	singleton = this;
+ 
+@@ -8736,9 +8738,11 @@ EditorNode::EditorNode() {
+ 	editor_export = memnew(EditorExport);
+ 	add_child(editor_export);
+ 
++	print_line(vformat("PERFPROBE before_theme %d", Memory::get_mem_usage()));
+ 	// Exporters might need the theme.
+ 	EditorThemeManager::initialize();
+ 	theme = EditorThemeManager::generate_theme();
++	print_line(vformat("PERFPROBE after_theme %d", Memory::get_mem_usage()));
+ 	DisplayServer::set_early_window_clear_color_override(true, theme->get_color(SNAME("background"), EditorStringName(Editor)));
+ 
+ 	EDITOR_DEF("_export_preset_advanced_mode", false); // Could be accessed in EditorExportPreset.
+@@ -9299,6 +9303,7 @@ EditorNode::EditorNode() {
+ 	p->add_item(TTRC("Hide Update Spinner"), SPINNER_UPDATE_SPINNER_HIDE);
+ 	_update_update_spinner();
+ 
++	print_line(vformat("PERFPROBE before_docks %d", Memory::get_mem_usage()));
+ 	// Instantiate and place editor docks.
+ 
+ 	memnew(SceneTreeDock(scene_root, editor_selection, editor_data));
+@@ -9332,6 +9337,7 @@ EditorNode::EditorNode() {
+ 	const int dock_hsize_scaled = dock_hsize * EDSCALE;
+ 	main_hsplit->set_split_offsets({ dock_hsize_scaled, -dock_hsize_scaled });
+ 
++	print_line(vformat("PERFPROBE after_docks %d", Memory::get_mem_usage()));
+ 	// Bottom panels.
+ 
+ 	bottom_panel = memnew(EditorBottomPanel);
+@@ -9446,6 +9452,7 @@ EditorNode::EditorNode() {
+ 	audio_preview_gen = memnew(AudioStreamPreviewGenerator);
+ 	add_child(audio_preview_gen);
+ 
++	print_line(vformat("PERFPROBE before_debugger_plugin %d", Memory::get_mem_usage()));
+ 	add_editor_plugin(memnew(DebuggerEditorPlugin(debug_menu)));
+ 
+ 	disk_changed = memnew(ConfirmationDialog);
+@@ -9487,41 +9494,56 @@ EditorNode::EditorNode() {
+ 	gui_base->add_child(project_data_missing);
+ 
+ 	add_editor_plugin(memnew(CanvasItemEditorPlugin));
++	print_line(vformat("PERFPROBE after_canvasitem_plugin %d", Memory::get_mem_usage()));
+ 	add_editor_plugin(memnew(Node3DEditorPlugin));
++	print_line(vformat("PERFPROBE after_node3d_plugin %d", Memory::get_mem_usage()));
+ 	add_editor_plugin(memnew(ScriptEditorPlugin));
++	print_line(vformat("PERFPROBE after_script_plugin %d", Memory::get_mem_usage()));
+ 
+ 	if (!Engine::get_singleton()->is_recovery_mode_hint()) {
+ 		add_editor_plugin(get_game_view_plugin());
+ 	}
++	print_line(vformat("PERFPROBE after_gameview_plugin %d", Memory::get_mem_usage()));
+ 
+ 	EditorAudioBuses *audio_bus_editor = EditorAudioBuses::register_editor();
+ 
+ 	ScriptTextEditor::register_editor(); // Register one for text scripts.
+ 	TextEditor::register_editor();
+ 	ShaderTextEditor::register_editor();
++	print_line(vformat("PERFPROBE after_text_editor_register %d", Memory::get_mem_usage()));
+ 
+ 	if (AssetLibraryEditorPlugin::is_available()) {
+ 		add_editor_plugin(memnew(AssetLibraryEditorPlugin));
+ 	} else {
+ 		print_verbose("Asset Store not available (due to using Web editor, or SSL support disabled).");
+ 	}
++	print_line(vformat("PERFPROBE after_assetlib_plugin %d", Memory::get_mem_usage()));
+ 
+ 	// More visually meaningful to have this later.
+ 	add_editor_plugin(memnew(AnimationPlayerEditorPlugin));
+ 	add_editor_plugin(memnew(AnimationTrackKeyEditEditorPlugin));
+ 	add_editor_plugin(memnew(AnimationMarkerKeyEditEditorPlugin));
++	print_line(vformat("PERFPROBE after_animation_plugins %d", Memory::get_mem_usage()));
+ 
+ 	add_editor_plugin(VersionControlEditorPlugin::get_singleton());
++	print_line(vformat("PERFPROBE after_versioncontrol_plugin %d", Memory::get_mem_usage()));
+ 
+ 	add_editor_plugin(memnew(AudioBusesEditorPlugin(audio_bus_editor)));
++	print_line(vformat("PERFPROBE after_audiobuses_plugin %d", Memory::get_mem_usage()));
+ 
+ 	for (int i = 0; i < EditorPlugins::get_plugin_count(); i++) {
+-		add_editor_plugin(EditorPlugins::create(i));
++		uint64_t _mem_before = Memory::get_mem_usage();
++		EditorPlugin *_p = EditorPlugins::create(i);
++		uint64_t _mem_after = Memory::get_mem_usage();
++		print_line(vformat("PERFPROBE plugin_iter %d %s %d", i, _p->get_class(), (int64_t)(_mem_after - _mem_before)));
++		add_editor_plugin(_p);
+ 	}
++	print_line(vformat("PERFPROBE after_builtin_plugins_loop %d", Memory::get_mem_usage()));
+ 
+ 	for (const StringName &extension_class_name : GDExtensionEditorPlugins::get_extension_classes()) {
+ 		add_extension_editor_plugin(extension_class_name);
+ 	}
++	print_line(vformat("PERFPROBE after_gdextension_plugins %d", Memory::get_mem_usage()));
+ 	GDExtensionEditorPlugins::editor_node_add_plugin = &EditorNode::add_extension_editor_plugin;
+ 	GDExtensionEditorPlugins::editor_node_remove_plugin = &EditorNode::remove_extension_editor_plugin;
+ 
+@@ -9581,6 +9603,7 @@ EditorNode::EditorNode() {
+ 	update_spinner_step_msec = OS::get_singleton()->get_ticks_msec();
+ 	update_spinner_step_frame = Engine::get_singleton()->get_frames_drawn();
+ 
++	print_line(vformat("PERFPROBE after_plugins %d", Memory::get_mem_usage()));
+ 	editor_plugins_over = memnew(EditorPluginList);
+ 	editor_plugins_force_over = memnew(EditorPluginList);
+ 	editor_plugins_force_input_forwarding = memnew(EditorPluginList);
+@@ -9789,6 +9812,7 @@ EditorNode::EditorNode() {
+ 	}
+ 
+ 	_update_layouts_menu();
++	print_line(vformat("PERFPROBE end %d", Memory::get_mem_usage()));
+ }
+ 
+ EditorNode::~EditorNode() {

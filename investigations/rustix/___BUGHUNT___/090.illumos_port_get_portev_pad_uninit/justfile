@@ -1,0 +1,39 @@
+# This candidate's bug only manifests under Miri's validity checker, applied to the exact
+# `libc::port_event` type rustix's own `c::port_event` resolves to (see repro/Cargo.toml) - not
+# as a process crash on real hardware, since no real Solaris/illumos hardware nor a Miri FFI shim
+# for `port_create`/`port_get` on illumos is available in this environment (verified this
+# session - see RESULT.md). The "before"/"after" comparison is Miri's own diagnostic output (UB
+# abort vs. a clean, correct result), not a plain process exit code.
+#
+# Requires a nightly toolchain with `miri` and `rust-src` components, and a Miri sysroot for
+# `x86_64-unknown-illumos` (`cargo +nightly miri setup --target x86_64-unknown-illumos` once,
+# cached under `~/.cache/miri` thereafter).
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+# repro/ does not depend on ./clone (it only needs the pinned `libc` crate, see repro/Cargo.toml) -
+# `clone`/`apply` exist so patch.diff's real target (rustix's own source) can still be inspected
+# and verified to apply cleanly, matching every other candidate's justfile shape.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Reproduces the exact byte-initialization pattern the real illumos kernel is proven (see
+# ../evidence/illumos_gate_port.c_excerpt.txt) to produce, on the identical `libc::port_event`
+# type rustix uses internally - should show a Miri UB abort.
+reproduce-before:
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri run --target x86_64-unknown-illumos --bin before
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same pattern, now using `zeroed()` (matching patch.diff) - should run cleanly, no UB.
+reproduce-after:
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri run --target x86_64-unknown-illumos --bin after
+
+clean:
+    rm -rf clone

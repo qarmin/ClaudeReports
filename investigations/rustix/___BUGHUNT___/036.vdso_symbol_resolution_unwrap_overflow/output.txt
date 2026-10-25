@@ -1,0 +1,77 @@
+=== BEFORE patch.diff (add_test.patch only), debug build ===
+$ cargo test --lib --features time,stdio,fs backend::vdso::tests::test_vdso_sym_overflow
+
+running 1 test
+test backend::vdso::tests::test_vdso_sym_overflow_panics_via_unwrap_before_bounds_assert ... FAILED
+
+failures:
+
+---- backend::vdso::tests::test_vdso_sym_overflow_panics_via_unwrap_before_bounds_assert stdout ----
+
+thread 'backend::vdso::tests::test_vdso_sym_overflow_panics_via_unwrap_before_bounds_assert' (113586) panicked at src/backend/linux_raw/vdso.rs:394:68:
+called `Option::unwrap()` on a `None` value
+note: run with RUST_BACKTRACE=1 environment variable to display a backtrace
+
+failures:
+    backend::vdso::tests::test_vdso_sym_overflow_panics_via_unwrap_before_bounds_assert
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+(Repeated 5 times total across this session, all 5/5 identical deterministic
+panics at the same line/column; this is one representative capture.)
+
+=== BEFORE patch.diff (add_test.patch only), release build ===
+$ cargo test --release --lib --features time,stdio,fs backend::vdso::tests::test_vdso_sym_overflow
+
+running 1 test
+test backend::vdso::tests::test_vdso_sym_overflow_panics_via_unwrap_before_bounds_assert ... FAILED
+
+failures:
+
+---- backend::vdso::tests::test_vdso_sym_overflow_panics_via_unwrap_before_bounds_assert stdout ----
+
+thread 'backend::vdso::tests::test_vdso_sym_overflow_panics_via_unwrap_before_bounds_assert' (113622) panicked at src/backend/linux_raw/vdso.rs:394:68:
+called `Option::unwrap()` on a `None` value
+note: run with RUST_BACKTRACE=1 environment variable to display a backtrace
+
+failures:
+    backend::vdso::tests::test_vdso_sym_overflow_panics_via_unwrap_before_bounds_assert
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+=== AFTER add_test.patch + patch.diff (the fix), debug build ===
+$ cargo test --lib --features time,stdio,fs backend::vdso::tests::test_vdso_sym_overflow
+
+running 1 test
+test backend::vdso::tests::test_vdso_sym_overflow_panics_via_unwrap_before_bounds_assert ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+=== AFTER add_test.patch + patch.diff (the fix), release build ===
+$ cargo test --release --lib --features time,stdio,fs backend::vdso::tests::test_vdso_sym_overflow
+
+running 1 test
+test backend::vdso::tests::test_vdso_sym_overflow_panics_via_unwrap_before_bounds_assert ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+=== Project test suite, --features time,stdio,fs, --no-fail-fast ===
+Before fix (add_test.patch only):
+  lib unittests: 20 passed; 1 failed (the new test above); 0 ignored
+Before AND after fix identically (pre-existing, unrelated to this bug,
+confirmed by running against pristine/unmodified code too):
+  tests/io (ioctl::test_int_setter): FAILED - Os { code: 2, kind: NotFound,
+    message: "No such file or directory" } (sandbox has no real tty device)
+  doctests (timespec::Timespec::checked_add / checked_sub): FAILED to
+    compile - E0432 unresolved import `rustix::event` (these two doctests
+    need the `event` feature, not enabled by the `time,stdio,fs` set used
+    here; same failure on unmodified code with the same feature set)
+After fix (add_test.patch + patch.diff):
+  lib unittests: 21 passed; 0 failed; 0 ignored
+  integration tests (all other targets): all ok (same as before, pre-existing
+    ioctl/doctest failures above excepted)
+
+Default-feature build (`cargo test --workspace`, no vdso module compiled at
+all since it needs feature = "time" or "thread"): 22 passed / 0 failed / 1
+ignored + 7 doc-tests, unchanged before and after (matches the crate's own
+previously-recorded baseline).

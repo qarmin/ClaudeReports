@@ -1,0 +1,34 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# Unlike most candidates in this workspace, the "repro" here is not a standalone Rust binary:
+# this bug is a rustdoc doctest compile failure inside zune-png's own doc comments, so the real
+# affected entry point is `cargo test --doc -p zune-png` run against the clone itself - see
+# repro/repro.sh.
+
+repo_url := "https://github.com/etemesi254/zune-image.git"
+base_commit := "533296caf9a6783691d42b2dfbc623029216cbaf"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Should demonstrate the bug: cargo test --doc -p zune-png fails to compile 2 of 11 doctests.
+reproduce-before:
+    ./repro/repro.sh clone || true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same check again, now against the patched clone - should show all doctests passing.
+reproduce-after:
+    ./repro/repro.sh clone
+
+clean:
+    rm -rf clone

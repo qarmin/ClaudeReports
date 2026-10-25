@@ -1,0 +1,33 @@
+# Self-contained reproduction attempt for candidate 089 (qnx_termios_reserved_field_uninitialized).
+#
+# Status: Not reproducible this session - no patch.diff, no fix applied. `reproduce-before` runs
+# the one tool-based check that was actually possible in this environment (a Miri cross-
+# interpretation attempt for the QNX target), and prints the real output: Miri has no foreign-
+# function shim for `tcgetattr` on OS "nto" at all, so it cannot observe whether the real syscall
+# leaves `Termios::__reserved` uninitialized. See RESULT.md for the full writeup, including the
+# documentary evidence (libc's own `Padding<T>` treatment of this exact field, the real QNX6
+# open-source `tcgetattr()` implementation) gathered in place of an actual execution.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Requires: `rustup component add miri --toolchain nightly`, `rustup component add rust-src
+# --toolchain nightly`, and `rustup run nightly cargo miri setup --target x86_64-pc-nto-qnx710`
+# once, before this will even get as far as the "unsupported operation" error below.
+reproduce-before:
+    @echo "=== rustix::termios::tcgetattr() cross-interpreted for QNX (x86_64-pc-nto-qnx710) ==="
+    @echo "=== Expected: Miri has no shim for tcgetattr on OS nto - a tooling gap, not a verdict either way ==="
+    cd repro && RUSTFLAGS="--cfg rustix_no_linux_raw" MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-pc-nto-qnx710 --bin tcgetattr_public_api || true
+
+clean:
+    rm -rf clone

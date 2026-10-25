@@ -1,0 +1,51 @@
+=== rustc/cargo versions ===
+cargo 1.98.1 (797e8a9bc 2026-08-05)
+rustc 1.98.1 (48a229cea 2026-09-01)
+miri 0.1.0 (5c543b0b8c 2026-09-29)
+
+=== Step 1: clippy confirms the lint actually fires on both sites ===
+$ cargo clippy --no-default-features --features std,all-apis --lib -- -W clippy::inconsistent_struct_constructor
+
+warning: struct constructor field order is inconsistent with struct definition field order
+   --> src/net/socket_addr_any.rs:103:16
+    |
+103 |         Self { storage, len }
+    |                ^^^^^^^^^^^^ help: try: `len, storage`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#inconsistent_struct_constructor
+
+warning: struct constructor field order is inconsistent with struct definition field order
+   --> src/net/socket_addr_any.rs:128:16
+    |
+128 |         Self { storage, len }
+    |                ^^^^^^^^^^^^ help: try: `len, storage`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#inconsistent_struct_constructor
+
+=== Step 2: debug-assertions build, real exercise via a small example (investigation/saa_check.rs) ===
+$ cargo run --example saa_check --no-default-features --features std,all-apis
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running `target/debug/examples/saa_check`
+new(): family = AddressFamily(2)
+read(): family = AddressFamily(2)
+new() at max len 128 : family = AddressFamily(2)
+OK - no init-order hazard observed
+
+=== Step 3: same example under Miri (would flag any init-order/uninit/provenance UB) ===
+$ cargo +nightly miri run --example saa_check --no-default-features --features std,all-apis
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-unknown-linux-gnu/debug/examples/saa_check`
+new(): family = AddressFamily(2)
+read(): family = AddressFamily(2)
+new() at max len 128 : family = AddressFamily(2)
+OK - no init-order hazard observed
+
+=== Supporting checks ===
+$ grep -n "impl Drop" src/net/*.rs src/net/**/*.rs 2>/dev/null
+(no match for SocketAddrAny or SocketAddrBuf - only an unrelated `impl Drop for RecvAncillaryBuffer` in src/net/send_recv/msg.rs)
+
+$ grep -n "derive" src/net/socket_addr_any.rs
+74:#[derive(Clone)]
+(no Drop derive/impl on SocketAddrAny; MaybeUninit<T> and NonZeroU32 have no drop glue either)

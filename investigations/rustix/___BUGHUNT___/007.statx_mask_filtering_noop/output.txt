@@ -1,0 +1,50 @@
+=== BEFORE fix (pristine HEAD 287214b889865d8e1406a0ee71cc409b6f6191c8) ===
+StatxFlags::all().bits()      = 0xffffffff
+u32::MAX                      = 0xffffffff
+all() == u32::MAX ?             true
+
+requested mask                = 0x001007ff
+mask & StatxFlags::all()      = 0x001007ff
+unknown bit survived filter?    true
+named BASIC_STATS survived?     true
+
+live statx("/") succeeded, kernel-returned stx_mask = 0x000017ff
+
+(Reproduced identically across multiple runs - StatxFlags::all().bits() is a
+compile-time-constant expression, not runtime-dependent, so this is fully
+deterministic. The live statx() call itself still succeeds on this kernel
+because the kernel silently ignores the unknown bit today - the guard exists
+to protect against a FUTURE kernel that assigns it a real meaning, exactly
+as the sourcing PR #1656 states: "This restores the future-kernel safety
+boundary intended by #379. It does not claim a vulnerability on current
+kernels.")
+
+No `strace` was available in this container (`which strace` found nothing)
+to directly capture the raw syscall argument bytes; the "unfiltered bit
+passing through" claim is instead demonstrated via the identical
+source-level expression (`mask & StatxFlags::all()`) used verbatim at both
+backend call sites (src/backend/linux_raw/fs/syscalls.rs:840 and
+src/backend/libc/fs/syscalls.rs:2091), which is the more direct and
+reliable evidence here.
+
+=== AFTER fix (patch.diff applied) ===
+An internal test added temporarily to src/fs/statx.rs during verification
+(reverted afterward, not part of patch.diff) confirmed:
+
+  test fs::statx::verify007_temp_test::unknown_bit_filtered_known_bit_survives ... ok
+  test fs::statx::verify007_temp_test::real_statx_call_with_unknown_bit_still_works ... ok
+
+  test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 53 filtered out
+
+The first test directly asserts: the unknown bit (1<<20) is stripped by
+`mask.bits() & KNOWN_STATX_FLAGS`, while the named flag `StatxFlags::BASIC_STATS`
+survives (the named-flag-survives sanity check). The second test calls the
+real public `rustix::fs::statx` entry point with a mixed mask and confirms
+it still succeeds end-to-end after the fix.
+
+=== cargo test --workspace --features "std,all-apis,use-libc" --no-fail-fast ===
+Before fix: 411 passed, 1 failed (io::ioctl::test_int_setter - pre-existing,
+needs /dev/net/tun, not present in this sandbox - unrelated).
+After fix:  411 passed, 1 failed - identical (same pre-existing failure).
+Existing statx-specific tests (tests/fs/statx.rs::test_statx_reserved,
+::test_statx_unknown_flags) passed both before and after.

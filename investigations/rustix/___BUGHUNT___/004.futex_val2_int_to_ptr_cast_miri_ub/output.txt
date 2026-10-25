@@ -1,0 +1,75 @@
+=== BEFORE fix, strict provenance (hard error) ===
+$ RUSTFLAGS="--cfg rustix_no_linux_raw" MIRIFLAGS="-Zmiri-strict-provenance" \
+    cargo +nightly miri run --example miri_futex_repro --features "std,thread,use-libc"
+
+error: unsupported operation: integer-to-pointer casts and `ptr::with_exposed_provenance` are not supported with `-Zmiri-strict-provenance`
+   --> src/backend/libc/thread/syscalls.rs:478:19
+    |
+478 |     let timeout = val2 as usize as *const Timespec;
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsupported operation occurred here
+    |
+    = help: use Strict Provenance APIs (https://doc.rust-lang.org/nightly/std/ptr/index.html#strict-provenance, https://crates.io/crates/sptr) instead
+    = note: stack backtrace:
+            0: rustix::backend::thread::syscalls::futex_val2
+                at src/backend/libc/thread/syscalls.rs:478:19: 478:51
+            1: rustix::thread::futex::requeue
+                at src/thread/futex.rs:133:14: 133:80
+            2: main
+                at examples/miri_futex_repro.rs:11:13: 11:64
+
+error: aborting due to 1 previous error
+
+=== BEFORE fix, default (permissive) Miri ===
+$ RUSTFLAGS="--cfg rustix_no_linux_raw" cargo +nightly miri run --example miri_futex_repro --features "std,thread,use-libc"
+
+warning: integer-to-pointer cast
+   --> src/backend/libc/thread/syscalls.rs:478:19
+    |
+478 |     let timeout = val2 as usize as *const Timespec;
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ integer-to-pointer cast
+    |
+    = help: this program is using integer-to-pointer casts or (equivalently) `ptr::with_exposed_provenance`, which means that Miri might miss pointer bugs in this program
+    ...
+error: Undefined Behavior: incorrect c-variadic argument type for `syscall(SYS_futex, ...)`: expected argument #2 to have type `*mut u32` but got incompatible type `*const std::sync::atomic::Atomic<u32>`
+   --> src/weak.rs:249:13
+
+(This second error is a separate, PRE-EXISTING Miri tooling limitation on the
+real syscall shim itself - libc::syscall()'s uaddr argument type strictness -
+present identically before AND after the fix below, and unrelated to
+timeout/val2. Not investigated/fixed as part of this candidate.)
+
+=== AFTER fix, strict provenance ===
+$ RUSTFLAGS="--cfg rustix_no_linux_raw" MIRIFLAGS="-Zmiri-strict-provenance" \
+    cargo +nightly miri run --example miri_futex_repro --features "std,thread,use-libc"
+
+error: Undefined Behavior: incorrect c-variadic argument type for `syscall(SYS_futex, ...)`: expected argument #2 to have type `*mut u32` but got incompatible type `*const std::sync::atomic::Atomic<u32>`
+   --> src/weak.rs:249:13
+
+(No more strict-provenance error at line 478/488 - the integer-to-pointer
+cast is gone. Only the unrelated, pre-existing syscall-shim limitation
+remains.)
+
+=== AFTER fix, default (permissive) Miri ===
+Identical to strict-provenance case above - no "integer-to-pointer cast"
+warning at all anymore.
+
+=== Real (non-Miri) verification ===
+cargo test --workspace --features "std,all-apis,use-libc":
+  Before fix: 151 passed, 1 failed.
+  After fix:  151 passed, 1 failed - identical.
+  The one failure (ioctl::test_int_setter, tests/io/ioctl.rs:21) is a
+  pre-existing, unrelated sandbox limitation (tries to open /dev/net/tun,
+  not present in this container) - reproduces identically with or without
+  the patch.
+
+cargo test --features "std,all-apis,use-libc" --test thread -- futex:
+  All 5 real futex tests pass with the fix applied (test_lock_unlock_pi,
+  test_wait_wake, test_wait_timeout, test_waitv_wake, test_waitv_timeout).
+
+Real-syscall smoke test on real Linux (fix applied - the #[cfg(not(miri))]
+branch is byte-for-byte the original code, so this reconfirms the real path
+is untouched):
+  requeue woken = 0
+  wake_op woken = 0
+  (both succeed with no error; 0 is expected since no other thread is
+  actually waiting)

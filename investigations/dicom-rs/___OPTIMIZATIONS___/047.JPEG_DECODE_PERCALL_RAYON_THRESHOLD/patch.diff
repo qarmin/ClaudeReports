@@ -20,10 +20,10 @@ index 2ebe15fe..97e133c7 100644
  [dependencies.flate2]
  version = "1.0.28"
 diff --git a/transfer-syntax-registry/src/adapters/jpeg.rs b/transfer-syntax-registry/src/adapters/jpeg.rs
-index 4a85965f..44bafe8a 100644
+index 4a85965f..4149ffae 100644
 --- a/transfer-syntax-registry/src/adapters/jpeg.rs
 +++ b/transfer-syntax-registry/src/adapters/jpeg.rs
-@@ -10,12 +10,55 @@ use dicom_encoding::snafu::prelude::*;
+@@ -10,12 +10,40 @@ use dicom_encoding::snafu::prelude::*;
  use jpeg_decoder::Decoder;
  use jpeg_encoder::ColorType;
  use std::borrow::Cow;
@@ -34,20 +34,7 @@ index 4a85965f..44bafe8a 100644
  #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
  pub struct JpegAdapter;
  
-+// `jpeg-decoder`'s own `Decoder::decode()` always requests its `Multithreaded` worker kind for
-+// any frame above 128x128 pixels (see its `select_worker`), with no public API to override this
-+// per call - the request just happens to be served by whichever rayon thread pool is "ambient"
-+// for the calling thread (rayon's own `in_place_scope`/`par_chunks_mut` pick up the pool the
-+// current thread is already running inside a `ThreadPool::install` of, falling back to the global
-+// pool otherwise). A call site that only ever decodes one frame at a time (e.g. a viewer
-+// scrolling through a multi-frame study, one `decode_frame` per redraw) pays the global pool's
-+// full dispatch/wake cost on every call without ever benefiting from decoding more than one
-+// frame's rows in parallel; a call that decodes many frames back-to-back in one `decode()` loop
-+// keeps the pool "hot" between frames and the parallel row-upsampling work is large enough to
-+// outweigh that cost. Below `FEW_FRAMES_RAYON_THRESHOLD` frames per call, install a small,
-+// lazily-built 2-thread pool (one thread for row-decode dispatch, one so at least a pair of
-+// components can genuinely run side by side) instead of the full-width global pool - see
-+// candidate 047's RESULT.md for the measured effect of each pool size tried.
++// `jpeg-decoder` always dispatches to rayon's ambient pool for frames above 128x128; a caller decoding only a few frames per call pays the global pool's dispatch cost without benefiting from it, so below FEW_FRAMES_RAYON_THRESHOLD we use a small dedicated pool instead (see RESULT.md).
 +#[cfg(feature = "rayon")]
 +const FEW_FRAMES_RAYON_THRESHOLD: usize = 4;
 +
@@ -59,9 +46,7 @@ index 4a85965f..44bafe8a 100644
 +        .as_ref()
 +}
 +
-+/// Decode a single embedded JPEG frame via `jpeg-decoder`, routing the call through a small,
-+/// dedicated thread pool instead of the process-wide global rayon pool whenever `frames_in_call`
-+/// (the number of frames being decoded by the calling function in this one invocation) is small.
++/// Decode a single embedded JPEG frame, routing through a small dedicated pool instead of the global one when `frames_in_call` is small.
 +fn decode_one_frame<R: Read + Send>(
 +    decoder: &mut Decoder<R>,
 +    #[cfg_attr(not(feature = "rayon"), allow(unused_variables))] frames_in_call: usize,
@@ -80,7 +65,7 @@ index 4a85965f..44bafe8a 100644
  impl PixelDataReader for JpegAdapter {
      /// Decode DICOM image data with jpeg encoding.
      fn decode(&self, src: &dyn PixelDataObject, dst: &mut Vec<u8>) -> DecodeResult<()> {
-@@ -68,8 +111,7 @@ impl PixelDataReader for JpegAdapter {
+@@ -68,8 +96,7 @@ impl PixelDataReader for JpegAdapter {
  
          'frame_loop: for i in 0..nr_frames {
              let mut decoder = Decoder::new(&mut cursor);
@@ -90,7 +75,7 @@ index 4a85965f..44bafe8a 100644
                  .map_err(|e| Box::new(e) as Box<_>)
                  .with_whatever_context(|_| format!("JPEG decoding failure on frame {i}"))?;
  
-@@ -219,8 +261,7 @@ impl PixelDataReader for JpegAdapter {
+@@ -219,8 +246,7 @@ impl PixelDataReader for JpegAdapter {
          let dst_offset = base_offset;
  
          let mut decoder = Decoder::new(&mut cursor);

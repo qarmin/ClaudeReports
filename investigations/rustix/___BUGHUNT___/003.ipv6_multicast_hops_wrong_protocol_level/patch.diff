@@ -1,0 +1,77 @@
+diff --git a/src/backend/libc/net/sockopt.rs b/src/backend/libc/net/sockopt.rs
+index 97104883..286adde6 100644
+--- a/src/backend/libc/net/sockopt.rs
++++ b/src/backend/libc/net/sockopt.rs
+@@ -618,12 +618,12 @@ pub(crate) fn ipv6_multicast_loop(fd: BorrowedFd<'_>) -> io::Result<bool> {
+
+ #[inline]
+ pub(crate) fn set_ipv6_multicast_hops(fd: BorrowedFd<'_>, multicast_hops: u32) -> io::Result<()> {
+-    setsockopt(fd, c::IPPROTO_IP, c::IPV6_MULTICAST_HOPS, multicast_hops)
++    setsockopt(fd, c::IPPROTO_IPV6, c::IPV6_MULTICAST_HOPS, multicast_hops)
+ }
+
+ #[inline]
+ pub(crate) fn ipv6_multicast_hops(fd: BorrowedFd<'_>) -> io::Result<u32> {
+-    getsockopt(fd, c::IPPROTO_IP, c::IPV6_MULTICAST_HOPS)
++    getsockopt(fd, c::IPPROTO_IPV6, c::IPV6_MULTICAST_HOPS)
+ }
+
+ #[inline]
+diff --git a/src/backend/linux_raw/net/sockopt.rs b/src/backend/linux_raw/net/sockopt.rs
+index a8b28192..33ed5c67 100644
+--- a/src/backend/linux_raw/net/sockopt.rs
++++ b/src/backend/linux_raw/net/sockopt.rs
+@@ -580,12 +580,12 @@ pub(crate) fn ipv6_multicast_loop(fd: BorrowedFd<'_>) -> io::Result<bool> {
+
+ #[inline]
+ pub(crate) fn set_ipv6_multicast_hops(fd: BorrowedFd<'_>, multicast_hops: u32) -> io::Result<()> {
+-    setsockopt(fd, c::IPPROTO_IP, c::IPV6_MULTICAST_HOPS, multicast_hops)
++    setsockopt(fd, c::IPPROTO_IPV6, c::IPV6_MULTICAST_HOPS, multicast_hops)
+ }
+
+ #[inline]
+ pub(crate) fn ipv6_multicast_hops(fd: BorrowedFd<'_>) -> io::Result<u32> {
+-    getsockopt(fd, c::IPPROTO_IP, c::IPV6_MULTICAST_HOPS)
++    getsockopt(fd, c::IPPROTO_IPV6, c::IPV6_MULTICAST_HOPS)
+ }
+
+ #[inline]
+diff --git a/tests/net/sockopt.rs b/tests/net/sockopt.rs
+index d139d9a5..b49d3a48 100644
+--- a/tests/net/sockopt.rs
++++ b/tests/net/sockopt.rs
+@@ -424,16 +424,30 @@ fn test_sockopts_ipv6() {
+     }
+     assert_ne!(sockopt::ipv6_unicast_hops(&s).unwrap(), 0);
+
+-    // On NetBSD, `get_ipv6_multicasthops` returns 1 here. It's not evident
+-    // why it differs from other OS's.
+-    #[cfg(not(target_os = "netbsd"))]
++    // The default `IPV6_MULTICAST_HOPS` value is 1 per RFC 3493 / `ipv6(7)`.
+     match sockopt::ipv6_multicast_hops(&s) {
+-        Ok(hops) => assert_eq!(hops, 0),
++        Ok(hops) => assert_eq!(hops, 1),
+         Err(io::Errno::NOPROTOOPT) => (),
+         Err(io::Errno::INVAL) => (),
+         Err(err) => panic!("{:?}", err),
+     }
+
++    // Set the IPv6 multicast hops value to a specific value. Note that on
++    // Linux, setting multicast options on a `SOCK_STREAM` socket fails with
++    // `ENOPROTOOPT`, since multicast doesn't apply to connection-oriented
++    // sockets; that's a real kernel restriction unrelated to the option
++    // level used here.
++    match sockopt::set_ipv6_multicast_hops(&s, 8) {
++        Ok(()) => {
++            // Check that the IPv6 multicast hops value is set.
++            assert_eq!(sockopt::ipv6_multicast_hops(&s).unwrap(), 8);
++        }
++        Err(io::Errno::OPNOTSUPP) => (),
++        Err(io::Errno::INVAL) => (),
++        Err(io::Errno::NOPROTOOPT) => (),
++        Err(err) => panic!("{:?}", err),
++    }
++
+     // Set the IPv4 V6OONLY value.
+     let v6only = rustix::net::sockopt::ipv6_v6only(&s).unwrap();
+     sockopt::set_ipv6_v6only(&s, !v6only).unwrap();

@@ -1,0 +1,49 @@
+# Self-contained reproduction for this candidate.
+#
+# Requires: a working internet connection for `clone`, and the
+# `x86_64-unknown-linux-musl` Rust target (`rustup target add
+# x86_64-unknown-linux-musl`) - the repro needs a statically linked,
+# non-PIE binary so nothing except rustix's own code dereferences the
+# (deliberately corrupted) `AT_PHDR` value before `main` runs; a normal
+# dynamically linked glibc binary's own `ld.so` dereferences `AT_PHDR` for
+# its own bootstrap before any Rust code runs at all, and crashes first.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build a statically linked, non-PIE binary calling the real public API,
+# corrupt its own `e_phoff` to be misaligned, then run it - against the
+# pristine clone, this panics.
+reproduce-before:
+    rustup target add x86_64-unknown-linux-musl
+    cd repro && rm -f target/x86_64-unknown-linux-musl/debug/repro
+    cd repro && RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static" \
+        cargo build --target x86_64-unknown-linux-musl
+    cd repro && python3 corrupt_phdr.py \
+        target/x86_64-unknown-linux-musl/debug/repro \
+        ./corrupted-before 1
+    cd repro && ulimit -c 0 && (./corrupted-before; echo "exit code: $?")
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same corruption procedure, now against the patched clone - should no
+# longer panic (prints a null phdr instead).
+reproduce-after:
+    cd repro && rm -f target/x86_64-unknown-linux-musl/debug/repro
+    cd repro && RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static" \
+        cargo build --target x86_64-unknown-linux-musl
+    cd repro && python3 corrupt_phdr.py \
+        target/x86_64-unknown-linux-musl/debug/repro \
+        ./corrupted-after 1
+    cd repro && ulimit -c 0 && (./corrupted-after; echo "exit code: $?")
+
+clean:
+    rm -rf clone repro/target repro/corrupted-before repro/corrupted-after

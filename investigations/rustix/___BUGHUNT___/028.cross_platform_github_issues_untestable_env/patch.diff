@@ -1,0 +1,39 @@
+diff --git a/src/backend/libc/termios/syscalls.rs b/src/backend/libc/termios/syscalls.rs
+index dbe4a6e0..d651258d 100644
+--- a/src/backend/libc/termios/syscalls.rs
++++ b/src/backend/libc/termios/syscalls.rs
+@@ -90,9 +90,12 @@ pub(crate) fn tcgetattr(fd: BorrowedFd<'_>) -> io::Result<Termios> {
+         };
+ 
+         // Copy in the control codes, since libc's `c_cc` array may have a
+-        // different length from the ioctl's.
+-        let nccs = termios2.c_cc.len();
+-        result.special_codes.0[..nccs].copy_from_slice(&termios2.c_cc);
++        // different length from the ioctl's. On some targets (e.g. sparc,
++        // sparc64), the kernel's `termios2.c_cc` is longer than libc's own
++        // `NCCS`-sized `SpecialCodes` array, so clamp to the shorter of the
++        // two rather than assuming the ioctl's array always fits.
++        let nccs = termios2.c_cc.len().min(result.special_codes.0.len());
++        result.special_codes.0[..nccs].copy_from_slice(&termios2.c_cc[..nccs]);
+ 
+         Ok(result)
+     }
+@@ -238,11 +241,13 @@ pub(crate) fn tcsetattr(
+         termios2.c_cflag |= speed::encode(input_speed).unwrap_or(c::BOTHER) << c::IBSHIFT;
+ 
+         // Copy in the control codes, since libc's `c_cc` array may have a
+-        // different length from the ioctl's.
+-        let nccs = termios2.c_cc.len();
+-        termios2
+-            .c_cc
+-            .copy_from_slice(&termios.special_codes.0[..nccs]);
++        // different length from the ioctl's. On some targets (e.g. sparc,
++        // sparc64), the kernel's `termios2.c_cc` is longer than libc's own
++        // `NCCS`-sized `SpecialCodes` array, so clamp to the shorter of the
++        // two rather than assuming `special_codes` always has enough to
++        // fill it.
++        let nccs = termios2.c_cc.len().min(termios.special_codes.0.len());
++        termios2.c_cc[..nccs].copy_from_slice(&termios.special_codes.0[..nccs]);
+ 
+         // Translate from `optional_actions` into a `TCSETS2` ioctl request
+         // code. On MIPS, `optional_actions` has `TCSETS` added to it.

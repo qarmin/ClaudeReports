@@ -1,0 +1,28 @@
+diff --git a/src/fs/raw_dir.rs b/src/fs/raw_dir.rs
+index 4b14be38..038c5576 100644
+--- a/src/fs/raw_dir.rs
++++ b/src/fs/raw_dir.rs
+@@ -219,7 +219,22 @@ impl<'buf, Fd: AsFd> RawDir<'buf, Fd> {
+         // - The starting pointer is aligned (performed in `RawDir::new`).
+         let dirent = unsafe { &*dirent_ptr.cast::<linux_dirent64>() };
+ 
+-        self.offset += usize::from(dirent.d_reclen);
++        let d_reclen = usize::from(dirent.d_reclen);
++        if d_reclen == 0 {
++            // A `d_reclen` of 0 would leave `self.offset` unchanged, so
++            // `is_buffer_empty()` (`self.offset >= self.initialized`) would
++            // never become true again and every subsequent call would
++            // re-parse the exact same bytes forever. The kernel's own VFS
++            // never emits this, but a buggy or malicious filesystem backend
++            // (e.g. a broken FUSE/9p driver) could. There's no way to know
++            // how long the corrupted record actually is, so we can't skip
++            // just this one entry and keep parsing the rest of the buffer -
++            // discard the remainder of the buffer so the next call issues a
++            // fresh `getdents64` instead of looping on this one.
++            self.offset = self.initialized;
++            return Some(Err(io::Errno::BADMSG));
++        }
++        self.offset += d_reclen;
+ 
+         Some(Ok(RawDirEntry {
+             file_type: dirent.d_type,

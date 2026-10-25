@@ -1,0 +1,77 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything needed is either in this folder or fetched by `just clone` into ./clone (gitignored),
+# except the shared empty-project harness at ___OPTIMIZATIONS___/harness/empty_project (untracked
+# in the main repo, shared with candidates 006/007/010/011/012/013/015/016/017 - see SKILL.md's
+# "Bench harnesses" section). This candidate's self-containment is relaxed to "given the whole
+# ___OPTIMIZATIONS___ folder kept together", not a fully isolated single subfolder.
+#
+# This is a from-scratch Godot build (SCons) - expect ~15-25 min per build on a modern multi-core
+# machine (~4 min on the 24-core container this was measured on), not a Rust/cargo build. scons
+# isn't preinstalled everywhere - `pip3 install scons --break-system-packages` if `command -v
+# scons` fails.
+#
+# Unlike the other candidates here, the patch applied is bench/bundle_of_8_patches.diff: the
+# combined diff of candidates 007+013+017+023+025+026+031+032, which is the artifact this
+# candidate measures. Both binaries are kept and benched **interleaved** (A/B/A/B/A/B), so machine
+# drift during the measurement hits both arms equally.
+
+repo_url := "https://github.com/godotengine/godot.git"
+base_commit := "9552dfb6859a1aaba1e570b8e0ef5c599b830f19"
+harness_dir := "../harness/empty_project"
+
+test: clone build-baseline apply build-patched bench-interleaved
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/_empty_project
+
+build-baseline:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v scons >/dev/null 2>&1 || pip3 install scons --break-system-packages
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+    cp bin/godot.linuxbsd.editor.x86_64 "{{justfile_directory()}}/bin_baseline"
+
+apply:
+    git -C clone apply "{{justfile_directory()}}/bench/bundle_of_8_patches.diff"
+
+build-patched:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+    cp bin/godot.linuxbsd.editor.x86_64 "{{justfile_directory()}}/bin_patched"
+
+# Peak RSS via /proc/<pid>/status's VmHWM (no /usr/bin/time in this project's own dev container -
+# adapt to `/usr/bin/time -v` if available on the machine running this).
+bench-interleaved:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    export XDG_DATA_HOME="{{justfile_directory()}}/clone/_xdg_data"
+    export XDG_CONFIG_HOME="{{justfile_directory()}}/clone/_xdg_config"
+    mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME"
+    cd clone
+    run_one() {
+      "$1" --headless --editor --path _empty_project --quit-after 1 > /dev/null 2>&1 &
+      local PID=$! PEAK="" V
+      while kill -0 $PID 2>/dev/null; do
+        V=$(grep VmHWM /proc/$PID/status 2>/dev/null | awk '{print $2}' || true)
+        if [ -n "$V" ]; then PEAK="$V"; fi
+        sleep 0.02
+      done
+      wait $PID; local RC=$?
+      echo "$2 peak_kB=$PEAK exit=$RC"
+    }
+    for block in 1 2 3; do
+      for i in 1 2; do run_one "{{justfile_directory()}}/bin_baseline" "baseline"; done
+      for i in 1 2; do run_one "{{justfile_directory()}}/bin_patched" "bundle"; done
+    done
+
+clean:
+    rm -rf clone bin_baseline bin_patched

@@ -27,18 +27,20 @@ Layout:
     name is used as the leading component, so the project name is never lost.
 
 What is left behind:
-    These workspaces reach gigabytes on disk - almost all of it build output and
-    inputs that are regenerable or freely available elsewhere. Skipped entirely:
+    The bug-hunt / perf-optimize skills name things by prefix: `_name` is kept,
+    `__name` (two underscores) is scratch - build trees, source checkouts and
+    worktrees, header trees, corpora, raw issue dumps, per-run results. Every file
+    and directory whose name starts with `__` is skipped, at any depth. Also
+    skipped:
 
-      - directories: clone/, target/, .worktrees/, .git/, node_modules/, .locks/
-        (build caches and checkouts - what `just clean` inside the workspace
-        removes), issues_raw/ (a dump of the upstream tracker, an *input* to the
-        hunt), scratch/, probe/ (work-in-progress leftovers)
-      - `*.zip` - output of `just pack`, a copy of what is being collected anyway
+      - legacy directory names the candidate justfiles still create: clone/,
+        target/, .worktrees/, .git/, node_modules/, .locks/, scratch/, probe/
+      - `*.zip` (output of `just pack`, a copy of what is being collected anyway),
+        `*.pid`
       - `.gitignore` - these guard the *source* project against its own build
-        caches, which the rules above already drop. Copied over they would only
-        make this repo silently skip files it did collect (`repro/Cargo.lock`
-        above all, which pins the versions a repro needs to still build later).
+        caches. Copied over they would only make this repo silently skip files it
+        did collect (`repro/Cargo.lock` above all, which pins the versions a repro
+        needs to still build later).
       - symlinks, so no dangling links land in the repo
       - anything else over --max-file-size (default 100 KB)
 
@@ -75,7 +77,6 @@ SKIP_DIRS = {
     ".git",
     "node_modules",
     ".locks",
-    "issues_raw",
     "scratch",
     "probe",
 }
@@ -86,7 +87,7 @@ ALWAYS_SUFFIXES = {
     ".c", ".h", ".cpp", ".hpp", ".json", ".yml", ".yaml",
 }
 ALWAYS_NAMES = {"justfile", "Justfile"}
-NEVER_SUFFIXES = {".zip"}
+NEVER_SUFFIXES = {".zip", ".pid"}
 NEVER_NAMES = {".gitignore"}
 
 DEFAULT_MAX_FILE_SIZE = 100_000
@@ -119,7 +120,7 @@ def find_workspaces(root: Path) -> list[Path]:
     for dirpath, dirnames, _ in os.walk(root):
         here = Path(dirpath)
         dirnames[:] = sorted(
-            d for d in dirnames if d not in SKIP_DIRS and not (here / d).is_symlink()
+            d for d in dirnames if d not in SKIP_DIRS and not scratch(d) and not (here / d).is_symlink()
         )
         for kind in KIND_DIRS:
             if kind in dirnames:
@@ -145,6 +146,10 @@ def wanted(path: Path, size: int, max_file_size: int) -> bool:
     return suffix in ALWAYS_SUFFIXES or path.name in ALWAYS_NAMES or size <= max_file_size
 
 
+def scratch(name: str) -> bool:
+    return name.startswith("__") and not name.startswith("___")
+
+
 def collect(workspace: Path, max_file_size: int) -> tuple[list[tuple[Path, Path, int]], int]:
     files: list[tuple[Path, Path, int]] = []
     links = 0
@@ -152,7 +157,7 @@ def collect(workspace: Path, max_file_size: int) -> tuple[list[tuple[Path, Path,
         here = Path(dirpath)
         keep = []
         for name in sorted(dirnames):
-            if name in SKIP_DIRS:
+            if scratch(name) or name in SKIP_DIRS:
                 continue
             if (here / name).is_symlink():
                 links += 1
@@ -161,6 +166,8 @@ def collect(workspace: Path, max_file_size: int) -> tuple[list[tuple[Path, Path,
         dirnames[:] = keep
         for name in sorted(filenames):
             path = here / name
+            if scratch(name):
+                continue
             if path.is_symlink():
                 links += 1
                 continue

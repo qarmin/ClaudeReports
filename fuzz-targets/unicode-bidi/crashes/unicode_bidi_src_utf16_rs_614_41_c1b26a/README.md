@@ -1,0 +1,72 @@
+# unicode-bidi/src/utf16.rs:614:41
+
+- crate: https://github.com/servo/unicode-bidi @ 9a8c7b03be01def5cf7014b89d5af90f7382fdad
+- kind: panic
+- location: `unicode-bidi/src/utf16.rs:614:41`
+- last API call: `unicode_bidi::utf16::Paragraph::direction`
+- documented `# Panics`: false
+- reproducer verified: true
+- miri: not run (skipped while revalidating)
+
+## Message
+
+```
+range end index 1 out of range for slice of length 0
+```
+
+## Reproducer
+
+`Cargo.toml`:
+
+```toml
+[dependencies]
+unicode-bidi = { git = "https://github.com/servo/unicode-bidi", rev = "9a8c7b03be01def5cf7014b89d5af90f7382fdad" }
+```
+
+`src/main.rs`:
+
+```rust
+use unicode_bidi::HardcodedBidiData;
+use unicode_bidi::Level;
+use unicode_bidi::ParagraphInfo;
+use unicode_bidi::utf16::BidiInfo;
+use unicode_bidi::utf16::Paragraph;
+
+fn main() {
+    let hardcoded_bidi_data = HardcodedBidiData;
+    let vec = vec![];
+    let bidi_info = BidiInfo::new_with_data_source::<unicode_bidi::HardcodedBidiData>(&hardcoded_bidi_data, &vec, None);
+    let paragraph_info = ParagraphInfo { range: 0usize..1usize, level: Level::new(0u8).unwrap() };
+    let paragraph = Paragraph::new(&bidi_info, &paragraph_info);
+    let _ = paragraph.direction();
+}
+```
+
+Run with `cargo run` in this directory (package `repro_unicode_bidi_src_utf16_rs_614_41_c1b26a`).
+
+## Output
+
+```
+thread 'main' (1244306) panicked at /home/rafal/.cargo/git/checkouts/unicode-bidi-19cde379c57bfc50/9a8c7b0/src/utf16.rs:614:41:
+range end index 1 out of range for slice of length 0
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:80:14
+   2: core::slice::index::slice_index_fail
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panic.rs:177:9
+   3: <core::ops::range::Range<usize> as core::slice::index::SliceIndex<[unicode_bidi::level::Level]>>::index
+             at /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/index.rs:413:13
+   4: <[unicode_bidi::level::Level] as core::ops::index::Index<core::ops::range::Range<usize>>>::index
+             at /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/index.rs:19:15
+   5: <alloc::vec::Vec<unicode_bidi::level::Level> as core::ops::index::Index<core::ops::range::Range<usize>>>::index
+             at /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3934:9
+   6: <unicode_bidi::utf16::Paragraph>::direction
+             at /home/rafal/.cargo/git/checkouts/unicode-bidi-19cde379c57bfc50/9a8c7b0/src/utf16.rs:614:41
+   7: repro_unicode_bidi_src_utf16_rs_614_41_c1b26a::main
+             at ./src/main.rs:13:23
+   8: <fn() as core::ops::function::FnOnce<()>>::call_once
+             at /home/rafal/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+```

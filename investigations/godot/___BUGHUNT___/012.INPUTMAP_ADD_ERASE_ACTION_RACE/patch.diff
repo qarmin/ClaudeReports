@@ -1,0 +1,211 @@
+diff --git a/core/input/input_map.cpp b/core/input/input_map.cpp
+index 99f61a21ba..d8751df67b 100644
+--- a/core/input/input_map.cpp
++++ b/core/input/input_map.cpp
+@@ -64,6 +64,8 @@ void InputMap::_bind_methods() {
+  * matching action name (if possible).
+  */
+ String InputMap::suggest_actions(const StringName &p_action) const {
++	_THREAD_SAFE_METHOD_
++
+ 	StringName closest_action;
+ 	float closest_similarity = 0.0;
+ 
+@@ -116,6 +118,8 @@ void InputMap::get_argument_options(const StringName &p_function, int p_idx, Lis
+ #endif
+ 
+ void InputMap::add_action(const StringName &p_action, float p_deadzone) {
++	_THREAD_SAFE_METHOD_
++
+ 	ERR_FAIL_COND_MSG(input_map.has(p_action), vformat("InputMap already has action \"%s\".", String(p_action)));
+ 	input_map[p_action] = Action();
+ 	static int last_id = 1;
+@@ -125,12 +129,16 @@ void InputMap::add_action(const StringName &p_action, float p_deadzone) {
+ }
+ 
+ void InputMap::erase_action(const StringName &p_action) {
++	_THREAD_SAFE_METHOD_
++
+ 	ERR_FAIL_COND_MSG(!input_map.has(p_action), suggest_actions(p_action));
+ 
+ 	input_map.erase(p_action);
+ }
+ 
+ TypedArray<StringName> InputMap::get_actions() {
++	_THREAD_SAFE_METHOD_
++
+ 	TypedArray<StringName> ret;
+ 
+ 	ret.resize(input_map.size());
+@@ -165,10 +173,14 @@ List<Ref<InputEvent>>::Element *InputMap::_find_event(Action &p_action, const Re
+ }
+ 
+ bool InputMap::has_action(const StringName &p_action) const {
++	_THREAD_SAFE_METHOD_
++
+ 	return input_map.has(p_action);
+ }
+ 
+ String InputMap::get_action_description(const StringName &p_action) const {
++	_THREAD_SAFE_METHOD_
++
+ 	ERR_FAIL_COND_V_MSG(!input_map.has(p_action), String(), suggest_actions(p_action));
+ 
+ 	String ret;
+@@ -188,18 +200,24 @@ String InputMap::get_action_description(const StringName &p_action) const {
+ }
+ 
+ float InputMap::action_get_deadzone(const StringName &p_action) {
++	_THREAD_SAFE_METHOD_
++
+ 	ERR_FAIL_COND_V_MSG(!input_map.has(p_action), 0.0f, suggest_actions(p_action));
+ 
+ 	return input_map[p_action].deadzone;
+ }
+ 
+ void InputMap::action_set_deadzone(const StringName &p_action, float p_deadzone) {
++	_THREAD_SAFE_METHOD_
++
+ 	ERR_FAIL_COND_MSG(!input_map.has(p_action), suggest_actions(p_action));
+ 
+ 	input_map[p_action].deadzone = p_deadzone;
+ }
+ 
+ void InputMap::action_add_event(const StringName &p_action, RequiredParam<InputEvent> p_event) {
++	_THREAD_SAFE_METHOD_
++
+ 	EXTRACT_PARAM_OR_FAIL_MSG(event, p_event, "It's not a reference to a valid InputEvent object.");
+ 	ERR_FAIL_COND_MSG(!input_map.has(p_action), suggest_actions(p_action));
+ 	if (_find_event(input_map[p_action], event, true)) {
+@@ -226,6 +244,8 @@ void InputMap::action_add_event(const StringName &p_action, RequiredParam<InputE
+ }
+ 
+ bool InputMap::action_has_event(const StringName &p_action, RequiredParam<InputEvent> p_event) {
++	_THREAD_SAFE_METHOD_
++
+ 	EXTRACT_PARAM_OR_FAIL_V(event, p_event, false);
+ 	ERR_FAIL_COND_V_MSG(!input_map.has(p_action), false, suggest_actions(p_action));
+ 	return (_find_event(input_map[p_action], event, true) != nullptr);
+@@ -233,26 +253,41 @@ bool InputMap::action_has_event(const StringName &p_action, RequiredParam<InputE
+ 
+ void InputMap::action_erase_event(const StringName &p_action, RequiredParam<InputEvent> p_event) {
+ 	EXTRACT_PARAM_OR_FAIL(event, p_event);
+-	ERR_FAIL_COND_MSG(!input_map.has(p_action), suggest_actions(p_action));
+ 
+-	List<Ref<InputEvent>>::Element *E = _find_event(input_map[p_action], event, true);
+-	if (E) {
+-		input_map[p_action].inputs.erase(E);
++	// Scoped so InputMap's own lock is released before calling into Input below - Input's
++	// locked input-parsing path calls back into InputMap (get_action_map()/event_is_action()),
++	// so holding both locks at once in opposite orders on different threads could deadlock.
++	bool event_erased = false;
++	{
++		_THREAD_SAFE_METHOD_
++
++		ERR_FAIL_COND_MSG(!input_map.has(p_action), suggest_actions(p_action));
+ 
+-		if (Input::get_singleton()->is_action_pressed(p_action)) {
+-			Input::get_singleton()->action_release(p_action);
++		List<Ref<InputEvent>>::Element *E = _find_event(input_map[p_action], event, true);
++		if (E) {
++			input_map[p_action].inputs.erase(E);
++			event_erased = true;
+ 		}
+ 	}
++
++	if (event_erased && Input::get_singleton()->is_action_pressed(p_action)) {
++		Input::get_singleton()->action_release(p_action);
++	}
+ }
+ 
+ void InputMap::action_erase_events(const StringName &p_action) {
+-	ERR_FAIL_COND_MSG(!input_map.has(p_action), suggest_actions(p_action));
++	// Scoped so InputMap's own lock is released before calling into Input below - see the
++	// identical note in action_erase_event() above.
++	{
++		_THREAD_SAFE_METHOD_
++
++		ERR_FAIL_COND_MSG(!input_map.has(p_action), suggest_actions(p_action));
++		input_map[p_action].inputs.clear();
++	}
+ 
+ 	if (Input::get_singleton()->is_action_pressed(p_action)) {
+ 		Input::get_singleton()->action_release(p_action);
+ 	}
+-
+-	input_map[p_action].inputs.clear();
+ }
+ 
+ TypedArray<InputEvent> InputMap::_action_get_events(const StringName &p_action) {
+@@ -268,6 +303,8 @@ TypedArray<InputEvent> InputMap::_action_get_events(const StringName &p_action)
+ }
+ 
+ const List<Ref<InputEvent>> *InputMap::action_get_events(const StringName &p_action) {
++	_THREAD_SAFE_METHOD_
++
+ 	HashMap<StringName, Action>::Iterator E = input_map.find(p_action);
+ 	if (!E) {
+ 		return nullptr;
+@@ -288,6 +325,8 @@ int InputMap::event_get_index(const Ref<InputEvent> &p_event, const StringName &
+ }
+ 
+ bool InputMap::event_get_action_status(const Ref<InputEvent> &p_event, const StringName &p_action, bool p_exact_match, bool *r_pressed, float *r_strength, float *r_raw_strength, int *r_event_index) const {
++	_THREAD_SAFE_METHOD_
++
+ 	HashMap<StringName, Action>::Iterator E = input_map.find(p_action);
+ 	ERR_FAIL_COND_V_MSG(!E, false, suggest_actions(p_action));
+ 
+@@ -319,10 +358,14 @@ bool InputMap::event_get_action_status(const Ref<InputEvent> &p_event, const Str
+ }
+ 
+ const HashMap<StringName, InputMap::Action> &InputMap::get_action_map() const {
++	_THREAD_SAFE_METHOD_
++
+ 	return input_map;
+ }
+ 
+ void InputMap::load_from_project_settings() {
++	_THREAD_SAFE_METHOD_
++
+ 	input_map.clear();
+ 
+ 	List<PropertyInfo> pinfo;
+@@ -451,6 +494,8 @@ String InputMap::get_builtin_display_name(const String &p_name) const {
+ }
+ 
+ const HashMap<String, List<Ref<InputEvent>>> &InputMap::get_builtins() {
++	_THREAD_SAFE_METHOD_
++
+ 	// Return cache if it has already been built.
+ 	if (default_builtin_cache.size()) {
+ 		return default_builtin_cache;
+@@ -895,6 +940,8 @@ const HashMap<String, List<Ref<InputEvent>>> &InputMap::get_builtins() {
+ }
+ 
+ const HashMap<String, List<Ref<InputEvent>>> &InputMap::get_builtins_with_feature_overrides_applied() {
++	_THREAD_SAFE_METHOD_
++
+ 	if (default_builtin_with_overrides_cache.size() > 0) {
+ 		return default_builtin_with_overrides_cache;
+ 	}
+diff --git a/core/input/input_map.h b/core/input/input_map.h
+index 02fe15d138..a0af04404b 100644
+--- a/core/input/input_map.h
++++ b/core/input/input_map.h
+@@ -32,6 +32,7 @@
+ 
+ #include "core/input/input_event.h"
+ #include "core/object/object.h"
++#include "core/os/thread_safe.h"
+ #include "core/templates/hash_map.h"
+ 
+ template <typename T>
+@@ -59,6 +60,8 @@ public:
+ private:
+ 	static inline InputMap *singleton = nullptr;
+ 
++	_THREAD_SAFE_CLASS_
++
+ 	mutable HashMap<StringName, Action> input_map;
+ 	HashMap<String, List<Ref<InputEvent>>> default_builtin_cache;
+ 	HashMap<String, List<Ref<InputEvent>>> default_builtin_with_overrides_cache;

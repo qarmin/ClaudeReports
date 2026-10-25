@@ -1,0 +1,39 @@
+=== Approach 1: standalone arithmetic identity check ===
+Reimplements exactly the expressions used in src/thread/libcap.rs's capget/capset
+(low = v as u32; high = (v >> u32::BITS) as u32; reconstruct = u64::from(low) | (u64::from(high) << u32::BITS))
+and checks it is lossless for representative boundary values plus every single bit position 0..64
+(an exhaustive check, not just sampling, since the transform is bitwise/linear - each output bit
+depends on exactly one input bit, so checking each bit position individually is a full proof the
+identity holds for all 2^64 possible u64 values, not just the tested ones).
+
+$ rustc -O u64split.rs -o u64split && ./u64split
+v=0x0000000000000000 reconstructed=0x0000000000000000 lossless=true
+v=0x0000000000000001 reconstructed=0x0000000000000001 lossless=true
+v=0x00000000ffffffff reconstructed=0x00000000ffffffff lossless=true
+v=0x0000000100000000 reconstructed=0x0000000100000000 lossless=true
+v=0x0000000100000000 reconstructed=0x0000000100000000 lossless=true
+v=0x8000000000000000 reconstructed=0x8000000000000000 lossless=true
+v=0xffffffffffffffff reconstructed=0xffffffffffffffff lossless=true
+v=0x0123456789abcdef reconstructed=0x0123456789abcdef lossless=true
+ALL_LOSSLESS=true
+(no "BIT N LOST" lines were printed by the bit-position loop covering bits 0..63 - every single
+bit round-trips)
+
+=== Approach 2: real end-to-end round-trip through rustix's own public API ===
+Standalone crate (/tmp/capcheck, Cargo.toml depends on this worktree's rustix with
+features = ["std", "thread"]) calling the real rustix::thread::capabilities /
+rustix::thread::set_capabilities, which is the actual capget/capset code under suspicion,
+through a real capget syscall then a real capset syscall (not a hand-built struct standing in for
+the kernel's reply).
+
+$ cargo run
+CapabilitySets { effective: CapabilitySet(0x0), permitted: CapabilitySet(0x0), inheritable: CapabilitySet(0x0) }
+round-trip OK: CapabilitySets { effective: CapabilitySet(0x0), permitted: CapabilitySet(0x0), inheritable: CapabilitySet(0x0) }
+
+(This container holds no capabilities at all, so this run only confirms the real syscall path
+compiles/executes/round-trips without panicking or data corruption for the all-zero case - it
+can't exercise high bit positions through a real capset, since the kernel itself rejects any
+CAP_* bit beyond CAP_LAST_CAP with EINVAL regardless of which half of the u32/u32 split it lands
+in. Approach 1 is what actually establishes losslessness across the full 64-bit range; this run
+is corroborating evidence that the production code path itself works, not an independent proof of
+the boundary claim.)

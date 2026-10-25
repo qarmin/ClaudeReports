@@ -1,0 +1,33 @@
+=== EARLIER APPROACH (3 writer threads + 3 reader threads, both off-main-thread, node NOT in tree - out of the documented-supported scope since set_name()'s own existing guard only restricts writes once data.tree is set): hung/deadlocked instead of crashing cleanly ===
+(engine never reached 'survived' even at a 30s timeout; one run surfaced "ERROR: BUG: Unreferenced static string to 0: servers" from StringName::unref() - an UNRELATED static string's refcount hitting 0, strong evidence of heap/table corruption from the race, consistent with a corrupted intern-table traversal looping forever under Table::mutex)
+
+=== REAL REPRO (matches the engine's own documented-supported shape: node added to tree, ALL renames from the main thread satisfying set_name()'s existing is-main-thread guard, reader threads only ever call the zero-guard get_name()): 4/4 unfixed crashes ===
+/tmp/run054c_1.txt:SUMMARY: AddressSanitizer: heap-use-after-free core/templates/safe_refcount.h:87 in SafeNumeric<unsigned long>::decrement()
+/tmp/run054c_4.txt:SUMMARY: AddressSanitizer: heap-use-after-free core/templates/safe_refcount.h:87 in SafeNumeric<unsigned long>::decrement()
+/tmp/run054c_3.txt:SUMMARY: AddressSanitizer: heap-use-after-free core/templates/safe_refcount.h:87 in SafeNumeric<unsigned long>::decrement()
+/tmp/run054c_2.txt:SUMMARY: AddressSanitizer: heap-use-after-free core/object/object.cpp:139 in Object::_predelete()
+
+--- representative unfixed backtrace (String CowData race reached via get_name()'s StringName->String implicit conversion in the reader thread) ---
+=================================================================
+==65901==ERROR: AddressSanitizer: heap-use-after-free on address 0x74dee26d15d0 at pc 0x61aa1b91de25 bp 0x742ebc7b9050 sp 0x742ebc7b9040
+WRITE of size 8 at 0x74dee26d15d0 thread T31
+    #0 0x61aa1b91de24 in std::__atomic_base<unsigned long>::fetch_sub(unsigned long, std::memory_order) /usr/include/c++/15/bits/atomic_base.h:641
+    #1 0x61aa1b91de24 in SafeNumeric<unsigned long>::decrement() core/templates/safe_refcount.h:87
+    #2 0x61aa1b91de24 in CowData<char32_t>::_unref() core/templates/cowdata.h:250
+    #3 0x61aa301d9bf9 in CowData<char32_t>::operator=(CowData<char32_t>&&) core/templates/cowdata.h:170
+    #4 0x61aa301d9bf9 in CowData<char32_t>::operator=(CowData<char32_t>&&) core/templates/cowdata.h:165
+    #5 0x61aa301d9bf9 in String::operator=(String&&) core/string/ustring.h:683
+    #6 0x61aa301d9bf9 in void VariantConstructor<String, String>::construct_helper<0ul>(String&, Variant const**, Callable::CallError&, IndexSequence<0ul>) core/variant/variant_construct.h:103
+    #7 0x61aa301d9bf9 in VariantConstructor<String, String>::construct(Variant&, Variant const**, Callable::CallError&) core/variant/variant_construct.h:123
+    #8 0x61aa1f8a1d33 in GDScriptFunction::call(GDScriptInstance*, Variant const**, int, Callable::CallError&, GDScriptFunction::CallState*) modules/gdscript/gdscript_vm.cpp:1460
+    #9 0x61aa1f3fb706 in GDScriptInstance::callp(StringName const&, Variant const**, int, Callable::CallError&) modules/gdscript/gdscript.cpp:1976
+
+=== First fix attempt (ERR_READ_THREAD_GUARD_V(StringName()) - the standard macro used elsewhere in this file) - still crashed 10/10, but DIFFERENTLY: a silent, unreported segfault, no ASan report, no error message at all ===
+(root cause: that macro's error path calls get_description(), which (while inside the tree) calls get_path(), which calls get_name() on every ancestor - recursing straight back into this same guard on the same now-disallowed thread, infinite-recursing to a stack overflow before any message could even be printed)
+
+=== Complete fix (manual guard using get_class() instead of get_description() in the error message, avoiding the get_path()/get_name() recursion): 10/10 clean, guard visibly firing ===
+1 1 1 1 1 1 1 1 1 1 
+(error message fired 564947 times across run 1's 6-second stress window, confirming the guard is actively rejecting the reader threads' now-disallowed get_name() calls, not just 'getting lucky')
+
+=== Test suite with the complete fix applied, matches established baseline ===
+[doctest] test cases:   1431 |   1430 passed |    1 failed | 3 skipped

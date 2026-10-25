@@ -1,0 +1,64 @@
+diff --git a/src/fs/constants.rs b/src/fs/constants.rs
+index 097435ea..be6467b0 100644
+--- a/src/fs/constants.rs
++++ b/src/fs/constants.rs
+@@ -82,8 +82,11 @@ mod tests {
+         let some_stat: Stat = unsafe { core::mem::zeroed() };
+ 
+         // Ensure that seconds fields are 64-bit on non-y2038-bug platforms, and
+-        // on Linux where we use statx.
+-        #[cfg(any(linux_kernel, not(fix_y2038)))]
++        // on Linux where we use statx. (Not on WASI: `c::stat`'s timestamps
++        // are nested `st_atim`/`st_mtim`/`st_ctim: timespec` fields there,
++        // not flat `st_atime` etc., and `Stat` is a direct alias for
++        // `c::stat` on WASI, so these flat-field accesses don't compile.)
++        #[cfg(all(not(target_os = "wasi"), any(linux_kernel, not(fix_y2038))))]
+         {
+             assert_eq!(some_stat.st_atime, 0_i64);
+             assert_eq!(some_stat.st_mtime, 0_i64);
+@@ -157,21 +160,30 @@ mod tests {
+                 ))]
+                 check_renamed_struct_field!(Stat, stat, __pad2);
+                 check_renamed_struct_field!(Stat, stat, st_blocks);
+-                check_renamed_struct_field!(Stat, stat, st_atime);
+-                #[cfg(not(target_os = "netbsd"))]
+-                check_renamed_struct_field!(Stat, stat, st_atime_nsec);
+-                #[cfg(target_os = "netbsd")]
+-                check_renamed_struct_renamed_field!(Stat, stat, st_atime_nsec, st_atimensec);
+-                check_renamed_struct_field!(Stat, stat, st_mtime);
+-                #[cfg(not(target_os = "netbsd"))]
+-                check_renamed_struct_field!(Stat, stat, st_mtime_nsec);
+-                #[cfg(target_os = "netbsd")]
+-                check_renamed_struct_renamed_field!(Stat, stat, st_mtime_nsec, st_mtimensec);
+-                check_renamed_struct_field!(Stat, stat, st_ctime);
+-                #[cfg(not(target_os = "netbsd"))]
+-                check_renamed_struct_field!(Stat, stat, st_ctime_nsec);
+-                #[cfg(target_os = "netbsd")]
+-                check_renamed_struct_renamed_field!(Stat, stat, st_ctime_nsec, st_ctimensec);
++                // On WASI, `c::stat`'s timestamps are nested `st_atim`/
++                // `st_mtim`/`st_ctim: timespec` fields rather than flat
++                // `st_atime`/`st_atime_nsec` etc., so these particular
++                // field-name checks don't apply there; `Stat` is a direct
++                // type alias for `c::stat` on WASI anyway (see `types.rs`),
++                // so there is no renaming to verify in the first place.
++                #[cfg(not(target_os = "wasi"))]
++                {
++                    check_renamed_struct_field!(Stat, stat, st_atime);
++                    #[cfg(not(target_os = "netbsd"))]
++                    check_renamed_struct_field!(Stat, stat, st_atime_nsec);
++                    #[cfg(target_os = "netbsd")]
++                    check_renamed_struct_renamed_field!(Stat, stat, st_atime_nsec, st_atimensec);
++                    check_renamed_struct_field!(Stat, stat, st_mtime);
++                    #[cfg(not(target_os = "netbsd"))]
++                    check_renamed_struct_field!(Stat, stat, st_mtime_nsec);
++                    #[cfg(target_os = "netbsd")]
++                    check_renamed_struct_renamed_field!(Stat, stat, st_mtime_nsec, st_mtimensec);
++                    check_renamed_struct_field!(Stat, stat, st_ctime);
++                    #[cfg(not(target_os = "netbsd"))]
++                    check_renamed_struct_field!(Stat, stat, st_ctime_nsec);
++                    #[cfg(target_os = "netbsd")]
++                    check_renamed_struct_renamed_field!(Stat, stat, st_ctime_nsec, st_ctimensec);
++                }
+                 #[cfg(all(
+                     linux_raw,
+                     not(any(

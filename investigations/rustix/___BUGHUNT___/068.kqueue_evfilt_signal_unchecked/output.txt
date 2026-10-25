@@ -1,0 +1,213 @@
+=== Step 1: code reading - from_raw_unchecked vs from_raw_nonzero_unchecked ===
+
+$ sed -n '213,257p' src/signal.rs
+
+    /// Convert a raw signal number into a `Signal` without checks.
+    ///
+    /// # Safety
+    ///
+    /// `sig` must be a valid and non-zero signal number.
+    /// ...
+    pub const unsafe fn from_raw_unchecked(sig: i32) -> Self {
+        Self::from_raw_nonzero_unchecked(NonZeroI32::new_unchecked(sig))
+    }
+
+    /// Convert a raw non-zero signal number into a `Signal` without checks.
+    ///
+    /// # Safety
+    ///
+    /// `sig` must be a valid signal number.
+    /// ...
+    pub const unsafe fn from_raw_nonzero_unchecked(sig: NonZeroI32) -> Self {
+        Self(sig)
+    }
+
+Unlike candidate 057's `from_raw_nonzero_unchecked` (whose body is just `Self(sig)`, no internal
+UB-capable primitive because `sig` is already a checked `NonZeroI32` by the time it's called),
+`from_raw_unchecked` calls `NonZeroI32::new_unchecked(sig)` directly on a still-possibly-zero raw
+`i32` - this is the same shape as candidate 035's confirmed-UB `Pid::from_raw_unchecked`, not
+candidate 057's not-reproducible `Signal::from_raw_nonzero_unchecked`.
+
+The call site under investigation, `src/event/kqueue.rs:124`:
+
+    c::EVFILT_SIGNAL => EventFilter::Signal {
+        // SAFETY: `EventFilter::new` requires a valid `Signal`.
+        signal: unsafe { Signal::from_raw_unchecked(self.inner.ident as _) },
+        times: self.inner.data as _,
+    },
+
+`self.inner.ident` is the raw `uintptr_t`/`intptr_t` field of a `kevent_t` struct as returned by a
+real `kevent(2)` syscall - i.e. kernel-controlled data on the decode side, not validated at this
+call site before being fed into the unsafe constructor.
+
+=== Step 2: Miri - does from_raw_unchecked(0) produce real UB? ===
+
+Temporary test added to src/signal.rs (reverted before writing this candidate):
+
+    #[test]
+    fn candidate_068_from_raw_unchecked_zero_is_ub() {
+        let _ = unsafe { Signal::from_raw_unchecked(0) };
+    }
+
+    #[test]
+    fn candidate_068_from_raw_unchecked_nonzero_values() {
+        for raw in [1i32, -1, i32::MAX, i32::MIN, 34, 64, 65, 126] {
+            let s = unsafe { Signal::from_raw_unchecked(raw) };
+            assert_eq!(s.as_raw(), raw);
+        }
+    }
+
+Command: RUSTFLAGS="--cfg rustix_no_linux_raw" cargo +nightly miri test --features
+"std,all-apis,use-libc" --lib candidate_068
+
+Run 1/3:
+running 2 tests
+test signal::tests::candidate_068_from_raw_unchecked_nonzero_values ... ok
+test signal::tests::candidate_068_from_raw_unchecked_zero_is_ub ... error: Undefined Behavior: entering unreachable code
+   --> src/signal.rs:233:42
+    |
+233 |         Self::from_raw_nonzero_unchecked(NonZeroI32::new_unchecked(sig))
+    |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Undefined Behavior occurred here
+    = note: this is on thread `signal::tests::`
+    stack backtrace:
+       0: signal::Signal::from_raw_unchecked
+          at src/signal.rs:233:42: 233:72
+       1: signal::tests::candidate_068_from_raw_unchecked_zero_is_ub
+          at src/signal.rs:546:26: 546:55
+
+Run 2/3: identical - "nonzero_values ... ok", "zero_is_ub ... error: Undefined Behavior: entering unreachable code"
+Run 3/3: identical - "nonzero_values ... ok", "zero_is_ub ... error: Undefined Behavior: entering unreachable code"
+
+Conclusion: deterministic, 3/3 runs - `Signal::from_raw_unchecked(0)` is real, immediate Undefined
+Behavior (same diagnostic shape as candidate 035's `Pid::from_raw_unchecked(0)`: "entering
+unreachable code" at std's own `NonZeroI32::new_unchecked` precondition check). The nonzero control
+values (including boundary values i32::MIN/i32::MAX and real-time-signal-shaped numbers 34/64/65/126)
+all round-trip cleanly with no diagnostic, confirming the UB is specific to the zero value, not a
+general problem with the function.
+
+=== Step 3: kernel source review - can a real kevent(2) ever report ident == 0 for a triggered EVFILT_SIGNAL event? ===
+
+This step establishes whether the kernel-controlled `self.inner.ident` feeding this call site can
+ever actually be 0 after a real kevent(2) wait call returns a *triggered* (not just registered)
+EVFILT_SIGNAL event, on the two kqueue-capable OS families this code targets.
+
+--- FreeBSD (github.com/freebsd/freebsd-src mirror of cgit.freebsd.org/src, sys/kern/kern_sig.c) ---
+
+$ curl https://cgit.freebsd.org/src/plain/sys/kern/kern_sig.c
+$ grep -n "filt_sig\|EVFILT_SIGNAL\|NOTE_SIGNAL" kern_sig.c
+
+static int
+filt_sigattach(struct knote *kn)
+{
+	struct proc *p = curproc;
+
+	kn->kn_ptr.p_proc = p;
+	kn->kn_flags |= EV_CLEAR;		/* automatically set */
+
+	knlist_add(p->p_klist, kn, 0);
+
+	return (0);
+}
+                                                        <- NOTE: no validation of kn->kn_id at all
+
+static int
+filt_signal(struct knote *kn, long hint)
+{
+
+	if (hint & NOTE_SIGNAL) {
+		hint &= ~NOTE_SIGNAL;
+
+		if (kn->kn_id == hint)
+			kn->kn_data++;
+	}
+	return (kn->kn_data != 0);
+}
+                                  <- only becomes "ready" (f_event true) if a NOTE_SIGNAL|sig hint
+                                     with sig == kn_id (the registered ident) is ever posted
+
+The only call site that posts a NOTE_SIGNAL hint, tdsendsignal() (sys/kern/kern_sig.c):
+
+int
+tdsendsignal(struct proc *p, struct thread *td, int sig, ksiginfo_t *ksi)
+{
+	...
+	if (!_SIG_VALID(sig))
+		panic("%s(): invalid signal %d", __func__, sig);
+	...
+	KNOTE_LOCKED(p->p_klist, NOTE_SIGNAL | sig);
+	...
+}
+
+$ grep -n "_SIG_VALID" sys/sys/_sigset.h
+#define	_SIG_VALID(sig)	((sig) <= _SIG_MAXSIG && (sig) > 0)
+
+=> tdsendsignal() *panics* (kernel panic, i.e. this path is definitionally unreachable in a
+   functioning kernel) if ever called with sig <= 0, including sig == 0 - so `NOTE_SIGNAL | 0` is
+   never posted through the normal, universal signal-delivery path.
+
+--- macOS / XNU (github.com/apple-oss-distributions/xnu, bsd/kern/kern_sig.c, bsd/kern/kern_event.c) ---
+
+$ curl -L https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/kern/kern_event.c
+$ grep -n "EVFILT_SIGNAL" xnu_kern_event.c
+	[~EVFILT_SIGNAL] = &sig_filtops,
+
+$ curl -L https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/kern/kern_sig.c
+$ grep -n "proc_knote(sig_proc, NOTE_SIGNAL" xnu_kern_sig.c
+2125:		proc_knote(sig_proc, NOTE_SIGNAL | signum);
+                                        (inside psignal_internal(), the one place XNU posts this hint)
+
+$ grep -n "^kill(" -A 40 xnu_kern_sig.c | sed -n '1,40p'
+kill(proc_t cp, struct kill_args *uap, __unused int32_t *retval)
+{
+	...
+	if ((u_int)uap->signum >= NSIG) {
+		return EINVAL;
+	}
+	...
+		if (uap->signum) {
+			psignal(p, uap->signum);
+		}
+	...
+}
+                       <- the kill(2) syscall's own "existence test" special case (POSIX
+                          kill(pid, 0) semantics) explicitly skips calling psignal() at all when
+                          signum == 0, so psignal_internal()/proc_knote(..., NOTE_SIGNAL | 0) is
+                          never reached via this path either.
+
+Conclusion: on both FreeBSD and macOS/XNU - the two kqueue-capable OS families actually checked -
+signal number 0 is architecturally never delivered through the kernel's real signal-posting path
+(a direct, structural consequence of POSIX's own kill(pid, 0) "no signal sent, existence/permission
+test only" semantics, enforced in FreeBSD by an outright kernel panic on any other caller attempting
+it, and in macOS/XNU by the kill(2) syscall never calling psignal() for signum == 0 in the first
+place). Even though `filt_sigattach` on both platforms would readily accept *registering* a knote
+with `ident == 0` for EVFILT_SIGNAL (no validation at attach time), such a knote's "ready" condition
+(`kn_data != 0`, driven exclusively by NOTE_SIGNAL hints matching its ident) can structurally never
+become true - so no real kevent(2) wait call can ever return a *triggered* EVFILT_SIGNAL event with
+ident == 0, regardless of what registered it or how.
+
+=== Step 4: git archaeology - introducing commit ===
+
+$ git log --follow --oneline -- src/event/kqueue.rs | tail -5
+0da77b01f Add kqueue signal filter (#582)
+
+$ git show fc2a014f -- src/event/kqueue.rs
+-            c::EVFILT_SIGNAL => EventFilter::Signal {
+-                signal: Signal::from_raw(self.inner.ident as _).unwrap(),
++            c::EVFILT_SIGNAL => EventFilter::Signal {
++                // SAFETY: `EventFilter::new` requires a valid `Signal`.
++                signal: unsafe { Signal::from_raw_unchecked(self.inner.ident as _) },
+                 times: self.inner.data as _,
+             },
+
+commit fc2a014f0eb124710669b57e883166c15d29225f
+Author: Dan Gohman <dev@sunfishcode.online>
+Date:   Tue Jan 28 04:57:51 2025 -0800
+    Support `SIGRTMIN+n` signals. (#1292)
+
+=== cargo test baseline (unmodified, host x86_64-unknown-linux-gnu; kqueue/BSD code does not
+compile/run on this host, listed for completeness only - not part of this candidate's own
+verification since no source was changed) ===
+
+Not run: no code change was made this session (the only modification, the temporary Miri probe
+test in src/signal.rs, was reverted before this file was written), so there is nothing for a
+before/after test-suite comparison to show.

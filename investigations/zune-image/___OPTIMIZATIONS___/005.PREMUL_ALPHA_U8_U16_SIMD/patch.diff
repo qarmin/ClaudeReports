@@ -1,0 +1,146 @@
+diff --git a/crates/zune-imageprocs/src/premul_alpha.rs b/crates/zune-imageprocs/src/premul_alpha.rs
+index 92134617..dc23653f 100644
+--- a/crates/zune-imageprocs/src/premul_alpha.rs
++++ b/crates/zune-imageprocs/src/premul_alpha.rs
+@@ -52,6 +52,7 @@ use zune_image::metadata::AlphaState;
+ use zune_image::traits::{OperationColorValues, OperationsTrait};
+ 
+ use crate::mathops::{compute_mod_u32, fastdiv_u32};
++use crate::simd_fn;
+ 
+ mod std_simd;
+ 
+@@ -259,15 +260,31 @@ pub fn create_unpremul_table_u16() -> Vec<u128> {
+ /// * `alpha`:  Alpha values corresponding to pre-multiplied alpha
+ ///
+ /// Items in input are modified in place.
+-#[allow(clippy::cast_possible_truncation)]
++#[inline]
+ pub fn premultiply_u8(input: &mut [u8], alpha: &[u8]) {
+-    input.iter_mut().zip(alpha).for_each(|(color, al)| {
+-        let temp = (u16::from(*al) * u16::from(*color)) + 0x80;
+-
+-        *color = ((temp + (temp >> 8)) >> 8) as u8;
+-    });
++    premultiply_u8_simd(input, alpha);
+ }
+ 
++// This loop is a tight, branch-free multiply-add-shift with no loop-carried dependency between
++// elements, so LLVM's auto-vectorizer already turns it into SSE2 code identical to a hand-written
++// SIMD version at the default (SSE2-only) compile target (verified by objdump - both produce the
++// same punpcklbw/pmullw/paddw/psrlw/packuswb sequence). Wrapping it with `simd_fn!` (this crate's
++// existing AVX2/NEON runtime-dispatch macro, used by sobel.rs/bilateral_filter.rs/rotate.rs)
++// instead lets the *same* source recompile under `#[target_feature(enable = "avx2")]`, so the
++// auto-vectorizer picks 32-byte-wide registers instead of 16-byte ones on machines that support
++// it - the actual point of this candidate, since the crate's own default feature set already
++// includes `avx2`.
++simd_fn!(
++    #[allow(clippy::cast_possible_truncation)]
++    fn premultiply_u8_simd(input: &mut [u8], alpha: &[u8]) {
++        input.iter_mut().zip(alpha).for_each(|(color, al)| {
++            let temp = (u16::from(*al) * u16::from(*color)) + 0x80;
++
++            *color = ((temp + (temp >> 8)) >> 8) as u8;
++        });
++    }
++);
++
+ /// Specialized pre_multiply for u16
+ ///
+ /// # Arguments
+@@ -276,16 +293,23 @@ pub fn premultiply_u8(input: &mut [u8], alpha: &[u8]) {
+ /// * `alpha`: Alpha for associated values
+ ///
+ /// returns: Array modified in place
+-#[allow(clippy::cast_possible_truncation)]
++#[inline]
+ pub fn premultiply_u16(input: &mut [u16], alpha: &[u16]) {
+-    const MAX_VALUE: u32 = 65535;
+-
+-    input.iter_mut().zip(alpha).for_each(|(color, al)| {
+-        let temp = (u32::from(*al) * u32::from(*color)) + MAX_VALUE.div_ceil(2);
+-        *color = ((temp + (temp >> 16)) >> 16) as u16;
+-    });
++    premultiply_u16_simd(input, alpha);
+ }
+ 
++simd_fn!(
++    #[allow(clippy::cast_possible_truncation)]
++    fn premultiply_u16_simd(input: &mut [u16], alpha: &[u16]) {
++        const MAX_VALUE: u32 = 65535;
++
++        input.iter_mut().zip(alpha).for_each(|(color, al)| {
++            let temp = (u32::from(*al) * u32::from(*color)) + MAX_VALUE.div_ceil(2);
++            *color = ((temp + (temp >> 16)) >> 16) as u16;
++        });
++    }
++);
++
+ /// Remove effects of pre-multiplied alpha
+ ///
+ /// # Arguments
+@@ -398,3 +422,64 @@ pub fn unpremultiply_f32(input: &mut [f32], alpha: &[f32]) {
+ 
+     unpremultiply_f32_scalar(input, alpha);
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::{premultiply_u16, premultiply_u8};
++
++    fn premultiply_u8_reference(color: u8, al: u8) -> u8 {
++        let temp = (u16::from(al) * u16::from(color)) + 0x80;
++        ((temp + (temp >> 8)) >> 8) as u8
++    }
++
++    fn premultiply_u16_reference(color: u16, al: u16) -> u16 {
++        const MAX_VALUE: u32 = 65535;
++        let temp = (u32::from(al) * u32::from(color)) + MAX_VALUE.div_ceil(2);
++        ((temp + (temp >> 16)) >> 16) as u16
++    }
++
++    #[test]
++    fn premultiply_u8_matches_reference_exhaustive() {
++        // exhaustive over the full u8 x u8 (color, alpha) domain, with a length (65536) that is
++        // a multiple of the AVX2 lane width (32) - also check a trimmed, non-multiple length
++        // below to exercise the scalar remainder path of the dispatched implementation.
++        let colors: Vec<u8> = (0..=255u16).flat_map(|c| std::iter::repeat(c as u8).take(256)).collect();
++        let alphas: Vec<u8> = (0..=255u16).cycle().take(colors.len()).map(|a| a as u8).collect();
++
++        let expected: Vec<u8> = colors
++            .iter()
++            .zip(&alphas)
++            .map(|(&c, &a)| premultiply_u8_reference(c, a))
++            .collect();
++
++        let mut actual = colors.clone();
++        premultiply_u8(&mut actual, &alphas);
++        assert_eq!(actual, expected);
++
++        // non-multiple-of-32 length remainder check
++        let mut actual = colors[..12345].to_vec();
++        premultiply_u8(&mut actual, &alphas[..12345]);
++        assert_eq!(actual, expected[..12345]);
++    }
++
++    #[test]
++    fn premultiply_u16_matches_reference() {
++        use nanorand::Rng;
++
++        // not a multiple of the AVX2 lane width (16) - exercises the remainder path too.
++        let mut colors = [0u16; 2003];
++        nanorand::WyRand::new().fill(&mut colors);
++        let mut alphas = [0u16; 2003];
++        nanorand::WyRand::new().fill(&mut alphas);
++
++        let expected: Vec<u16> = colors
++            .iter()
++            .zip(&alphas)
++            .map(|(&c, &a)| premultiply_u16_reference(c, a))
++            .collect();
++
++        let mut actual = colors;
++        premultiply_u16(&mut actual, &alphas);
++        assert_eq!(actual.as_slice(), expected.as_slice());
++    }
++}

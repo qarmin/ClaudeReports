@@ -1,0 +1,116 @@
+diff --git a/core/variant/array.cpp b/core/variant/array.cpp
+index d39c51942f..a6c1f007ec 100644
+--- a/core/variant/array.cpp
++++ b/core/variant/array.cpp
+@@ -124,6 +124,10 @@ void Array::clear() {
+ 	_p->array.clear();
+ }
+ 
++const Vector<Variant> &Array::as_vector() const {
++	return _p->array;
++}
++
+ bool Array::operator==(const Array &p_array) const {
+ 	return recursive_equal(p_array, 0);
+ }
+@@ -952,6 +956,12 @@ Array::Array(const Array &p_from) {
+ 	_ref(p_from);
+ }
+ 
++Array::Array(Vector<Variant> &&p_from) {
++	_p = memnew(ArrayPrivate);
++	_p->refcount.init();
++	_p->array = std::move(p_from);
++}
++
+ Array::Array(std::initializer_list<Variant> p_init) {
+ 	_p = memnew(ArrayPrivate);
+ 	_p->refcount.init();
+diff --git a/core/variant/array.h b/core/variant/array.h
+index 9ec32797ea..645311a6fb 100644
+--- a/core/variant/array.h
++++ b/core/variant/array.h
+@@ -40,6 +40,8 @@
+ class Callable;
+ class StringName;
+ class Variant;
++template <typename>
++class Vector;
+ 
+ struct ArrayPrivate;
+ struct ContainerType;
+@@ -115,6 +117,8 @@ public:
+ 	bool is_empty() const;
+ 	void clear();
+ 
++	const Vector<Variant> &as_vector() const;
++
+ 	bool operator==(const Array &p_array) const;
+ 	bool operator!=(const Array &p_array) const;
+ 	bool recursive_equal(const Array &p_array, int p_recursion_count) const;
+@@ -203,6 +207,7 @@ public:
+ 
+ 	Array(const Array &p_base, uint32_t p_type, const StringName &p_class_name, const Variant &p_script);
+ 	Array(const Array &p_from);
++	explicit Array(Vector<Variant> &&p_from);
+ 	Array(std::initializer_list<Variant> p_init);
+ 	Array();
+ 	~Array();
+diff --git a/core/variant/callable.cpp b/core/variant/callable.cpp
+index b918729cb0..d410bf96ea 100644
+--- a/core/variant/callable.cpp
++++ b/core/variant/callable.cpp
+@@ -135,12 +135,7 @@ Callable Callable::bindv(const Array &p_arguments) {
+ 		return *this; // No point in creating a new callable if nothing is bound.
+ 	}
+ 
+-	Vector<Variant> args;
+-	args.resize(p_arguments.size());
+-	for (int i = 0; i < p_arguments.size(); i++) {
+-		args.write[i] = p_arguments[i];
+-	}
+-	return Callable(memnew(CallableCustomBind(*this, args)));
++	return Callable(memnew(CallableCustomBind(*this, Vector(p_arguments.as_vector()))));
+ }
+ 
+ Callable Callable::unbind(int p_argcount) const {
+@@ -216,12 +211,7 @@ void Callable::get_bound_arguments_ref(Vector<Variant> &r_arguments) const {
+ Array Callable::get_bound_arguments() const {
+ 	Vector<Variant> arr;
+ 	get_bound_arguments_ref(arr);
+-	Array ret;
+-	ret.resize(arr.size());
+-	for (int i = 0; i < arr.size(); i++) {
+-		ret[i] = arr[i];
+-	}
+-	return ret;
++	return Array(std::move(arr));
+ }
+ 
+ int Callable::get_unbound_arguments_count() const {
+diff --git a/core/variant/variant.cpp b/core/variant/variant.cpp
+index 029221cdb2..a3b59f59ee 100644
+--- a/core/variant/variant.cpp
++++ b/core/variant/variant.cpp
+@@ -2296,20 +2296,7 @@ Variant::operator Vector<Face3>() const {
+ }
+ 
+ Variant::operator Vector<Variant>() const {
+-	Array va = operator Array();
+-	Vector<Variant> variants;
+-	int va_size = va.size();
+-	if (va_size == 0) {
+-		return variants;
+-	}
+-
+-	variants.resize(va_size);
+-	Variant *w = variants.ptrw();
+-	for (int i = 0; i < va_size; i++) {
+-		w[i] = va[i];
+-	}
+-
+-	return variants;
++	return Vector(operator Array().as_vector());
+ }
+ 
+ Variant::operator Vector<StringName>() const {

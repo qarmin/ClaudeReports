@@ -114,3 +114,15 @@ Per-project rules when copying:
 - if an identical report is already here, it is left untouched (never overwritten);
 - if only older version(s) exist, they are deleted and the newer report takes their place;
 - if a newer version is already here, the older source report is skipped (no downgrade).
+
+## Fuzz targets
+
+`fuzz-targets/<name>/` holds the crashes found by [rust-fuzzer](https://github.com/qarmin/rust-fuzzer) (`rfuzz`) for each library: `fuzz.toml`, `crashes.md` and one folder per crash with a standalone reproducer (`src/main.rs`, `Cargo.toml`, `Cargo.lock`, `README.md`). Targets that were already reported upstream carry an empty `REPORTED` file.
+
+Refresh from a local rust-fuzzer checkout (default `~/Projekty/Rust/rust-fuzzer`, reads `targets/` and `targets_reported/`):
+
+```
+python3 scripts/find_targets.py [path] [--dry-run]
+```
+
+Unchanged targets are skipped, changed ones are rewritten and targets that disappeared from the source are removed. `assets/`, `work/` and rfuzz internals (`trace.ron` etc.) are not copied.

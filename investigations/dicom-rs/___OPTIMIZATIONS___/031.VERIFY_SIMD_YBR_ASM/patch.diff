@@ -1,18 +1,12 @@
 diff --git a/pixeldata/src/lib.rs b/pixeldata/src/lib.rs
-index 6ede5847..f228b1e0 100644
+index 6ede5847..064549de 100644
 --- a/pixeldata/src/lib.rs
 +++ b/pixeldata/src/lib.rs
-@@ -1985,6 +1985,26 @@ fn bytes_to_vec_u16(data: &[u8]) -> Vec<u16> {
+@@ -1985,6 +1985,20 @@ fn bytes_to_vec_u16(data: &[u8]) -> Vec<u16> {
  
  // Convert u8 pixel array from YBR_FULL or YBR_FULL_422 to RGB
  // Every pixel is replaced with an RGB value
-+// Fixed-point (Q12.20, i32) coefficients for the YCbCr->RGB matrix below,
-+// avoiding a per-pixel f32 multiply chain + libm `floor` call. Rounding the
-+// coefficients to the nearest 1/2^20 introduces a small, one-directional
-+// discrepancy against the f32 path at rounding boundaries (measured: ~0.053%
-+// of channel values come out exactly 1 LSB lower than the float version,
-+// never higher and never off by more than 1 LSB - see candidate
-+// 002.YBR_TO_RGB_FIXED_POINT's RESULT.md for the exhaustive check).
++// Fixed-point (Q12.20, i32) coefficients for the YCbCr->RGB matrix, avoiding a per-pixel f32 multiply+floor (rounding discrepancy vs. f32: <=1 LSB, see 002's RESULT.md).
 +#[cfg(feature = "image")]
 +const YBR_SHIFT_U8: i32 = 20;
 +#[cfg(feature = "image")]
@@ -29,7 +23,7 @@ index 6ede5847..f228b1e0 100644
  #[cfg(feature = "image")]
  fn convert_colorspace_u8(i: &mut [u8]) {
      #[cfg(feature = "rayon")]
-@@ -1995,23 +2015,18 @@ fn convert_colorspace_u8(i: &mut [u8]) {
+@@ -1995,23 +2009,18 @@ fn convert_colorspace_u8(i: &mut [u8]) {
      // Matrix multiplication taken from
      // https://github.com/pydicom/pydicom/blob/f36517e10/pydicom/pixel_data_handlers/util.py#L576
      iter.for_each(|pixel| {
@@ -65,19 +59,11 @@ index 6ede5847..f228b1e0 100644
      });
  }
  
-@@ -2031,6 +2046,28 @@ fn interleave<T: Copy>(data: &[T]) -> Vec<T> {
+@@ -2031,6 +2040,20 @@ fn interleave<T: Copy>(data: &[T]) -> Vec<T> {
  
  // Convert u16 pixel array from YBR_FULL or YBR_FULL_422 to RGB
  // Every pixel is replaced with an RGB value
-+// Fixed-point (Q33.30, i64) coefficients for the u16 path - needs i64 and a
-+// higher shift than the u8 path because `y` here ranges up to 65535, so a
-+// 32-bit accumulator with enough coefficient precision to keep the
-+// float-vs-fixed discrepancy small would overflow (verified: i32 with a
-+// shift high enough for good precision overflows at y=65535). Rounding
-+// discrepancy vs. the f32 path (measured, sampled + boundary-swept): ~0.37%
-+// of channel values 1 LSB lower, a much smaller fraction 1 LSB higher, never
-+// off by more than 1 LSB - see candidate 002.YBR_TO_RGB_FIXED_POINT's
-+// RESULT.md.
++// Fixed-point (Q33.30, i64) coefficients for the u16 path - needs i64 since y up to 65535 would overflow a 32-bit accumulator (rounding discrepancy vs. f32: <=1 LSB, see 002's RESULT.md).
 +#[cfg(feature = "image")]
 +const YBR_SHIFT_U16: i64 = 30;
 +#[cfg(feature = "image")]
@@ -94,7 +80,7 @@ index 6ede5847..f228b1e0 100644
  #[cfg(feature = "image")]
  fn convert_colorspace_u16(i: &mut [u16]) {
      #[cfg(feature = "rayon")]
-@@ -2041,23 +2078,18 @@ fn convert_colorspace_u16(i: &mut [u16]) {
+@@ -2041,23 +2064,18 @@ fn convert_colorspace_u16(i: &mut [u16]) {
      // Matrix multiplication taken from
      // https://github.com/pydicom/pydicom/blob/f36517e10/pydicom/pixel_data_handlers/util.py#L576
      iter.for_each(|pixel| {

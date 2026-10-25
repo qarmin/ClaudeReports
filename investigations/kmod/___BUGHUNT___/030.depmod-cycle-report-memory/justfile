@@ -1,0 +1,50 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# Fill in repo_url/base_commit when this candidate is created (read them once with
+# `git remote get-url origin` / `git rev-parse HEAD` in the main project, at the moment
+# patch.diff is captured) - patch.diff is a diff against that exact commit and may stop applying
+# cleanly once the main branch moves on.
+
+repo_url := "https://github.com/kmod-project/kmod"
+base_commit := "692c5a0f731f31c1da49cce12b231be35c76b7fe"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+# If this candidate has no patch.diff (Confirmed with no bounded fix, or Not reproducible /
+# Inconclusive), delete the `apply`/`reproduce-after` steps and keep only `reproduce-before`.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && git apply "{{justfile_directory()}}/prereq-011.diff"
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug.
+# repro/run.sh <src> <build_dir> builds against ./clone's ASAN/UBSAN build and exits non-zero when
+# the bug reproduces. `ulimit -c 0` stops a crashing repro from dumping a core file.
+build:
+    cd clone && (test -f _b/build.ninja || CC=clang meson setup _b --native-file build-dev.ini -Ddocs=false -Dmanpages=false -Dwerror=false) && ninja -C _b
+
+reproduce-before: build
+    # expected to fail (bug present) - the leading '-' keeps `just test` going
+    -ulimit -c 0 && bash repro/run.sh clone clone/_b
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should no longer demonstrate the bug (or, for
+# a logic bug, should now produce the correct result).
+# just runs a dependency at most once per invocation, so `build: ` here would be skipped after
+# `apply` - rebuild explicitly instead.
+reproduce-after:
+    ninja -C clone/_b
+    ulimit -c 0 && bash repro/run.sh clone clone/_b
+
+clean:
+    rm -rf clone

@@ -1,0 +1,40 @@
+diff --git a/src/backend/libc/termios/syscalls.rs b/src/backend/libc/termios/syscalls.rs
+index dbe4a6e0..7c40673e 100644
+--- a/src/backend/libc/termios/syscalls.rs
++++ b/src/backend/libc/termios/syscalls.rs
+@@ -346,6 +346,15 @@ pub(crate) fn tcflow(fd: BorrowedFd<'_>, action: Action) -> io::Result<()> {
+ pub(crate) fn tcgetsid(fd: BorrowedFd<'_>) -> io::Result<Pid> {
+     unsafe {
+         let pid = ret_pid_t(c::tcgetsid(borrowed_fd(fd)))?;
++
++        // As with `tcgetpgrp` above, the kernel can report a session id of 0
++        // (e.g. on Linux, when the tty's controlling session isn't visible in
++        // the calling process' pid namespace), which `Pid::from_raw_unchecked`
++        // cannot accept.
++        if pid == 0 {
++            return Err(io::Errno::OPNOTSUPP);
++        }
++
+         Ok(Pid::from_raw_unchecked(pid))
+     }
+ }
+diff --git a/src/backend/linux_raw/termios/syscalls.rs b/src/backend/linux_raw/termios/syscalls.rs
+index 07c3a3d9..8d630390 100644
+--- a/src/backend/linux_raw/termios/syscalls.rs
++++ b/src/backend/linux_raw/termios/syscalls.rs
+@@ -252,6 +252,15 @@ pub(crate) fn tcgetsid(fd: BorrowedFd<'_>) -> io::Result<Pid> {
+         let mut result = MaybeUninit::<c::pid_t>::uninit();
+         ret(syscall!(__NR_ioctl, fd, c_uint(c::TIOCGSID), &mut result))?;
+         let pid = result.assume_init();
++
++        // As with `tcgetpgrp` above, the kernel's `pid_vnr`/`pid_nr_ns` can
++        // report 0 (e.g. when the tty's controlling session isn't visible in
++        // the calling process' pid namespace), which `Pid::from_raw_unchecked`
++        // cannot accept.
++        if pid == 0 {
++            return Err(io::Errno::OPNOTSUPP);
++        }
++
+         Ok(Pid::from_raw_unchecked(pid))
+     }
+ }

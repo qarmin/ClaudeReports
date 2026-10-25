@@ -1,0 +1,53 @@
+# Self-contained reproduction for this candidate.
+# repo_url/base_commit read at the moment patch.diff was captured in the main project.
+
+repo_url := "https://github.com/godotengine/godot.git"
+base_commit := "9552dfb6859a1aaba1e570b8e0ef5c599b830f19"
+
+test: clone build bench-before apply rebuild bench-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v scons >/dev/null 2>&1 || pip3 install scons --break-system-packages
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+
+bench-before:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export XDG_DATA_HOME="{{justfile_directory()}}/clone/tmp/xdg_data"
+    mkdir -p "$XDG_DATA_HOME"
+    echo "--- before: timing ---"
+    clone/bin/godot.linuxbsd.editor.x86_64 --headless --script "{{justfile_directory()}}/bench/timing_probe.gd"
+    echo "--- before: memory ---"
+    clone/bin/godot.linuxbsd.editor.x86_64 --headless --script "{{justfile_directory()}}/bench/memory_probe.gd"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+rebuild:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+
+bench-after:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export XDG_DATA_HOME="{{justfile_directory()}}/clone/tmp/xdg_data"
+    mkdir -p "$XDG_DATA_HOME"
+    echo "--- after: timing ---"
+    clone/bin/godot.linuxbsd.editor.x86_64 --headless --script "{{justfile_directory()}}/bench/timing_probe.gd"
+    echo "--- after: memory ---"
+    clone/bin/godot.linuxbsd.editor.x86_64 --headless --script "{{justfile_directory()}}/bench/memory_probe.gd"
+
+clean:
+    rm -rf clone

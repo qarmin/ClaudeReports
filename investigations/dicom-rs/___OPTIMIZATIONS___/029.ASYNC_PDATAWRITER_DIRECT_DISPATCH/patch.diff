@@ -1,17 +1,12 @@
 diff --git a/ul/src/association/pdata.rs b/ul/src/association/pdata.rs
-index dcb4eb20..408413e0 100644
+index dcb4eb20..89fe8221 100644
 --- a/ul/src/association/pdata.rs
 +++ b/ul/src/association/pdata.rs
-@@ -373,6 +373,43 @@ pub mod non_blocking {
+@@ -373,6 +373,31 @@ pub mod non_blocking {
          /// Currently writing to underlying stream, with a position in the buffer
          /// and the number of bytes consumed by the caller buffer
          Writing(usize, usize),
-+        /// Currently writing a PDU whose payload was never copied into `self.buffer` (see
-+        /// `poll_write`'s "direct dispatch" path for a large single write reaching a fresh
-+        /// `Ready` state) - `header_pos` tracks progress writing `self.buffer`'s header bytes,
-+        /// `payload_pos` tracks progress writing `payload_len` bytes directly out of the
-+        /// caller's own `buf` (guaranteed to be passed identically on every resumed call while
-+        /// `Poll::Pending` is returned, per the `AsyncWrite` contract).
++        /// Writing a PDU whose payload was never copied into `self.buffer` (see `poll_write`'s "direct dispatch" path); tracks header and payload write progress separately.
 +        WritingDirect {
 +            header_pos: usize,
 +            payload_pos: usize,
@@ -19,14 +14,7 @@ index dcb4eb20..408413e0 100644
 +        },
 +    }
 +
-+    /// Same layout as the top-level `setup_pdata_header`, but takes `data_len` explicitly
-+    /// instead of inferring it from `buffer.len()` - used only by the "direct dispatch" path
-+    /// above, where `buffer` is always exactly the `PDU_PDV_HEADER_SIZE`-byte header prefix and
-+    /// the payload itself is never copied into it. Kept local to this module (not shared with
-+    /// the synchronous `PDataWriter`'s own `setup_pdata_header`) so this candidate stays
-+    /// self-contained and independently applicable, per this workspace's "one fix per
-+    /// candidate" discipline - candidate 020's own sync-side fix already made an equivalent
-+    /// change to the shared helper, but that patch is not assumed to be applied here.
++    /// Same as the top-level `setup_pdata_header`, but takes `data_len` explicitly since `buffer` here is just the header prefix (payload never copied into it).
 +    fn setup_pdata_header_direct(buffer: &mut [u8], data_len: u32, is_last: bool) {
 +        let pdu_len = data_len + 4 + 2;
 +        let pdu_len_bytes = pdu_len.to_be_bytes();
@@ -46,14 +34,11 @@ index dcb4eb20..408413e0 100644
      }
  
      /// A P-Data async value writer.
-@@ -508,6 +545,79 @@ pub mod non_blocking {
+@@ -508,6 +533,75 @@ pub mod non_blocking {
          }
      }
  
-+    /// Write the header (`self.buffer`, always exactly `PDU_PDV_HEADER_SIZE` bytes here) and
-+    /// then `payload_len` bytes taken directly from the caller's `buf` (never copied into
-+    /// `self.buffer`), resuming from `header_pos`/`payload_pos` if this is continuing after a
-+    /// previous `Poll::Pending` - see `WriteState::WritingDirect`.
++    /// Write the header, then `payload_len` bytes taken directly from `buf`, resuming from `header_pos`/`payload_pos` after a previous `Poll::Pending` (see `WriteState::WritingDirect`).
 +    #[cfg(feature = "async")]
 +    fn poll_write_direct<W: AsyncWrite + Unpin>(
 +        mut this: Pin<&mut AsyncPDataWriter<W>>,
@@ -104,8 +89,7 @@ index dcb4eb20..408413e0 100644
 +                Poll::Ready(Ok(n)) => {
 +                    payload_pos += n;
 +                    if payload_pos == payload_len {
-+                        // `self.buffer` was never extended for this PDU - it's already back to
-+                        // just the header, nothing to truncate.
++                        // `self.buffer` was never extended for this PDU, nothing to truncate.
 +                        w.state = WriteState::Ready;
 +                        return Poll::Ready(Ok(payload_len));
 +                    }
@@ -126,23 +110,19 @@ index dcb4eb20..408413e0 100644
      #[cfg(feature = "async")]
      impl<W> AsyncWrite for AsyncPDataWriter<W>
      where
-@@ -529,6 +639,15 @@ pub mod non_blocking {
+@@ -529,6 +623,11 @@ pub mod non_blocking {
                          // Still have space in `self.buffer`, accumulate into buffer
                          self.buffer.extend(buf);
                          Poll::Ready(Ok(buf.len()))
 +                    } else if self.buffer.len() == PDU_PDV_HEADER_SIZE {
-+                        // Fresh PDU (no partial payload already accumulated) and this write
-+                        // alone overflows it - take this PDU's whole payload capacity straight
-+                        // from `buf` and send it without copying it into `self.buffer` first,
-+                        // mirroring candidate 020's sync-side fix for the same "large single
-+                        // write" case (see this candidate's own RESULT.md).
++                        // Fresh PDU overflowed by this write alone - dispatch straight from `buf` instead of copying into `self.buffer` first.
 +                        let take = total_len - PDU_PDV_HEADER_SIZE;
 +                        setup_pdata_header_direct(&mut self.buffer, take as u32, false);
 +                        poll_write_direct(self.as_mut(), cx, buf, 0, 0, take)
                      } else {
                          // `self.buffer` is full, fill in the rest of the
                          // buffer, prepare to send PDU
-@@ -621,6 +740,11 @@ pub mod non_blocking {
+@@ -621,6 +720,11 @@ pub mod non_blocking {
                          }
                      }
                  }
@@ -154,15 +134,11 @@ index dcb4eb20..408413e0 100644
              }
          }
  
-@@ -1190,6 +1314,12 @@ mod tests {
+@@ -1190,6 +1294,8 @@ mod tests {
      #[case(vec![Some(2000), Some(1000), None, Some(1000)])]
      #[case(vec![Some(2000), Some(1000), None, None, None, Some(1000)])]
      #[case(vec![Some(2000), Some(1000), None, Some(1000), None, None, Some(1000)])]
-+    // Pending injected mid-header (the very first poll_write call returns Pending before any
-+    // header byte is written), then a partial header write, then Pending again mid-payload -
-+    // exercises the "direct dispatch" path's WritingDirect{header_pos, ...} resume logic for a
-+    // large single write reaching a fresh Ready state (none of the cases above happen to split
-+    // the 12-byte PDU header itself across multiple poll_write calls).
++    // Exercises the direct-dispatch WritingDirect resume logic: Pending mid-header, then a partial header write, then Pending again mid-payload.
 +    #[case(vec![None, Some(5), Some(7), Some(1000), None, None, Some(1000)])]
      #[tokio::test(flavor = "multi_thread")]
      async fn test_partial_write(#[case] control: Vec<Option<usize>>) {

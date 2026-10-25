@@ -1,0 +1,45 @@
+=== Approach 1: real boundary-value / differential sweep over RawDir (genuine getdents64 syscalls, buf_size 0..=4096) ===
+created 13 real entries
+swept buf_size 0..=4096: 0 mismatches, 0 sizes too small for one entry
+OK: no logic mismatch or crash/UB observed across the full buffer-size sweep
+
+=== Approach 2a: same RawDir code under MemorySanitizer (linux_raw backend, real tmp dir with 13 entries) ===
+created 13 real entries
+==189300==WARNING: MemorySanitizer: use-of-uninitialized-value
+    #0 0x564641709863 in <rustix::fs::raw_dir::RawDir<&std::os::fd::owned::OwnedFd>>::next /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/044/src/fs/raw_dir.rs:226:40
+    #1 0x5646416fd183 in raw_dir_boundary::collect_rawdir /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/044/examples/raw_dir_boundary.rs:44:38
+    #2 0x5646417002d5 in raw_dir_boundary::main /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_wt/044/examples/raw_dir_boundary.rs:84:19
+    #3 0x56464171aaf5 in <fn() as core::ops::function::FnOnce<()>>::call_once /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+    #4 0x56464171add8 in std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()> /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166:18
+    #5 0x564641716f02 in std::rt::lang_start::<()>::{closure#0} /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206:18
+    #6 0x564641bfc6f2 in <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:287:21
+    #7 0x564641851d03 in std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:573:43
+    #8 0x564641889cb9 in __rust_try std.c2fe5b3d92faa4fb-cgu.04
+    #9 0x56464184fa7e in std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync> /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:541:19
+    #10 0x564641a2412a in std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32> /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panic.rs:359:14
+    #11 0x56464196bc88 in std::rt::lang_start_internal::{closure#0} /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:175:24
+    #12 0x56464185189b in std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize> /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:573:43
+    #13 0x564641889cb9 in __rust_try std.c2fe5b3d92faa4fb-cgu.04
+    #14 0x56464184f44b in std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}> /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:541:19
+    #15 0x564641a24074 in std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize> /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panic.rs:359:14
+    #16 0x56464198ae64 in std::rt::lang_start_internal /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:171:5
+    #17 0x564641716e48 in std::rt::lang_start::<()> /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:205:5
+
+(MSan backtrace for approach 2a truncated above to the fault site + first few frames;
+ full raw output omitted for brevity - fault site is src/fs/raw_dir.rs:226:40, the
+ `dirent.d_reclen`/`dirent.d_ino` field reads inside RawDir::next.)
+
+=== Approach 2b: standalone, rustix-free isolation of the MSan diagnostic (investigation/msan_false_positive_main.rs) ===
+Command: RUSTFLAGS="-Zsanitizer=memory -Zsanitizer-memory-track-origins" cargo +nightly run -Zbuild-std --target x86_64-unknown-linux-gnu
+(no rustix code involved at all - same real getdents64 syscall via libc::syscall, same
+ raw-pointer-cast-to-dirent64 decode, only the buffer's allocation site differs)
+[stack buffer]  decoded 97 entries, no MSan warning expected
+...
+SUMMARY: MemorySanitizer: use-of-uninitialized-value /home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/fmt/num.rs:143:60 in <u16 as core::fmt::Display>::fmt
+
+Result: the [stack buffer] decode (identical syscall + identical field-read pattern,
+a [MaybeUninit<u8>; 4096] local array) completes with NO MSan warning. The [heap buffer]
+decode (same syscall, same decode, only a Vec<MaybeUninit<u8>> instead of a stack array)
+fires the exact same 'use-of-uninitialized-value' diagnostic seen against the real
+RawDir code in approach 2a - this isolates the finding to an MSan interceptor gap for
+syscall()-into-heap-allocated-buffer, not a real bug in rustix's own code.

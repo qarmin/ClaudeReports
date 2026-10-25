@@ -1,0 +1,72 @@
+diff --git a/src/backend/linux_raw/param/auxv.rs b/src/backend/linux_raw/param/auxv.rs
+index 2c02b5bd..9113d170 100644
+--- a/src/backend/linux_raw/param/auxv.rs
++++ b/src/backend/linux_raw/param/auxv.rs
+@@ -95,6 +95,16 @@ pub(crate) fn linux_execfn() -> &'static CStr {
+         execfn = EXECFN.load(Relaxed);
+     }
+ 
++    // `execfn` can still be null here: `AT_EXECFN` may be absent, or the
++    // kernel-provided value may have failed `check_raw_pointer`'s validity
++    // check in `init_from_aux_iter`. Per this function's own documented
++    // contract ("Returns an empty string if the string is not available"),
++    // fall back to an empty string instead of dereferencing a null pointer.
++    if execfn.is_null() {
++        // SAFETY: A static NUL-terminated empty byte string.
++        return unsafe { CStr::from_ptr(b"\0".as_ptr().cast()) };
++    }
++
+     // SAFETY: We assume the `AT_EXECFN` value provided by the kernel is a
+     // valid pointer to a valid NUL-terminated array of bytes.
+     unsafe { CStr::from_ptr(execfn.cast()) }
+@@ -399,7 +409,18 @@ unsafe fn init_from_aux_iter(aux_iter: impl Iterator<Item = Elf_auxv_t>) -> Opti
+             AT_HWCAP => hwcap = a_val as usize,
+             AT_HWCAP2 => hwcap2 = a_val as usize,
+             AT_MINSIGSTKSZ => minsigstksz = a_val as usize,
+-            AT_EXECFN => execfn = check_raw_pointer::<c::c_char>(a_val as *mut _)?.as_ptr(),
++            // If the kernel-provided `AT_EXECFN` value doesn't look like a
++            // valid pointer, ignore it rather than aborting the entire parse
++            // (which would also discard every other already-parsed aux
++            // value and propagate a panic to `init_auxv`'s caller instead of
++            // the `/proc/self/auxv` fallback the rest of this function is
++            // designed to support). Same treatment as `AT_SYSINFO_EHDR`
++            // below.
++            AT_EXECFN => {
++                if let Some(value) = check_raw_pointer::<c::c_char>(a_val as *mut _) {
++                    execfn = value.as_ptr();
++                }
++            }
+ 
+             // Use the `AT_SYSINFO_EHDR` if it matches the platform rustix is
+             // compiled for.
+@@ -419,16 +440,28 @@ unsafe fn init_from_aux_iter(aux_iter: impl Iterator<Item = Elf_auxv_t>) -> Opti
+             AT_GID => gid = Some(a_val),
+             #[cfg(feature = "runtime")]
+             AT_EGID => egid = Some(a_val),
++            // Same treatment as `AT_EXECFN` above: an invalid `AT_PHDR` only
++            // leaves `phdr` at its default (null), it doesn't abort parsing
++            // the rest of the aux vector.
+             #[cfg(feature = "runtime")]
+-            AT_PHDR => phdr = check_raw_pointer::<Elf_Phdr>(a_val as *mut _)?.as_ptr(),
++            AT_PHDR => {
++                if let Some(value) = check_raw_pointer::<Elf_Phdr>(a_val as *mut _) {
++                    phdr = value.as_ptr();
++                }
++            }
+             #[cfg(feature = "runtime")]
+             AT_PHNUM => phnum = a_val as usize,
+             #[cfg(feature = "runtime")]
+             AT_PHENT => phent = a_val as usize,
+             #[cfg(feature = "runtime")]
+             AT_ENTRY => entry = a_val as usize,
++            // Same treatment as `AT_EXECFN`/`AT_PHDR` above.
+             #[cfg(feature = "runtime")]
+-            AT_RANDOM => random = check_raw_pointer::<[u8; 16]>(a_val as *mut _)?.as_ptr(),
++            AT_RANDOM => {
++                if let Some(value) = check_raw_pointer::<[u8; 16]>(a_val as *mut _) {
++                    random = value.as_ptr();
++                }
++            }
+ 
+             AT_NULL => break,
+             _ => (),

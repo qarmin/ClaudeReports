@@ -1,0 +1,48 @@
+# Self-contained reproduction for this candidate.
+#
+# handle_pat()/handle_pmt() are `static` and the real plugin build uses -fvisibility=hidden for
+# everything else, so repro/build_and_run.sh compiles gsthlsdemux-util.c directly (default
+# visibility) alongside repro.c, rather than linking against the prebuilt plugin .so - mirrors
+# this project's existing gsth266parser.c fuzz-harness approach. Requires clang (for ASAN+UBSAN).
+
+repo_url := "https://github.com/GStreamer/gstreamer.git"
+base_commit := "65b9547519cdafce691e65777d4178280bf10808"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Builds+runs repro.c (compiled together with the real gsthlsdemux-util.c) - should crash with
+# an ASAN heap-buffer-overflow inside handle_pat().
+reproduce-before:
+    #!/usr/bin/env bash
+    set -o pipefail
+    OUT="$(SRC_DIR="{{justfile_directory()}}/clone" bash repro/build_and_run.sh 2>&1)"
+    RC=$?
+    echo "$OUT"
+    if ! grep -q "AddressSanitizer: heap-buffer-overflow" <<< "$OUT"; then
+        echo "expected an ASAN heap-buffer-overflow report, exit=$RC" >&2
+        exit 1
+    fi
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - should exit cleanly with no ASAN report,
+# gst_hlsdemux_tsreader_find_pcrs() correctly rejecting the malformed packet.
+reproduce-after:
+    #!/usr/bin/env bash
+    set -eo pipefail
+    OUT="$(SRC_DIR="{{justfile_directory()}}/clone" bash repro/build_and_run.sh 2>&1)"
+    RC=$?
+    echo "$OUT"
+    if [ "$RC" != 0 ] || grep -q "AddressSanitizer" <<< "$OUT"; then
+        echo "expected a clean exit with no ASAN report after the fix, got exit=$RC" >&2
+        exit 1
+    fi
+
+clean:
+    rm -rf clone build-hls-repro

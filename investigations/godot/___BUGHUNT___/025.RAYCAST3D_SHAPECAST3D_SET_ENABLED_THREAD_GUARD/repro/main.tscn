@@ -1,0 +1,40 @@
+[gd_scene load_steps=2 format=3]
+
+[sub_resource type="GDScript" id="GDScript_1"]
+script/source = "extends Node3D
+
+
+func _ready() -> void:
+	# Turn on physics debug-shape drawing BEFORE the RayCast3D enters the tree, on the main
+	# thread - this is the safe way to trigger NOTIFICATION_ENTER_TREE's own call into
+	# _update_debug_shape(), which runs get_world_3d() on the main thread (fine) and leaves
+	# the node primed (debug_instance valid, enabled == true).
+	get_tree().set_debug_collisions_hint(true)
+
+	var ray := RayCast3D.new()
+	add_child(ray)
+
+	var threads: Array[Thread] = []
+	for i in range(6):
+		var t := Thread.new()
+		t.start(_spam.bind(ray))
+		threads.append(t)
+	for t in threads:
+		t.wait_to_finish()
+	print(\"survived\")
+	get_tree().quit()
+
+
+func _spam(ray: RayCast3D) -> void:
+	var start: int = Time.get_ticks_msec()
+	while Time.get_ticks_msec() - start < 15000:
+		if not is_instance_valid(ray):
+			break
+		# RayCast3D::set_enabled(true) -> _update_debug_shape() -> get_world_3d()->get_scenario()
+		# off the main thread: get_world_3d()'s own ERR_READ_THREAD_GUARD_V returns a null Ref
+		# here, unconditionally dereferenced by the caller one line later.
+		ray.set_enabled(true)
+"
+
+[node name="Main" type="Node3D"]
+script = SubResource("GDScript_1")

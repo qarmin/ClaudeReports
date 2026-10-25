@@ -1,0 +1,75 @@
+# Self-contained reproduction for this candidate.
+#
+# Reaches the patched code (Node::get_path_to()) via the gdbench harness copied in from
+# ___OPTIMIZATIONS___/harness/gdbench/ (untracked in the main repo, built by this workspace - see
+# SKILL.md's "Bench harnesses" / shape-3 justfile pattern). This candidate folder is self-contained
+# only given the whole ___OPTIMIZATIONS___ folder kept together, not in isolation - say so if this
+# folder is ever copied out on its own.
+#
+# From-scratch SCons build, ~15-25 min. `pip3 install scons --break-system-packages` if missing.
+
+repo_url := "https://github.com/godotengine/godot.git"
+base_commit := "9552dfb6859a1aaba1e570b8e0ef5c599b830f19"
+harness_dir := "../harness/gdbench"
+
+test: clone build-baseline bench-baseline apply build-patched bench-patched verify-correctness
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/gdbench_harness
+
+build-baseline:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v scons >/dev/null 2>&1 || pip3 install scons --break-system-packages
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+    cp bin/godot.linuxbsd.editor.x86_64 "{{justfile_directory()}}/bin_baseline"
+
+apply:
+    git -C clone apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+    cp bin/godot.linuxbsd.editor.x86_64 "{{justfile_directory()}}/bin_patched"
+
+bench-baseline:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{justfile_directory()}}/xdg_data"
+    export XDG_DATA_HOME="{{justfile_directory()}}/xdg_data"
+    echo "=== baseline (before patch) ==="
+    for i in 1 2 3; do
+      "{{justfile_directory()}}/bin_baseline" --headless --path clone/gdbench_harness --script bench.gd -- get_path_to_deep get_path_to_cross_branch
+    done
+
+bench-patched:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{justfile_directory()}}/xdg_data"
+    export XDG_DATA_HOME="{{justfile_directory()}}/xdg_data"
+    echo "=== patched (after patch) ==="
+    for i in 1 2 3; do
+      "{{justfile_directory()}}/bin_patched" --headless --path clone/gdbench_harness --script bench.gd -- get_path_to_deep get_path_to_cross_branch
+    done
+
+verify-correctness:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{justfile_directory()}}/xdg_data"
+    export XDG_DATA_HOME="{{justfile_directory()}}/xdg_data"
+    cp "{{justfile_directory()}}/bench/get_path_to_correctness.gd" clone/gdbench_harness/
+    echo "=== baseline correctness ==="
+    "{{justfile_directory()}}/bin_baseline" --headless --path clone/gdbench_harness --script get_path_to_correctness.gd
+    echo "=== patched correctness ==="
+    "{{justfile_directory()}}/bin_patched" --headless --path clone/gdbench_harness --script get_path_to_correctness.gd
+
+clean:
+    rm -rf clone bin_baseline bin_patched xdg_data

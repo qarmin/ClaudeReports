@@ -1,0 +1,107 @@
+diff --git a/crates/zune-png/src/filters/sse4.rs b/crates/zune-png/src/filters/sse4.rs
+index 487440d4..6982cf90 100644
+--- a/crates/zune-png/src/filters/sse4.rs
++++ b/crates/zune-png/src/filters/sse4.rs
+@@ -207,6 +207,55 @@ unsafe fn if_then_else(c: __m128i, t: __m128i, e: __m128i) -> __m128i {
+     //return _mm_or_si128(_mm_and_si128(c, t), _mm_andnot_si128(c, e));
+ }
+ 
++// Build a pixel (up to 8 bytes, SIZE known at compile time) into the low 64 bits of an
++// __m128i and widen each byte to an i16 lane, without going through a 16-byte stack buffer
++// that LLVM tends to reconstruct via a per-byte pinsrb chain (see this candidate's RESULT.md -
++// that chain, not the arithmetic, was the measured hot spot). On x86_64 the bytes are first
++// assembled into a u64 GPR (cheap shift/or, no SIMD domain-crossing per byte) and moved into
++// the low lane with a single movq; on 32-bit x86 (no 64-bit GPR) we fall back to a small 8-byte
++// buffer + a single movq-from-memory load, which is still one memory op rather than a
++// reconstructed-vector chain.
++#[inline]
++#[target_feature(enable = "sse4.1")]
++unsafe fn widen_pixel<const SIZE: usize>(bytes: &[u8], zero: __m128i) -> __m128i {
++    debug_assert_eq!(bytes.len(), SIZE);
++    #[cfg(target_arch = "x86_64")]
++    {
++        let mut val: u64 = 0;
++        for i in 0..SIZE {
++            val |= u64::from(*bytes.get_unchecked(i)) << (8 * i);
++        }
++        _mm_unpacklo_epi8(_mm_cvtsi64_si128(val as i64), zero)
++    }
++    #[cfg(target_arch = "x86")]
++    {
++        let mut buf = [0u8; 8];
++        buf.get_unchecked_mut(..SIZE).copy_from_slice(bytes);
++        _mm_unpacklo_epi8(_mm_loadl_epi64(buf.as_ptr().cast()), zero)
++    }
++}
++
++// Inverse of widen_pixel: take the low 8 packed bytes of `v` and write the first SIZE of them
++// to `out`, again via GPR shifts on x86_64 instead of a per-byte pextrb chain.
++#[inline]
++#[target_feature(enable = "sse4.1")]
++unsafe fn narrow_pixel<const SIZE: usize>(v: __m128i, out: &mut [u8]) {
++    debug_assert_eq!(out.len(), SIZE);
++    #[cfg(target_arch = "x86_64")]
++    {
++        let val = _mm_cvtsi128_si64(v) as u64;
++        for i in 0..SIZE {
++            *out.get_unchecked_mut(i) = (val >> (8 * i)) as u8;
++        }
++    }
++    #[cfg(target_arch = "x86")]
++    {
++        let mut buf = [0u8; 8];
++        _mm_storel_epi64(buf.as_mut_ptr().cast(), v);
++        out.copy_from_slice(buf.get_unchecked(..SIZE));
++    }
++}
++
+ // 16 bpp RGBA SSE filtering code
+ #[target_feature(enable = "sse4.1")]
+ #[allow(unused_assignments)]
+@@ -223,30 +272,18 @@ unsafe fn de_filter_paeth_sse41_inner<const SIZE: usize>(
+     // d = current/raw
+     let (mut c, mut b, mut a, mut d) = (zero, zero, zero, zero);
+ 
+-    let (mut f, mut g) = ([0u8; 16], [0u8; 16]);
+-
+     for ((prev, raw), current_row) in prev_row
+         .chunks_exact(SIZE)
+         .zip(raw.chunks_exact(SIZE))
+         .zip(current.chunks_exact_mut(SIZE))
+     {
+-        f[..SIZE].copy_from_slice(prev);
+-        g[..SIZE].copy_from_slice(raw);
+-
+         // Slide previous vectors
+         c = b;
+         a = d;
+ 
+         // Load next upper/raw bytes as widened i16 lanes
+-        b = _mm_unpacklo_epi8(
+-            _mm_loadu_si128(f.as_ptr().cast()),
+-            zero,
+-        );
+-
+-        d = _mm_unpacklo_epi8(
+-            _mm_loadu_si128(g.as_ptr().cast()),
+-            zero,
+-        );
++        b = widen_pixel::<SIZE>(prev, zero);
++        d = widen_pixel::<SIZE>(raw, zero);
+ 
+         //
+         // stb-style Paeth predictor:
+@@ -294,12 +331,7 @@ unsafe fn de_filter_paeth_sse41_inner<const SIZE: usize>(
+         d = _mm_add_epi8(d, nearest);
+ 
+         // pack back to bytes
+-        _mm_storeu_si128(
+-            f.as_mut_ptr().cast(),
+-            _mm_packus_epi16(d, d),
+-        );
+-
+-        current_row.copy_from_slice(&f[..SIZE]);
++        narrow_pixel::<SIZE>(_mm_packus_epi16(d, d), current_row);
+     }
+ }
+ 

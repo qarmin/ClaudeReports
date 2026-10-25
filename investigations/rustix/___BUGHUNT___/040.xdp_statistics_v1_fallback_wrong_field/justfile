@@ -1,0 +1,31 @@
+# Self-contained reproduction for candidate 040.
+#
+# Deviation from the standard candidate_justfile template, explained in RESULT.md: the buggy
+# function (`xdp_statistics`) is `pub(crate)` in both backends, so no external crate - including
+# this repro - can call it directly regardless of whether it depends on a git clone or a published
+# release. There is therefore no `clone`/`apply` step here: `repro/` pins the exact published
+# release cut at base_commit (`rustix = "=1.1.5"`) for the real `XdpStatistics` type, and contains
+# a verbatim transcription of the real branch body under test (cited to file+line in
+# repro/src/main.rs's own doc comment), toggled by a Cargo feature instead of a source patch -
+# `cargo run` = pre-patch (buggy), `cargo run --features fixed` = post-patch (this candidate's
+# patch.diff applied to both real backend files). See RESULT.md section "Why no real end-to-end
+# repro" for why a genuine real-kernel/real-AF_XDP-socket repro is not practical in this
+# environment (CONFIRMATION.md section 11's documented exception).
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: reproduce-before reproduce-after
+
+# Demonstrates the bug: the real (pre-patch) v1-fallback branch, fed synthetic bytes laid out
+# exactly as a real pre-5.9 kernel's `copy_to_sockptr` would deposit them.
+# (exits 1 by design when the bug reproduces - `-` so `just test` doesn't abort the chain)
+reproduce-before:
+    -cd repro && cargo run
+
+# Same repro, now selecting the real (post-patch) branch body - should no longer reproduce the bug.
+reproduce-after:
+    cd repro && cargo run --features fixed
+
+clean:
+    rm -rf repro/target

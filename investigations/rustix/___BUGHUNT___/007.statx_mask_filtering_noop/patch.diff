@@ -1,0 +1,78 @@
+diff --git a/src/backend/libc/fs/syscalls.rs b/src/backend/libc/fs/syscalls.rs
+index c95eaf56..6a4c04bb 100644
+--- a/src/backend/libc/fs/syscalls.rs
++++ b/src/backend/libc/fs/syscalls.rs
+@@ -2088,7 +2088,7 @@ pub(crate) fn statx(
+     if (mask.bits() & STATX__RESERVED) == STATX__RESERVED {
+         return Err(io::Errno::INVAL);
+     }
+-    let mask = mask & StatxFlags::all();
++    let mask = StatxFlags::from_bits_retain(mask.bits() & crate::fs::statx::KNOWN_STATX_FLAGS);
+ 
+     let mut statx_buf = MaybeUninit::<Statx>::uninit();
+     unsafe {
+diff --git a/src/backend/linux_raw/fs/syscalls.rs b/src/backend/linux_raw/fs/syscalls.rs
+index 297782d8..07d24466 100644
+--- a/src/backend/linux_raw/fs/syscalls.rs
++++ b/src/backend/linux_raw/fs/syscalls.rs
+@@ -837,7 +837,7 @@ pub(crate) fn statx(
+     if (mask.bits() & STATX__RESERVED) == STATX__RESERVED {
+         return Err(io::Errno::INVAL);
+     }
+-    let mask = mask & StatxFlags::all();
++    let mask = StatxFlags::from_bits_retain(mask.bits() & crate::fs::statx::KNOWN_STATX_FLAGS);
+ 
+     unsafe {
+         let mut statx_buf = MaybeUninit::<Statx>::uninit();
+diff --git a/src/fs/mod.rs b/src/fs/mod.rs
+index dfeed87a..21c423c6 100644
+--- a/src/fs/mod.rs
++++ b/src/fs/mod.rs
+@@ -56,7 +56,7 @@ mod sendfile;
+ #[cfg(not(target_os = "espidf"))]
+ mod special;
+ #[cfg(linux_kernel)]
+-mod statx;
++pub(crate) mod statx;
+ #[cfg(not(any(
+     target_os = "espidf",
+     target_os = "horizon",
+diff --git a/src/fs/statx.rs b/src/fs/statx.rs
+index f8be29f7..9be58b64 100644
+--- a/src/fs/statx.rs
++++ b/src/fs/statx.rs
+@@ -124,6 +124,34 @@ bitflags! {
+     }
+ }
+ 
++/// The union of `StatxFlags` bits that rustix currently has a named variant
++/// for.
++///
++/// `StatxFlags::all()` can't be used for this purpose: since `StatxFlags`
++/// opts in to bitflags' "externally defined flags" support (so that unknown
++/// kernel-defined bits round-trip through `from_bits_retain`/`bits()`
++/// unchanged), `StatxFlags::all().bits()` is `u32::MAX`, not the set of
++/// currently-named bits. Masking a caller-supplied request against this
++/// constant (rather than against `StatxFlags::all()`) is what keeps unknown
++/// mask bits from reaching the kernel; see the callers in
++/// `backend::linux_raw::fs::syscalls::statx` and
++/// `backend::libc::fs::syscalls::statx`.
++pub(crate) const KNOWN_STATX_FLAGS: u32 = StatxFlags::TYPE.bits()
++    | StatxFlags::MODE.bits()
++    | StatxFlags::NLINK.bits()
++    | StatxFlags::UID.bits()
++    | StatxFlags::GID.bits()
++    | StatxFlags::ATIME.bits()
++    | StatxFlags::MTIME.bits()
++    | StatxFlags::CTIME.bits()
++    | StatxFlags::INO.bits()
++    | StatxFlags::SIZE.bits()
++    | StatxFlags::BLOCKS.bits()
++    | StatxFlags::BASIC_STATS.bits()
++    | StatxFlags::BTIME.bits()
++    | StatxFlags::MNT_ID.bits()
++    | StatxFlags::DIOALIGN.bits();
++
+ bitflags! {
+     /// `STATX_ATTR_*` flags for use with [`Statx`].
+     #[repr(transparent)]

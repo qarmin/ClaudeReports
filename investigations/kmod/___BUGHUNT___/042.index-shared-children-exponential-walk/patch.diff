@@ -1,0 +1,172 @@
+diff --git a/libkmod/libkmod-index.c b/libkmod/libkmod-index.c
+index 3dd13df..8e801a2 100644
+--- a/libkmod/libkmod-index.c
++++ b/libkmod/libkmod-index.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <sys/param.h>
++#include <sys/stat.h>
+ 
+ #include <assert.h>
+ #include <endian.h>
+@@ -243,6 +244,9 @@ struct index_file {
+ 	uint32_t root_offset;
+ 	char *tmp;
+ 	size_t tmp_size;
++	size_t size;
++	size_t visits;
++	size_t visit_limit;
+ };
+ 
+ struct index_node_f {
+@@ -264,6 +268,10 @@ static struct index_node_f *index_read(struct index_file *idx, uint32_t offset)
+ 	if ((offset & INDEX_NODE_MASK) == 0)
+ 		return NULL;
+ 
++	/* A valid index is a tree: shared children would make a walk exponential. */
++	if (idx->visits++ >= idx->visit_limit)
++		return NULL;
++
+ 	if (fseek(fp, offset & INDEX_NODE_MASK, SEEK_SET) < 0)
+ 		return NULL;
+ 
+@@ -346,6 +354,7 @@ struct index_file *index_file_open(const char *filename)
+ 	FILE *file;
+ 	uint32_t magic, version;
+ 	struct index_file *new;
++	struct stat st;
+ 
+ 	file = fopen(filename, "re");
+ 	if (!file)
+@@ -368,6 +377,9 @@ struct index_file *index_file_open(const char *filename)
+ 	}
+ 	new->tmp = NULL;
+ 	new->tmp_size = 0;
++	new->size = fstat(fileno(file), &st) == 0 ? (size_t)st.st_size : 0;
++	new->visits = 0;
++	new->visit_limit = SIZE_MAX;
+ 
+ 	return new;
+ err:
+@@ -382,8 +394,17 @@ void index_file_close(struct index_file *idx)
+ 	free(idx);
+ }
+ 
+-static struct index_node_f *index_readroot(struct index_file *in)
++static size_t walk_limit(size_t size, size_t factor)
++{
++	size_t limit;
++
++	return umulsz_overflow(size, factor, &limit) ? SIZE_MAX : limit;
++}
++
++static struct index_node_f *index_readroot(struct index_file *in, size_t visit_limit)
+ {
++	in->visits = 0;
++	in->visit_limit = visit_limit;
+ 	return index_read(in, in->root_offset);
+ }
+ 
+@@ -433,7 +454,7 @@ void index_dump(struct index_file *in, int fd, bool alias_prefix)
+ 	struct index_node_f *root;
+ 	struct wrtbuf wbuf;
+ 
+-	root = index_readroot(in);
++	root = index_readroot(in, in->size);
+ 	if (root == NULL)
+ 		return;
+ 
+@@ -491,7 +512,7 @@ char *index_search(struct index_file *in, const char *key)
+ 	struct index_node_f *root;
+ 	char *value;
+ 
+-	root = index_readroot(in);
++	root = index_readroot(in, SIZE_MAX);
+ 	value = index_search__node(root, key, 0);
+ 
+ 	return value;
+@@ -615,7 +636,7 @@ static void index_searchwild__node(struct index_node_f *node, struct strbuf *buf
+ struct index_value *index_searchwild(struct index_file *in, const char *key)
+ {
+ 	DECLARE_STRBUF_WITH_STACK(buf, 128);
+-	struct index_node_f *root = index_readroot(in);
++	struct index_node_f *root = index_readroot(in, walk_limit(in->size, strlen(key) + 1));
+ 	struct index_value *out = NULL;
+ 
+ 	index_searchwild__node(root, &buf, key, &out);
+@@ -636,6 +657,8 @@ struct index_mm {
+ 	void *mm;
+ 	uint32_t root_offset;
+ 	size_t size;
++	size_t visits;
++	size_t visit_limit;
+ };
+ 
+ struct index_mm_value {
+@@ -694,10 +717,15 @@ static struct index_mm_node *index_mm_read_node(const struct index_mm *idx,
+ 						struct index_mm_node *node)
+ {
+ 	const void *p;
++	struct index_mm *walk = (struct index_mm *)idx; /* walk accounting only */
+ 
+ 	if ((offset & INDEX_NODE_MASK) == 0 || (offset & INDEX_NODE_MASK) >= idx->size)
+ 		return NULL;
+ 
++	/* A valid index is a tree: shared children would make a walk exponential. */
++	if (walk->visits++ >= walk->visit_limit)
++		return NULL;
++
+ 	p = (const char *)idx->mm + (offset & INDEX_NODE_MASK);
+ 
+ 	if (offset & INDEX_NODE_PREFIX) {
+@@ -807,6 +835,8 @@ int index_mm_open(const struct kmod_ctx *ctx, const char *filename,
+ 
+ 	idx->root_offset = hdr.root_offset;
+ 	idx->size = st.st_size;
++	idx->visits = 0;
++	idx->visit_limit = SIZE_MAX;
+ 	idx->ctx = ctx;
+ 	close(fd);
+ 
+@@ -831,8 +861,12 @@ void index_mm_close(struct index_mm *idx)
+ }
+ 
+ static struct index_mm_node *index_mm_readroot(const struct index_mm *idx,
+-					       struct index_mm_node *root)
++					       struct index_mm_node *root, size_t visit_limit)
+ {
++	struct index_mm *walk = (struct index_mm *)idx;
++
++	walk->visits = 0;
++	walk->visit_limit = visit_limit;
+ 	return index_mm_read_node(idx, idx->root_offset, root);
+ }
+ 
+@@ -893,7 +927,7 @@ void index_mm_dump(const struct index_mm *idx, int fd, bool alias_prefix)
+ 	struct index_mm_node nbuf, *root;
+ 	struct wrtbuf wbuf;
+ 
+-	root = index_mm_readroot(idx, &nbuf);
++	root = index_mm_readroot(idx, &nbuf, idx->size);
+ 	if (root == NULL)
+ 		return;
+ 
+@@ -950,7 +984,7 @@ char *index_mm_search(const struct index_mm *idx, const char *key)
+ 	struct index_mm_node nbuf, *root;
+ 	char *value;
+ 
+-	root = index_mm_readroot(idx, &nbuf);
++	root = index_mm_readroot(idx, &nbuf, SIZE_MAX);
+ 	value = index_mm_search_node(root, key);
+ 
+ 	return value;
+@@ -1073,7 +1107,7 @@ struct index_value *index_mm_searchwild(const struct index_mm *idx, const char *
+ 	struct index_mm_node nbuf, *root;
+ 	struct index_value *out = NULL;
+ 
+-	root = index_mm_readroot(idx, &nbuf);
++	root = index_mm_readroot(idx, &nbuf, walk_limit(idx->size, strlen(key) + 1));
+ 	index_mm_searchwild_node(root, &buf, key, &out);
+ 	return out;
+ }

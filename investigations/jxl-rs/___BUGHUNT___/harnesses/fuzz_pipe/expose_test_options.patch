@@ -1,0 +1,609 @@
+diff --git a/jxl/src/api/codestream_parser/frame_info.rs b/jxl/src/api/codestream_parser/frame_info.rs
+index 926b021..8c80825 100644
+--- a/jxl/src/api/codestream_parser/frame_info.rs
++++ b/jxl/src/api/codestream_parser/frame_info.rs
+@@ -132,7 +132,7 @@ impl FrameInfo {
+             .or(self.frame.as_ref().map(|x| x.header()))
+     }
+ 
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub fn current_toc(&self) -> Option<&crate::headers::toc::Toc> {
+         self.frame.as_ref().map(|x| x.toc())
+     }
+diff --git a/jxl/src/api/codestream_parser/mod.rs b/jxl/src/api/codestream_parser/mod.rs
+index dcd0a1a..a133dc1 100644
+--- a/jxl/src/api/codestream_parser/mod.rs
++++ b/jxl/src/api/codestream_parser/mod.rs
+@@ -121,7 +121,7 @@ pub(super) struct CodestreamParser {
+     slot_frames: [Option<usize>; 8],
+ 
+     /// Number of frames decoded (not skipped), for tests.
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub(super) frames_decoded: usize,
+ }
+ 
+@@ -147,7 +147,7 @@ impl CodestreamParser {
+             visible_frames_to_skip: None,
+             next_frame_index: 0,
+             slot_frames: [None; 8],
+-            #[cfg(test)]
++            #[cfg(any(test, bh_diff))]
+             frames_decoded: 0,
+             frame_scan_info: FrameScanInfo::new(),
+             file_length: None,
+@@ -356,7 +356,7 @@ impl CodestreamParser {
+                     if decode_options.scan_frames_only && process_mode == ProcessMode::Process {
+                         process_mode = ProcessMode::Skip(true);
+                     }
+-                    #[cfg(test)]
++                    #[cfg(any(test, bh_diff))]
+                     if !matches!(process_mode, ProcessMode::Skip(_)) {
+                         self.frames_decoded += 1;
+                     }
+diff --git a/jxl/src/api/data_types.rs b/jxl/src/api/data_types.rs
+index 5c02034..3805172 100644
+--- a/jxl/src/api/data_types.rs
++++ b/jxl/src/api/data_types.rs
+@@ -131,7 +131,7 @@ impl JxlDataFormat {
+     }
+ 
+     /// Returns the byte representation of opaque alpha (1.0) for this format.
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub(crate) fn opaque_alpha_bytes(&self) -> Vec<u8> {
+         match self {
+             JxlDataFormat::U8 { bit_depth } => {
+diff --git a/jxl/src/api/decoder.rs b/jxl/src/api/decoder.rs
+index f0c3a1f..0f3f635 100644
+--- a/jxl/src/api/decoder.rs
++++ b/jxl/src/api/decoder.rs
+@@ -73,7 +73,7 @@ impl JxlDecoder {
+         }
+     }
+ 
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub(crate) fn file_header(&self) -> Option<&crate::headers::FileHeader> {
+         if self.codestream_parser.image_info.is_complete() {
+             Some(self.codestream_parser.image_info.file_header())
+@@ -82,17 +82,17 @@ impl JxlDecoder {
+         }
+     }
+ 
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub(crate) fn raw_frame_header(&self) -> Option<&crate::headers::frame_header::FrameHeader> {
+         self.codestream_parser.frame_info.current_frame_header()
+     }
+ 
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub(crate) fn frames_decoded(&self) -> usize {
+         self.codestream_parser.frames_decoded
+     }
+ 
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub(crate) fn toc(&self) -> Option<&crate::headers::toc::Toc> {
+         self.codestream_parser.frame_info.current_toc()
+     }
+diff --git a/jxl/src/api/options.rs b/jxl/src/api/options.rs
+index 5107d13..fe50002 100644
+--- a/jxl/src/api/options.rs
++++ b/jxl/src/api/options.rs
+@@ -5,7 +5,7 @@
+ 
+ use crate::api::JxlAuxBoxType;
+ 
+-#[cfg(test)]
++#[cfg(any(test, bh_diff))]
+ #[derive(Debug, Clone, Copy, Default)]
+ pub struct TestOptions {
+     pub use_simple_pipeline: bool,
+@@ -54,7 +54,7 @@ pub struct JxlDecoderOptions {
+     /// When [`ProfileLevel::Main5`], enforces Level 5 complexity constraints defined by ISO/IEC 18181-1.
+     /// When [`ProfileLevel::Main10`], allows Level 10 limits (which requires a container with a Level 10 `jxll` box).
+     pub max_profile_level: ProfileLevel,
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub test_options: TestOptions,
+ }
+ 
+@@ -82,7 +82,7 @@ impl Default for JxlDecoderOptions {
+             scan_frames_only: false,
+             request_aux_boxes: Vec::new(),
+             max_profile_level: ProfileLevel::Main5,
+-            #[cfg(test)]
++            #[cfg(any(test, bh_diff))]
+             test_options: TestOptions::default(),
+         }
+     }
+diff --git a/jxl/src/bh_fuzz.rs b/jxl/src/bh_fuzz.rs
+new file mode 100644
+index 0000000..1701360
+--- /dev/null
++++ b/jxl/src/bh_fuzz.rs
+@@ -0,0 +1,70 @@
++#![allow(dead_code, unused_imports)]
++use crate::bit_reader::BitReader;
++use crate::features::patches::PatchesDictionary;
++use crate::features::spline::Splines;
++use crate::frame::ReferenceFrame;
++use crate::headers::bit_depth::BitDepth;
++use crate::headers::extra_channels::{ExtraChannel, ExtraChannelInfo};
++use crate::image::Image;
++
++pub fn patches(data: &[u8]) {
++    if data.len() < 16 {
++        return;
++    }
++    let (cfg, rest) = data.split_at(16);
++    let xsize = 1 + (u16::from_le_bytes([cfg[0], cfg[1]]) as usize % 300);
++    let ysize = 1 + (u16::from_le_bytes([cfg[2], cfg[3]]) as usize % 300);
++    let nec = (cfg[4] % 3) as usize;
++    let mut refs: Vec<Option<ReferenceFrame>> = vec![];
++    for i in 0..4 {
++        let w = 1 + (cfg[5 + i] as usize * (xsize + 20)) / 255;
++        let h = 1 + (cfg[9 + i] as usize * (ysize + 20)) / 255;
++        let shrink_ec = false;
++        if cfg[14] & (1 << i) != 0 {
++            refs.push(None);
++            continue;
++        }
++        let mut frame = vec![];
++        for c in 0..3 + nec {
++            let (cw, ch) = if c >= 3 && shrink_ec { (w.div_ceil(2), h.div_ceil(2)) } else { (w, h) };
++            match Image::<f32>::new((cw, ch)) {
++                Ok(img) => frame.push(img),
++                Err(_) => return,
++            }
++        }
++        refs.push(Some(ReferenceFrame { frame, saved_before_color_transform: cfg[15] & (1 << i) == 0 }));
++    }
++    let mut br = BitReader::new(rest);
++    let Ok(dict) = PatchesDictionary::read_internal(&mut br, xsize, ysize, nec, &refs, false) else { return };
++    let eci: Vec<ExtraChannelInfo> = (0..nec)
++        .map(|i| ExtraChannelInfo::new(false, ExtraChannel::Alpha, BitDepth::f32(), 0, String::new(), i % 2 == 0, None, None))
++        .collect();
++    let chunk = 1 + (cfg[4] as usize / 3) % xsize;
++    let mut pr = vec![];
++    let mut scratch = vec![];
++    for y in 0..ysize {
++        let mut x0 = 0;
++        while x0 < xsize {
++            let n = chunk.min(xsize - x0);
++            let mut chans: Vec<Vec<f32>> = (0..3 + nec).map(|_| vec![0.5f32; n + 16]).collect();
++            let mut rows: Vec<&mut [f32]> = chans.iter_mut().map(|c| &mut c[..]).collect();
++            dict.add_one_row(&mut rows, (x0, y), n, &eci, &refs, &mut pr, &mut scratch);
++            x0 += n;
++        }
++    }
++}
++
++pub fn splines(data: &[u8]) {
++    if data.len() < 8 {
++        return;
++    }
++    let (cfg, rest) = data.split_at(8);
++    let xsize = 1 + (u16::from_le_bytes([cfg[0], cfg[1]]) as u64 % 2000);
++    let ysize = 1 + (u16::from_le_bytes([cfg[2], cfg[3]]) as u64 % 2000);
++    let mut br = BitReader::new(rest);
++    let Ok(mut s) = Splines::read(&mut br, (xsize * ysize) as u32) else { return };
++    let cc = crate::frame::color_correlation_map::ColorCorrelationParams::default();
++    if s.initialize_draw_cache(xsize, ysize, &cc, cfg[4] & 1 != 0, cfg[4] & 2 != 0).is_err() {
++        return;
++    }
++}
+diff --git a/jxl/src/entropy_coding/huffman.rs b/jxl/src/entropy_coding/huffman.rs
+index 5b7d3f5..bfa904c 100644
+--- a/jxl/src/entropy_coding/huffman.rs
++++ b/jxl/src/entropy_coding/huffman.rs
+@@ -505,7 +505,7 @@ impl HuffmanCodes {
+     }
+ }
+ 
+-#[cfg(test)]
++#[cfg(any(test, bh_diff))]
+ impl HuffmanCodes {
+     /// Builds Huffman histogram of 256 8-bit symbols.
+     pub(super) fn byte_histogram() -> HuffmanCodes {
+diff --git a/jxl/src/entropy_coding/hybrid_uint.rs b/jxl/src/entropy_coding/hybrid_uint.rs
+index 28a1126..203a001 100644
+--- a/jxl/src/entropy_coding/hybrid_uint.rs
++++ b/jxl/src/entropy_coding/hybrid_uint.rs
+@@ -118,7 +118,7 @@ impl HybridUint {
+     }
+ }
+ 
+-#[cfg(test)]
++#[cfg(any(test, bh_diff))]
+ impl HybridUint {
+     pub fn new(split_exponent: u32, msb_in_token: u32, lsb_in_token: u32) -> Self {
+         Self {
+diff --git a/jxl/src/features/patches.rs b/jxl/src/features/patches.rs
+index 9a5483f..40dd16d 100644
+--- a/jxl/src/features/patches.rs
++++ b/jxl/src/features/patches.rs
+@@ -76,7 +76,7 @@ pub enum PatchBlendMode {
+ impl PatchBlendMode {
+     pub const NUM_BLEND_MODES: u8 = 8;
+ 
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     fn try_from(i: u8) -> Result<PatchBlendMode> {
+         match i {
+             0 => Ok(PatchBlendMode::None),
+diff --git a/jxl/src/features/spline.rs b/jxl/src/features/spline.rs
+index b02e4b5..de4956c 100644
+--- a/jxl/src/features/spline.rs
++++ b/jxl/src/features/spline.rs
+@@ -639,7 +639,7 @@ impl Splines {
+         !self.segment_y_start.is_empty()
+     }
+ 
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub fn create(
+         quantization_adjustment: i32,
+         splines: Vec<QuantizedSpline>,
+diff --git a/jxl/src/frame/decode.rs b/jxl/src/frame/decode.rs
+index 6b99d69..bd830c4 100644
+--- a/jxl/src/frame/decode.rs
++++ b/jxl/src/frame/decode.rs
+@@ -38,7 +38,7 @@ use crate::headers::color_encoding::ColorSpace;
+ use crate::headers::frame_header::{Encoding, FrameHeader, FrameType};
+ use crate::headers::toc::Toc;
+ use crate::image::{BufferRecycler, DataTypeTag, Image, OwnedRawImage, Rect};
+-#[cfg(test)]
++#[cfg(any(test, bh_diff))]
+ use crate::render::SimpleRenderPipeline;
+ use crate::render::buffer_splitter::BufferSplitter;
+ use crate::render::low_memory_pipeline::row_buffers::RowBuffer;
+@@ -285,7 +285,7 @@ impl Frame {
+         let group_dim = frame_header.group_dim();
+ 
+         Ok(Box::new(Self {
+-            #[cfg(test)]
++            #[cfg(any(test, bh_diff))]
+             use_simple_pipeline: decoder_state.use_simple_pipeline,
+             group_status: GroupStatus::new(&frame_header),
+             header: frame_header,
+diff --git a/jxl/src/frame/mod.rs b/jxl/src/frame/mod.rs
+index d1c0b2e..8be1172 100644
+--- a/jxl/src/frame/mod.rs
++++ b/jxl/src/frame/mod.rs
+@@ -83,7 +83,7 @@ pub struct ReferenceFrame {
+ }
+ 
+ impl ReferenceFrame {
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub fn blank(
+         width: usize,
+         height: usize,
+@@ -122,9 +122,9 @@ pub struct DecoderState {
+     pub(super) reference_frames: Arc<[Option<ReferenceFrame>; Self::MAX_STORED_FRAMES]>,
+     pub(super) lf_frames: [Option<[Image<f32>; 3]>; Self::NUM_LF_FRAMES],
+     pub render_spotcolors: bool,
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub use_simple_pipeline: bool,
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub allow_16bit_modular_buffers: bool,
+     pub high_precision: bool,
+     pub premultiply_output: bool,
+@@ -165,9 +165,9 @@ impl DecoderState {
+             reference_frames: Arc::new([None, None, None, None]),
+             lf_frames: std::array::from_fn(|_| None),
+             render_spotcolors: options.render_spot_colors,
+-            #[cfg(test)]
++            #[cfg(any(test, bh_diff))]
+             use_simple_pipeline: options.test_options.use_simple_pipeline,
+-            #[cfg(test)]
++            #[cfg(any(test, bh_diff))]
+             allow_16bit_modular_buffers: !options.test_options.disable_16bit_modular_buffers,
+             high_precision: options.high_precision,
+             premultiply_output: options.premultiply_output,
+@@ -179,7 +179,7 @@ impl DecoderState {
+     }
+ 
+     pub fn modular_storage(&self) -> ModularStorage {
+-        #[cfg(test)]
++        #[cfg(any(test, bh_diff))]
+         if !self.allow_16bit_modular_buffers {
+             return ModularStorage::I32;
+         }
+@@ -315,11 +315,11 @@ pub struct Frame {
+     pub(super) lf_image: Option<[Image<f32>; 3]>,
+     pub(super) hf_meta: Option<HfMetadata>,
+     pub(super) decoder_state: DecoderState,
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     use_simple_pipeline: bool,
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     render_pipeline: Option<Box<dyn std::any::Any + Send + Sync>>,
+-    #[cfg(not(test))]
++    #[cfg(not(any(test, bh_diff)))]
+     render_pipeline: Option<Box<crate::render::LowMemoryRenderPipeline>>,
+     reference_frame_data: Option<Vec<Image<f32>>>,
+     lf_frame_data: Option<[Image<f32>; 3]>,
+diff --git a/jxl/src/frame/quant_weights.rs b/jxl/src/frame/quant_weights.rs
+index 897ecdc..b6cb134 100644
+--- a/jxl/src/frame/quant_weights.rs
++++ b/jxl/src/frame/quant_weights.rs
+@@ -1126,7 +1126,7 @@ impl DequantMatrices {
+     pub const REQUIRED_SIZE_Y: [usize; QuantTable::CARDINALITY] =
+         [1, 1, 1, 1, 2, 4, 2, 4, 4, 1, 1, 8, 8, 16, 16, 32, 32];
+ 
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     const SUM_REQUIRED_X_Y: usize = 2056;
+ }
+ 
+diff --git a/jxl/src/frame/render.rs b/jxl/src/frame/render.rs
+index 5421783..b0dfab6 100644
+--- a/jxl/src/frame/render.rs
++++ b/jxl/src/frame/render.rs
+@@ -25,7 +25,7 @@ use crate::headers::color_encoding::ColorSpace;
+ use crate::headers::extra_channels::ExtraChannel;
+ use crate::headers::frame_header::{Encoding, FrameHeader, FrameType};
+ use crate::image::{DataTypeTag, Image, OwnedRawImage, Rect};
+-#[cfg(test)]
++#[cfg(any(test, bh_diff))]
+ use crate::render::SimpleRenderPipeline;
+ use crate::render::buffer_splitter::BufferSplitter;
+ use crate::render::stages::*;
+@@ -33,7 +33,7 @@ use crate::render::{LowMemoryRenderPipeline, RenderPipeline, RenderPipelineBuild
+ use crate::util::SmallVec;
+ use crate::util::sync::{Arc, RwLock};
+ 
+-#[cfg(test)]
++#[cfg(any(test, bh_diff))]
+ macro_rules! pipeline_mut {
+     ($frame: expr, $pipeline: ident, $op: expr) => {
+         if $frame.use_simple_pipeline {
+@@ -57,7 +57,7 @@ macro_rules! pipeline_mut {
+     };
+ }
+ 
+-#[cfg(not(test))]
++#[cfg(not(any(test, bh_diff)))]
+ macro_rules! pipeline_mut {
+     ($frame: expr, $pipeline: ident, $op: expr) => {{
+         let $pipeline = $frame.render_pipeline.as_mut().unwrap();
+@@ -65,7 +65,7 @@ macro_rules! pipeline_mut {
+     }};
+ }
+ 
+-#[cfg(test)]
++#[cfg(any(test, bh_diff))]
+ macro_rules! pipeline {
+     ($frame: expr, $pipeline: ident, $op: expr) => {
+         if $frame.use_simple_pipeline {
+@@ -89,7 +89,7 @@ macro_rules! pipeline {
+     };
+ }
+ 
+-#[cfg(not(test))]
++#[cfg(not(any(test, bh_diff)))]
+ macro_rules! pipeline {
+     ($frame: expr, $pipeline: ident, $op: expr) => {{
+         let $pipeline = $frame.render_pipeline.as_ref().unwrap();
+@@ -919,7 +919,7 @@ impl Frame {
+         pixel_format: &JxlPixelFormat,
+         output_profile: &JxlColorProfile,
+     ) -> Result<()> {
+-        #[cfg(test)]
++        #[cfg(any(test, bh_diff))]
+         let render_pipeline = if self.use_simple_pipeline {
+             Self::build_render_pipeline::<SimpleRenderPipeline>(
+                 &self.decoder_state,
+@@ -949,7 +949,7 @@ impl Frame {
+                 self.buffer_recycler.clone(),
+             )? as Box<dyn std::any::Any + Send + Sync>
+         };
+-        #[cfg(not(test))]
++        #[cfg(not(any(test, bh_diff)))]
+         let render_pipeline = Self::build_render_pipeline::<LowMemoryRenderPipeline>(
+             &self.decoder_state,
+             &self.header,
+diff --git a/jxl/src/headers/bit_depth.rs b/jxl/src/headers/bit_depth.rs
+index 57d3fe1..794b0f3 100644
+--- a/jxl/src/headers/bit_depth.rs
++++ b/jxl/src/headers/bit_depth.rs
+@@ -60,7 +60,7 @@ impl BitDepth {
+             exponent_bits_per_sample: 0,
+         }
+     }
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub fn f32() -> BitDepth {
+         BitDepth {
+             floating_point_sample: true,
+@@ -68,7 +68,7 @@ impl BitDepth {
+             exponent_bits_per_sample: 8,
+         }
+     }
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub fn f16() -> BitDepth {
+         BitDepth {
+             floating_point_sample: true,
+diff --git a/jxl/src/headers/color_encoding.rs b/jxl/src/headers/color_encoding.rs
+index 1cd8b2d..d0f4f49 100644
+--- a/jxl/src/headers/color_encoding.rs
++++ b/jxl/src/headers/color_encoding.rs
+@@ -135,7 +135,7 @@ pub struct CustomTransferFunction {
+ }
+ 
+ impl CustomTransferFunction {
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub fn empty() -> CustomTransferFunction {
+         CustomTransferFunction {
+             have_gamma: false,
+diff --git a/jxl/src/headers/extra_channels.rs b/jxl/src/headers/extra_channels.rs
+index e080595..0486cdf 100644
+--- a/jxl/src/headers/extra_channels.rs
++++ b/jxl/src/headers/extra_channels.rs
+@@ -60,7 +60,7 @@ pub struct ExtraChannelInfo {
+ }
+ 
+ impl ExtraChannelInfo {
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     #[allow(clippy::too_many_arguments)]
+     pub fn new(
+         all_default: bool,
+diff --git a/jxl/src/headers/permutation.rs b/jxl/src/headers/permutation.rs
+index 6a4e047..0b58b2b 100644
+--- a/jxl/src/headers/permutation.rs
++++ b/jxl/src/headers/permutation.rs
+@@ -166,7 +166,7 @@ fn decode_lehmer_code(code: &[u32], permutation_slice: &[u32]) -> Result<Vec<u32
+ }
+ 
+ // Decodes the Lehmer code in `code` and returns the permuted vector.
+-#[cfg(test)]
++#[cfg(any(test, bh_diff))]
+ fn decode_lehmer_code_naive(code: &[u32], permutation_slice: &[u32]) -> Result<Vec<u32>> {
+     let n = code.len();
+     if n == 0 {
+diff --git a/jxl/src/image/data_type.rs b/jxl/src/image/data_type.rs
+index 94f6b93..ac9043b 100644
+--- a/jxl/src/image/data_type.rs
++++ b/jxl/src/image/data_type.rs
+@@ -75,7 +75,7 @@ pub unsafe trait ImageDataType:
+     }
+ }
+ 
+-#[cfg(test)]
++#[cfg(any(test, bh_diff))]
+ macro_rules! type_min {
+     (f32) => {
+         0.0f32
+@@ -88,7 +88,7 @@ macro_rules! type_min {
+     };
+ }
+ 
+-#[cfg(test)]
++#[cfg(any(test, bh_diff))]
+ macro_rules! type_max {
+     (f32) => {
+         1.0f32
+diff --git a/jxl/src/lib.rs b/jxl/src/lib.rs
+index ce11a2d..120895b 100644
+--- a/jxl/src/lib.rs
++++ b/jxl/src/lib.rs
+@@ -16,6 +16,8 @@ mod icc;
+ pub mod image;
+ mod render;
+ mod util;
++#[cfg(bh_diff)]
++pub mod bh_fuzz;
+ 
+ #[cfg(test)]
+ mod tests;
+diff --git a/jxl/src/render/buffer_splitter.rs b/jxl/src/render/buffer_splitter.rs
+index 563f6f7..ed1ca1e 100644
+--- a/jxl/src/render/buffer_splitter.rs
++++ b/jxl/src/render/buffer_splitter.rs
+@@ -218,7 +218,7 @@ impl<'a> BufferSplitter<'a> {
+         self.requested_rects.into_inner().unwrap()
+     }
+ 
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub fn get_full_buffers(&self) -> ChannelVec<Option<OutputChannelRef<'a, '_>>> {
+         self.buffers
+             .iter()
+diff --git a/jxl/src/render/internal.rs b/jxl/src/render/internal.rs
+index 2e27b5e..48828c2 100644
+--- a/jxl/src/render/internal.rs
++++ b/jxl/src/render/internal.rs
+@@ -46,7 +46,7 @@ impl<Buffer: 'static> Stage<Buffer> {
+         }
+     }
+ 
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub(super) fn new_size(&self, size: (usize, usize)) -> (usize, usize) {
+         match self {
+             Stage::Extend(e) => e.image_size,
+diff --git a/jxl/src/render/mod.rs b/jxl/src/render/mod.rs
+index 12ac2c3..79391b7 100644
+--- a/jxl/src/render/mod.rs
++++ b/jxl/src/render/mod.rs
+@@ -18,7 +18,7 @@ mod channels;
+ mod internal;
+ pub mod low_memory_pipeline;
+ pub mod save;
+-#[cfg(test)]
++#[cfg(any(test, bh_diff))]
+ mod simple_pipeline;
+ pub mod stages;
+ #[cfg(test)]
+@@ -39,7 +39,7 @@ pub use channels::{
+     Channels, ChannelsMut, ChannelsView, StoreInterleaved, VecLoad, for_each_chunk,
+ };
+ pub use low_memory_pipeline::LowMemoryRenderPipeline;
+-#[cfg(test)]
++#[cfg(any(test, bh_diff))]
+ pub(crate) use simple_pipeline::SimpleRenderPipeline;
+ 
+ pub type ErasedLocalState = dyn Any + Send + Sync;
+diff --git a/jxl/src/render/stages/xyb.rs b/jxl/src/render/stages/xyb.rs
+index 31d18e6..f1d33e3 100644
+--- a/jxl/src/render/stages/xyb.rs
++++ b/jxl/src/render/stages/xyb.rs
+@@ -26,7 +26,7 @@ pub struct OutputColorInfo {
+     pub tf: TransferFunction,
+ }
+ 
+-#[cfg(test)]
++#[cfg(any(test, bh_diff))]
+ impl Default for OutputColorInfo {
+     fn default() -> Self {
+         use crate::headers::encodings::Empty;
+diff --git a/jxl/src/util/cacheline.rs b/jxl/src/util/cacheline.rs
+index 34be686..67ce202 100644
+--- a/jxl/src/util/cacheline.rs
++++ b/jxl/src/util/cacheline.rs
+@@ -19,7 +19,7 @@ pub const fn num_per_cache_line<T>() -> usize {
+     CACHE_LINE_BYTE_SIZE / std::mem::size_of::<T>()
+ }
+ 
+-#[cfg(test)]
++#[cfg(any(test, bh_diff))]
+ pub fn round_up_size_to_cache_line<T>(size: usize) -> usize {
+     let n = const { num_per_cache_line::<T>() };
+     size.div_ceil(n) * n
+diff --git a/jxl/src/util/fast_math.rs b/jxl/src/util/fast_math.rs
+index c28af2e..4027c82 100644
+--- a/jxl/src/util/fast_math.rs
++++ b/jxl/src/util/fast_math.rs
+@@ -43,7 +43,7 @@ pub fn fast_cos(x: f32) -> f32 {
+     }
+ }
+ 
+-#[cfg(test)]
++#[cfg(any(test, bh_diff))]
+ #[inline(always)]
+ pub fn fast_erff(x: f32) -> f32 {
+     // Formula from
+diff --git a/jxl/src/util/xorshift128plus.rs b/jxl/src/util/xorshift128plus.rs
+index c337554..dd763fc 100644
+--- a/jxl/src/util/xorshift128plus.rs
++++ b/jxl/src/util/xorshift128plus.rs
+@@ -16,7 +16,7 @@ pub struct Xorshift128Plus {
+ impl Xorshift128Plus {
+     pub const N: usize = 8;
+ 
+-    #[cfg(test)]
++    #[cfg(any(test, bh_diff))]
+     pub fn new_with_seed(seed: u64) -> Self {
+         let mut s0 = [0; Self::N];
+         let mut s1 = [0; Self::N];

@@ -1,0 +1,482 @@
+diff --git a/servers/audio/audio_server.cpp b/servers/audio/audio_server.cpp
+index b7730d7f28..dc6f2eae81 100644
+--- a/servers/audio/audio_server.cpp
++++ b/servers/audio/audio_server.cpp
+@@ -658,12 +658,15 @@ void AudioServer::set_bus_count(int p_count) {
+ }
+ 
+ void AudioServer::remove_bus(int p_index) {
+-	ERR_FAIL_INDEX(p_index, buses.size());
+ 	ERR_FAIL_COND(p_index == 0);
+ 
+ 	MARK_EDITED
+ 
+ 	lock();
++	if (p_index < 0 || p_index >= buses.size()) {
++		unlock();
++		ERR_FAIL_MSG("Index p_index out of bounds.");
++	}
+ 	bus_map.erase(buses[p_index]->name);
+ 	memdelete(buses[p_index]);
+ 	buses.remove_at(p_index);
+@@ -677,6 +680,8 @@ void AudioServer::remove_bus(int p_index) {
+ void AudioServer::add_bus(int p_at_pos) {
+ 	MARK_EDITED
+ 
++	lock();
++
+ 	if (p_at_pos >= buses.size()) {
+ 		p_at_pos = -1;
+ 	} else if (p_at_pos == 0) {
+@@ -725,18 +730,25 @@ void AudioServer::add_bus(int p_at_pos) {
+ 		buses.insert(p_at_pos, bus);
+ 	}
+ 
++	unlock();
++
+ 	AudioDriver::get_singleton()->add_sample_bus(p_at_pos);
+ 
+ 	emit_signal(SNAME("bus_layout_changed"));
+ }
+ 
+ void AudioServer::move_bus(int p_bus, int p_to_pos) {
+-	ERR_FAIL_COND(p_bus < 1 || p_bus >= buses.size());
+-	ERR_FAIL_COND(p_to_pos != -1 && (p_to_pos < 1 || p_to_pos > buses.size()));
+-
+ 	MARK_EDITED
+ 
++	lock();
++
++	if (p_bus < 1 || p_bus >= buses.size() || (p_to_pos != -1 && (p_to_pos < 1 || p_to_pos > buses.size()))) {
++		unlock();
++		ERR_FAIL_MSG("Index out of bounds.");
++	}
++
+ 	if (p_bus == p_to_pos) {
++		unlock();
+ 		return;
+ 	}
+ 
+@@ -751,17 +763,21 @@ void AudioServer::move_bus(int p_bus, int p_to_pos) {
+ 		buses.insert(p_to_pos - 1, bus);
+ 	}
+ 
++	unlock();
++
+ 	AudioDriver::get_singleton()->move_sample_bus(p_bus, p_to_pos);
+ 
+ 	emit_signal(SNAME("bus_layout_changed"));
+ }
+ 
+ int AudioServer::get_bus_count() const {
+-	return buses.size();
++	const_cast<AudioServer *>(this)->lock();
++	int ret = buses.size();
++	const_cast<AudioServer *>(this)->unlock();
++	return ret;
+ }
+ 
+ void AudioServer::set_bus_name(int p_bus, const String &p_name) {
+-	ERR_FAIL_INDEX(p_bus, buses.size());
+ 	if (p_bus == 0 && p_name != "Master") {
+ 		return; // Bus 0 is always "Master".
+ 	}
+@@ -770,6 +786,11 @@ void AudioServer::set_bus_name(int p_bus, const String &p_name) {
+ 
+ 	lock();
+ 
++	if (p_bus < 0 || p_bus >= buses.size()) {
++		unlock();
++		ERR_FAIL_MSG("Index p_bus out of bounds.");
++	}
++
+ 	StringName old_name = buses[p_bus]->name;
+ 
+ 	if (old_name == p_name) {
+@@ -805,32 +826,52 @@ void AudioServer::set_bus_name(int p_bus, const String &p_name) {
+ }
+ 
+ String AudioServer::get_bus_name(int p_bus) const {
+-	ERR_FAIL_INDEX_V(p_bus, buses.size(), String());
+-	return buses[p_bus]->name;
++	const_cast<AudioServer *>(this)->lock();
++	if (p_bus < 0 || p_bus >= buses.size()) {
++		const_cast<AudioServer *>(this)->unlock();
++		ERR_FAIL_V(String());
++	}
++	String ret = buses[p_bus]->name;
++	const_cast<AudioServer *>(this)->unlock();
++	return ret;
+ }
+ 
+ int AudioServer::get_bus_index(const StringName &p_bus_name) const {
++	const_cast<AudioServer *>(this)->lock();
++	int ret = -1;
+ 	for (int i = 0; i < buses.size(); ++i) {
+ 		if (buses[i]->name == p_bus_name) {
+-			return i;
++			ret = i;
++			break;
+ 		}
+ 	}
+-	return -1;
++	const_cast<AudioServer *>(this)->unlock();
++	return ret;
+ }
+ 
+ void AudioServer::set_bus_volume_db(int p_bus, float p_volume_db) {
+-	ERR_FAIL_INDEX(p_bus, buses.size());
+-
+ 	MARK_EDITED
+ 
++	lock();
++	if (p_bus < 0 || p_bus >= buses.size()) {
++		unlock();
++		ERR_FAIL_MSG("Index p_bus out of bounds.");
++	}
+ 	buses[p_bus]->volume_db = p_volume_db;
++	unlock();
+ 
+ 	AudioDriver::get_singleton()->set_sample_bus_volume_db(p_bus, p_volume_db);
+ }
+ 
+ float AudioServer::get_bus_volume_db(int p_bus) const {
+-	ERR_FAIL_INDEX_V(p_bus, buses.size(), 0);
+-	return buses[p_bus]->volume_db;
++	const_cast<AudioServer *>(this)->lock();
++	if (p_bus < 0 || p_bus >= buses.size()) {
++		const_cast<AudioServer *>(this)->unlock();
++		ERR_FAIL_V(0);
++	}
++	float ret = buses[p_bus]->volume_db;
++	const_cast<AudioServer *>(this)->unlock();
++	return ret;
+ }
+ 
+ void AudioServer::set_bus_volume_linear(int p_bus, float p_volume_linear) {
+@@ -842,69 +883,112 @@ float AudioServer::get_bus_volume_linear(int p_bus) const {
+ }
+ 
+ int AudioServer::get_bus_channels(int p_bus) const {
+-	ERR_FAIL_INDEX_V(p_bus, buses.size(), 0);
+-	return buses[p_bus]->channels.size();
++	const_cast<AudioServer *>(this)->lock();
++	if (p_bus < 0 || p_bus >= buses.size()) {
++		const_cast<AudioServer *>(this)->unlock();
++		ERR_FAIL_V(0);
++	}
++	int ret = buses[p_bus]->channels.size();
++	const_cast<AudioServer *>(this)->unlock();
++	return ret;
+ }
+ 
+ void AudioServer::set_bus_send(int p_bus, const StringName &p_send) {
+-	ERR_FAIL_INDEX(p_bus, buses.size());
+-
+ 	MARK_EDITED
+ 
++	lock();
++	if (p_bus < 0 || p_bus >= buses.size()) {
++		unlock();
++		ERR_FAIL_MSG("Index p_bus out of bounds.");
++	}
+ 	buses[p_bus]->send = p_send;
++	unlock();
+ 
+ 	AudioDriver::get_singleton()->set_sample_bus_send(p_bus, p_send);
+ }
+ 
+ StringName AudioServer::get_bus_send(int p_bus) const {
+-	ERR_FAIL_INDEX_V(p_bus, buses.size(), StringName());
+-	return buses[p_bus]->send;
++	const_cast<AudioServer *>(this)->lock();
++	if (p_bus < 0 || p_bus >= buses.size()) {
++		const_cast<AudioServer *>(this)->unlock();
++		ERR_FAIL_V(StringName());
++	}
++	StringName ret = buses[p_bus]->send;
++	const_cast<AudioServer *>(this)->unlock();
++	return ret;
+ }
+ 
+ void AudioServer::set_bus_solo(int p_bus, bool p_enable) {
+-	ERR_FAIL_INDEX(p_bus, buses.size());
+-
+ 	MARK_EDITED
+ 
++	lock();
++	if (p_bus < 0 || p_bus >= buses.size()) {
++		unlock();
++		ERR_FAIL_MSG("Index p_bus out of bounds.");
++	}
+ 	buses[p_bus]->solo = p_enable;
++	unlock();
+ 
+ 	AudioDriver::get_singleton()->set_sample_bus_solo(p_bus, p_enable);
+ }
+ 
+ bool AudioServer::is_bus_solo(int p_bus) const {
+-	ERR_FAIL_INDEX_V(p_bus, buses.size(), false);
+-
+-	return buses[p_bus]->solo;
++	const_cast<AudioServer *>(this)->lock();
++	if (p_bus < 0 || p_bus >= buses.size()) {
++		const_cast<AudioServer *>(this)->unlock();
++		ERR_FAIL_V(false);
++	}
++	bool ret = buses[p_bus]->solo;
++	const_cast<AudioServer *>(this)->unlock();
++	return ret;
+ }
+ 
+ void AudioServer::set_bus_mute(int p_bus, bool p_enable) {
+-	ERR_FAIL_INDEX(p_bus, buses.size());
+-
+ 	MARK_EDITED
+ 
++	lock();
++	if (p_bus < 0 || p_bus >= buses.size()) {
++		unlock();
++		ERR_FAIL_MSG("Index p_bus out of bounds.");
++	}
+ 	buses[p_bus]->mute = p_enable;
++	unlock();
+ 
+ 	AudioDriver::get_singleton()->set_sample_bus_mute(p_bus, p_enable);
+ }
+ 
+ bool AudioServer::is_bus_mute(int p_bus) const {
+-	ERR_FAIL_INDEX_V(p_bus, buses.size(), false);
+-
+-	return buses[p_bus]->mute;
++	const_cast<AudioServer *>(this)->lock();
++	if (p_bus < 0 || p_bus >= buses.size()) {
++		const_cast<AudioServer *>(this)->unlock();
++		ERR_FAIL_V(false);
++	}
++	bool ret = buses[p_bus]->mute;
++	const_cast<AudioServer *>(this)->unlock();
++	return ret;
+ }
+ 
+ void AudioServer::set_bus_bypass_effects(int p_bus, bool p_enable) {
+-	ERR_FAIL_INDEX(p_bus, buses.size());
+-
+ 	MARK_EDITED
+ 
++	lock();
++	if (p_bus < 0 || p_bus >= buses.size()) {
++		unlock();
++		ERR_FAIL_MSG("Index p_bus out of bounds.");
++	}
+ 	buses[p_bus]->bypass = p_enable;
++	unlock();
+ }
+ 
+ bool AudioServer::is_bus_bypassing_effects(int p_bus) const {
+-	ERR_FAIL_INDEX_V(p_bus, buses.size(), false);
+-
+-	return buses[p_bus]->bypass;
++	const_cast<AudioServer *>(this)->lock();
++	if (p_bus < 0 || p_bus >= buses.size()) {
++		const_cast<AudioServer *>(this)->unlock();
++		ERR_FAIL_V(false);
++	}
++	bool ret = buses[p_bus]->bypass;
++	const_cast<AudioServer *>(this)->unlock();
++	return ret;
+ }
+ 
+ void AudioServer::_update_bus_effects(int p_bus) {
+@@ -922,12 +1006,16 @@ void AudioServer::_update_bus_effects(int p_bus) {
+ 
+ void AudioServer::add_bus_effect(int p_bus, const Ref<AudioEffect> &p_effect, int p_at_pos) {
+ 	ERR_FAIL_COND(p_effect.is_null());
+-	ERR_FAIL_INDEX(p_bus, buses.size());
+ 
+ 	MARK_EDITED
+ 
+ 	lock();
+ 
++	if (p_bus < 0 || p_bus >= buses.size()) {
++		unlock();
++		ERR_FAIL_MSG("Index p_bus out of bounds.");
++	}
++
+ 	Bus::Effect fx;
+ 	fx.effect = p_effect;
+ 	//fx.instance=p_effect->instantiate();
+@@ -948,12 +1036,15 @@ void AudioServer::add_bus_effect(int p_bus, const Ref<AudioEffect> &p_effect, in
+ }
+ 
+ void AudioServer::remove_bus_effect(int p_bus, int p_effect) {
+-	ERR_FAIL_INDEX(p_bus, buses.size());
+-
+ 	MARK_EDITED
+ 
+ 	lock();
+ 
++	if (p_bus < 0 || p_bus >= buses.size()) {
++		unlock();
++		ERR_FAIL_MSG("Index p_bus out of bounds.");
++	}
++
+ 	buses[p_bus]->effects.remove_at(p_effect);
+ 	_update_bus_effects(p_bus);
+ 
+@@ -961,73 +1052,105 @@ void AudioServer::remove_bus_effect(int p_bus, int p_effect) {
+ }
+ 
+ int AudioServer::get_bus_effect_count(int p_bus) {
+-	ERR_FAIL_INDEX_V(p_bus, buses.size(), 0);
+-
+-	return buses[p_bus]->effects.size();
++	lock();
++	if (p_bus < 0 || p_bus >= buses.size()) {
++		unlock();
++		ERR_FAIL_V(0);
++	}
++	int ret = buses[p_bus]->effects.size();
++	unlock();
++	return ret;
+ }
+ 
+ Ref<AudioEffectInstance> AudioServer::get_bus_effect_instance(int p_bus, int p_effect, int p_channel) {
+-	ERR_FAIL_INDEX_V(p_bus, buses.size(), Ref<AudioEffectInstance>());
+-	ERR_FAIL_INDEX_V(p_effect, buses[p_bus]->effects.size(), Ref<AudioEffectInstance>());
+-	ERR_FAIL_INDEX_V(p_channel, buses[p_bus]->channels.size(), Ref<AudioEffectInstance>());
+-
+-	return buses[p_bus]->channels[p_channel].effect_instances[p_effect];
++	lock();
++	if (p_bus < 0 || p_bus >= buses.size() || p_effect < 0 || p_effect >= buses[p_bus]->effects.size() || p_channel < 0 || p_channel >= buses[p_bus]->channels.size()) {
++		unlock();
++		ERR_FAIL_V(Ref<AudioEffectInstance>());
++	}
++	Ref<AudioEffectInstance> ret = buses[p_bus]->channels[p_channel].effect_instances[p_effect];
++	unlock();
++	return ret;
+ }
+ 
+ Ref<AudioEffect> AudioServer::get_bus_effect(int p_bus, int p_effect) {
+-	ERR_FAIL_INDEX_V(p_bus, buses.size(), Ref<AudioEffect>());
+-	ERR_FAIL_INDEX_V(p_effect, buses[p_bus]->effects.size(), Ref<AudioEffect>());
+-
+-	return buses[p_bus]->effects[p_effect].effect;
++	lock();
++	if (p_bus < 0 || p_bus >= buses.size() || p_effect < 0 || p_effect >= buses[p_bus]->effects.size()) {
++		unlock();
++		ERR_FAIL_V(Ref<AudioEffect>());
++	}
++	Ref<AudioEffect> ret = buses[p_bus]->effects[p_effect].effect;
++	unlock();
++	return ret;
+ }
+ 
+ void AudioServer::swap_bus_effects(int p_bus, int p_effect, int p_by_effect) {
+-	ERR_FAIL_INDEX(p_bus, buses.size());
+-	ERR_FAIL_INDEX(p_effect, buses[p_bus]->effects.size());
+-	ERR_FAIL_INDEX(p_by_effect, buses[p_bus]->effects.size());
+-
+ 	MARK_EDITED
+ 
+ 	lock();
++	if (p_bus < 0 || p_bus >= buses.size() || p_effect < 0 || p_effect >= buses[p_bus]->effects.size() || p_by_effect < 0 || p_by_effect >= buses[p_bus]->effects.size()) {
++		unlock();
++		ERR_FAIL_MSG("Index out of bounds.");
++	}
+ 	SWAP(buses.write[p_bus]->effects.write[p_effect], buses.write[p_bus]->effects.write[p_by_effect]);
+ 	_update_bus_effects(p_bus);
+ 	unlock();
+ }
+ 
+ void AudioServer::set_bus_effect_enabled(int p_bus, int p_effect, bool p_enabled) {
+-	ERR_FAIL_INDEX(p_bus, buses.size());
+-	ERR_FAIL_INDEX(p_effect, buses[p_bus]->effects.size());
+-
+ 	MARK_EDITED
+ 
++	lock();
++	if (p_bus < 0 || p_bus >= buses.size() || p_effect < 0 || p_effect >= buses[p_bus]->effects.size()) {
++		unlock();
++		ERR_FAIL_MSG("Index out of bounds.");
++	}
+ 	buses.write[p_bus]->effects.write[p_effect].enabled = p_enabled;
++	unlock();
+ }
+ 
+ bool AudioServer::is_bus_effect_enabled(int p_bus, int p_effect) const {
+-	ERR_FAIL_INDEX_V(p_bus, buses.size(), false);
+-	ERR_FAIL_INDEX_V(p_effect, buses[p_bus]->effects.size(), false);
+-	return buses[p_bus]->effects[p_effect].enabled;
++	const_cast<AudioServer *>(this)->lock();
++	if (p_bus < 0 || p_bus >= buses.size() || p_effect < 0 || p_effect >= buses[p_bus]->effects.size()) {
++		const_cast<AudioServer *>(this)->unlock();
++		ERR_FAIL_V(false);
++	}
++	bool ret = buses[p_bus]->effects[p_effect].enabled;
++	const_cast<AudioServer *>(this)->unlock();
++	return ret;
+ }
+ 
+ float AudioServer::get_bus_peak_volume_left_db(int p_bus, int p_channel) const {
+-	ERR_FAIL_INDEX_V(p_bus, buses.size(), 0);
+-	ERR_FAIL_INDEX_V(p_channel, buses[p_bus]->channels.size(), 0);
+-
+-	return buses[p_bus]->channels[p_channel].peak_volume.left;
++	const_cast<AudioServer *>(this)->lock();
++	if (p_bus < 0 || p_bus >= buses.size() || p_channel < 0 || p_channel >= buses[p_bus]->channels.size()) {
++		const_cast<AudioServer *>(this)->unlock();
++		ERR_FAIL_V(0);
++	}
++	float ret = buses[p_bus]->channels[p_channel].peak_volume.left;
++	const_cast<AudioServer *>(this)->unlock();
++	return ret;
+ }
+ 
+ float AudioServer::get_bus_peak_volume_right_db(int p_bus, int p_channel) const {
+-	ERR_FAIL_INDEX_V(p_bus, buses.size(), 0);
+-	ERR_FAIL_INDEX_V(p_channel, buses[p_bus]->channels.size(), 0);
+-
+-	return buses[p_bus]->channels[p_channel].peak_volume.right;
++	const_cast<AudioServer *>(this)->lock();
++	if (p_bus < 0 || p_bus >= buses.size() || p_channel < 0 || p_channel >= buses[p_bus]->channels.size()) {
++		const_cast<AudioServer *>(this)->unlock();
++		ERR_FAIL_V(0);
++	}
++	float ret = buses[p_bus]->channels[p_channel].peak_volume.right;
++	const_cast<AudioServer *>(this)->unlock();
++	return ret;
+ }
+ 
+ bool AudioServer::is_bus_channel_active(int p_bus, int p_channel) const {
+-	ERR_FAIL_INDEX_V(p_bus, buses.size(), false);
+-	ERR_FAIL_INDEX_V(p_channel, buses[p_bus]->channels.size(), false);
+-
+-	return buses[p_bus]->channels[p_channel].active;
++	const_cast<AudioServer *>(this)->lock();
++	if (p_bus < 0 || p_bus >= buses.size() || p_channel < 0 || p_channel >= buses[p_bus]->channels.size()) {
++		const_cast<AudioServer *>(this)->unlock();
++		ERR_FAIL_V(false);
++	}
++	bool ret = buses[p_bus]->channels[p_channel].active;
++	const_cast<AudioServer *>(this)->unlock();
++	return ret;
+ }
+ 
+ void AudioServer::set_playback_speed_scale(float p_scale) {
+@@ -1357,6 +1480,7 @@ void AudioServer::init() {
+ 
+ void AudioServer::update() {
+ #ifdef DEBUG_ENABLED
++	lock();
+ 	if (EngineDebugger::is_profiling(SNAME("servers"))) {
+ 		// Driver time includes server time + effects times
+ 		// Server time includes effects times
+@@ -1421,6 +1545,7 @@ void AudioServer::update() {
+ 
+ 	AudioDriver::get_singleton()->reset_profiling_time();
+ 	prof_time.set(0);
++	unlock();
+ #endif
+ 
+ 	for (CallbackItem *ci : update_callback_list) {

@@ -1,0 +1,51 @@
+# Self-contained reproduction for this candidate. Everything needed is either already in this
+# folder or fetched by `just clone` into ./clone (gitignored) - nothing reaches outside this
+# folder, so it can be copied/attached standalone and `just test` still works.
+#
+# Building this project scoped for ASAN is itself a ~10-15 minute step (a real, if narrowed,
+# GStreamer monorepo build) - see ../README.md and ../tools/build_asan_fuzz.sh for why this scope
+# and why clang (not gcc). `repro/repro.c` only needs libgstanalytics-1.0 + its direct deps, but
+# building just that slice standalone (outside the project's own meson setup) isn't practical
+# given how its build options are wired, so this reuses the same scoped build the rest of the
+# session used.
+
+repo_url := "git@github.com:GStreamer/gstreamer.git"
+base_commit := "65b9547519cdafce691e65777d4178280bf10808"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && bash ../../tools/build_asan_fuzz.sh build-asan-fuzz
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug
+# (index 1 incorrectly resolves to the tensor at index 0).
+reproduce-before:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone
+    export PATH="$HOME/.local/bin:$PATH"
+    export LD_LIBRARY_PATH="$PWD/build-asan-fuzz/subprojects/gst-plugins-bad/gst-libs/gst/analytics:$PWD/build-asan-fuzz/subprojects/gst-plugins-base/gst-libs/gst/video:$PWD/build-asan-fuzz/subprojects/gstreamer/libs/gst/base:$PWD/build-asan-fuzz/subprojects/gstreamer/gst:${LD_LIBRARY_PATH:-}"
+    CFLAGS=$(PKG_CONFIG_PATH=build-asan-fuzz/meson-uninstalled pkg-config --cflags gstreamer-analytics-1.0 gstreamer-1.0)
+    LIBS=$(PKG_CONFIG_PATH=build-asan-fuzz/meson-uninstalled pkg-config --libs gstreamer-analytics-1.0 gstreamer-1.0)
+    clang -fsanitize=address,undefined -g -o /tmp/modelinfo_repro ../repro/repro.c $CFLAGS $LIBS
+    ulimit -c 0
+    GST_REGISTRY=/tmp/bughunt_gst_registry_candidate005.bin /tmp/modelinfo_repro
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && export PATH="$HOME/.local/bin:$PATH" && ninja -C build-asan-fuzz subprojects/gst-plugins-bad/gst-libs/gst/analytics/libgstanalytics-1.0.so.0.2902.0
+
+# Same repro again, now against the patched clone - should no longer demonstrate the bug.
+reproduce-after:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clone
+    export LD_LIBRARY_PATH="$PWD/build-asan-fuzz/subprojects/gst-plugins-bad/gst-libs/gst/analytics:$PWD/build-asan-fuzz/subprojects/gst-plugins-base/gst-libs/gst/video:$PWD/build-asan-fuzz/subprojects/gstreamer/libs/gst/base:$PWD/build-asan-fuzz/subprojects/gstreamer/gst:${LD_LIBRARY_PATH:-}"
+    ulimit -c 0
+    GST_REGISTRY=/tmp/bughunt_gst_registry_candidate005.bin /tmp/modelinfo_repro
+
+clean:
+    rm -rf clone

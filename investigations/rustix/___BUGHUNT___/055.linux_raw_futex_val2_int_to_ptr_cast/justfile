@@ -1,0 +1,51 @@
+# This candidate's bug only manifests under Miri's strict-provenance check,
+# not as a real crash on real hardware. Unlike candidate 004 (the libc-backend
+# sibling), the linux_raw backend this candidate targets is never selected by
+# the project's own build.rs when compiling under Miri at all ("Miri doesn't
+# support inline asm ... so if we're running under Miri, use the libc
+# backend" - build.rs itself, and Cargo.toml's own target.'cfg(...)' dependency
+# sections additionally hard-code `not(miri)`/`miri` into which linux-raw-sys
+# features get pulled in). So reaching the suspect line under Miri at all
+# requires a small, clearly-scoped bypass of that routing - applied here as
+# enable-miri-linux-raw.patch, NOT part of the real fix (patch.diff) - purely
+# an investigation technique, the same way candidate 004 used
+# `RUSTFLAGS=--cfg rustix_no_linux_raw` to force a backend switch under Miri.
+#
+# "reproduce-after" still exits non-zero: once the targeted cast at
+# syscalls.rs:222 is fixed, Miri proceeds further into the same call and hits
+# a separate, pre-existing, out-of-scope integer-to-pointer cast
+# (src/backend/linux_raw/conv.rs's `pass_usize`, used for every plain integer
+# syscall argument across the whole linux_raw backend, not just futex) under
+# `-Zmiri-strict-provenance`. The before/after comparison that matters is the
+# file:line in Miri's error output, not the process exit code - see RESULT.md.
+
+repo_url := "git@github.com:bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cd clone && git apply "{{justfile_directory()}}/repro/enable-miri-linux-raw.patch"
+
+# Expected: a hard error at src/backend/linux_raw/thread/syscalls.rs:222
+# ("integer-to-pointer casts ... are not supported with
+# -Zmiri-strict-provenance"), reached through the real public API
+# (rustix::thread::futex::requeue).
+reproduce-before:
+    cd repro && MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri run
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Expected: the error at syscalls.rs:222 is gone. Miri now proceeds further
+# and errors instead at src/backend/linux_raw/conv.rs's `pass_usize` (a
+# separate, pre-existing, out-of-scope cast - see the header comment above
+# and RESULT.md's "What's not done" section).
+reproduce-after:
+    cd repro && MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri run
+
+clean:
+    rm -rf clone

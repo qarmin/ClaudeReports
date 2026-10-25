@@ -1,0 +1,79 @@
+diff --git a/libkmod/libkmod-index.c b/libkmod/libkmod-index.c
+index 3dd13df..7b043d7 100644
+--- a/libkmod/libkmod-index.c
++++ b/libkmod/libkmod-index.c
+@@ -688,6 +688,18 @@ static inline void read_value_mm(const void **p, struct index_mm_value *v)
+ 	v->value = read_chars_mm(p, &v->len);
+ }
+ 
++static inline size_t mm_left(const struct index_mm *idx, const void *p)
++{
++	return (size_t)((const char *)idx->mm + idx->size - (const char *)p);
++}
++
++static const void *mm_skip_str(const struct index_mm *idx, const void *p)
++{
++	const char *nul = memchr(p, '\0', mm_left(idx, p));
++
++	return nul != NULL ? nul + 1 : NULL;
++}
++
+ /* reads node into given node struct and returns its address on success or NULL on error. */
+ static struct index_mm_node *index_mm_read_node(const struct index_mm *idx,
+ 						uint32_t offset,
+@@ -701,8 +713,10 @@ static struct index_mm_node *index_mm_read_node(const struct index_mm *idx,
+ 	p = (const char *)idx->mm + (offset & INDEX_NODE_MASK);
+ 
+ 	if (offset & INDEX_NODE_PREFIX) {
+-		size_t len;
+-		node->prefix = read_chars_mm(&p, &len);
++		node->prefix = p;
++		p = mm_skip_str(idx, p);
++		if (p == NULL)
++			return NULL;
+ 	} else {
+ 		node->prefix = "";
+ 	}
+@@ -710,6 +724,9 @@ static struct index_mm_node *index_mm_read_node(const struct index_mm *idx,
+ 	if (offset & INDEX_NODE_CHILDS) {
+ 		size_t child_count;
+ 
++		if (mm_left(idx, p) < 2)
++			return NULL;
++
+ 		node->first = read_char_mm(&p);
+ 		node->last = read_char_mm(&p);
+ 
+@@ -720,6 +737,9 @@ static struct index_mm_node *index_mm_read_node(const struct index_mm *idx,
+ 		node->children = p;
+ 
+ 		child_count = node->last - node->first + 1;
++		if (mm_left(idx, p) < sizeof(uint32_t) * child_count)
++			return NULL;
++
+ 		p = (const char *)p + sizeof(uint32_t) * child_count;
+ 	} else {
+ 		node->first = INDEX_CHILDMAX;
+@@ -728,8 +748,22 @@ static struct index_mm_node *index_mm_read_node(const struct index_mm *idx,
+ 	}
+ 
+ 	if (offset & INDEX_NODE_VALUES) {
++		size_t i;
++
++		if (mm_left(idx, p) < sizeof(uint32_t))
++			return NULL;
++
+ 		node->value_count = read_u32_mm(&p);
+ 		node->values = p;
++
++		/* consumers read values unchecked, so validate them all here */
++		for (i = 0; i < node->value_count; i++) {
++			if (mm_left(idx, p) < sizeof(uint32_t))
++				return NULL;
++			p = mm_skip_str(idx, (const char *)p + sizeof(uint32_t));
++			if (p == NULL)
++				return NULL;
++		}
+ 	} else {
+ 		node->value_count = 0;
+ 		node->values = NULL;

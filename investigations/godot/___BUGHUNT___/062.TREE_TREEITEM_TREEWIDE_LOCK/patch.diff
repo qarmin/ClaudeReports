@@ -1,0 +1,93 @@
+diff --git a/scene/gui/tree.cpp b/scene/gui/tree.cpp
+index 8b67cc7427..61fb834f96 100644
+--- a/scene/gui/tree.cpp
++++ b/scene/gui/tree.cpp
+@@ -921,6 +921,8 @@ Ref<StyleBox> TreeItem::get_custom_stylebox(int p_column) const {
+ }
+ 
+ TreeItem *TreeItem::create_child(int p_index) {
++	MutexLock lock(tree ? tree->_thread_safe_ : _fallback_mutex);
++
+ 	TreeItem *ti = memnew(TreeItem(tree));
+ 	if (tree) {
+ 		ti->cells.resize(tree->columns.size());
+@@ -1006,6 +1008,8 @@ void TreeItem::add_child(TreeItem *p_item) {
+ }
+ 
+ void TreeItem::remove_child(TreeItem *p_item) {
++	MutexLock lock(tree ? tree->_thread_safe_ : _fallback_mutex);
++
+ 	ERR_FAIL_NULL(p_item);
+ 	ERR_FAIL_COND(p_item->parent != this);
+ 
+@@ -1023,10 +1027,13 @@ Tree *TreeItem::get_tree() const {
+ }
+ 
+ TreeItem *TreeItem::get_next() const {
++	MutexLock lock(tree ? tree->_thread_safe_ : _fallback_mutex);
+ 	return next;
+ }
+ 
+ TreeItem *TreeItem::get_prev() {
++	MutexLock lock(tree ? tree->_thread_safe_ : _fallback_mutex);
++
+ 	if (prev) {
+ 		return prev;
+ 	}
+@@ -1046,14 +1053,17 @@ TreeItem *TreeItem::get_prev() {
+ }
+ 
+ TreeItem *TreeItem::get_parent() const {
++	MutexLock lock(tree ? tree->_thread_safe_ : _fallback_mutex);
+ 	return parent;
+ }
+ 
+ TreeItem *TreeItem::get_first_child() const {
++	MutexLock lock(tree ? tree->_thread_safe_ : _fallback_mutex);
+ 	return first_child;
+ }
+ 
+ TreeItem *TreeItem::get_last_child() const {
++	MutexLock lock(tree ? tree->_thread_safe_ : _fallback_mutex);
+ 	return last_child;
+ }
+ 
+@@ -1174,6 +1184,7 @@ int TreeItem::get_visible_child_count() {
+ }
+ 
+ int TreeItem::get_child_count() {
++	MutexLock lock(tree ? tree->_thread_safe_ : _fallback_mutex);
+ 	_create_children_cache();
+ 	return children_cache.size();
+ }
+diff --git a/scene/gui/tree.h b/scene/gui/tree.h
+index b335aa8ab3..ffb4b09188 100644
+--- a/scene/gui/tree.h
++++ b/scene/gui/tree.h
+@@ -60,6 +60,11 @@ public:
+ private:
+ 	friend class Tree;
+ 
++	// Used instead of `tree->_thread_safe_` only when this item has no `tree` (a standalone
++	// TreeItem not yet part of any Tree widget) - see Tree::_thread_safe_'s own comment for why
++	// the structural lock lives on Tree, not here.
++	mutable Mutex _fallback_mutex;
++
+ 	struct Cell {
+ 		mutable RID accessibility_cell_element;
+ 		TreeCellMode mode = TreeItem::CELL_MODE_STRING;
+@@ -494,6 +499,14 @@ public:
+ private:
+ 	friend class TreeItem;
+ 
++	// Guards the parent/child/sibling structure of every TreeItem in this tree (first_child/
++	// last_child/next/prev/parent, and TreeItem's children_cache). This is deliberately a single
++	// tree-wide lock, not a per-TreeItem one: a child's next/prev fields are written by its
++	// *parent's* create_child()/remove_child(), so a per-instance mutex on the child can never
++	// provide mutual exclusion against the parent's concurrent write - see candidate 042's own
++	// "what's not done" note. TreeItem reaches this via its `tree` back-pointer (friend access).
++	_THREAD_SAFE_CLASS_
++
+ 	TreeItem *root = nullptr;
+ 	TreeItem *popup_edited_item = nullptr;
+ 	TreeItem *selected_item = nullptr;

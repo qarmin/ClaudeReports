@@ -1,0 +1,139 @@
+Candidate 028 - RemoteDebuggerPeerTCP::has_message()/is_peer_connected() missing lock
+======================================================================================
+
+Setup: a real second participant (server_project/, a genuine TCP debug server speaking the
+real var_to_bytes()-encoded wire protocol) connects over a real loopback socket to the real
+debuggee (client_project/), started with `--remote-debug tcp://127.0.0.1:17891` against a
+real, self-built `godot.linuxbsd.template_debug.x86_64.san` binary
+(scons platform=linuxbsd target=template_debug use_tsan=yes debug_symbols=yes
+disable_path_overrides=no). The server floods ~40-90k real length-prefixed `var_to_bytes([])`
+messages over ~12s while the debuggee just idles (its own per-frame debugger polling already
+exercises the racy accessors), then disconnects to flip `connected`.
+
+=== UNFIXED: 5/5 runs reproduce the `is_peer_connected()` data race, 3/3 high-burst runs also
+=== reproduce the `has_message()` / in_queue race and a related unlocked read inside
+=== `_read_in()` itself (same root cause, same file)
+
+Run 1 (lower message rate, ~1 msg/frame):
+  SUMMARY: ThreadSanitizer: data race core/debugger/remote_debugger_peer.cpp:41 in RemoteDebuggerPeerTCP::is_peer_connected()
+
+Run 2 (lower message rate, ~1 msg/frame):
+  SUMMARY: ThreadSanitizer: data race core/debugger/remote_debugger_peer.cpp:41 in RemoteDebuggerPeerTCP::is_peer_connected()
+
+Run 3 (burst rate, 50 msgs/frame - server sent 87000 messages):
+  SUMMARY: ThreadSanitizer: data race core/debugger/remote_debugger_peer.cpp:41 in RemoteDebuggerPeerTCP::is_peer_connected()
+  SUMMARY: ThreadSanitizer: data race core/templates/list.h:247 in List<Array, DefaultAllocator>::_Data::erase(List<Array, DefaultAllocator>::Element*)
+  SUMMARY: ThreadSanitizer: lock-order-inversion (potential deadlock) ... [pre-existing, unrelated - see RESULT.md "What's not done"]
+  SUMMARY: ThreadSanitizer: data race core/templates/list.h:485 in List<Array, DefaultAllocator>::size() const
+  SUMMARY: ThreadSanitizer: data race core/debugger/remote_debugger_peer.cpp:41 in RemoteDebuggerPeerTCP::is_peer_connected()
+  SUMMARY: ThreadSanitizer: data race core/templates/list.h:312 in List<Array, DefaultAllocator>::push_back(Array const&)
+  SUMMARY: ThreadSanitizer: data race core/templates/list.h:485 in List<Array, DefaultAllocator>::size() const
+
+Run 4 (burst rate, 50 msgs/frame):
+  SUMMARY: ThreadSanitizer: data race core/debugger/remote_debugger_peer.cpp:41 in RemoteDebuggerPeerTCP::is_peer_connected()
+  SUMMARY: ThreadSanitizer: data race core/templates/list.h:247 in List<Array, DefaultAllocator>::_Data::erase(List<Array, DefaultAllocator>::Element*)
+  SUMMARY: ThreadSanitizer: lock-order-inversion (potential deadlock) ... [pre-existing, unrelated]
+  SUMMARY: ThreadSanitizer: data race core/templates/list.h:485 in List<Array, DefaultAllocator>::size() const
+  SUMMARY: ThreadSanitizer: data race core/debugger/remote_debugger_peer.cpp:41 in RemoteDebuggerPeerTCP::is_peer_connected()
+  SUMMARY: ThreadSanitizer: data race core/templates/list.h:289 in List<Array, DefaultAllocator>::push_back(Array const&)
+  SUMMARY: ThreadSanitizer: data race core/templates/list.h:485 in List<Array, DefaultAllocator>::size() const
+
+Run 5 (burst rate, re-run via repro/run_repro.sh, final version):
+  SUMMARY: ThreadSanitizer: data race core/debugger/remote_debugger_peer.cpp:41 in RemoteDebuggerPeerTCP::is_peer_connected()
+  SUMMARY: ThreadSanitizer: data race core/templates/list.h:485 in List<Array, DefaultAllocator>::size() const
+  SUMMARY: ThreadSanitizer: data race core/templates/list.h:247 in List<Array, DefaultAllocator>::_Data::erase(List<Array, DefaultAllocator>::Element*)
+  SUMMARY: ThreadSanitizer: data race core/debugger/remote_debugger_peer.cpp:41 in RemoteDebuggerPeerTCP::is_peer_connected()
+  SUMMARY: ThreadSanitizer: data race core/templates/list.h:289 in List<Array, DefaultAllocator>::push_back(Array const&)
+
+--- Full report for the `is_peer_connected()` race (identical shape in every unfixed run) ---
+
+WARNING: ThreadSanitizer: data race (pid=42283)
+  Read of size 1 at 0x724c0000ef80 by main thread (mutexes: write M0):
+    #0 RemoteDebuggerPeerTCP::is_peer_connected() core/debugger/remote_debugger_peer.cpp:41
+    #1 RemoteDebugger::is_peer_connected() core/debugger/remote_debugger.h:102
+    #2 RemoteDebugger::send_message(String const&, Array const&) core/debugger/remote_debugger.cpp:265
+    #3 EngineDebugger::initialize(...) core/debugger/engine_debugger.cpp:149
+    #4 Main::setup(...) main/main.cpp:2283
+    #5 main platform/linuxbsd/godot_linuxbsd.cpp:111
+
+  Previous write of size 1 at 0x724c0000ef80 by thread T26:
+    #0 RemoteDebuggerPeerTCP::_poll() core/debugger/remote_debugger_peer.cpp:222
+    #1 RemoteDebuggerPeerTCP::_poll() core/debugger/remote_debugger_peer.cpp:217
+    #2 RemoteDebuggerPeerTCP::_thread_func(void*) core/debugger/remote_debugger_peer.cpp:202
+    #3 Thread::callback(...) core/os/thread.cpp:64
+    (... std::thread plumbing frames omitted ...)
+
+  Thread T26 created by main thread at:
+    #2 RemoteDebuggerPeerTCP::RemoteDebuggerPeerTCP(Ref<StreamPeerSocket>) core/debugger/remote_debugger_peer.cpp:94
+    #3 RemoteDebuggerPeerTCP::create_tcp(String const&) core/debugger/remote_debugger_peer.cpp:249
+    #4 EngineDebugger::initialize(...) core/debugger/engine_debugger.cpp:141
+
+SUMMARY: ThreadSanitizer: data race core/debugger/remote_debugger_peer.cpp:41 in RemoteDebuggerPeerTCP::is_peer_connected()
+
+--- Full report for the `has_message()` race (burst runs only - the exact candidate-described bug) ---
+
+WARNING: ThreadSanitizer: data race (pid=42773)
+  Write of size 4 at 0x720c0002f660 by thread T26 (mutexes: write M0):
+    #0 List<Array, DefaultAllocator>::push_back(Array const&) core/templates/list.h:312
+    #1 RemoteDebuggerPeerTCP::_read_in() core/debugger/remote_debugger_peer.cpp:168
+    #2 RemoteDebuggerPeerTCP::_poll() core/debugger/remote_debugger_peer.cpp:221
+    #3 RemoteDebuggerPeerTCP::_thread_func(void*) core/debugger/remote_debugger_peer.cpp:202
+
+  Previous read of size 4 at 0x720c0002f660 by main thread (mutexes: write M1):
+    #0 List<Array, DefaultAllocator>::size() const core/templates/list.h:485
+    #1 RemoteDebuggerPeerTCP::has_message() core/debugger/remote_debugger_peer.cpp:45
+    #2 RemoteDebugger::_poll_messages() core/debugger/remote_debugger.cpp:357
+    #3 RemoteDebugger::poll_events(bool) core/debugger/remote_debugger.cpp:663
+    #4 EngineDebugger::line_poll() core/debugger/engine_debugger.h:131
+    #5 GDScriptFunction::call(...) modules/gdscript/gdscript_vm.cpp:3969
+    (... GDScript/_ready()/SceneTree bootstrap frames omitted ...)
+
+SUMMARY: ThreadSanitizer: data race core/templates/list.h:312 in List<Array, DefaultAllocator>::push_back(Array const&)
+
+--- Related: `_read_in()`'s own unlocked capacity check races `get_message()`'s locked pop_front()/erase() (same `in_queue`, a real free) ---
+
+  Write of size 4 ... by main thread (mutexes: write M0, write M1):
+    #0 List<Array, DefaultAllocator>::_Data::erase(...) core/templates/list.h:247
+    #1 List<Array, DefaultAllocator>::erase(...) core/templates/list.h:447
+    #2 List<Array, DefaultAllocator>::pop_front() core/templates/list.h:357
+    #3 RemoteDebuggerPeerTCP::get_message() core/debugger/remote_debugger_peer.cpp:54
+    #4 RemoteDebugger::_poll_messages() core/debugger/remote_debugger.cpp:358
+
+  Previous read of size 4 ... by thread T26:
+    #0 List<Array, DefaultAllocator>::size() const core/templates/list.h:485
+    #1 RemoteDebuggerPeerTCP::_read_in() core/debugger/remote_debugger_peer.cpp:134
+    #2 RemoteDebuggerPeerTCP::_poll() core/debugger/remote_debugger_peer.cpp:221
+
+SUMMARY: ThreadSanitizer: data race core/templates/list.h:247 in List<Array, DefaultAllocator>::_Data::erase(List<Array, DefaultAllocator>::Element*)
+
+=== FIXED: 5/5 runs clean (patch.diff applied) ===
+
+$ bash repro/run_repro.sh <fixed-binary> fixed-final /tmp/repro028_final_fixed
+=== fixed-final: client exit 124 ===
+[fixed-final] clean: no RemoteDebuggerPeerTCP/List<Array> race in ThreadSanitizer output
+
+(4 earlier fixed runs during development were clean in the same way; the only TSan reports that
+still appear after the fix are the two pre-existing, unrelated ones also seen in the unfixed
+runs: a lock-order-inversion between RemoteDebugger::mutex and the global error-print lock in
+_poll_messages()/_print_handler(), and an unrelated race in
+drivers/unix/file_access_unix.cpp:51 FileAccessUnix::check_errors() - neither touches
+remote_debugger_peer.cpp or List<Array>, confirming they are not fixed by, and not the subject
+of, this candidate's patch.)
+
+=== Project test suite, before and after (bin/godot.linuxbsd.editor.x86_64.san, ASan,
+=== tests=yes, debug_symbols=yes) ===
+
+Unfixed:
+[doctest] test cases:   1431 |   1430 passed |    1 failed | 3 skipped
+[doctest] assertions: 425312 | 424312 passed | 1000 failed |
+[doctest] Status: FAILURE!
+
+Fixed:
+[doctest] test cases:   1431 |   1430 passed |    1 failed | 3 skipped
+[doctest] assertions: 425312 | 424312 passed | 1000 failed |
+[doctest] Status: FAILURE!
+
+(Identical result before/after - the single failing test case is tests/core/io/test_ip.cpp's
+pre-existing IPv6 loopback-address assertion, a known environment-dependent failure unrelated to
+this change and already documented as the established baseline by earlier candidates in this
+workspace, e.g. 002/003/004/010/011.)

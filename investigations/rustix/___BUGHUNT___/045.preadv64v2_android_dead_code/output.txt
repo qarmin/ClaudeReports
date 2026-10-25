@@ -1,0 +1,119 @@
+=== BEFORE (pristine checkout at 287214b889865d8e1406a0ee71cc409b6f6191c8) ===
+$ repro/run_repro.sh <clone> present
++ cargo clippy --target aarch64-linux-android --features std,all-apis,try_close
+warning: function `preadv64v2` is never used
+   --> src/backend/libc/c.rs:414:36
+    |
+414 |     pub(in super::super) unsafe fn preadv64v2(
+    |                                    ^^^^^^^^^^^
+
+warning: function `pwritev64v2` is never used
+   --> src/backend/libc/c.rs:442:36
+    |
+442 |     pub(in super::super) unsafe fn pwritev64v2(
+    |                                    ^^^^^^^^^^^
+
+warning: struct `KernelSigSet` is never constructed
+  --> src/kernel_sigset.rs:32:12
+   |
+32 | pub struct KernelSigSet(kernel_sigset_t);
+   |            ^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+  --> src/kernel_sigset.rs:36:18
+   |
+34 | impl KernelSigSet {
+   | ----------------- associated items in this implementation
+35 |     /// Create a new empty `KernelSigSet`.
+36 |     pub const fn empty() -> Self {
+   |                  ^^^^^
+...
+46 |     pub const fn all() -> Self {
+   |                  ^^^
+...
+54 |     pub fn clear(&mut self) {
+   |            ^^^^^
+...
+61 |     pub fn insert(&mut self, sig: Signal) {
+   |            ^^^^^^
+...
+69 |     pub fn insert_all(&mut self) {
+   |            ^^^^^^^^^^
+...
+74 |     pub fn remove(&mut self, sig: Signal) {
+   |            ^^^^^^
+...
+82 |     pub fn contains(&self, sig: Signal) -> bool {
+   |            ^^^^^^^^
+
+warning: methods with the following characteristics: (`to_*` and `self` type is `Copy`) usually take `self` by value
+   --> src/timespec.rs:210:31
+    |
+210 |     pub(crate) fn to_sec_usec(&self) -> Option<(Secs, u32)> {
+    |                               ^^^^^
+    |
+    = help: consider choosing a less ambiguous name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#wrong_self_convention
+    = note: `#[warn(clippy::wrong_self_convention)]` on by default
+
+warning: methods with the following characteristics: (`to_*` and `self` type is `Copy`) usually take `self` by value
+   --> src/timespec.rs:223:30
+    |
+223 |     pub(crate) fn to_timeval(&self) -> crate::io::Result<c::timeval> {
+    |                              ^^^^^
+    |
+    = help: consider choosing a less ambiguous name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#wrong_self_convention
+
+warning: `rustix` (lib) generated 6 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.60s
+---
+dead-code warnings for preadv64v2/pwritev64v2: present (expected: present)
+REPRO: matches expectation (OK)
+
+Reproduced identically on 3 separate invocations (2 after a `cargo clean -p rustix`,
+one more after that) - fully deterministic, not layout/seed-dependent (this is a
+static lint over a fixed cfg/feature combination, not a runtime observation).
+
+=== AFTER (patched: src/backend/libc/c.rs with #[cfg_attr(target_os = "android", allow(dead_code))] added) ===
+$ repro/run_repro.sh <clone-with-patch.diff-applied> absent
++ cargo clippy --target aarch64-linux-android --features std,all-apis,try_close
+warning: struct `KernelSigSet` is never constructed
+  --> src/kernel_sigset.rs:32:12
+   |
+32 | pub struct KernelSigSet(kernel_sigset_t);
+   |            ^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+  --> src/kernel_sigset.rs:36:18
+   |
+34 | impl KernelSigSet {
+   | ----------------- associated items in this implementation
+35 |     /// Create a new empty `KernelSigSet`.
+36 |     pub const fn empty() -> Self {
+   |                  ^^^^^
+...
+   (same KernelSigSet / wrong_self_convention warnings as before - unrelated,
+   not part of this candidate's scope)
+
+warning: `rustix` (lib) generated 4 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.76s
+---
+dead-code warnings for preadv64v2/pwritev64v2: absent (expected: absent)
+REPRO: matches expectation (OK)
+
+=== Sibling check: x86_64-unknown-linux-musl (where this module IS reachable) ===
+Before and after the patch, `cargo clippy --target x86_64-unknown-linux-musl
+--features std,all-apis,try_close` produces 0 occurrences of
+"preadv64v2"/"pwritev64v2"/"error" in its output both times - confirming the fix's
+`cfg_attr(target_os = "android", ...)` is scoped correctly and does not silence (or
+otherwise affect) the warning on the musl target where the module is genuinely used,
+and does not introduce any build error there.
+
+=== Project test suite (default x86_64-unknown-linux-gnu host target) ===
+Before (pristine):  cargo test --workspace -> 22 passed; 0 failed; 1 ignored (lib/int
+                     tests) + 7 passed (doc-tests)
+After (patched):    cargo test --workspace -> 22 passed; 0 failed; 1 ignored (lib/int
+                     tests) + 7 passed (doc-tests)
+No change in test outcome between before/after (expected: this fix is `cfg`/lint-only,
+not a behavioral change on any already-tested target).

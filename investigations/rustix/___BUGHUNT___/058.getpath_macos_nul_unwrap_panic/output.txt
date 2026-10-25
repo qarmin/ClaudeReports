@@ -1,0 +1,98 @@
+=== Approach 1/3: real Apple hardware/execution feasibility check (same conclusion as
+=== candidates 038/039, re-verified fresh in this session's own worktree) ===
+
+$ rustup target list --installed | grep -i apple
+x86_64-apple-darwin
+
+$ xcrun --sdk macosx --show-sdk-path
+/bin/bash: line 5: xcrun: command not found
+
+$ sudo -n true; echo "sudo exit: $?"
+sudo: The "no new privileges" flag is set, which prevents sudo from running as root.
+sudo exit: 1
+
+$ cargo build --target x86_64-apple-darwin --features "fs,alloc,std" --lib
+   Compiling libc v0.2.189
+   Compiling rustix v1.1.5 (.../_wt/058)
+   Compiling bitflags v2.9.1
+   Compiling errno v0.3.14
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.78s
+
+-> Cross-compiles cleanly (rlib only, no link needed) - confirms `getpath` is real, shipped,
+   reachable code on the actual Apple build matrix, matching candidate 038's identical finding
+   for the same environment. No macOS SDK/cross-linker exists here to produce or run a real
+   linked Darwin binary (same conclusion already independently established for this container by
+   candidates 038/039).
+
+=== Approach 2/3: Miri cross-interpretation of the REAL unmodified getpath function
+=== (no mock at all - genuinely checking whether Miri can run the real syscall) ===
+
+$ MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run \
+    --target x86_64-apple-darwin --example bughunt_058_getpath --features "fs,alloc,std"
+
+error: unsupported operation: fcntl: unsupported command 0x32
+    --> src/backend/libc/fs/syscalls.rs:2204:13
+     |
+2204 |         ret(c::fcntl(borrowed_fd(fd), c::F_GETPATH, buf.as_mut_ptr()))?;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsupported operation occurred here
+     = help: this is likely not a bug in the program; it indicates that the program performed an
+       operation that Miri does not support
+
+-> Dead end for the REAL, unmocked syscall (Miri has no shim implementing F_GETPATH's path-
+   resolution semantics for any fd) - unlike candidate 039's `fstat`, which Miri's libc shim does
+   emulate. This is a genuine tool limitation, not evidence the bug is absent. This is exactly
+   why approach 3 mocks only the syscall boundary rather than giving up here.
+
+=== Approach 3/3: manual boundary-value construction, syscall boundary mocked for two magic raw
+=== fd values only (mock.patch), real getpath logic unmodified, run via Miri cross-interpretation
+=== for x86_64-apple-darwin (which needs no real linking/execution, only MIR interpretation -
+=== this is what makes approach 3 runnable at all in this sandbox) ===
+
+$ MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run \
+    --target x86_64-apple-darwin --example bughunt_058_getpath --features "fs,alloc,std"
+  (run 5 times total)
+
+thread 'main' (NNNNN) panicked at src/backend/libc/fs/syscalls.rs:2217:46:
+called `Option::unwrap()` on a `None` value
+[full-nonzero-buffer] REPRODUCED - panicked: called `Option::unwrap()` on a `None` value
+[boundary-last-byte-nul] did not reproduce - getpath succeeded with "AAA...A" (1023 bytes)
+
+-> Reproduced 5/5 runs, identical panic message and exact source location every time
+   (src/backend/libc/fs/syscalls.rs:2217:46, the `.position(|&c| c == 0).unwrap()` call) -
+   deterministic, no layout/seed dependency (Miri cross-interpretation, not a raw memory-layout-
+   dependent crash). The boundary variant (1023 non-zero bytes + 1 real NUL, the legitimate
+   maximal path) succeeds cleanly every run, confirming the panic is driven exactly by "kernel
+   wrote 0 bytes of room for a NUL", not by buffer size or any other incidental factor.
+
+=== After applying patch.diff (buf.iter().position(...).unwrap() -> match with
+=== Err(io::Errno::NAMETOOLONG) for the None case), re-run via the same mock mechanism
+=== (mock_and_fix.patch = mock.patch + patch.diff combined, to avoid a hunk conflict - see
+=== justfile's header comment), 3/3 runs ===
+
+[full-nonzero-buffer] did not reproduce - getpath returned a clean error: Os { code: 63,
+  kind: InvalidFilename, message: "File name too long (os error 36)" }
+[boundary-last-byte-nul] did not reproduce - getpath succeeded with "AAA...A" (1023 bytes)
+
+-> Panic gone, clean NAMETOOLONG error returned instead; the legitimate boundary case is
+   unaffected. 3/3 runs, no flakiness either way.
+
+=== `just test` run from a completely fresh clone (this candidate folder's own self-contained
+=== justfile, repo_url/base_commit filled in) - see this folder's own copy of the full output ===
+
+$ just test
+[... clone, mock, reproduce-before: panics on full-nonzero-buffer, succeeds on boundary ...]
+[... clone-after, mock-and-fix, reproduce-after: clean NAMETOOLONG error, boundary still succeeds ...]
+
+(full transcript matches the "Approach 3" and "After applying patch.diff" sections above -
+verified to actually run end-to-end from a fresh `git clone`, not just read as a recipe)
+
+=== Project test suite, cargo test --workspace --features "std,all-apis,use-libc" --no-fail-fast,
+=== run in the investigating worktree (not the standalone clone) ===
+
+BEFORE (pristine src/backend/libc/fs/syscalls.rs):
+TOTAL: 411 passed, 1 failed
+  (the one failure, ioctl::test_int_setter, is the pre-existing, unrelated /dev/net/tun absence
+  already documented in projects/rustix.md and candidates 032/038/039's own RESULT.md files)
+
+AFTER (patch.diff applied):
+TOTAL: 411 passed, 1 failed (identical - same single pre-existing failure, no new failures)

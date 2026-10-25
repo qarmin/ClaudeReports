@@ -1,0 +1,66 @@
+=== Representative excerpt from a full run (full raw output is ~65k lines, mostly repeated ERR_READ_THREAD_GUARD spam from the 6 racing threads calling Node/Node3D methods off the main thread - expected noise, not a separate bug; this is the ASan report + its fully symbolized stacks for both the use-after-free read and the free/alloc history) ===
+
+==1841803==ERROR: AddressSanitizer: heap-use-after-free on address 0x6cb1d6129328 at pc 0x5745a9a6c1a1 bp 0x6c71b03ada50 sp 0x6c71b03ada40
+READ of size 8 at 0x6cb1d6129328 thread T31
+...
+    #0 0x5745a9a6c1a0 in CowData<CSGBrush::Face>::size() const core/templates/cowdata.h:185
+    #1 0x5745a9a6c1a0 in Vector<CSGBrush::Face>::size() const core/templates/vector.h:93
+    #2 0x5745a9a6c1a0 in CSGShape3D::_get_brush_collision_faces() modules/csg/csg_shape.cpp:895
+    #3 0x5745a9a6c97b in CSGShape3D::bake_collision_shape() modules/csg/csg_shape.cpp:930
+    #4 0x5745a9aa92ea in void call_with_validated_variant_args_ret_helper<__UnexistingClass, Ref<ConcavePolygonShape3D>>(__UnexistingClass*, Ref<ConcavePolygonShape3D> (__UnexistingClass::*)(), Variant const**, Variant*, IndexSequence<>) core/variant/binder_common.h:129
+    #5 0x5745a9aa92ea in void call_with_validated_object_instance_args_ret<__UnexistingClass, Ref<ConcavePolygonShape3D>>(__UnexistingClass*, Ref<ConcavePolygonShape3D> (__UnexistingClass::*)(), Variant const**, Variant*) core/variant/binder_common.h:416
+    #6 0x5745a9aa92ea in MethodBindTR<Ref<ConcavePolygonShape3D>>::validated_call(Object*, Variant const**, Variant*) const core/object/method_bind_common.h:275
+    #7 0x5745a9aa92ea in MethodBindTR<Ref<ConcavePolygonShape3D>>::validated_call(Object*, Variant const**, Variant*) const core/object/method_bind_common.h:268
+    #8 0x5745aa4cda9b in GDScriptFunction::call(GDScriptInstance*, Variant const**, int, Callable::CallError&, GDScriptFunction::CallState*) modules/gdscript/gdscript_vm.cpp:2342
+    #9 0x5745aa042706 in GDScriptInstance::callp(StringName const&, Variant const**, int, Callable::CallError&) modules/gdscript/gdscript.cpp:1976
+    #10 0x5745bb2aa2c6 in Object::callp(StringName const&, Variant const**, int, Callable::CallError&) core/object/object.cpp:883
+    #11 0x5745ba65d9d0 in Callable::callp(Variant const**, int, Variant&, Callable::CallError&) const core/variant/callable.cpp:68
+    #12 0x5745ba661294 in CallableCustomBind::call(Variant const**, int, Variant&, Callable::CallError&) const core/variant/callable_bind.cpp:150
+    #13 0x5745ba65dd70 in Callable::callp(Variant const**, int, Variant&, Callable::CallError&) const core/variant/callable.cpp:58
+    #14 0x5745b9b1726e in CoreBind::Thread::_start_func(void*) core/core_bind.cpp:1493
+    #15 0x5745b9d14d84 in Thread::callback(unsigned long, Thread::Settings const&, void (*)(void*), void*) core/os/thread.cpp:64
+    #16 0x5745bc1ccd43 in execute_native_thread_routine (/home/rafal/Projekty/Obce/godot/bin/godot.linuxbsd.editor.x86_64.san+0x17bbdd43) (BuildId: 9832a123935a356736ca2fb2b0c8857cef8eea18)
+    #17 0x7071d6f88a80 in asan_thread_start ../../../../src/libsanitizer/asan/asan_interceptors.cpp:246
+    #18 0x7071d6c81df9 in start_thread nptl/pthread_create.c:454
+    #19 0x7071d6d153d3 in clone ../sysdeps/unix/sysv/linux/x86_64/clone.S:100
+
+0x6cb1d6129328 is located 24 bytes inside of 48-byte region [0x6cb1d6129310,0x6cb1d6129340)
+freed by thread T33 here:
+ERROR: /root/Main/@CSGCylinder3D@2: The caller thread can't call the function `get_child_count()` on this node. Use `call_deferred()` or `call_deferred_thread_group()` instead.
+   at: get_child_count (scene/main/node.cpp:1856)
+   GDScript backtrace (most recent call first):
+       [0] _spam (res://main.tscn::GDScript_1:32)
+    #0 0x7071d704f3ff in free ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:51
+    #1 0x5745a9a67f08 in void memdelete<CSGBrush>(CSGBrush*) core/os/memory.h:169
+    #2 0x5745a9a67f08 in CSGShape3D::_get_brush() modules/csg/csg_shape.cpp:491
+
+previously allocated by thread T32 here:
+ERROR: /root/Main/@CSGCylinder3D@2: The caller thread can't call the function `update_configuration_warnings()` on this node. Use `call_deferred()` or `call_deferred_thread_group()` instead.
+   at: update_configuration_warnings (scene/main/node.cpp:3577)
+   GDScript backtrace (most recent call first):
+       [0] _spam (res://main.tscn::GDScript_1:32)
+ERROR: /root/Main/@CSGCylinder3D@2: The caller thread can't call the function `update_gizmos()` on this node. Use `call_deferred()` or `call_deferred_thread_group()` instead.
+   at: update_gizmos (scene/3d/node_3d.cpp:858)
+   GDScript backtrace (most recent call first):
+       [0] _spam (res://main.tscn::GDScript_1:28)
+ERROR: /root/Main/@CSGCylinder3D@2: The caller thread can't call the function `update_gizmos()` on this node. Use `call_deferred()` or `call_deferred_thread_group()` instead.
+   at: update_gizmos (scene/3d/node_3d.cpp:858)
+   GDScript backtrace (most recent call first):
+       [0] _spam (res://main.tscn::GDScript_1:30)
+ERROR: /root/Main/@CSGCylinder3D@2: The caller thread can't call the function `update_gizmos()` on this node. Use `call_deferred()` or `call_deferred_thread_group()` instead.
+   at: update_gizmos (scene/3d/node_3d.cpp:858)
+   GDScript backtrace (most recent call first):
+       [0] _spam (res://main.tscn::GDScript_1:28)
+    #0 0x7071d705060f in malloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:67
+    #1 0x5745b9d0334d in void* Memory::alloc_static<false>(unsigned long, bool) core/os/memory.cpp:101
+
+Thread T31 created by T0 here:
+ERROR: /root/Main/@CSGCylinder3D@2: The caller thread can't call the function `get_child_count()` on this node. Use `call_deferred()` or `call_deferred_thread_group()` instead.
+   at: get_child_count (scene/main/node.cpp:1856)
+   GDScript backtrace (most recent call first):
+       [0] _spam (res://main.tscn::GDScript_1:32)
+ERROR: /root/Main/@CSGCylinder3D@2: The caller thread can't call the function `update_configuration_warnings()` on this node. Use `call_deferred()` or `call_deferred_thread_group()` instead.
+   at: update_configuration_warnings (scene/main/node.cpp:3577)
+   GDScript backtrace (most recent call first):
+
+SUMMARY: AddressSanitizer: heap-use-after-free core/templates/cowdata.h:185 in CowData<CSGBrush::Face>::size() const

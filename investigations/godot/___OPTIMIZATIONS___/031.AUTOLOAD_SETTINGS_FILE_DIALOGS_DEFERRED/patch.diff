@@ -1,0 +1,121 @@
+diff --git a/editor/settings/editor_autoload_settings.cpp b/editor/settings/editor_autoload_settings.cpp
+index 20738db123..e833305123 100644
+--- a/editor/settings/editor_autoload_settings.cpp
++++ b/editor/settings/editor_autoload_settings.cpp
+@@ -56,18 +56,9 @@
+ void EditorAutoloadSettings::_notification(int p_what) {
+ 	switch (p_what) {
+ 		case NOTIFICATION_ENTER_TREE: {
+-			List<String> afn;
+-			ResourceLoader::get_recognized_extensions_for_type("PackedScene", &afn);
+-
+-			for (const String &E : afn) {
+-				scene_file_dialog->add_filter("*." + E);
+-			}
+-
+-			ResourceLoader::get_recognized_extensions_for_type("Script", &afn);
+-
+-			for (const String &E : afn) {
+-				autoload_file_dialog->add_filter("*." + E);
+-			}
++			// The file dialogs' filters are set up when each dialog is first created, see the
++			// _get_*() accessors - doing it here would force both to be constructed at startup,
++			// which is what the lazy construction avoids.
+ 		} break;
+ 
+ 		case NOTIFICATION_THEME_CHANGED: {
+@@ -377,8 +368,8 @@ void EditorAutoloadSettings::_create_script_autoload() {
+ }
+ 
+ void EditorAutoloadSettings::_create_scene_autoload() {
+-	scene_file_dialog->set_current_file("new_autoload_scene.tscn");
+-	scene_file_dialog->popup_file_dialog();
++	_get_scene_file_dialog()->set_current_file("new_autoload_scene.tscn");
++	_get_scene_file_dialog()->popup_file_dialog();
+ }
+ 
+ void EditorAutoloadSettings::init_autoloads() {
+@@ -842,6 +833,44 @@ void EditorAutoloadSettings::_bind_methods() {
+ 	ADD_SIGNAL(MethodInfo("autoload_changed"));
+ }
+ 
++// These two EditorFileDialogs cost ~1.45MB each (see ___OPTIMIZATIONS___/021) and are only used
++// by the Autoload tab's browse/create-scene actions, so they are built on first use.
++FileDialog *EditorAutoloadSettings::_get_autoload_file_dialog() {
++	if (!autoload_file_dialog) {
++		autoload_file_dialog = memnew(EditorFileDialog);
++		autoload_file_dialog->set_file_mode(FileDialog::FILE_MODE_OPEN_FILE);
++		add_child(autoload_file_dialog);
++		autoload_file_dialog->connect("file_selected", callable_mp(this, &EditorAutoloadSettings::_autoload_file_selected));
++
++		List<String> afn;
++		ResourceLoader::get_recognized_extensions_for_type("Script", &afn);
++		for (const String &E : afn) {
++			autoload_file_dialog->add_filter("*." + E);
++		}
++	}
++	return autoload_file_dialog;
++}
++
++FileDialog *EditorAutoloadSettings::_get_scene_file_dialog() {
++	if (!scene_file_dialog) {
++		scene_file_dialog = memnew(EditorFileDialog);
++		scene_file_dialog->set_file_mode(FileDialog::FILE_MODE_SAVE_FILE);
++		add_child(scene_file_dialog);
++		scene_file_dialog->connect("file_selected", callable_mp(this, &EditorAutoloadSettings::_scene_file_selected));
++
++		List<String> afn;
++		ResourceLoader::get_recognized_extensions_for_type("PackedScene", &afn);
++		for (const String &E : afn) {
++			scene_file_dialog->add_filter("*." + E);
++		}
++	}
++	return scene_file_dialog;
++}
++
++void EditorAutoloadSettings::_browse_pressed() {
++	_get_autoload_file_dialog()->popup_file_dialog();
++}
++
+ EditorAutoloadSettings::EditorAutoloadSettings() {
+ 	ProjectSettings::get_singleton()->add_hidden_prefix("autoload/");
+ 
+@@ -884,20 +913,15 @@ EditorAutoloadSettings::EditorAutoloadSettings() {
+ 	HBoxContainer *hbc = memnew(HBoxContainer);
+ 	add_child(hbc);
+ 
+-	autoload_file_dialog = memnew(EditorFileDialog);
+-	autoload_file_dialog->set_file_mode(FileDialog::FILE_MODE_OPEN_FILE);
+-	hbc->add_child(autoload_file_dialog);
+-	autoload_file_dialog->connect("file_selected", callable_mp(this, &EditorAutoloadSettings::_autoload_file_selected));
++	// autoload_file_dialog is created lazily, see _get_autoload_file_dialog().
+ 
+-	scene_file_dialog = memnew(EditorFileDialog);
+-	scene_file_dialog->set_file_mode(FileDialog::FILE_MODE_SAVE_FILE);
+-	hbc->add_child(scene_file_dialog);
+-	scene_file_dialog->connect("file_selected", callable_mp(this, &EditorAutoloadSettings::_scene_file_selected));
++	// scene_file_dialog is created lazily, see _get_scene_file_dialog().
+ 
+ 	browse_button = memnew(Button);
+ 	browse_button->set_text(TTRC("Select Script/Scene"));
+ 	hbc->add_child(browse_button);
+-	browse_button->connect(SceneStringName(pressed), callable_mp(autoload_file_dialog, &FileDialog::popup_file_dialog));
++	// Bound to this rather than straight to the dialog, which no longer exists yet.
++	browse_button->connect(SceneStringName(pressed), callable_mp(this, &EditorAutoloadSettings::_browse_pressed));
+ 
+ 	create_script_autoload = memnew(Button);
+ 	create_script_autoload->set_text(TTRC("Create Script"));
+diff --git a/editor/settings/editor_autoload_settings.h b/editor/settings/editor_autoload_settings.h
+index ef228ee786..50e54f801a 100644
+--- a/editor/settings/editor_autoload_settings.h
++++ b/editor/settings/editor_autoload_settings.h
+@@ -98,6 +98,9 @@ class EditorAutoloadSettings : public VBoxContainer {
+ 	void _create_script_autoload();
+ 	void _create_scene_autoload();
+ 	void _autoload_file_selected(const String &p_path);
++	void _browse_pressed();
++	FileDialog *_get_autoload_file_dialog();
++	FileDialog *_get_scene_file_dialog();
+ 	void _scene_file_selected(const String &p_path);
+ 
+ 	void _script_created(Ref<Script> p_script);

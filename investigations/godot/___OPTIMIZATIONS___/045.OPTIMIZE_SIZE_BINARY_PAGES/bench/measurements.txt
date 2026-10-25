@@ -1,0 +1,58 @@
+Candidate 045 raw measurements. Two builds of the same tree (pristine HEAD 9552dfb685 + the memstat
+instrumentation), differing only in SCons flags:
+  default : scons -j22 platform=linuxbsd target=editor tests=yes
+  opt=size: scons -j22 platform=linuxbsd target=editor tests=yes optimize=size
+Both benched interleaved. glibc 2.43, 24 cores. The optimize=size rebuild took 235s.
+
+=== binary size on disk ===
+default : 183904320 B (175.4 MB)
+opt=size: 145428416 B (138.7 MB)    -> -38.5 MB (-20.9%)
+
+=== per-mapping RSS at steady state (--quit-after 400, sampled 3s in), 2 runs each ===
+default  run1: VmHWM=718028 VmRSS=718028 binary_pages=105172 heap=499676 anon=108304  (kB)
+default  run2: VmHWM=717768 VmRSS=717768 binary_pages=104804 heap=499716 anon=108304
+opt=size run1: VmHWM=692080 VmRSS=692080 binary_pages= 79128 heap=499680 anon=108308
+opt=size run2: VmHWM=691368 VmRSS=691368 binary_pages= 78584 heap=499712 anon=108308
+
+  resident binary pages: 104988 -> 78856 kB mean = -25.5 MB (-24.9%)
+  heap:  499696 -> 499696 kB  (identical)
+  anon:  108304 -> 108308 kB  (identical)
+  -> the entire RSS difference is binary pages; nothing about engine allocation changed.
+
+=== Godot's tracked counters (control) ===
+default : usage=91165351 max=448282949
+opt=size: usage=91165339 max=448282925
+  identical within 24 bytes, confirming the allocations themselves are unchanged.
+
+=== peak RSS, 6 interleaved pairs (kB) ===
+pair1 default=716112 opt_size=692324
+pair2 default=717704 opt_size=691068
+pair3 default=716516 opt_size=691240
+pair4 default=717112 opt_size=690020
+pair5 default=716952 opt_size=690920
+pair6 default=716880 opt_size=691336
+  default mean 716879.3 kB (700.1 MB), opt=size mean 691151.3 kB (675.0 MB)
+  delta -25728 kB = -25.13 MB (-3.59%), opt=size lower in 6/6, no overlap.
+
+=== COST 1: editor startup wall time, 6 interleaved pairs (ms) ===
+default : 2522 2498 2499 2402 2494 2502   mean 2486.2
+opt=size: 2775 2692 2680 2682 2679 2686   mean 2699.0
+  +212.8 ms (+8.56%), slower in 6/6 pairs.
+
+=== COST 2: runtime benches (harness/gdbench), interleaved (ms) ===
+mode           default                        opt=size                    delta
+array_append   315 314 314                    318 320 320                 +1.6%
+string_concat  405 406 405                     410 410 411                +1.2%
+node_instance  220 220 230 224 222            224 227 229 225 222         +1.0%
+vector_math    503 501 502                    597 594 604                 +19.2%
+variant_call   1061 1061 1061                 1245 1251 1247              +17.6%
+regex          224 228 224 222 218            316 316 320 318 319         +42.4%
+dict_insert    319 406 312 407 313            410 411 408 410 409         unreliable, see below
+
+  dict_insert is BIMODAL in the default arm (two clusters, ~315 and ~406) while opt=size sits
+  consistently in the slow cluster (~410). Medians give +28% but the bimodality makes this one
+  untrustworthy as a clean delta - reported, not counted.
+
+  Pattern: allocation-dominated modes are unaffected (~1%); computation-dominated ones
+  (regex matching, Variant dispatch, vector math) lose 17-42%, consistent with -Os giving up the
+  inlining and vectorization those paths depend on.

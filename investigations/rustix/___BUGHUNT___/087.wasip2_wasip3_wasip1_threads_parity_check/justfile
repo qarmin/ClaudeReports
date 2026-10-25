@@ -1,0 +1,46 @@
+# Self-contained reproduction for candidate 087.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# Unlike most candidates in this workspace, this bug lives entirely inside rustix's own
+# `#[cfg(test)]` self-check code (unreachable through any public API), so `repro/check.sh`
+# operates directly on a path to a rustix checkout (the `./clone` this justfile produces) rather
+# than being its own separate Cargo crate with rustix as a path dependency.
+#
+# Requires: wasm32-wasip1/wasip2/wasip1-threads Rust targets (installed automatically by
+# `repro/check.sh` via `rustup target add` - prebuilt std, stable toolchain, no nightly needed)
+# and, for wasm32-wasip3 (no prebuilt rust-std exists yet for this target), the nightly
+# toolchain's `rust-src` component (installed automatically too) plus `-Zbuild-std`.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+# Full cycle: clone pristine, prove the bug exists on all 4 wasi targets, apply the fix
+# (reused verbatim from candidate 081), prove it's gone on all 4.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Build the real, unmodified rustix lib tests for each real wasi target against the pristine
+# clone - should fail to compile with the st_atime/st_mtime/st_ctime field errors on all 4.
+reproduce-before:
+    bash repro/check.sh clone
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same check again, now against the patched clone - the st_atime/st_mtime/st_ctime errors
+# should be gone on all 4 targets (a separate, pre-existing, out-of-scope pair of errors -
+# "cannot find `ugid`" and "cannot find function `dup2`" - is expected to remain; see RESULT.md).
+reproduce-after:
+    bash repro/check.sh clone
+
+clean:
+    rm -rf clone

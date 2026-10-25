@@ -1,0 +1,166 @@
+diff --git a/modules/csg/csg_shape.cpp b/modules/csg/csg_shape.cpp
+index 7bd849fd7d..75d1b74376 100644
+--- a/modules/csg/csg_shape.cpp
++++ b/modules/csg/csg_shape.cpp
+@@ -251,22 +251,33 @@ float CSGShape3D::get_snap() const {
+ #endif // DISABLE_DEPRECATED
+ 
+ void CSGShape3D::_make_dirty(bool p_parent_removing) {
++	// Scoped so brush_mutex is released before propagating to parent_shape->_make_dirty() below -
++	// never hold this instance's own lock while asking the parent instance for its lock.
++	CSGShape3D *parent_to_notify = nullptr;
++	{
++		MutexLock lock(brush_mutex);
++
+ #ifndef PHYSICS_3D_DISABLED
+-	if ((p_parent_removing || is_root_shape()) && !dirty) {
+-		callable_mp(this, &CSGShape3D::update_shape).call_deferred(); // Must be deferred; otherwise, is_root_shape() will use the previous parent.
+-	}
++		if ((p_parent_removing || is_root_shape()) && !dirty) {
++			callable_mp(this, &CSGShape3D::update_shape).call_deferred(); // Must be deferred; otherwise, is_root_shape() will use the previous parent.
++		}
+ #endif // PHYSICS_3D_DISABLED
+ 
+-	if (!is_root_shape()) {
+-		parent_shape->_make_dirty();
+-	}
++		if (!is_root_shape()) {
++			parent_to_notify = parent_shape;
++		}
+ #ifndef PHYSICS_3D_DISABLED
+-	else if (!dirty) {
+-		callable_mp(this, &CSGShape3D::update_shape).call_deferred();
+-	}
++		else if (!dirty) {
++			callable_mp(this, &CSGShape3D::update_shape).call_deferred();
++		}
+ #endif // PHYSICS_3D_DISABLED
+ 
+-	dirty = true;
++		dirty = true;
++	}
++
++	if (parent_to_notify) {
++		parent_to_notify->_make_dirty();
++	}
+ }
+ 
+ enum ManifoldProperty {
+@@ -485,6 +496,8 @@ struct ManifoldOperation {
+ };
+ 
+ CSGBrush *CSGShape3D::_get_brush() {
++	MutexLock lock(brush_mutex);
++
+ 	if (!dirty) {
+ 		return brush;
+ 	}
+@@ -889,6 +902,12 @@ Ref<ArrayMesh> CSGShape3D::bake_static_mesh() {
+ 
+ #ifndef PHYSICS_3D_DISABLED
+ Vector<Vector3> CSGShape3D::_get_brush_collision_faces() {
++	// Held for the whole function, not just the _get_brush() call below: the returned CSGBrush*
++	// is only safe to read while nothing can concurrently memdelete it in another _get_brush()
++	// rebuild, so the lock must cover every read of `n` below too (brush_mutex is recursive, so
++	// nesting into _get_brush()'s own lock here is safe).
++	MutexLock lock(brush_mutex);
++
+ 	Vector<Vector3> collision_faces;
+ 	CSGBrush *n = _get_brush();
+ 	ERR_FAIL_NULL_V_MSG(n, collision_faces, "Cannot get CSGBrush.");
+@@ -1648,7 +1667,10 @@ void CSGSphere3D::_bind_methods() {
+ 
+ void CSGSphere3D::set_radius(const float p_radius) {
+ 	ERR_FAIL_COND(p_radius <= 0);
+-	radius = p_radius;
++	{
++		MutexLock lock(brush_mutex);
++		radius = p_radius;
++	}
+ 	_make_dirty();
+ 	update_gizmos();
+ }
+@@ -1658,7 +1680,10 @@ float CSGSphere3D::get_radius() const {
+ }
+ 
+ void CSGSphere3D::set_radial_segments(const int p_radial_segments) {
+-	radial_segments = p_radial_segments > 4 ? p_radial_segments : 4;
++	{
++		MutexLock lock(brush_mutex);
++		radial_segments = p_radial_segments > 4 ? p_radial_segments : 4;
++	}
+ 	_make_dirty();
+ 	update_gizmos();
+ }
+@@ -1668,7 +1693,10 @@ int CSGSphere3D::get_radial_segments() const {
+ }
+ 
+ void CSGSphere3D::set_rings(const int p_rings) {
+-	rings = p_rings > 1 ? p_rings : 1;
++	{
++		MutexLock lock(brush_mutex);
++		rings = p_rings > 1 ? p_rings : 1;
++	}
+ 	_make_dirty();
+ 	update_gizmos();
+ }
+@@ -1678,7 +1706,10 @@ int CSGSphere3D::get_rings() const {
+ }
+ 
+ void CSGSphere3D::set_smooth_faces(const bool p_smooth_faces) {
+-	smooth_faces = p_smooth_faces;
++	{
++		MutexLock lock(brush_mutex);
++		smooth_faces = p_smooth_faces;
++	}
+ 	_make_dirty();
+ }
+ 
+@@ -1687,7 +1718,10 @@ bool CSGSphere3D::get_smooth_faces() const {
+ }
+ 
+ void CSGSphere3D::set_material(const Ref<Material> &p_material) {
+-	material = p_material;
++	{
++		MutexLock lock(brush_mutex);
++		material = p_material;
++	}
+ 	_make_dirty();
+ }
+ 
+diff --git a/modules/csg/csg_shape.h b/modules/csg/csg_shape.h
+index 85c05008c6..4ff7ea3319 100644
+--- a/modules/csg/csg_shape.h
++++ b/modules/csg/csg_shape.h
+@@ -32,6 +32,8 @@
+ 
+ #include "csg.h"
+ 
++#include "core/os/mutex.h"
++
+ #include "scene/3d/path_3d.h"
+ #include "scene/3d/visual_instance_3d.h"
+ 
+@@ -58,6 +60,22 @@ private:
+ 	Operation operation = OPERATION_UNION;
+ 	CSGShape3D *parent_shape = nullptr;
+ 
++protected:
++	// Guards dirty/brush/node_aabb against concurrent _get_brush() calls (e.g. two threads both
++	// calling bake_collision_shape()/get_meshes(), or a worker thread racing the main thread's own
++	// _make_dirty()-deferred update_shape()). Per-instance, not shared with any other CSGShape3D -
++	// _get_brush() holds it across a recursive child->_get_brush() call, which is safe because
++	// each child locks its own, different mutex instance; _make_dirty() releases it before
++	// propagating to parent_shape->_make_dirty() so it never holds a child's lock while asking for
++	// a parent's (see candidate 012/013's identical lesson on cross-object lock ordering).
++	// Protected (not private): CSGPrimitive3D subclasses' own shape-parameter setters
++	// (radius/rings/sides/height/etc.) must also take this lock around their field writes, not
++	// just call _make_dirty() - _build_brush() reads those same fields while holding this mutex
++	// (via _get_brush()), so an unlocked concurrent setter write is a TOCTOU race on the fields
++	// an override's _build_brush() uses to size its output arrays (candidate 052).
++	mutable Mutex brush_mutex;
++
++private:
+ 	CSGBrush *brush = nullptr;
+ 
+ 	AABB node_aabb;

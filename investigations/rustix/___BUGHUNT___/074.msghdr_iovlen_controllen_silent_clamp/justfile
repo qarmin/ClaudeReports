@@ -1,0 +1,28 @@
+# Self-contained reproduction attempt for this candidate.
+#
+# Status: Not reproducible - no patch.diff exists, so there is no apply/reproduce-after step.
+# `repro/main.rs` drives rustix's real public `sendmsg` API over a real `AF_UNIX` socketpair on
+# a real kernel, at `iov`/control-buffer sizes that bracket the kernel's own actual limits
+# (UIO_MAXIOV=1024, net.core.optmem_max). It must be built for a target where
+# `msg_iov_len`/`msg_control_len`'s clamped (`c_int`/`socklen_t`) variants are actually compiled
+# in - glibc Linux (the default host target) never activates either clamp, so this specifically
+# targets `x86_64-unknown-linux-musl`, which is fully statically linked and runs directly on any
+# Linux host with no extra musl runtime install required (only `rustup target add
+# x86_64-unknown-linux-musl`). See RESULT.md for the full boundary sweep and root-cause reasoning.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+reproduce:
+    rustup target add x86_64-unknown-linux-musl
+    cd repro && cargo run --target x86_64-unknown-linux-musl --release
+
+clean:
+    rm -rf clone

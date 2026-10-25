@@ -1,0 +1,179 @@
+# Root justfile for ___BUGHUNT___/. Run from inside this folder.
+#
+# This does NOT auto-generate SUMMARY.md - table formatting stays a manual/agent step by design.
+# What this gives you instead: (1) whether each candidate's patch.diff still applies to the
+# CURRENT state of the main project, and (2) a way to re-run one candidate's repro against the
+# main tree to eyeball whether it still reproduces, without a full clone.
+#
+# project_path defaults to the main project two levels up (___BUGHUNT___/.. is the project root) -
+# override it if this folder was moved.
+
+# zip -x patterns for OS/tool debug litter a crashing repro leaves behind (core dumps from a
+# SIGSEGV/SIGABRT/stack-overflow repro, valgrind's own vgcore.*, perf.data from profiling) - never
+# part of the deliverable, fully regenerable by just re-running the repro, and a single candidate's
+# repeated crash runs (e.g. confirm_repro.sh's default 10 runs) can leave behind hundreds of MB of
+# these. Applied to every pack/pack-full zip call below; `clean` also deletes them outright.
+crash_litter_excludes := '-x "*/core" -x "core" -x "*/core.[0-9]*" -x "core.[0-9]*" -x "*/vgcore.*" -x "vgcore.*" -x "*/perf.data" -x "*/perf.data.old" -x "*/*.stackdump" -x "*.stackdump"'
+
+# Check every candidate's patch.diff still applies cleanly. Reports STALE ones without touching
+# the project tree (uses `git apply --check`, which never writes).
+verify-patches project_path="..":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for d in */; do
+      d="${d%/}"
+      [ -f "$d/patch.diff" ] || continue
+      if git -C "{{project_path}}" apply --check "{{justfile_directory()}}/$d/patch.diff" 2>/dev/null; then
+        echo "OK      $d"
+      else
+        echo "STALE   $d  (no longer applies cleanly - project moved on since this candidate was made)"
+      fi
+    done
+
+# Re-run one candidate's repro/ against the MAIN project tree (reuses its build-asan-fuzz/, unlike
+# the candidate's own clone-based justfile). Always reverts afterwards, whether or not a patch
+# exists. ADAPTED for this project: repro/ is expected to be a shell script (run.sh) that invokes
+# a binary from ../../../build-asan-fuzz/ (see tools/build_asan_fuzz.sh), not a cargo crate.
+rerun candidate project_path="..":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'git -C "{{project_path}}" checkout -- .' EXIT
+    ulimit -c 0  # a crashing repro shouldn't dump a core file
+    echo "--- before (pristine tree) ---"
+    ( cd "{{justfile_directory()}}/{{candidate}}/repro" && bash run.sh )
+    if [ -f "{{justfile_directory()}}/{{candidate}}/patch.diff" ]; then
+      git -C "{{project_path}}" apply "{{justfile_directory()}}/{{candidate}}/patch.diff"
+      ninja -C "{{project_path}}/build-asan-fuzz"
+      echo "--- after (patched tree) ---"
+      ( cd "{{justfile_directory()}}/{{candidate}}/repro" && bash run.sh )
+    fi
+
+# Re-run every candidate that has a repro/, one at a time.
+rerun-all project_path="..":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for d in */; do
+      d="${d%/}"
+      [ -d "$d/repro" ] || continue
+      just rerun "$d" "{{project_path}}"
+    done
+
+# Pack ONLY candidates that actually have a finding (a row in SUMMARY-SHORT.md - i.e. Status was
+# Confirmed), plus SUMMARY.md/SUMMARY-SHORT.md/README.md - the minimum a reader needs: what's
+# broken, a runnable repro for each, and the toolchain notes to reproduce them. Deliberately does
+# NOT include IDEAS.md (unchecked backlog, not findings), issues_raw/ or _reference/ (session-local
+# working material, never needed to reproduce a finding) - none of those are ever added here since
+# this recipe builds its file list explicitly rather than globbing the directory. Skips folders for
+# candidates that were only tested (Not reproducible / Inconclusive), which never get a
+# SUMMARY-SHORT.md row and just add dead weight to an issue attachment. Not wrapped in a
+# ___BUGHUNT___/ prefix - the zip's root is this folder's contents directly. Written INSIDE this
+# folder, named after the main project. Fails loudly (see `_packcheck` below) if the result is over
+# GitHub's 10MB attachment limit, so an oversized artifact is caught immediately instead of after
+# it's already attached somewhere. Use `just pack-full` for the truly-everything behavior.
+pack: (_pack "SUMMARY-SHORT.md" "SUMMARY.md SUMMARY-SHORT.md README.md")
+
+# Pack the workspace's LITERAL ENTIRE contents - every candidate folder regardless of outcome
+# (including Not-reproducible/Inconclusive ones with no SUMMARY-SHORT.md row), SUMMARY.md/
+# SUMMARY-SHORT.md, IDEAS.md, issues_raw/, _reference/, tools/ - everything. You should rarely need
+# this; `pack` is what normally goes into an issue/PR. Excludes only genuine disk-hogging/
+# regenerable build litter: clone/ and target/ dirs at any depth (a candidate's clone/ is a full git
+# checkout, its repro/'s target/ a full build cache - both fully regenerable, clone/ from
+# repo_url+base_commit, target/ from a plain `cargo build`), any stray worktree left directly under
+# this folder, OS/tool debug litter (see crash_litter_excludes above), and any previous pack zip so
+# re-running doesn't nest old archives into new ones. Run `just clean` first if you want a guarantee
+# clone/target/litter don't exist rather than relying on the exclude patterns alone.
+pack-full:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="{{justfile_directory()}}"
+    name="$(basename "$(dirname "$dir")")"
+    proj="$(printf '%s' "$name" | tr -c 'A-Za-z0-9' '_')"
+    out="${proj}_bughunt_full_$(date +%Y%m%d_%H%M%S).zip"
+    cd "$dir"
+    zip -rq "$out" . \
+        -x "*/clone/*" -x "*/clone" \
+        -x "__*" -x "*/__*" \
+        -x "*/target/*" -x "*/target" \
+        -x "*/worktree/*" -x "*/worktree" -x "*/worktrees/*" -x "*/worktrees" \
+        -x "*.zip" \
+        {{crash_litter_excludes}}
+    just _packcheck "$dir/$out"
+
+# Shared implementation for pack: packs whatever's listed (space-separated) in extra_files, plus
+# every candidate folder (NNN.*/) whose number appears as a leading-column row in filter_file.
+_pack filter_file extra_files:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="{{justfile_directory()}}"
+    name="$(basename "$(dirname "$dir")")"
+    proj="$(printf '%s' "$name" | tr -c 'A-Za-z0-9' '_')"
+    out="${proj}_bughunt_$(date +%Y%m%d_%H%M%S).zip"
+    cd "$dir"
+    [ -f "{{filter_file}}" ] || { echo "ERROR: {{filter_file}} not found" >&2; exit 1; }
+    to_add=()
+    for f in {{extra_files}}; do
+      [ -f "$f" ] && to_add+=("$f")
+    done
+    nums="$(grep -oE '^\| *[0-9]+ *\|' "{{filter_file}}" | grep -oE '[0-9]+' || true)"
+    for n in $nums; do
+      for d in "$n".*/; do
+        [ -d "$d" ] && to_add+=("${d%/}")
+      done
+    done
+    if [ "${#to_add[@]}" -eq 0 ]; then
+      echo "ERROR: nothing matched to pack (no rows in {{filter_file}}, or their folders are missing)" >&2
+      exit 1
+    fi
+    zip -rq "$out" "${to_add[@]}" \
+        -x "*/clone/*" -x "*/clone" \
+        -x "__*" -x "*/__*" \
+        -x "*/target/*" -x "*/target" \
+        -x "*/issues_raw/*" -x "*/issues_raw" \
+        {{crash_litter_excludes}}
+    just _packcheck "$dir/$out"
+
+# Internal: report size and fail (non-zero exit, zip left in place for inspection) if the given zip
+# exceeds GitHub's 10MB attachment limit - called at the end of every pack recipe so an oversized
+# artifact is caught immediately, not discovered only after trying to attach it somewhere.
+_packcheck zippath:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    limit=$((10*1024*1024))
+    size=$(stat -c%s "{{zippath}}" 2>/dev/null || stat -f%z "{{zippath}}")
+    echo "wrote {{zippath}}"
+    du -h "{{zippath}}"
+    if [ "$size" -gt "$limit" ]; then
+      echo "ERROR: $(basename "{{zippath}}") is $(du -h "{{zippath}}" | cut -f1) - over GitHub's 10MB attachment limit." >&2
+      echo "       Left in place for inspection - trim contents (fewer candidates, drop repro/clone artifacts) and re-pack." >&2
+      exit 1
+    fi
+
+# Remove every candidate's clone/ and repro/'s target/ dir, plus any stray core dump/vgcore/
+# perf.data debug litter (see crash_litter_excludes above for why these appear), to reclaim disk
+# space - safe any time, all fully regenerable (clone/ via that candidate's own justfile, target/
+# via a plain rebuild, litter via just re-running the repro). Run this before `just pack` for a
+# guaranteed-clean archive.
+clean:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    find "{{justfile_directory()}}" -type d \( -name clone -o -name target \) -prune -exec rm -rf {} +
+    echo "removed all clone/ and target/ dirs under {{justfile_directory()}}"
+    just tidy
+
+# Delete debug litter and sort the SUMMARY tables. Idempotent, safe to run at any time, and
+# cheap - run it after any candidate whose repro actually crashed, and once at the end of a
+# session. Unlike the old workspace-only sweep, this ALSO scans the main project tree: a repro
+# run against the main tree dumps `core.<pid>` into the PROJECT ROOT (its cwd), not in here, so
+# those dumps used to accumulate forever - 20 MB each, times 10 runs per candidate, times every
+# crashing candidate. Deletion is by exact name (`core.<digits>`, `vgcore.<digits>`, an ELF-magic
+# bare `core`, `perf.data`, `*.stackdump`, `*.profraw`, ...), so a `core/` directory or a
+# `core.c` source file is never touched; `--dry-run` shows what would go.
+tidy *args:
+    python3 "{{justfile_directory()}}/tools/tidy.py" \
+        --workspace "{{justfile_directory()}}" --project-root "{{justfile_directory()}}/.." {{args}}
+
+# Just the sort half of `tidy` - reorder SUMMARY.md/SUMMARY-SHORT.md rows by their `#` column
+# so the ledgers don't read as 1, 4, 12, 2, 5, 6. Add `--desc` for newest-first.
+sort-summaries *args:
+    python3 "{{justfile_directory()}}/tools/tidy.py" \
+        --workspace "{{justfile_directory()}}" --sort {{args}}

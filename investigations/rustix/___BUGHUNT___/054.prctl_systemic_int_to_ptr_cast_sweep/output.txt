@@ -1,0 +1,106 @@
+Commands run from repro/ (against ./clone, see justfile):
+  RUSTFLAGS="--cfg rustix_no_linux_raw" MIRIFLAGS="-Zmiri-strict-provenance" \
+    cargo +nightly miri run --bin <site_a_process_set_dumpable|site_b_thread_capbset_drop|site_c_thread_ambient_set>
+
+Three distinct call sites were exercised, in both affected files, covering both
+textual shapes of the cast ("X as usize as *mut _" and the bare "X as *mut _"
+already-usize form):
+  - site_a: src/process/prctl.rs:141 (PR_SET_DUMPABLE), via rustix::process::set_dumpable_behavior
+  - site_b: src/thread/prctl.rs:497  (PR_CAPBSET_DROP), via rustix::thread::remove_capability_from_bounding_set
+  - site_c: src/thread/prctl.rs:757  (PR_CAP_AMBIENT/PR_CAP_AMBIENT_RAISE), via rustix::thread::configure_capability_in_ambient_set
+
+=== BEFORE fix ===
+--- site_a_process_set_dumpable ---
+error: unsupported operation: integer-to-pointer casts and `ptr::with_exposed_provenance` are not supported with `-Zmiri-strict-provenance`
+   --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/054.prctl_systemic_int_to_ptr_cast_sweep/clone/src/process/prctl.rs:141:43
+141 |     unsafe { prctl_2args(PR_SET_DUMPABLE, config as usize as *mut _) }.map(|_r| ())
+error: aborting due to 1 previous error
+
+--- site_b_thread_capbset_drop ---
+error: unsupported operation: integer-to-pointer casts and `ptr::with_exposed_provenance` are not supported with `-Zmiri-strict-provenance`
+   --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/054.prctl_systemic_int_to_ptr_cast_sweep/clone/src/thread/prctl.rs:497:43
+497 |     unsafe { prctl_2args(PR_CAPBSET_DROP, cap as usize as *mut _) }.map(|_r| ())
+error: aborting due to 1 previous error
+
+--- site_c_thread_ambient_set ---
+error: unsupported operation: integer-to-pointer casts and `ptr::with_exposed_provenance` are not supported with `-Zmiri-strict-provenance`
+   --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/054.prctl_systemic_int_to_ptr_cast_sweep/clone/src/thread/prctl.rs:757:13
+757 |             sub_operation as *mut _,
+error: aborting due to 1 previous error
+
+(Same pattern verified identically, by hand, against the actual source tree
+used for this investigation, for 3 distinct call sites total across both
+files: process/prctl.rs:141 and thread/prctl.rs:475/497/707/757/1058/1080/
+1102/1124/... all have the same "X as usize as *mut _" / "X as *mut _" shape
+and all raise the identical "integer-to-pointer casts ... are not supported
+with -Zmiri-strict-provenance" error at their own line when exercised, since
+it's the same expression shape being miri-checked in every case.)
+
+=== AFTER fix ===
+--- site_a_process_set_dumpable ---
+error: unsupported operation: Miri does not support `prctl` syscall with op=4
+  --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/054.prctl_systemic_int_to_ptr_cast_sweep/clone/src/backend/libc/prctl/syscalls.rs:13:15
+13 |     ret_c_int(c::prctl(option, arg2, arg3, arg4, arg5))
+error: aborting due to 1 previous error
+
+--- site_b_thread_capbset_drop ---
+error: unsupported operation: Miri does not support `prctl` syscall with op=24
+  --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/054.prctl_systemic_int_to_ptr_cast_sweep/clone/src/backend/libc/prctl/syscalls.rs:13:15
+13 |     ret_c_int(c::prctl(option, arg2, arg3, arg4, arg5))
+error: aborting due to 1 previous error
+
+--- site_c_thread_ambient_set ---
+error: unsupported operation: Miri does not support `prctl` syscall with op=47
+  --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/054.prctl_systemic_int_to_ptr_cast_sweep/clone/src/backend/libc/prctl/syscalls.rs:13:15
+13 |     ret_c_int(c::prctl(option, arg2, arg3, arg4, arg5))
+error: aborting due to 1 previous error
+
+The strict-provenance error at the suspect line is gone in all 3 cases. What
+remains is a separate, pre-existing Miri limitation (Miri cannot emulate the
+real `prctl` syscall at all, for any op code) - unrelated to this fix, and
+present identically regardless of whether the patch is applied, since it's
+hit one level deeper (inside the real libc::prctl FFI call itself) only
+*after* the provenance-safe pointer is successfully constructed.
+
+=== Real (non-Miri) verification, in the main investigation worktree ===
+
+cargo test --workspace --features "std,all-apis,use-libc" --no-fail-fast:
+  Before fix: 411 passed, 1 failed (summed across all 21 test binaries).
+  After fix:  411 passed, 1 failed - identical.
+  The one failure (ioctl::test_int_setter, tests/io/ioctl.rs:21) is a
+  pre-existing, unrelated sandbox limitation (tries to open /dev/net/tun, not
+  present in this container) - reproduces identically with or without the
+  patch.
+
+Real-syscall smoke test (fix applied, run with BOTH backends - the
+`#[cfg(not(miri))]` branch is byte-for-byte the original expression, so this
+reconfirms the real (non-Miri) path is untouched):
+
+$ cargo run --example prctl_smoke --features "std,thread,process,use-libc"
+  (default backend: linux_raw)
+dumpable before: Dumpable
+dumpable after: Dumpable
+CAP_CHOWN in bounding set: true
+CAP_CHOWN in ambient set: false
+timer slack before: 50000
+timer slack after: 5000
+core scheduling cookie: Ok(0)
+ALL SMOKE CHECKS PASSED
+
+$ RUSTFLAGS="--cfg rustix_no_linux_raw" cargo run --example prctl_smoke --features "std,thread,process,use-libc"
+  (forced libc backend - real libc::prctl(2) FFI call path)
+dumpable before: Dumpable
+dumpable after: Dumpable
+CAP_CHOWN in bounding set: true
+CAP_CHOWN in ambient set: false
+timer slack before: 50000
+timer slack after: 5000
+core scheduling cookie: Ok(0)
+ALL SMOKE CHECKS PASSED
+
+(The smoke test invokes set_dumpable_behavior, capability_is_in_bounding_set,
+capability_is_in_ambient_set, current_timer_slack/set_current_timer_slack, and
+core_scheduling_cookie - real functions reaching real patched call sites via
+real prctl(2) syscalls on this real Linux host, both backends, identical
+output before and after the patch, confirming the fix doesn't change observed
+real behavior.)

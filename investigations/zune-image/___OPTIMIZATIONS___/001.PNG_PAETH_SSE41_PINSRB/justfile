@@ -1,0 +1,51 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff is ONLY the source fix (crates/zune-png/src/filters/sse4.rs) - the standalone bench
+# driver it's measured with (bench/bench_decode.rs, copied to
+# clone/crates/zune-png/examples/bench_decode.rs) is harness, not fix, so it's copied in by
+# `clone:` below and present identically for both the baseline and patched builds, rather than
+# folded into patch.diff (the project has no existing example reaching
+# PngDecoder::decode_raw() directly with per-iteration timing).
+
+repo_url := "https://github.com/etemesi254/zune-image.git"
+base_commit := "533296caf9a6783691d42b2dfbc623029216cbaf"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/crates/zune-png/examples
+    cp "{{justfile_directory()}}/bench/bench_decode.rs" clone/crates/zune-png/examples/bench_decode.rs
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Baseline build happens BEFORE `apply`, patched build happens AFTER - `test`'s recipe order
+# (clone build-baseline apply build-patched bench) guarantees this.
+build-baseline:
+    cd clone && cargo build --release -p zune-png --example bench_decode 2>&1 | tail -5
+    mkdir -p ../bin
+    cp clone/target/release/examples/bench_decode ./bin_baseline
+
+build-patched:
+    cd clone && cargo build --release -p zune-png --example bench_decode 2>&1 | tail -5
+    cp clone/target/release/examples/bench_decode ./bin_patched
+
+# expected_hash_hex pins the known-correct decode of test-images/png/benchmarks/speed_bench.png
+# at base_commit - both binaries must reproduce it bit-exact (the candidate is a bit-exact patch,
+# not a characterized-difference one, see RESULT.md).
+bench_args := "clone/test-images/png/benchmarks/speed_bench.png 20 5ca89c3632c9e076"
+
+bench:
+    @echo "=== baseline (before patch) ==="
+    ulimit -c 0 && ./bin_baseline {{bench_args}}
+    @echo "=== patched (after patch) ==="
+    ulimit -c 0 && ./bin_patched {{bench_args}}
+
+clean:
+    rm -rf clone bin_baseline bin_patched

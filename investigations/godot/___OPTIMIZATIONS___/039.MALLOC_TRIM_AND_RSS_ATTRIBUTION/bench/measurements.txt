@@ -1,0 +1,49 @@
+Candidate 039 raw measurements. Pristine HEAD 9552dfb685 + bench/trim_probe_instrumentation.diff
+(which also carries candidate 035's memstat lines). Empty-project editor startup,
+--quit-after 300 unless stated. glibc 2.43, 24 cores.
+
+=== 1. malloc_trim(0) at frame 120 (startup settled), default arena config, 4 runs ===
+rss_before_kB=717460 rss_after_kB=717268 freed_kB=192 ret=1 trim_us=93  tracked_usage=445627885
+rss_before_kB=717832 rss_after_kB=717640 freed_kB=192 ret=1 trim_us=268 tracked_usage=445627885
+rss_before_kB=718180 rss_after_kB=717992 freed_kB=188 ret=1 trim_us=269 tracked_usage=445627885
+rss_before_kB=716688 rss_after_kB=716496 freed_kB=192 ret=1 trim_us=86  tracked_usage=445627885
+
+  freed: 188-192 kB out of ~717 MB resident = 0.027%. Cost 86-269 us. ret=1 (glibc did release
+  memory, there just is almost none to release).
+
+=== 2. same, with MALLOC_ARENA_MAX=1 (candidate 038's config), 2 runs ===
+rss_before_kB=659116 rss_after_kB=659056 freed_kB=60 ret=1 trim_us=230 tracked_usage=445627885
+rss_before_kB=659436 rss_after_kB=659384 freed_kB=52 ret=1 trim_us=179 tracked_usage=445627885
+
+  Even less to give back once the arenas are gone (52-60 kB).
+
+=== 3. steady-state vs peak RSS (no trim), 3 runs, "peak last_rss exit" ===
+default:            717136 715116 0 | 713900 712456 0 | 716448 714852 0
+MALLOC_ARENA_MAX=1: 659312 658392 0 | 659300 657784 0 | 659044 657540 0
+
+  Steady-state RSS sits only ~1-2 MB below peak: the editor does not release memory after startup,
+  so for this workload "peak RSS" and "idle RSS" are effectively the same number.
+
+=== 4. full RSS attribution at steady state, /proc/<pid>/smaps + smaps_rollup ===
+Rss:              717004 kB   (700.2 MB)
+Pss:              714639 kB
+Pss_Dirty:        611228 kB   (all anonymous)
+Pss_File:         103411 kB
+Private_Clean:    103000 kB
+Private_Dirty:    611228 kB
+Shared_Clean:       2776 kB
+SwapPss:               0 kB
+
+top mappings by Rss:
+   499608 kB  [heap]                                  (488.0 MB)
+   108172 kB  [anon]                                  (105.6 MB)
+   104360 kB  bin/godot.linuxbsd.editor.x86_64        (101.9 MB)
+     1880 kB  /usr/lib/x86_64-linux-gnu/libc.so.6
+
+=== 5. Godot's own tracked counters, same runs ===
+tracked live heap at frame 120 (get_mem_usage):     445627885 B = 425.0 MB
+tracked peak            (get_mem_max_usage):        448283037 B = 427.5 MB
+tracked live heap at Main::cleanup (get_mem_usage):  91165755 B =  86.9 MB
+
+  The cleanup-time figure is small because teardown has already freed most of the editor. Any
+  RSS-vs-tracked comparison must use the steady-state or peak figure, not this one.

@@ -1,0 +1,29 @@
+=== BEFORE fix (pristine HEAD 287214b889865d8e1406a0ee71cc409b6f6191c8), 3 identical runs ===
+rustix::io::Errno::from_raw_os_error() probe
+==============================================
+zero (the exact #1578 repro) (raw=0): PANICKED! message = "assertion failed: encoded >= 0xf001"
+negative (raw=-1): PANICKED! message = "assertion failed: encoded >= 0xf001"
+negative (typical errno-style, should be fine) (raw=2): OK, no panic. Errno::from_raw_os_error(2).raw_os_error() = 2
+>= 4096 (out of Linux errno range) (raw=4096): PANICKED! message = "assertion failed: encoded >= 0xf001"
+>= 4096 (larger) (raw=100000): PANICKED! message = "assertion failed: encoded >= 0xf001"
+i32::MIN (raw=-2147483648): PANICKED! message = "assertion failed: encoded >= 0xf001"
+i32::MAX (raw=2147483647): PANICKED! message = "assertion failed: encoded >= 0xf001"
+sanity check: from_raw_os_error(2).raw_os_error() == 2 -> true
+
+=== AFTER fix (patch.diff applied), 3 identical runs ===
+rustix::io::Errno::from_raw_os_error() probe
+==============================================
+zero (the exact #1578 repro) (raw=0): OK, no panic. Errno::from_raw_os_error(0).raw_os_error() = 0
+negative (raw=-1): OK, no panic. Errno::from_raw_os_error(-1).raw_os_error() = -1
+negative (typical errno-style, should be fine) (raw=2): OK, no panic. Errno::from_raw_os_error(2).raw_os_error() = 2
+>= 4096 (out of Linux errno range) (raw=4096): OK, no panic. Errno::from_raw_os_error(4096).raw_os_error() = 4096
+>= 4096 (larger) (raw=100000): OK, no panic. Errno::from_raw_os_error(100000).raw_os_error() = -31072
+i32::MIN (raw=-2147483648): OK, no panic. Errno::from_raw_os_error(-2147483648).raw_os_error() = 0
+i32::MAX (raw=2147483647): OK, no panic. Errno::from_raw_os_error(2147483647).raw_os_error() = -1
+sanity check: from_raw_os_error(2).raw_os_error() == 2 -> true
+
+=== cargo test --workspace, default features, x86_64-unknown-linux-gnu ===
+Before fix: 22 passed, 0 failed, 1 ignored, across all test binaries + 7 doc-tests.
+After fix:  22 passed, 0 failed, 1 ignored - identical.
+No pre-existing failures either way; no test in the suite already exercised
+from_raw_os_error(0), so the suite didn't catch this bug on its own.

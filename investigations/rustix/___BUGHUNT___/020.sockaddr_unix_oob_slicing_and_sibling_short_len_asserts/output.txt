@@ -1,0 +1,56 @@
+=== Approach 1: raw C-level kernel-boundary probe (bypassing rustix entirely) ===
+Command: gcc -o probe probe.c && ./probe
+test1 bind(len=110) = 0 (errno=0 Success)
+  getsockname -> r=0 reported len=110 (sizeof(sockaddr_un)=110)
+test2 bind(len=128, > sizeof(sockaddr_un)) = -1 (errno=22 Invalid argument)
+test3 bind(fs path, len=110) = 0 (errno=2 No such file or directory)
+  getsockname -> r=0 reported len=33 (strlen+1+2=33)
+
+=== Approach 2: real end-to-end boundary sweep via rustix's own public safe API (bind+getsockname), linux_raw backend ===
+Command: cargo run --release --bin sockaddr_sweep  (rustix path-dependency, features = std,net,all-apis,use-libc)
+abstract len=108 construct error: Os { code: 36, kind: InvalidFilename, message: "File name too long" } (expected only at len=108, NAMETOOLONG)
+fs path len=0: can't hit this exact length in this environment (base too long), skipping
+fs path len=1: can't hit this exact length in this environment (base too long), skipping
+TOTAL: oks=112 panics=0
+
+=== Approach 2b: same sweep, forced libc backend (RUSTFLAGS=--cfg rustix_no_linux_raw) ===
+92 | use {crate::fs::XattrFlags, core::mem::size_of, core::ptr::null_mut};
+
+95 |     crate::fs::{ResolveFlags, Statx, StatxFlags, CWD},
+
+20 | use crate::net::xdp::{XdpMmapOffsets, XdpOptionsFlags, XdpRingOffset, XdpStatistics, XdpUmemReg};
+
+ --> /tmp/rustix_wt_020/src/fs/ioctl.rs:9:13
+9 |     crate::{backend, ffi, io, ioctl},
+
+12 | use bitflags::bitflags;
+
+149 | use crate::net::xdp::{XdpMmapOffsets, XdpOptionsFlags, XdpStatistics, XdpUmemReg};
+
+ --> /tmp/rustix_wt_020/src/prctl.rs:9:5
+9 | use bitflags::bitflags;
+
+1909 | const SYS_OPENAT2: i64 = 437;
+
+2699 | pub(crate) fn inotify_init1(flags: super::inotify::CreateFlags) -> io::Result<OwnedFd> {
+
+2706 | pub(crate) fn inotify_add_watch(
+
+2724 | pub(crate) fn inotify_rm_watch(inot: BorrowedFd<'_>, wd: i32) -> io::Result<()> {
+
+1076 | const PR_PAC_GET_ENABLED_KEYS: c_int = 61;
+
+1092 | const PR_PAC_SET_ENABLED_KEYS: c_int = 60;
+
+839 | const PR_PAC_RESET_KEYS: c_int = 54;
+
+abstract len=108 construct error: Os { code: 36, kind: InvalidFilename, message: "File name too long" } (expected only at len=108, NAMETOOLONG)
+fs path len=0: can't hit this exact length in this environment (base too long), skipping
+fs path len=1: can't hit this exact length in this environment (base too long), skipping
+TOTAL: oks=112 panics=0
+
+=== Approach 3: real two-participant test (server thread + client thread, real connect()/accept()/getpeername()) at the maximal legitimate abstract-name boundary (107 bytes) ===
+acceptfrom peer addr_len = Some(110)
+acceptfrom abstract_name len = Some(107)
+getpeername abstract_name len = Some(107)
+ACCEPT/GETPEERNAME TEST: no panic, OK

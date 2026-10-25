@@ -1,0 +1,62 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff is ONLY the source fix (crates/zune-imageprocs/src/premul_alpha.rs) - the standalone
+# bench driver it's measured with (bench/bench_premul_alpha.rs, copied to
+# clone/crates/zune-imageprocs/examples/bench_premul_alpha.rs) is harness, not fix, so it's
+# copied in by `clone:` below and present identically for both the baseline and patched builds
+# (the project had no existing example/bench reaching premultiply_u8/premultiply_u16 directly -
+# the workspace's own criterion bench, benchmarks/benches/imageprocs.rs, requires libvips as a
+# system dependency and only measures the full PremultiplyAlpha operation, not this inner loop).
+#
+# No nightly toolchain or special Cargo feature is needed - the patch uses the crate's own
+# existing `simd_fn!` AVX2/NEON runtime-dispatch macro (crates/zune-imageprocs/src/macro_utils.rs),
+# already exercised elsewhere in this crate (sobel.rs, bilateral_filter.rs, rotate.rs), and AVX2
+# is part of this crate's default feature set. Plain `cargo build --release` is enough.
+#
+# Measured result for this candidate: ~43% faster (u8) / ~25-27% faster (u16) for
+# premultiply_u8/premultiply_u16 in isolation, bit-exact (verified exhaustively over the full u8
+# domain and by random sampling for u16) - see RESULT.md.
+
+repo_url := "https://github.com/etemesi254/zune-image.git"
+base_commit := "533296caf9a6783691d42b2dfbc623029216cbaf"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/crates/zune-imageprocs/examples
+    cp "{{justfile_directory()}}/bench/bench_premul_alpha.rs" clone/crates/zune-imageprocs/examples/bench_premul_alpha.rs
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Baseline build happens BEFORE `apply`, patched build happens AFTER - `test`'s recipe order
+# (clone build-baseline apply build-patched bench) guarantees this.
+build-baseline:
+    cd clone && cargo build --release -p zune-imageprocs --example bench_premul_alpha 2>&1 | tail -5
+    mkdir -p ../bin
+    cp clone/target/release/examples/bench_premul_alpha ./bin_baseline
+
+build-patched:
+    cd clone && cargo build --release -p zune-imageprocs --example bench_premul_alpha 2>&1 | tail -5
+    cp clone/target/release/examples/bench_premul_alpha ./bin_patched
+
+# bench_premul_alpha <pixels> <iters> <depth: u8|u16>. Both binaries must report the same
+# `hash = ...` line for each depth (bit-exact, see RESULT.md).
+bench:
+    @echo "=== baseline (before patch) - u8 ==="
+    ulimit -c 0 && ./bin_baseline 2073600 20 u8
+    @echo "=== patched (after patch) - u8 ==="
+    ulimit -c 0 && ./bin_patched 2073600 20 u8
+    @echo "=== baseline (before patch) - u16 ==="
+    ulimit -c 0 && ./bin_baseline 2073600 20 u16
+    @echo "=== patched (after patch) - u16 ==="
+    ulimit -c 0 && ./bin_patched 2073600 20 u16
+
+clean:
+    rm -rf clone bin_baseline bin_patched

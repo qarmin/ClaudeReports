@@ -1,0 +1,114 @@
+=== Candidate 100: ptsname_apple_fallback_cstr_from_ptr_oob_read ===
+Session date: 2026-10-01 (Europe/Warsaw)
+base_commit: 287214b889865d8e1406a0ee71cc409b6f6191c8
+
+--- Approach 1: code read (src/backend/libc/pty/syscalls.rs:75-94) ---
+#[cfg(apple)]
+let r = unsafe {
+    weak! { fn ptsname_r(c::c_int, *mut c::c_char, c::size_t) -> c::c_int }
+    if let Some(libc_ptsname_r) = ptsname_r.get() {
+        libc_ptsname_r(borrowed_fd(fd), buffer.as_mut_ptr().cast(), buffer.len())
+    } else {
+        // The size declared in the `TIOCPTYGNAME` macro in
+        // sys/ttycom.h is 128.
+        let mut name: [u8; 128] = [0_u8; 128];
+        match c::ioctl(borrowed_fd(fd), c::TIOCPTYGNAME as _, &mut name) {
+            0 => {
+                let len = CStr::from_ptr(name.as_ptr().cast()).to_bytes().len();
+                core::ptr::copy_nonoverlapping(name.as_ptr(), buffer.as_mut_ptr(), len + 1);
+                0
+            }
+            _ => libc_errno::errno().0,
+        }
+    }
+};
+Confirmed: CStr::from_ptr(name.as_ptr().cast()) has no explicit verification that `name` contains
+a NUL within its 128 bytes before scanning it - relies entirely on the kernel ioctl having written
+one. This matches the candidate description exactly. git log -S "TIOCPTYGNAME" shows this code was
+introduced in c2699e36 "Add a `rustix::pty` module. (#673)" and has not changed shape since.
+
+--- Approach 2: cross-compile reachability check (does this branch actually get compiled for the
+real affected target, x86_64-apple-darwin) ---
+$ rustup target list --installed | grep darwin
+x86_64-apple-darwin
+
+$ cargo check --target x86_64-apple-darwin --features "std,all-apis,use-libc" --manifest-path Cargo.toml
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+   Compiling libc v0.2.189
+   Compiling rustix v1.1.5 (<worktree>)
+    Checking bitflags v2.9.1
+    Checking errno v0.3.14
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.63s
+-> Compiles cleanly. The `#[cfg(apple)]` branch (including the `ioctl`/`CStr::from_ptr` fallback,
+which is not itself behind any further `cfg` - only the outer `weak!`/`.get()` check at runtime
+decides whether it executes) is genuinely live code on the real affected target, not dead code.
+
+--- Approach 3: audit the real upstream XNU kernel source that implements TIOCPTYGNAME, to check
+whether the "kernel might not NUL-terminate" premise is realizable on any currently-known real
+macOS kernel ---
+Fetched (read-only, via raw.githubusercontent.com, apple-oss-distributions/xnu, branch "main") the
+three kernel files that implement every registered pty/ptmx ioctl handler on real macOS:
+
+$ curl -s https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/sys/ttycom.h | grep -n TIOCPTYGNAME
+181:#define TIOCPTYGNAME    _IOC(IOC_OUT, 't', 83, 128)     /* ptsname(3) */
+
+-> Confirms the encoded ioctl size is 128 bytes, matching rustix's own stack buffer - this is the
+*same* 128 both sides agree on, not a mismatch.
+
+$ curl -s https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/kern/tty_dev.c | sed -n '1113,1122p'
+        case TIOCPTYGNAME:      /* ptsname(3) */
+                /*
+                 * Report the name of the replica device in *data
+                 * (128 bytes max.).  Use the same template string
+                 * used for calling devfs_make_node() to create it.
+                 */
+                pty_get_name(dev, data, 128);
+                error = 0;
+                goto out;
+
+-> The generic ioctl dispatcher (shared by both the legacy /dev/pty* driver and the modern
+/dev/ptmx driver - every registered `tty_dev_t`) calls `pty_get_name(dev, data, 128)` with a
+hardcoded size of 128, identical to the ioctl's own encoded size above.
+
+$ curl -s https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/kern/tty_ptmx.c | sed -n '453,456p'
+ptmx_get_name(int minor, char *buffer, size_t size)
+{
+        return snprintf(buffer, size, "/dev/" PTSD_TEMPLATE, minor);
+}
+
+$ curl -s https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/kern/tty_pty.c | sed -n '135,141p'
+static int
+pty_get_name(int minor, char *buffer, size_t size)
+{
+        return snprintf(buffer, size, "/dev/tty%c%x",
+                   START_CHAR + (minor / HEX_BASE),
+                   minor % HEX_BASE);
+}
+
+-> Both of the only two `name()` callbacks ever registered in the current XNU source
+(the modern /dev/ptmx driver and the legacy /dev/pty* driver - there is no third) write via
+`snprintf(buffer, size, ...)`. `snprintf`'s C standard contract guarantees NUL-termination
+within the first `size` bytes whenever `size > 0` (it either fits and NUL-terminates, or
+truncates and still NUL-terminates at `size - 1`) - it can never leave `buffer` without a NUL
+within the first 128 bytes. The device names themselves ("/dev/ttyp0".."/dev/ttysXX" style,
+a handful of bytes) are also nowhere near the 128-byte limit, so truncation itself never
+actually occurs in practice either.
+
+=> Conclusion: on every currently known real macOS kernel implementation, the exact mechanism the
+candidate worried about (kernel ioctl handler leaving the 128-byte buffer without a NUL) cannot
+occur - it's ruled out structurally by `snprintf`'s own safety contract in the only two code paths
+that have ever implemented this ioctl. The candidate's own hedged premise ("kernel bug, future ABI
+change, reused ioctl number on a different BSD-flavored kernel") is explicitly speculative, and no
+real second participant (a real macOS kernel, real hardware, or a working emulator/Darling) exists
+in this environment to attempt to falsify that conclusion empirically rather than by source
+reading.
+
+--- Attempted but unavailable: real hardware / emulation ---
+No macOS or BSD hardware, no qemu-system-based macOS emulation, no Darling available in this
+container (same conclusion independently reached by prior candidates 028 and 035 in this
+workspace, for the same reason: no such hardware/toolchain here). Miri is also not useful for this
+candidate specifically: the vulnerable branch bottoms out in a real `ioctl(2)` syscall, which Miri
+cannot execute (consistent with projects/rustix.md's existing note that real syscalls generally
+can't run under Miri in this environment) - so Miri could not be used to drive the real ioctl path
+either, even on a non-Apple host.

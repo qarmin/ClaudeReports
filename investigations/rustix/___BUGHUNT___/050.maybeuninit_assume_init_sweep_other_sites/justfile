@@ -1,0 +1,51 @@
+# Self-contained reproduction for candidate 050 (maybeuninit_assume_init_sweep_other_sites).
+#
+# Status: Not reproducible this session - no patch.diff. `reproduce-before` runs the set of
+# checks that were actually used to investigate every call site named in this candidate, and
+# prints the real output for each: the one genuine Miri UB signal found (`uname`/`sysinfo`), the
+# real-syscall poison-byte test that showed it's a Miri shim limitation rather than a real bug,
+# the clean `socketpair` Miri run, and the Miri "unsupported foreign function" tooling-gap errors
+# for the 3 call sites that could not be tested at all in this environment (QNX `tcgetattr`,
+# BSD `kqueue`, Solaris/illumos `port_create`). See RESULT.md for the full writeup.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce-before
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Requires: `rustup component add miri --toolchain nightly`, `rustup component add rust-src
+# --toolchain nightly`, and `rustup run nightly cargo miri setup --target <T>` once per target
+# (x86_64-apple-darwin / x86_64-pc-nto-qnx710 / x86_64-unknown-illumos) before this will work -
+# see README.md in the main ___BUGHUNT___/ workspace for the one-time Miri setup notes.
+reproduce-before:
+    @echo "=== 1. Real (non-Miri) poison-byte test: does the real Linux syscall fully init the struct? ==="
+    cd repro && cargo run --release --bin poison_byte_real_syscalls
+    @echo
+    @echo "=== 2. rustix::system::uname() under Miri (native linux) - UB, but see check 1 above ==="
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --bin uname_public_api || true
+    @echo
+    @echo "=== 3. rustix::system::uname() under Miri, cross-interpreted for x86_64-apple-darwin - same UB ==="
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-apple-darwin --bin uname_public_api || true
+    @echo
+    @echo "=== 4. rustix::net::socketpair() under Miri - clean, no UB (contrast with uname/sysinfo) ==="
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --bin socketpair_public_api
+    @echo
+    @echo "=== 5. rustix::termios::tcgetattr() cross-interpreted for QNX (x86_64-pc-nto-qnx710) - no Miri shim ==="
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-pc-nto-qnx710 --bin tcgetattr_public_api || true
+    @echo
+    @echo "=== 6. rustix::event::kqueue::kqueue()/kevent() cross-interpreted for apple-darwin - no Miri shim ==="
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-apple-darwin --bin kevent_public_api || true
+    @echo
+    @echo "=== 7. rustix::event::port::create()/get() cross-interpreted for illumos - no Miri shim ==="
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-unknown-illumos --bin port_get_public_api || true
+
+clean:
+    rm -rf clone

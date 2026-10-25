@@ -1,0 +1,67 @@
+# Self-contained reproduction for this candidate.
+#
+# This is a MEASUREMENT-ONLY candidate - it re-checks candidate 008's own patch.diff at a
+# different input scale, it does not introduce a new patch. `just test` clones Godot, builds
+# baseline, applies BOTH this candidate's scratch benchmark test case (bench/scratch_benchmark.patch)
+# and candidate 008's own patch.diff (../008.TEXTEDIT_SYNTAX_CACHE_BY_REF/patch.diff) for the
+# patched build.
+#
+# A full from-scratch SCons build takes 15-25 minutes on a modern multi-core machine - there is
+# no lighter way to get this binary from a pristine clone.
+
+repo_url := "https://github.com/godotengine/godot.git"
+base_commit := "9552dfb6859a1aaba1e570b8e0ef5c599b830f19"
+candidate_008_patch := "../008.TEXTEDIT_SYNTAX_CACHE_BY_REF/patch.diff"
+
+test: clone build-baseline bench-baseline apply build-patched bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    git -C clone apply "{{justfile_directory()}}/bench/scratch_benchmark.patch"
+
+build-baseline:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v scons >/dev/null 2>&1 || pip3 install scons --break-system-packages
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+    cp bin/godot.linuxbsd.editor.x86_64 "{{justfile_directory()}}/bin_baseline"
+
+apply:
+    git -C clone apply "{{justfile_directory()}}/{{candidate_008_patch}}"
+
+build-patched:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+    cp bin/godot.linuxbsd.editor.x86_64 "{{justfile_directory()}}/bin_patched"
+
+bench-baseline:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export XDG_DATA_HOME="{{justfile_directory()}}/clone/_xdg_data"
+    mkdir -p "$XDG_DATA_HOME"
+    cd clone
+    echo "=== baseline (by-value copy) ==="
+    for i in 1 2 3 4; do
+      "{{justfile_directory()}}/bin_baseline" --headless --test --test-case="*long lines*" 2>&1 | grep SCRATCH_BENCH
+    done
+
+bench-patched:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export XDG_DATA_HOME="{{justfile_directory()}}/clone/_xdg_data"
+    mkdir -p "$XDG_DATA_HOME"
+    cd clone
+    echo "=== patched (by-reference, candidate 008) ==="
+    for i in 1 2 3 4; do
+      "{{justfile_directory()}}/bin_patched" --headless --test --test-case="*long lines*" 2>&1 | grep SCRATCH_BENCH
+    done
+
+clean:
+    rm -rf clone bin_baseline bin_patched

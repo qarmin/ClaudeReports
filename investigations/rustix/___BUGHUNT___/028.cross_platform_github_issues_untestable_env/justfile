@@ -1,0 +1,43 @@
+# Self-contained reproduction for this candidate.
+#
+# Unlike most candidates in this workspace, `repro/` here is a fully standalone program that does
+# NOT depend on building rustix itself (see RESULT.md for why: no sparc/sparc64 cross-linker
+# exists in the environment this was investigated in, so rustix itself cannot actually be built
+# for the affected target here). Instead `repro/` reproduces rustix's own two lines of logic
+# verbatim, with the real sparc/sparc64 array-length constants substituted in (independently
+# verified from the vendored `libc` crate - see repro/src/main.rs's own header comment for exact
+# file/line citations). `clone`/`apply` below are still provided so `patch.diff` can be verified to
+# apply cleanly against the stated base commit, and so a reader with real sparc hardware (or a
+# working sparc cross-toolchain) can independently build+run the real, patched rustix and confirm
+# the fix there too - but `reproduce-before`/`reproduce-after` do not depend on that clone.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce-before apply verify-patch-applies reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Demonstrates the bug: the exact rustix source lines, with the real sparc/sparc64 sizes.
+# Prefixed with `-` (just's ignore-error marker): this is EXPECTED to panic and exit non-zero -
+# that panic, with the exact message the original GitHub issue reporter saw, is the proof.
+reproduce-before:
+    -ulimit -c 0 && cd repro && cargo run -- before
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Confirms the patch applies cleanly to the stated base commit (does not build rustix for sparc -
+# see justfile header).
+verify-patch-applies:
+    cd clone && git diff --stat HEAD
+
+# Demonstrates the fix: the same lines, patched, no longer panic.
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo run -- after
+
+clean:
+    rm -rf clone repro/target

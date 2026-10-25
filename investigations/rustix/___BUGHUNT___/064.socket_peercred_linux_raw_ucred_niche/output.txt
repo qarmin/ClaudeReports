@@ -1,0 +1,56 @@
+=== BEFORE (pristine HEAD 287214b8), repro binary, debug build, 5/5 runs ===
+$ cargo build && for i in 1 2 3 4 5; do ./target/debug/unconnected_peercred_public_api; echo exit=$?; done
+socket_peercred() returned Err(Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" })
+CONFIRMED: a syscall that the kernel actually completed successfully (verified independently via a raw getsockopt(2) on the same fd, see RESULT.md) is reported to the caller as a spurious Err - the real UCred{pid:0, uid:u32::MAX, gid:u32::MAX} payload collided with the niche bit pattern the compiler chose to represent Result<UCred, Errno>'s Err variant, because Pid's NonZeroI32 niche makes pid==0 look type-system-impossible.
+exit=0
+[... identical output repeated for runs 2-5, all Err ...]
+
+=== BEFORE (pristine), repro binary, release build, 5/5 runs ===
+(identical Err output to debug build, every run)
+
+=== BEFORE (pristine), repro binary, re-run after a fresh `rm -rf target` + rebuild, 3/3 runs ===
+socket_peercred() returned Err(Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" })
+CONFIRMED: syscall actually succeeded but was reported as a spurious Err - see RESULT.md for the niche-collision mechanism
+(repeated identically for all 3 runs)
+
+=== Independent verification that the underlying getsockopt(2) syscall truly succeeds (rules out a
+    real permission problem) ===
+$ cat debug_fd.rs-equivalent probe (raw libc::getsockopt on the exact same fd rustix's socket()
+  returned, called immediately before the failing rustix::net::sockopt::socket_peercred call):
+libc getsockopt via raw fd: r=0 errno=0
+optlen=12 buf=[0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255]
+rustix socket_peercred: Err(Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" })
+
+Instrumented trace of rustix's own internal getsockopt_raw() and getsockopt<T>() (temporarily added
+with eprintln!, reverted before writing this candidate up - see RESULT.md "What was tried"):
+DEBUG getsockopt_raw: fd=BorrowedFd { fd: 3 } level=1 optname=17 optlen_before=12 size_of_T=12
+DEBUG getsockopt_raw: result=Ok(()) optlen_after=12
+DEBUG getsockopt<T>: raw bytes before assume_init = [0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255]
+DEBUG getsockopt<T>: result is_ok = false
+rustix socket_peercred: Err(Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" })
+
+This proves the raw syscall genuinely returned success (result=Ok(())) with the exact documented
+kernel default bytes for an unconnected AF_UNIX socket (pid=0, uid=gid=0xFFFFFFFF), and that the
+corruption from Ok to Err happens at the single line `unsafe { Ok(value.assume_init()) }` itself -
+i.e. constructing `Result<UCred, Errno>` from those exact bytes is where the niche collision occurs.
+
+=== AFTER (patched tree, patch.diff applied), repro binary, release build, 3/3 runs ===
+Ok(UCred { pid: None, uid: Uid(4294967295), gid: Gid(4294967295) })
+FIXED: socket_peercred() succeeded and correctly reports no pid (None)
+(repeated identically for all 3 runs)
+
+=== Project test suite, --workspace --features "std,all-apis,use-libc" --no-fail-fast ===
+BEFORE (pristine HEAD 287214b8): total passed=411 total failed=1
+AFTER (patch.diff applied):      total passed=411 total failed=1
+
+The single failure in both runs is the same pre-existing, environment-caused one documented in
+___BUGHUNT___/projects/rustix.md ("Gotcha ... sandbox has no /dev/net/tun"):
+  thread 'ioctl::test_int_setter' panicked at tests/io/ioctl.rs:21:65:
+  called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+No new failures were introduced by the patch, and no pre-existing failure was fixed by it either -
+both states are identical except for this candidate's own niche-collision bug.
+
+=== `assert_eq_size!(UCred, libc::ucred)` (net::types::tests::test_sizes) still passes after the
+    patch, confirming Option<Pid> really does keep the same size/layout as Pid (0 => None) ===
+test net::types::tests::test_sizes ... ok
+test pid::tests::test_sizes ... ok

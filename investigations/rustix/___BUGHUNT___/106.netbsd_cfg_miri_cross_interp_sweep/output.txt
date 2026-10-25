@@ -1,0 +1,43 @@
+=== 1. cargo check --tests --target x86_64-unknown-netbsd (compile-time static_assertions layout checks: Stat/StatFs/Itimerspec/TimerfdFlags vs libc, against base_commit 287214b889865d8e1406a0ee71cc409b6f6191c8) ===
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+   Compiling rustix v1.1.5 (/home/rafal/Projekty/Obce/rustix/.worktrees/bughunt-106)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.48s
+(exit code: 0)
+
+=== 2. Real end-to-end Miri cross-interpretation, --target x86_64-unknown-netbsd, MIRIFLAGS=-Zmiri-disable-isolation: rustix's real public API for the NetBSD-gated paths Miri CAN execute (plain, non-versioned libc symbols) ===
+    bin: io_sweep (file create/write/remove, pipe()+poll() exercising the netbsd ppoll-weak-symbol-with-poll()-fallback branch in src/backend/libc/event/syscalls.rs, makedev()/major()/minor() round-trip at boundary values)
+   |
+20 | mostly-unused = true
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+   |
+20 | mostly-unused = true
+   |
+   = help: pass `-Zprofile-hint-mostly-unused` to enable it
+     Running `/home/rafal/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner target/miri/x86_64-unknown-netbsd/debug/io_sweep`
+file create/write/remove: ok
+pipe + poll (netbsd ppoll-weak-symbol fallback path): n=1, revents=PollFlags(IN)
+makedev(0xff, 0xfffff) = 0xfff0ffff -> major=0xff minor=0xfffff
+makedev/major/minor round-trip: ok
+
+=== 3. Real end-to-end Miri cross-interpretation attempts of the 3 structurally-most-promising NetBSD-gated suspects (same technique as candidates 039/050/058) - each fails with Miri's own 'unsupported operation', not a rustix bug ===
+--- probe: unsupported_sweep fstat ---
+error: unsupported operation: can't call foreign function `__fstat50` on OS `netbsd`
+    --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/106.netbsd_cfg_miri_cross_interp_sweep/clone/src/backend/libc/fs/syscalls.rs:1579:13
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsupported operation occurred here
+error: aborting due to 1 previous error
+
+--- probe: unsupported_sweep kqueue ---
+error: unsupported operation: can't call foreign function `kqueue` on OS `netbsd`
+  --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/106.netbsd_cfg_miri_cross_interp_sweep/clone/src/backend/libc/event/syscalls.rs:91:27
+   |                           ^^^^^^^^^^^ unsupported operation occurred here
+error: aborting due to 1 previous error
+
+--- probe: unsupported_sweep uname ---
+error: unsupported operation: `uname` is not supported on netbsd
+  --> /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/106.netbsd_cfg_miri_cross_interp_sweep/clone/src/backend/libc/system/syscalls.rs:29:17
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsupported operation occurred here
+error: aborting due to 1 previous error
+

@@ -1,0 +1,21 @@
+diff --git a/src/backend/libc/thread/syscalls.rs b/src/backend/libc/thread/syscalls.rs
+index 81f60219..d573685c 100644
+--- a/src/backend/libc/thread/syscalls.rs
++++ b/src/backend/libc/thread/syscalls.rs
+@@ -475,6 +475,16 @@ pub(crate) unsafe fn futex_val2(
+     // the pointer.
+     //
+     // [“the kernel casts the timeout value first to unsigned long, then to uint32_t”]: https://man7.org/linux/man-pages/man2/futex.2.html
++    //
++    // This pointer is never dereferenced; it's just a vehicle for smuggling
++    // `val2` through the FFI signature's `timeout: *const Timespec` slot.
++    // Miri's strict-provenance checks reject a bare integer-to-pointer `as`
++    // cast, so build it with `without_provenance` under Miri instead; this
++    // isn't done unconditionally because it wasn't stabilized until Rust
++    // 1.84, newer than our MSRV.
++    #[cfg(miri)]
++    let timeout = core::ptr::without_provenance::<Timespec>(val2 as usize);
++    #[cfg(not(miri))]
+     let timeout = val2 as usize as *const Timespec;
+ 
+     #[cfg(all(

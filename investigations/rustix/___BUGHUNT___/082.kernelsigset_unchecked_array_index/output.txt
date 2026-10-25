@@ -1,0 +1,47 @@
+=== BEFORE fix (pristine checkout at base_commit 287214b889865d8e1406a0ee71cc409b6f6191c8) ===
+$ cargo run --release   (repro/, rustix dependency pointed at the unmodified worktree)
+
+insert(64) (in-bounds, last valid signal number) succeeded as expected
+
+thread 'main' (471275) panicked at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_reference/wt-082/src/kernel_sigset.rs:65:9:
+index out of bounds: the len is 1 but the index is 1562
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+insert(100000) panic message: index out of bounds: the len is 1 but the index is 1562
+REPRODUCED - generic, undocumented 'index out of bounds' panic (pre-fix behavior) for raw=100000
+
+thread 'main' (471275) panicked at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_reference/wt-082/src/kernel_sigset.rs:65:9:
+index out of bounds: the len is 1 but the index is 288230376151711743
+insert(-5) panic message: index out of bounds: the len is 1 but the index is 288230376151711743
+REPRODUCED - generic, undocumented 'index out of bounds' panic (pre-fix behavior) for raw=-5
+
+$ echo "exit code: $?"
+exit code: 1
+
+Repeated 5/5 runs: all 5 runs panicked identically (same two messages, same exit code 1) -
+deterministic, not layout/seed-dependent (the index is a pure function of the hand-picked `raw`
+input, no heap-layout or ASLR dependency anywhere in this code path).
+
+=== AFTER fix (patch.diff applied to the same base commit) ===
+$ cargo run --release
+
+insert(64) (in-bounds, last valid signal number) succeeded as expected
+
+thread 'main' (471364) panicked at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_reference/wt-082/src/kernel_sigset.rs:65:9:
+signal number out of range: 100000
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+insert(100000) panic message: signal number out of range: 100000
+did not reproduce - clear, explicit 'signal number out of range' assertion (post-fix behavior) for raw=100000
+
+thread 'main' (471364) panicked at /home/rafal/Projekty/Obce/rustix/___BUGHUNT___/_reference/wt-082/src/kernel_sigset.rs:65:9:
+signal number out of range: -5
+insert(-5) panic message: signal number out of range: -5
+did not reproduce - clear, explicit 'signal number out of range' assertion (post-fix behavior) for raw=-5
+
+$ echo "exit code: $?"
+exit code: 0
+
+Note: the patched code still panics on out-of-range input (by design, matching the project's own
+existing precedent in `thread::CpuSet`/candidate 041 - the fix is about message clarity and
+consistency, not turning a documented-unsafe-precondition violation into a non-panicking Result).
+The repro's own pass/fail check (see repro/src/main.rs) distinguishes the two panic message shapes,
+not panic-vs-no-panic, for exactly this reason.

@@ -1,0 +1,44 @@
+# Self-contained reproduction for this candidate.
+#
+# Per this project's repro policy, this candidate has a GDScript-level repro (repro/) - no
+# standalone C++ mirror. Re-running it from scratch means building a real Godot binary with
+# ThreadSanitizer (~10-30 min depending on how much is cached), so this justfile splits into a
+# cheap default check (`test`: does the patch still apply to a fresh clone?) and a separate,
+# expensive recipe (`build-and-run`) that does the real thing.
+
+repo_url := "https://github.com/qarmin/godot.git"
+base_commit := "b8420aa3a60689572a745c0f8a85c9df62d4cbfb"
+
+test: clone verify-patch
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Cheap sanity check: does patch.diff still apply cleanly to the commit this candidate was
+# recorded against? Does NOT build or run anything.
+verify-patch:
+    cd clone && git apply --check "{{justfile_directory()}}/patch.diff"
+    @echo "patch.diff applies cleanly."
+
+# The real thing: builds a fresh ThreadSanitizer `template_debug` binary from the clone, runs the
+# real two-process repro (a real TCP debug server + the real debuggee started with
+# `--remote-debug`) against it unpatched (expect a real TSan data race in
+# RemoteDebuggerPeerTCP::is_peer_connected()/has_message()), applies the fix, rebuilds (much
+# faster, only remote_debugger_peer.cpp changed), and runs it again (expect clean).
+#
+# `disable_path_overrides=no` is required for a `template_debug` binary to load a project from a
+# plain CWD at all (export templates default to expecting an embedded .pck).
+build-and-run: clone
+    cd clone && python3 -m venv .venv 2>/dev/null; . .venv/bin/activate 2>/dev/null; pip install scons -q 2>/dev/null || true
+    cd clone && scons platform=linuxbsd target=template_debug use_tsan=yes debug_symbols=yes disable_path_overrides=no -j"$(nproc)"
+    @echo "=== unfixed: running the real two-process repro, expect a ThreadSanitizer data race in remote_debugger_peer.cpp ==="
+    bash "{{justfile_directory()}}/repro/run_repro.sh" "{{justfile_directory()}}/clone/bin/godot.linuxbsd.template_debug.x86_64.san" unfixed /tmp/candidate028_repro_unfixed || true
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && scons platform=linuxbsd target=template_debug use_tsan=yes debug_symbols=yes disable_path_overrides=no -j"$(nproc)"
+    @echo "=== fixed: running the real two-process repro again, expect clean (no remote_debugger_peer.cpp/List<Array> race) ==="
+    bash "{{justfile_directory()}}/repro/run_repro.sh" "{{justfile_directory()}}/clone/bin/godot.linuxbsd.template_debug.x86_64.san" fixed /tmp/candidate028_repro_fixed
+
+clean:
+    rm -rf clone

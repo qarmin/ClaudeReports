@@ -1,0 +1,48 @@
+# Self-contained reproduction for candidate 028 (hls_m3u8_master_playlist_uaf).
+#
+# Unlike a candidate that needs a full plugin build (see e.g. 010's justfile), this bug's
+# affected function - gst_hls_master_playlist_new_from_data() - only needs glib + stable
+# GStreamer core API (gst_uri_is_valid(), GST_DEBUG_CATEGORY, GMutex, g_atomic_int, GList).
+# repro/run.sh compiles the checkout's own, unmodified ext/hls/m3u8.c directly with clang+ASAN
+# against a system-installed gstreamer-1.0 (pkg-config) - no meson/ninja build of the whole
+# project required. Needs: clang, pkg-config, a gstreamer-1.0 dev package (libgstreamer1.0-dev
+# or equivalent).
+
+repo_url := "https://github.com/GStreamer/gstreamer.git"
+base_commit := "65b9547519cdafce691e65777d4178280bf10808"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Prints a real AddressSanitizer heap-use-after-free report (m3u8.c:1663, freed at m3u8.c:1669)
+# - the repro itself exits non-zero on a real ASan abort, so this recipe checks for that exit
+# code explicitly (and fails *itself*, loudly, if the bug did NOT reproduce) instead of just
+# letting `just`'s own default "abort the whole chain on any non-zero recipe" stop `reproduce-
+# after`/`apply` from ever running under a plain `just test`.
+reproduce-before:
+    #!/usr/bin/env bash
+    set -eo pipefail
+    ulimit -c 0
+    set +e
+    SRC_ROOT="{{justfile_directory()}}/clone" bash repro/run.sh
+    ec=$?
+    set -e
+    if [ "$ec" -eq 0 ]; then
+      echo "expected the repro to crash (heap-use-after-free) but it exited 0 - bug did not reproduce!" >&2
+      exit 1
+    fi
+    echo ">>> confirmed: repro crashed as expected (exit $ec) - see the AddressSanitizer report above"
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Should now run all 5 crafted cases cleanly (exit 0, no ASan report).
+reproduce-after:
+    ulimit -c 0 && SRC_ROOT="{{justfile_directory()}}/clone" bash repro/run.sh
+
+clean:
+    rm -rf clone repro/repro_bin

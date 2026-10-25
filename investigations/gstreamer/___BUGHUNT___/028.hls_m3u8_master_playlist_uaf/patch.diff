@@ -1,0 +1,31 @@
+diff --git a/subprojects/gst-plugins-bad/ext/hls/m3u8.c b/subprojects/gst-plugins-bad/ext/hls/m3u8.c
+index 0bb845a459..99310af131 100644
+--- a/subprojects/gst-plugins-bad/ext/hls/m3u8.c
++++ b/subprojects/gst-plugins-bad/ext/hls/m3u8.c
+@@ -1666,7 +1666,11 @@ gst_hls_master_playlist_new_from_data (gchar * data, const gchar * base_uri)
+             stream->name = g_strdup (stream->uri);
+             gst_m3u8_set_uri (stream->m3u8, stream->uri, NULL, stream->name);
+           } else {
+-            gst_hls_variant_stream_unref (stream);
++            /* Don't free stream here: the attribute-parsing loop below still
++             * holds a pointer to it, and so does the iframe/uri handling
++             * right after the loop. Just leave stream->uri NULL and let
++             * that code drop it once, after parsing has fully finished. */
++            GST_WARNING ("Error while reading i-frame stream URI");
+           }
+         } else if (g_str_equal (a, "AUDIO")) {
+           g_free (stream->media_groups[GST_HLS_MEDIA_TYPE_AUDIO]);
+@@ -1684,7 +1688,12 @@ gst_hls_master_playlist_new_from_data (gchar * data, const gchar * base_uri)
+       }
+ 
+       if (stream->iframe) {
+-        if (find_variant_stream_by_uri (playlist->iframe_variants, stream->uri)) {
++        if (stream->uri == NULL) {
++          GST_WARNING ("EXT-X-I-FRAME-STREAM-INF without a valid URI, "
++              "dropping");
++          gst_hls_variant_stream_unref (stream);
++        } else if (find_variant_stream_by_uri (playlist->iframe_variants,
++                stream->uri)) {
+           GST_DEBUG ("Already have a list with this URI");
+           gst_hls_variant_stream_unref (stream);
+         } else {

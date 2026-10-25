@@ -1,0 +1,45 @@
+use krilla::Data;
+use krilla::action::ResetFormAction;
+use krilla::annotation::AnnotationType;
+use krilla::annotation::LinkAnnotation;
+use krilla::annotation::LinkBorder;
+use krilla::annotation::Target;
+use krilla::color::rgb::Color;
+use krilla::configure::Accessibility;
+use krilla::configure::ConfigurationBuilder;
+use krilla::destination::Destination;
+use krilla::destination::XyzDestination;
+use krilla::form::kind::Text;
+use krilla::geom::PathBuilder;
+use krilla::geom::Point;
+use krilla::geom::Quadrilateral;
+use krilla::geom::Rect;
+use krilla::image::Image;
+use krilla::paint::LineJoin;
+use krilla::tagging::GlyphOrientationVertical;
+use krilla::tagging::kind::Lbl;
+use krilla::tagging::kind::THead;
+use krilla::text::Font;
+
+fn main() {
+    let _ = Image::from_webp(Data::from(std::sync::Arc::new(include_bytes!("mutated_0_rgba8.webp").to_vec())), true);
+    let _ = ResetFormAction::Include(vec!["مرحبا".to_string()]);
+    let mut path_builder = PathBuilder::default();
+    path_builder.quad_to(-50.2f32, 0.0f32, 28.6f32, -1.6f32);
+    let _ = <krilla::icc::ICCProfile<4>>::new(&include_bytes!("sRGB-v4.icc").to_vec());
+    let _ = GlyphOrientationVertical::Clockwise90;
+    let _ = Quadrilateral([Point { x: -0.0016725775f32, y: -2.2978705e-26f32 }, Point::default(), Point::from_xy(1.0f32, 256.0f32), Point::default()]);
+    let _ = Lbl;
+    let destination = Destination::from(XyzDestination::new(usize::MAX, Point { x: 82.2f32, y: f32::MAX }));
+    let _ = AnnotationType::Link(LinkAnnotation::new(Rect::from_xywh(0.0f32, -0.0f32, 0.5f32, 0.5f32).unwrap(), Target::Destination(destination.clone())).with_border(LinkBorder::new(f32::MAX, krilla::color::Color::from(Color::default()))));
+    let _ = Font::new(Data::from(include_bytes!("mutated_2_LatinModernRoman-Regular.otf").to_vec()), 3u32);
+    let accessibility = Accessibility::from(Accessibility::UA1);
+    let _ = accessibility.min();
+    let _ = ConfigurationBuilder::default();
+    let _ = THead;
+    let _ = Text::default();
+    let _ = XyzDestination::new(1usize, Point::from_xy(f32::MIN, 65536.0f32));
+    let _ = XyzDestination::new(1usize, Point::default());
+    let _ = LineJoin::Round;
+    let _ = LineJoin::default();
+}

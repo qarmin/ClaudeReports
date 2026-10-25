@@ -1,0 +1,49 @@
+Unpatched: 5/5 runs crashed (gdscript_repro/, 6-thread hammering of a shared Curve2D + a shared
+Curve3D via add_point/remove_point/samplef/sample_baked/get_point_position). See
+gdscript_repro/gdscript_output_crash.txt for a full captured run. Tail of one run:
+
+       [0] _spam3d (res://main.tscn::GDScript_1:62)
+ERROR: No points in Curve3D.
+   at: sample_baked (scene/resources/curve.cpp:1937)
+ERROR: Condition "pc == 0" is true. Returning: Vector3()
+   at: sample (scene/resources/curve.cpp:1476)
+=================================================================
+   GDScript backtrace (most recent call first):
+       [0] _spam3d (res://main.tscn::GDScript_1:60)
+   GDScript backtrace (most recent call first):
+       [0] _spam3d (res://main.tscn::GDScript_1:62)
+   GDScript backtrace (most recent call first):
+       [0] _spam3d (res://main.tscn::GDScript_1:62)
+==7388==ERROR: AddressSanitizer: attempting double-free on 0x701b74a9aea0 in thread T28:
+ERROR: Condition "pc == 0" is true. Returning: Vector2()
+   at: sample (scene/resources/curve.cpp:768)
+   GDScript backtrace (most recent call first):
+       [0] _spam2d (res://main.tscn::GDScript_1:40)
+ERROR: FATAL: Index p_index = 3 is out of bounds (size() = 3).
+   at: get (./core/templates/cowdata.h:208)
+ERROR: FATAL: Index p_index = 2 is out of bounds (size() = 2).
+   at: get (./core/templates/cowdata.h:208)
+   GDScript backtrace (most recent call first):
+       [0] _spam3d (res://main.tscn::GDScript_1:62)
+   GDScript backtrace (most recent call first):
+       [0] _spam3d (res://main.tscn::GDScript_1:62)
+
+----
+Patched (_THREAD_SAFE_CLASS_/_THREAD_SAFE_METHOD_ added to Curve2D/Curve3D): 8/8 clean runs, no
+crashes/ASan errors. See gdscript_repro/gdscript_output_fixed.txt for the full per-run summary.
+
+----
+Project test suite (bin/godot.linuxbsd.editor.x86_64.san --headless --test, absolute
+XDG_DATA_HOME/XDG_CONFIG_HOME):
+- Before (unpatched, main tree's prebuilt binary, commit b8420aa3a6): 1431 test cases | 1430 passed
+  | 1 failed | 3 skipped (same pre-existing test_ip.cpp IPv6 failure as established in candidates
+  002-016's baseline).
+- After (patched, rebuilt in the candidate worktree): first run showed 1431 | 1429 passed | 2 failed
+  | 3 skipped (test_ip.cpp's known failure plus one [TranslationCSV] CSV import failure); a second
+  run against the same patched binary with a fresh XDG_DATA_HOME came back 1431 | 1430 passed | 1
+  failed | 3 skipped, identical to the established baseline. Isolating [TranslationCSV] CSV import
+  on its own (--test-case="*CSV import*") passes cleanly on the unpatched binary too, and the
+  failure did not reproduce on the second full-suite run - a flaky, order/locale-state-dependent
+  doctest interaction (TranslationServer is a process-wide singleton reused across test cases, and
+  doctest's default run order is not isolated per test case), not a regression caused by this
+  patch. No new deterministic failures from the fix.

@@ -1,0 +1,54 @@
+Candidate 040 raw measurements. Both arms built from the same tree, minutes apart, and benched
+interleaved A/B. Empty-project editor startup, --headless --editor --quit-after 1.
+Arms: baseline = pristine HEAD 9552dfb685 + memstat_instrumentation.diff;
+      bundle13 = the same + bench/bundle_of_13_patches.diff.
+
+=== tracked heap (Memory::get_mem_usage / get_mem_max_usage at Main::cleanup), 3 runs each ===
+baseline  usage=91165355 max=448282957
+baseline  usage=91165355 max=448282957
+baseline  usage=91165355 max=448282957
+bundle13  usage=81106143 max=328222837
+bundle13  usage=81106143 max=329071511
+bundle13  usage=81106143 max=330260045
+
+  tracked peak: 448282957 -> mean 329184797.7 B = -113.58 MB (-26.57%)
+  live at cleanup: 91165355 -> 81106143 B = -9.59 MB
+  NOTE: the bundle's tracked peak is NOT byte-identical across runs (1.94MB spread) although every
+  individual candidate's was. With this many dialogs deferred, the peak moves to a different,
+  timing-sensitive phase of startup. Worth knowing before assuming the counter is always exact.
+
+=== peak RSS (VmHWM), 8 interleaved pairs, kB ===
+pair1 base=719576 bundle=565592
+pair2 base=719032 bundle=565472
+pair3 base=718624 bundle=564292
+pair4 base=718872 bundle=564704
+pair5 base=718748 bundle=565400
+pair6 base=719672 bundle=565408
+pair7 base=719068 bundle=565296
+pair8 base=719840 bundle=565556
+
+  baseline mean 719179.0 kB (702.32 MB), bundle mean 565215.0 kB (551.97 MB)
+  delta -153964 kB = -150.36 MB (-21.41%), bundle lower in 8/8 pairs, distributions do not overlap
+  (baseline 718624-719840, bundle 564292-565592). All runs exit 0.
+  RSS/tracked-peak ratio 1.32x (in line with the 1.23-1.31x seen in candidates 035/036).
+
+=== additivity ===
+individual RSS deltas, each measured alone against pristine HEAD:
+  007 -7.85  013 -15.52  017 -13.81  018 -7.85  019 -3.70  023 -46.39  024 -9.02
+  025 -11.21 026 -6.70   029 -8.63   030 -7.01  031 -3.85  032 -37.48   (MB)
+  naive sum = 179.02 MB
+  measured  = 150.36 MB  -> 84.0% additive, shortfall 28.66 MB
+  candidate 033's 8-patch figure was 85.7% additive, and its extrapolated prediction for the full
+  13 was "~-153MB (~22%)" against the -150.36 MB (-21.41%) measured here.
+
+=== integration checks (the part no individual candidate can provide) ===
+full test suite, both arms identical:
+  1427 cases, 1426 passed, 1 failed, 3 skipped; 424066 assertions, 423066 passed, 1000 failed
+  (the known test_ip.cpp IPv6 failure, no IPv6 in this container)
+
+Xvfb startup node counts (candidate 037's counting plugin, run against both arms):
+  baseline  EditorFileDialog=64  EditorHelpSearch=1  ConfirmationDialog=400
+  bundle13  EditorFileDialog=35  EditorHelpSearch=1  ConfirmationDialog=165
+  firing the real "New Text File..." menu item still opens a dialog titled 'New Text File...' in
+  both arms (EditorHelpSearch stays 1 and the count stays 35 in the bundle because candidate 037,
+  which defers ScriptEditor's own file dialog and help search, is deliberately NOT in this bundle).

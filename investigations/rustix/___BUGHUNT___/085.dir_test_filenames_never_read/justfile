@@ -1,0 +1,68 @@
+# Self-contained reproduction for candidate 085
+# (dir_test_filenames_never_read: tests/fs/dir.rs's test_dir_seek builds
+# `filenames` but never reads it back, so the test only compares two listings
+# of the same directory against each other, never against the real files
+# created - a name-parsing bug that corrupts every entry identically on
+# every read is invisible to it).
+#
+# Everything this needs is either already in this folder, or fetched by
+# `just clone` into ./clone (gitignored) - nothing in this justfile reaches
+# outside the folder it lives in.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+# Full cycle: clone pristine, inject a mutant that a real name-parsing bug
+# could plausibly look like, show the shipping test misses it while a
+# stronger check catches it, then apply the real fix to the real project
+# test suite and show it now also catches the same mutant (and still passes
+# normally on correct code).
+test: clone reproduce-before unmutate apply reproduce-after mutate-again reproduce-after-mutant unmutate-again
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Inject the mutant (deterministic last-byte name corruption in the
+# linux_raw backend's dirent-name parsing - a realistic stand-in for a real
+# name-parsing bug) into the pristine clone, then build and run the two
+# standalone repro binaries against it through the REAL rustix::fs::Dir
+# public API (real temp dir, real files, real read()/seek() calls).
+reproduce-before:
+    cd clone && git apply "{{justfile_directory()}}/repro/mutant.patch"
+    cd repro && cargo build --release
+    @echo "--- weak_check (mirrors the real, currently-shipping test_dir_seek) ---"
+    ./repro/target/release/weak_check || true
+    @echo "--- strong_check (mirrors test_dir_seek + patch.diff) ---"
+    ./repro/target/release/strong_check || true
+
+# Remove the mutant so `clone` is pristine again before applying the real fix.
+unmutate:
+    cd clone && git apply -R "{{justfile_directory()}}/repro/mutant.patch"
+
+# Apply the real, verified fix to the real project's own test file.
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Run the REAL project test suite's test_dir_seek (now with patch.diff
+# applied) against pristine (unmutated) code - must still pass normally.
+reproduce-after:
+    cd clone && cargo test --features all-apis --test fs dir::test_dir_seek -- --nocapture
+
+# Re-inject the same mutant on top of the now-patched test file, to prove
+# the REAL project test suite (not just the standalone strong_check binary)
+# now actually catches it.
+mutate-again:
+    cd clone && git apply "{{justfile_directory()}}/repro/mutant.patch"
+
+# Must now FAIL (panic on "unexpected directory entry name") - the real
+# fix, in the real test suite, catches the mutant the original test missed.
+reproduce-after-mutant:
+    cd clone && cargo test --features all-apis --test fs dir::test_dir_seek -- --nocapture || true
+
+unmutate-again:
+    cd clone && git apply -R "{{justfile_directory()}}/repro/mutant.patch"
+
+clean:
+    rm -rf clone repro/target

@@ -1,0 +1,43 @@
+# Self-contained reproduction for this candidate.
+#
+# Per this project's repro policy (2026-10-05), this candidate has ONLY a
+# GDScript-level repro (gdscript_repro/) - no standalone C++ mirror. Re-running
+# it from scratch means building a real Godot editor binary with ASan (~1-15
+# min depending on how much is cached), so this justfile splits into a cheap
+# default check (`test`: does the patch still apply to a fresh clone?) and a
+# separate, expensive recipe (`build-and-run`) that does the real thing.
+
+repo_url := "https://github.com/qarmin/godot.git"
+base_commit := "b8420aa3a60689572a745c0f8a85c9df62d4cbfb"
+
+test: clone verify-patch
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Cheap sanity check: does patch.diff still apply cleanly to the commit this
+# candidate was recorded against? Does NOT build or run anything.
+verify-patch:
+    cd clone && git apply --check "{{justfile_directory()}}/patch.diff"
+    @echo "patch.diff applies cleanly."
+
+# The real thing: builds a fresh ASan editor binary from the clone, runs
+# gdscript_repro/ against it unpatched (expect an abort - this reproduced on
+# the very first run every time this session, well under 15s; the external
+# sweep also reports a hang as an alternative outcome of the same race, so
+# this always runs under an external `timeout`), applies the fix, rebuilds,
+# and runs it again (expect all clean).
+build-and-run: clone
+    cd clone && python3 -m venv .venv 2>/dev/null; . .venv/bin/activate 2>/dev/null; pip install scons -q 2>/dev/null || true
+    cd clone && scons platform=linuxbsd target=editor use_asan=yes tests=yes debug_symbols=yes -j"$(nproc)"
+    @echo "=== unfixed: running gdscript_repro/, expect an abort or hang (external timeout applies) ==="
+    (cd clone && ASAN_OPTIONS=detect_leaks=0 timeout -k 5 25 ./bin/godot.linuxbsd.editor.x86_64.san --headless --path "{{justfile_directory()}}/gdscript_repro" || true)
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && scons platform=linuxbsd target=editor use_asan=yes tests=yes debug_symbols=yes -j"$(nproc)"
+    @echo "=== fixed: running gdscript_repro/, expect clean ==="
+    cd clone && ASAN_OPTIONS=detect_leaks=0 timeout -k 5 25 ./bin/godot.linuxbsd.editor.x86_64.san --headless --path "{{justfile_directory()}}/gdscript_repro"
+
+clean:
+    rm -rf clone

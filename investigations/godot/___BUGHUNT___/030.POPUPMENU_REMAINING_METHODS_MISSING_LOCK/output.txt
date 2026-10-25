@@ -1,0 +1,142 @@
+=== Candidate 030: PopupMenu remaining item-touching methods, unlocked ===
+Binary: bin/godot.linuxbsd.editor.x86_64.san (ASan+UBSan, use_asan=yes debug_symbols=yes tests=yes)
+Commit under test: b8420aa3a60689572a745c0f8a85c9df62d4cbfb
+Repro: repro/ (6 GDScript Threads hammering add_item/add_icon_item/clear/remove_item/
+set_item_text/get_item_text/set_item_checked/is_item_checked/scroll_to_item/set_item_disabled
+on one shared PopupMenu - deliberately NEVER calls set_item_count()/get_item_count(), which is
+candidate 018's own already-confirmed-and-fixed scope)
+Command: ASAN_OPTIONS=detect_leaks=0 timeout -k 5 25 ./bin/godot.linuxbsd.editor.x86_64.san --headless --path repro
+
+------------------------------------------------------------------------------
+UNFIXED tree, run 1/6 (exit 132 = SIGILL, i.e. ASan/Godot FATAL abort trap)
+------------------------------------------------------------------------------
+4:   at: can_auto_translate (scene/main/node.cpp:1362)
+5:   GDScript backtrace (most recent call first):
+7:ERROR: Index p_idx = 0 is out of bounds (items.size() = 0).
+8:   at: remove_item (scene/gui/popup_menu.cpp:3239)
+9:ERROR: Index p_idx = 0 is out of bounds (items.size() = 0).
+10:   at: get_item_text (scene/gui/popup_menu.cpp:2597)
+11:   GDScript backtrace (most recent call first):
+13:   GDScript backtrace (most recent call first):
+16:   at: get_translation_domain (scene/main/node.cpp:1384)
+17:   GDScript backtrace (most recent call first):
+20:   at: queue_redraw (scene/main/canvas_item.cpp:542)
+22:   at: can_auto_translate (scene/main/node.cpp:1362)
+23:ERROR: FATAL: Index p_index = 0 is out of bounds (((Vector<T> *)(this))->_cowdata.size() = 0).
+24:   at: operator[] (./core/templates/vector.h:47)
+25:ERROR: Index p_idx = 0 is out of bounds (items.size() = 0).
+27:   at: can_auto_translate (scene/main/node.cpp:1362)
+28:   at: set_item_disabled (scene/gui/popup_menu.cpp:2469)
+29:   GDScript backtrace (most recent call first):
+31:   GDScript backtrace (most recent call first):
+33:   GDScript backtrace (most recent call first):
+35:   GDScript backtrace (most recent call first):
+37:   GDScript backtrace (most recent call first):
+40:   at: queue_redraw (scene/main/canvas_item.cpp:542)
+41:   GDScript backtrace (most recent call first):
+44:   at: child_controls_changed (scene/main/window.cpp:2021)
+45:   GDScript backtrace (most recent call first):
+48:   at: get_translation_domain (scene/main/node.cpp:1384)
+49:   GDScript backtrace (most recent call first):
+53:   at: get_translation_domain (scene/main/node.cpp:1384)
+54:   at: get_size (scene/gui/control.cpp:1642)
+55:   GDScript backtrace (most recent call first):
+57:   GDScript backtrace (most recent call first):
+60:   at: child_controls_changed (scene/main/window.cpp:2021)
+62:   at: hide (scene/main/canvas_item.cpp:130)
+63:   GDScript backtrace (most recent call first):
+65:   GDScript backtrace (most recent call first):
+68:   at: is_layout_rtl (scene/main/window.cpp:3266)
+69:   GDScript backtrace (most recent call first):
+72:   at: is_layout_rtl (scene/main/window.cpp:3266)
+74:   at: queue_redraw (scene/main/canvas_item.cpp:542)
+
+------------------------------------------------------------------------------
+UNFIXED tree: 6/6 runs against the shipped repro/ crashed (exit code 132 every time)
+------------------------------------------------------------------------------
+run 1: exit=132 (Illegal instruction), survived-count=0
+run 2: exit=132 (Illegal instruction), survived-count=0
+run 3: exit=132 (Illegal instruction), survived-count=0
+run 4: exit=132 (Illegal instruction), survived-count=0
+run 5: exit=132 (Illegal instruction), survived-count=0
+run 6: exit=132 (Illegal instruction), survived-count=0
+
+------------------------------------------------------------------------------
+Supplementary evidence: a symbolized ASan backtrace from the same repro logic
+(the only difference: this capture used an earlier draft of main.tscn whose
+final match-branch called the nonexistent PopupMenu.activate_item() GDScript
+binding - that branch always failed with a harmless SCRIPT ERROR and never
+executed, so the 9 *other* branches that actually ran are identical to the
+shipped repro/main.tscn). Shows the crash is a real, symbolized
+AddressSanitizer "unknown-crash" READ inside PopupMenu::clear() by way of
+Vector<Item>::begin()/ptrw()/CowData::_copy_on_write() - one of the ~80
+methods outside candidate 018's set_item_count()/get_item_count() scope:
+------------------------------------------------------------------------------
+==12102==ERROR: AddressSanitizer: unknown-crash on address 0x75ba687ead78 at pc 0x5cca4c0caee4 bp 0x73ba4366ba40 sp 0x73ba4366ba30
+READ of size 8 at 0x75ba687ead78 thread T31
+ERROR: /root/Main/@PopupMenu@11: The caller thread can't call the function `emit_signalp()` on this node. Use `call_deferred()` or `call_deferred_thread_group()` instead.
+Load address: 77ba69554000
+
+    #0 0x5cca4c0caee3 in CowData<PopupMenu::Item>::_copy_on_write() core/templates/cowdata.h:514
+    #1 0x5cca4c076d46 in CowData<PopupMenu::Item>::ptrw() core/templates/cowdata.h:177
+    #2 0x5cca4c076d46 in Vector<PopupMenu::Item>::ptrw() core/templates/vector.h:91
+    #3 0x5cca4c076d46 in Vector<PopupMenu::Item>::begin() core/templates/vector.h:305
+    #4 0x5cca4c076d46 in PopupMenu::clear(bool) scene/gui/popup_menu.cpp:3280
+    #5 0x5cca3e5f15c0 in void call_with_variant_args_helper<__UnexistingClass, bool, 0ul>(__UnexistingClass*, void (__UnexistingClass::*)(bool), Variant const**, Callable::CallError&, IndexSequence<0ul>) core/variant/binder_common.h:58
+    #6 0x5cca3e5f15c0 in void call_with_variant_args_dv<__UnexistingClass, bool>(__UnexistingClass*, void (__UnexistingClass::*)(bool), Variant const**, int, Callable::CallError&, Vector<Variant> const&) core/variant/binder_common.h:205
+    #7 0x5cca3e5f18bd in MethodBindT<bool>::call(Object*, Variant const**, int, Callable::CallError&) const core/object/method_bind_common.h:85
+    #8 0x5cca41fadbf1 in GDScriptFunction::call(GDScriptInstance*, Variant const**, int, Callable::CallError&, GDScriptFunction::CallState*) modules/gdscript/gdscript_vm.cpp:2102
+    #9 0x5cca41b2c706 in GDScriptInstance::callp(StringName const&, Variant const**, int, Callable::CallError&) modules/gdscript/gdscript.cpp:1976
+    #10 0x5cca52d94846 in Object::callp(StringName const&, Variant const**, int, Callable::CallError&) core/object/object.cpp:883
+    #11 0x5cca52147f50 in Callable::callp(Variant const**, int, Variant&, Callable::CallError&) const core/variant/callable.cpp:68
+    #12 0x5cca5214b814 in CallableCustomBind::call(Variant const**, int, Variant&, Callable::CallError&) const core/variant/callable_bind.cpp:150
+    #13 0x5cca521482f0 in Callable::callp(Variant const**, int, Variant&, Callable::CallError&) const core/variant/callable.cpp:58
+    #14 0x5cca516017ee in CoreBind::Thread::_start_func(void*) core/core_bind.cpp:1493
+    #15 0x5cca517ff304 in Thread::callback(unsigned long, Thread::Settings const&, void (*)(void*), void*) core/os/thread.cpp:64
+    #16 0x5cca53cb72c3 in execute_native_thread_routine (/home/rafal/Projekty/Obce/godot/.worktrees/030/bin/godot.linuxbsd.editor.x86_64.san+0x17bbe2c3) (BuildId: 5fadb51a700f19f0c9e5a7bad2e77631cd0f99c3)
+    #17 0x77ba698fea80 in asan_thread_start ../../../../src/libsanitizer/asan/asan_interceptors.cpp:246
+    #18 0x77ba695f7df9 in start_thread nptl/pthread_create.c:454
+    #19 0x77ba6968b3d3 in clone ../sysdeps/unix/sysv/linux/x86_64/clone.S:100
+
+A second run of that same earlier-draft repro crashed via a different path,
+also fully symbolized - CowData<PopupMenu::Item>::get() reached from a
+GDScript-bound item getter (validated_call -> CowData::get(), cowdata.h:208):
+------------------------------------------------------------------------------
+192:   at: get (./core/templates/cowdata.h:208)
+217:handle_crash: Program crashed with signal 4
+222:[1] 5c3b8052f4a5 (godot.linuxbsd.editor.x86_64.san+1f534a5) - handle_crash(int) at /home/rafal/Projekty/Obce/godot/platform/linuxbsd/crash_handler_linuxbsd.cpp:95
+224:[3] 5c3b8e4f10a2 (godot.linuxbsd.editor.x86_64.san+ff150a2) - CowData<PopupMenu::Item>::get(long) const at /home/rafal/Projekty/Obce/godot/core/templates/cowdata.h:208
+225:[4] 5c3b80ab7854 (godot.linuxbsd.editor.x86_64.san+24db854) - MethodBindT<int>::validated_call(Object*, Variant const**, Variant*) const at /home/rafal/Projekty/Obce/godot/core/object/method_bind_common.h:90
+227:[6] 5c3b8400f707 (godot.linuxbsd.editor.x86_64.san+5a33707) - GDScriptInstance::callp(StringName const&, Variant const**, int, Callable::CallError&) at /home/rafal/Projekty/Obce/godot/modules/gdscript/gdscript.cpp:1976
+
+------------------------------------------------------------------------------
+FIXED tree (_THREAD_SAFE_CLASS_ + _THREAD_SAFE_METHOD_ on all 80 item-touching
+public methods): 11/11 clean runs against the shipped repro/, every run printed
+"survived" and exited 0
+------------------------------------------------------------------------------
+/tmp/fixedrun_1.log: survived-count=1, tail: survived
+/tmp/fixedrun_2.log: survived-count=1, tail: survived
+/tmp/fixedrun_3.log: survived-count=1, tail: survived
+/tmp/fixedrun_4.log: survived-count=1, tail: survived
+/tmp/fixedrun_5.log: survived-count=1, tail: survived
+/tmp/fixedrun_6.log: survived-count=1, tail: survived
+/tmp/fixedrun_7.log: survived-count=1, tail: survived
+/tmp/fixedrun_8.log: survived-count=1, tail: survived
+/tmp/fixed_final_1.log: survived-count=1, tail: survived
+/tmp/fixed_final_2.log: survived-count=1, tail: survived
+/tmp/fixed_final_3.log: survived-count=1, tail: survived
+
+------------------------------------------------------------------------------
+Project test suite (--headless --test), same binary build, before vs after:
+------------------------------------------------------------------------------
+BEFORE (unfixed tree):
+===============================================================================
+[doctest] test cases:   1431 |   1430 passed |    1 failed | 3 skipped
+[doctest] assertions: 425313 | 424313 passed | 1000 failed |
+[doctest] Status: FAILURE!
+
+AFTER (fixed tree):
+===============================================================================
+[doctest] test cases:   1431 |   1430 passed |    1 failed | 3 skipped
+[doctest] assertions: 425313 | 424313 passed | 1000 failed |
+[doctest] Status: FAILURE!

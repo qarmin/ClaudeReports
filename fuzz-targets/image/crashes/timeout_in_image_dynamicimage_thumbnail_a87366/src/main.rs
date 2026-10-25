@@ -1,0 +1,45 @@
+use image::ColorType;
+use image::DynamicImage;
+use image::ExtendedColorType;
+use image::ImageFormat;
+use image::ImageLayout;
+use image::LimitSupport;
+use image::SpecCompliance;
+use image::codecs::avif::ColorSpace;
+use image::codecs::gif::Repeat;
+use image::codecs::jpeg::ChromaSubsampling;
+use image::codecs::png::FilterType;
+use image::error::UnsupportedErrorKind;
+use image::io::DecodedAnimationAttributes;
+use image::io::DecoderPreparedImage;
+
+fn main() {
+    let dynamic_image = DynamicImage::new_rgba32f(1000u32, 65536u32);
+    let dynamic_image2 = dynamic_image.thumbnail(4010821916u32, 65535u32);
+    let _ = dynamic_image2.color();
+    let _ = FilterType::Avg;
+    let _ = <image::codecs::ico::IcoEncoder<Vec<u8>> as image::ImageEncoder>::write_image(<image::codecs::ico::IcoEncoder<Vec<u8>>>::new(include_bytes!("image_0.bmp").to_vec()), &vec![], u32::MAX, 0u32, ExtendedColorType::Cmyk16);
+    let _ = dynamic_image2.as_rgba16();
+    let _ = ColorSpace::Srgb;
+    let mut image_reader_options = <image::ImageReaderOptions<::std::io::Cursor<Vec<u8>>>>::with_format(std::io::Cursor::new(include_bytes!("mutated_1_rgb24.bmp").to_vec()), ImageFormat::Farbfeld);
+    image_reader_options.set_spec_compliance(SpecCompliance::Strict);
+    let _ = ColorSpace::Bt709;
+    let vec = include_bytes!("image_2.bmp").to_vec();
+    let _ = <image::Luma<u8> as image::Pixel>::from_slice(&vec);
+    let _ = ColorSpace::Srgb;
+    let _ = DecoderPreparedImage::from(ImageLayout::empty(ColorType::La32F));
+    let _ = LimitSupport::default();
+    let _ = ChromaSubsampling::S422;
+    let _ = DecodedAnimationAttributes::default();
+    let _ = LimitSupport::default();
+    let mut rgba = <image::Rgba<u16> as image::Pixel>::to_rgba(&<image::Rgba<u16> as image::Pixel>::to_rgba(&<image::LumaA<u16> as image::Pixel>::to_rgba(&<image::Rgb<u16> as image::Pixel>::to_luma_alpha(&<image::Rgb<u16> as ::core::convert::From<[u16; 3]>>::from([256u16, 255u16, 28u16])))));
+    <image::Rgba<u16> as image::Pixel>::apply2::<fn(u16, u16) -> u16>(&mut rgba, &<image::Rgba<u16> as image::Pixel>::to_rgba(&<image::Rgb<u16> as image::Pixel>::to_rgba(&<image::Rgba<u16> as image::Pixel>::to_rgb(&<image::Rgba<u16> as ::core::convert::From<[u16; 4]>>::from([35915u16, 255u16, 256u16, 255u16])))), |_, _| 1 as u16);
+    let tga_encoder = <image::codecs::tga::TgaEncoder<Vec<u8>>>::new(include_bytes!("image_3.jpg").to_vec());
+    let mut tga_encoder2 = tga_encoder.disable_rle();
+    let _ = <image::codecs::tga::TgaEncoder<Vec<u8>> as image::ImageEncoder>::set_icc_profile(&mut tga_encoder2, include_bytes!("mutated_4_pal8os2sp.bmp").to_vec());
+    let _ = Repeat::Finite(23566u16);
+    let _ = UnsupportedErrorKind::GenericFeature("\u{200b}\u{200d}".to_string());
+    let _ = <image::ImageReaderOptions<::std::io::Cursor<Vec<u8>>>>::new(std::io::Cursor::new(include_bytes!("image_5.bmp").to_vec()));
+    let vec2 = include_bytes!("image_6.gif").to_vec();
+    let _ = <image::LumaA<u8> as image::Pixel>::from_slice(&vec2);
+}

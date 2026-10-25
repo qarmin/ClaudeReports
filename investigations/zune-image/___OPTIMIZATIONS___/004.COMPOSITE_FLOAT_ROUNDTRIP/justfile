@@ -1,0 +1,59 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff is ONLY the source fix (crates/zune-imageprocs/src/composite.rs) - the standalone
+# bench driver it's measured with (bench/bench_composite.rs, copied to
+# clone/crates/zune-imageprocs/examples/bench_composite.rs) is harness, not fix, so it's copied
+# in by `clone:` below and present identically for both the baseline and patched builds (the
+# project had no existing example/bench reaching Composite::execute_multiple() directly).
+#
+# Measured result for this candidate: ~2.1x-2.9x speedup for Over/Multiply/Screen on u8 images,
+# bit-exact (verified both against a large random image and exhaustively over the full u8 input
+# domain) - see RESULT.md.
+
+repo_url := "https://github.com/etemesi254/zune-image.git"
+base_commit := "533296caf9a6783691d42b2dfbc623029216cbaf"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/crates/zune-imageprocs/examples
+    cp "{{justfile_directory()}}/bench/bench_composite.rs" clone/crates/zune-imageprocs/examples/bench_composite.rs
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Baseline build happens BEFORE `apply`, patched build happens AFTER - `test`'s recipe order
+# (clone build-baseline apply build-patched bench) guarantees this.
+build-baseline:
+    cd clone && cargo build --release -p zune-imageprocs --example bench_composite 2>&1 | tail -5
+    mkdir -p ../bin
+    cp clone/target/release/examples/bench_composite ./bin_baseline
+
+build-patched:
+    cd clone && cargo build --release -p zune-imageprocs --example bench_composite 2>&1 | tail -5
+    cp clone/target/release/examples/bench_composite ./bin_patched
+
+# bench_composite <width> <height> <iters> <method>. Both binaries must report the same
+# `hash = ...` line for each method (bit-exact, see RESULT.md).
+bench:
+    @echo "=== baseline (before patch) - over ==="
+    ulimit -c 0 && ./bin_baseline 1920 1080 30 over
+    @echo "=== patched (after patch) - over ==="
+    ulimit -c 0 && ./bin_patched 1920 1080 30 over
+    @echo "=== baseline (before patch) - multiply ==="
+    ulimit -c 0 && ./bin_baseline 1920 1080 30 multiply
+    @echo "=== patched (after patch) - multiply ==="
+    ulimit -c 0 && ./bin_patched 1920 1080 30 multiply
+    @echo "=== baseline (before patch) - screen ==="
+    ulimit -c 0 && ./bin_baseline 1920 1080 30 screen
+    @echo "=== patched (after patch) - screen ==="
+    ulimit -c 0 && ./bin_patched 1920 1080 30 screen
+
+clean:
+    rm -rf clone bin_baseline bin_patched

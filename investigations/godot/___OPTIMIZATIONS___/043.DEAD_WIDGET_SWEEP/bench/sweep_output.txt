@@ -1,0 +1,33 @@
+Candidate 043: sweep for member widgets that are constructed but never shown.
+Pristine HEAD 9552dfb685. Method: find `member = memnew(<DialogClass>)` assignments in
+editor/**.cpp and scene/gui/**.cpp, then search the whole repo for any call that could make each
+one visible. 240 distinct member/class constructions scanned; 40 had no direct
+`member->popup*()/show()/set_visible()` call.
+
+Of those 40, exactly ONE is genuinely unreachable (file_templates, candidate 042). The other 39 are
+false positives of three distinct indirection patterns:
+
+1. PopupMenu attached as a submenu / to a MenuBar (shown by its parent, never by a call on itself):
+     file_menu(84) debug_menu(54) gizmos_menu(50) display_submenu(50) menu_ctl(44)
+     smartsnap_config_popup(35) menu_dir(34) animations_menu(30) help_menu(33) settings_menu(27)
+     project_menu(25) tool_menu(24) recent_scenes(23) bookmarks_menu(16) editor_layouts(15)
+     recent_scripts(14) grid_menu(11) edit_menu_line(11) apple_menu(10) menu_subresources(10)
+     theme_menu(9) theme_submenu(8) highlighter_menu(8) edit_menu_fold(8)
+     extra_options_remove_branch_list(8) extra_options_remove_remote_list(8)
+     edit_menu_convert(7) edit_menu_convert_indent(7) connect_menu(7)
+     end_menu(6) state_machine_menu(6) container_menu(5)
+
+2. Popped through a callable bound to the dialog, so the dialog is the *receiver of a bind*, not the
+   subject of a call (candidate 031 hit this exact shape as a deferral blocker):
+     autoload_file_dialog          - callable_mp(autoload_file_dialog, &FileDialog::popup_file_dialog)
+     set_up_ssh_private_key_file_dialog / set_up_ssh_public_key_file_dialog
+                                   - callable_mp(this, &...::_popup_file_dialog).bind(dialog)
+     tpz_selection_dialog          - same shape, via the "Install from a TPZ file." button
+
+3. Popped by passing the dialog as an *argument* to a helper:
+     save_accept, load_error_dialog, execute_output_dialog
+                                   - EditorInterface::popup_dialog_centered*(dialog, ...)
+
+Conclusion: the "constructed but never shown" class is bounded at one instance (already fixed by
+candidate 042). Any future re-run of this sweep must handle patterns 1-3 or it will produce the same
+39 false positives.

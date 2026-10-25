@@ -1,0 +1,65 @@
+=== BEFORE (pristine HEAD 65b9547519, name_len=246) ===
+$ NAME_LEN=246 BUILD_DIR=<asan core-only build> repro/run.sh
+
+Registering custom meta with name_len=246
+Registered. strlen(g_type_name(info->type)) = 246
+Calling gst_meta_serialize_simple()...
+=================================================================
+==39318==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x749eea5e4c7f at pc 0x778eebbb6989 bp 0x7ffca925e270 sp 0x7ffca925e268
+WRITE of size 1 at 0x749eea5e4c7f thread T0
+    #0 0x778eebbb6988 in gst_meta_serialize .../subprojects/gstreamer/gst/gstmeta.c:781:31
+    #1 0x778eebbb6d34 in gst_meta_serialize_simple .../subprojects/gstreamer/gst/gstmeta.c:829:10
+    #2 0x631e4aad0158 in main repro/repro.c:57:17
+    ...
+0x749eea5e4c7f is located 1 bytes before 256-byte region [0x749eea5e4c80,0x749eea5e4d80)
+allocated by thread T0 here:
+    #0 0x631e4aa8bdc0 in realloc ...
+    #1 0x778eeb7101c9 in g_realloc /usr/lib/x86_64-linux-gnu/libglib-2.0.so.0+0x681c9
+    #2 0x778eeb6cf4c3  /usr/lib/x86_64-linux-gnu/libglib-2.0.so.0+0x274c3
+    #3 0x778eeb6cfc71 in g_array_set_size /usr/lib/x86_64-linux-gnu/libglib-2.0.so.0+0x27c71
+    #4 0x778eebbb6e6f in byte_array_impl_resize .../subprojects/gstreamer/gst/gstmeta.c:802:3
+    #5 0x778eebbb4c46 in gst_byte_array_interface_set_size .../subprojects/gstreamer/gst/gstbytearrayinterface.h:83:32
+    #6 0x778eebbb4c46 in gst_byte_array_interface_append .../gstbytearrayinterface.h:103:8
+    #7 0x778eebbb4c46 in gst_byte_array_interface_append_data .../gstbytearrayinterface.h:122:17
+    #8 0x778eebbb4c46 in custom_serialize_func .../subprojects/gstreamer/gst/gstmeta.c:216:18
+    #9 0x778eebbb62e7 in gst_meta_serialize .../subprojects/gstreamer/gst/gstmeta.c:776:9
+    #10 0x778eebbb6d34 in gst_meta_serialize_simple .../subprojects/gstreamer/gst/gstmeta.c:829:10
+    #11 0x631e4aad0158 in main repro/repro.c:57:17
+    ...
+SUMMARY: AddressSanitizer: heap-buffer-overflow .../subprojects/gstreamer/gst/gstmeta.c:781:31 in gst_meta_serialize
+==39318==ABORTING
+(exit code 134)
+
+Reproduced 3/3 runs (debugoptimized build, clang -fsanitize=address,undefined, no fixed seed
+needed - deterministic for any name_len making (name_len + 10) mod 256 == 0, e.g. 246).
+Boundary check: name_len=245 (header_size=255, no wrap) does NOT crash; name_len=246
+(header_size=0 after wraparound) crashes reliably every time.
+
+=== AFTER (patch.diff applied: guint8 -> guint32 header_size, name_len=246) ===
+$ NAME_LEN=246 BUILD_DIR=<asan core-only build, rebuilt with patch.diff applied> repro/run.sh
+
+Registering custom meta with name_len=246
+Registered. strlen(g_type_name(info->type)) = 246
+Calling gst_meta_serialize_simple()...
+gst_meta_serialize_simple() returned TRUE, data->len=504
+sum=116
+Done without crashing.
+(exit code 0)
+
+Also re-checked at name_len = 245, 300, 500, 1000 (spanning multiple header_size wrap points,
+e.g. 300+10=310 which wrapped mod 256 to 54 pre-patch) - all exit 0, "Done without crashing." under
+the same ASAN/UBSAN build.
+
+=== Project test suite (gstreamer:* suite, meson test, 4 parallel jobs) ===
+Before (pristine):  Ok: 55  Fail: 55  (110 total)
+After  (patched):   Ok: 56  Fail: 54  (110 total)
+
+Diff between the two full per-test result sets: exactly one line changed,
+"gstreamer:gst_gstdevice FAIL" -> "gstreamer:gst_gstdevice OK" - unrelated to gstmeta.c (device
+enumeration test, no relation to meta serialization), reran independently and treated as
+pre-existing flakiness in this environment, not caused by the patch. All other 109 test outcomes
+are byte-for-byte identical before and after. The 54/55 failures themselves are pre-existing and
+environment-caused (this is a core-library-only build with all plugins disabled per
+tools/build_asan_core.sh, so any test requiring gst-plugins-base/good elements like fakesink,
+queue2, etc. fails to find its element) - unrelated to gstmeta.c and present identically before and
+after the patch.

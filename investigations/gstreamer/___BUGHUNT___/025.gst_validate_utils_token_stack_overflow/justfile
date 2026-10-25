@@ -1,0 +1,113 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# This is a C/meson project (not Rust/Cargo): the repro is a tiny standalone C program that calls
+# the REAL, unmodified, exported gst_validate_utils_parse_expression() from a real built
+# libgstvalidate-1.0.so, found via pkg-config against the project's own meson "uninstalled devenv"
+# (gst-env.py) - no `ninja install` step, no symbols stubbed/reimplemented.
+#
+# Needs: meson, ninja, clang (with libclang_rt.asan/ubsan for this clang version), pkg-config,
+# glib/gstreamer's usual build deps (glib2-dev, etc - whatever the main gstreamer meson build
+# already needs). `meson`/`ninja` may need `pip install --user meson ninja` or
+# `uv tool install meson && uv tool install ninja` if not already on PATH.
+
+repo_url := "git@github.com:GStreamer/gstreamer.git"
+base_commit := "65b9547519cdafce691e65777d4178280bf10808"
+
+builddir := "build-asan"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone build-before reproduce-before apply build-after reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Minimal-scope ASAN+UBSan meson build: core+base plus gst-devtools:validate only (no
+# good/bad/ugly plugins, no introspection/docs/examples/tests) - enough to produce
+# libgstvalidate-1.0.so and nothing else, to keep `just test` reasonably fast from a fresh clone.
+_configure:
+    cd clone && CC=clang CXX=clang++ meson setup {{builddir}} \
+        --buildtype=debugoptimized \
+        -Db_sanitize=address,undefined \
+        -Db_lundef=false \
+        -Dc_args=-fno-sanitize=function \
+        -Dcpp_args=-fno-sanitize=function \
+        -Dglib:tests=false \
+        -Ddoc=disabled \
+        -Dexamples=disabled \
+        -Dintrospection=disabled \
+        -Dgood=disabled \
+        -Dbad=disabled \
+        -Dugly=disabled \
+        -Dlibav=disabled \
+        -Ddevtools=enabled \
+        -Dgst-devtools:validate=enabled \
+        -Dgst-devtools:tools=disabled \
+        -Dgst-devtools:tests=disabled \
+        -Dgst-devtools:cairo=disabled \
+        -Dgst-devtools:dots_viewer=disabled
+
+build-before: _configure
+    cd clone && ninja -C {{builddir}}
+    cd clone && python3 gst-env.py --builddir={{builddir}} --only-environment > {{builddir}}/env.sh
+
+# Build+run the standalone repro against the pristine clone - should demonstrate the bug
+# (AddressSanitizer: stack-buffer-overflow, for both the numeric-literal and identifier paths).
+# `ulimit -c 0` stops a crashing repro from dumping a core file into the current directory.
+reproduce-before:
+    #!/usr/bin/env bash
+    set -eo pipefail
+    source clone/{{builddir}}/env.sh
+    export ASAN_OPTIONS=detect_leaks=0
+    export GST_REGISTRY_UPDATE=no
+    clang -fsanitize=address,undefined -fno-sanitize=function -g -O0 \
+        $(pkg-config --cflags gstreamer-validate-1.0) \
+        -o /tmp/repro_numeric_before repro/repro_numeric.c \
+        $(pkg-config --libs gstreamer-validate-1.0)
+    clang -fsanitize=address,undefined -fno-sanitize=function -g -O0 \
+        $(pkg-config --cflags gstreamer-validate-1.0) \
+        -o /tmp/repro_identifier_before repro/repro_identifier.c \
+        $(pkg-config --libs gstreamer-validate-1.0)
+    ulimit -c 0
+    echo "--- numeric literal (expect: AddressSanitizer: stack-buffer-overflow) ---"
+    /tmp/repro_numeric_before || true
+    echo "--- identifier (expect: AddressSanitizer: stack-buffer-overflow) ---"
+    /tmp/repro_identifier_before || true
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+build-after:
+    cd clone && ninja -C {{builddir}}
+
+# Same repros again, now against the patched clone - should no longer demonstrate the bug: both
+# should print "Returned without crashing: ... error=Token is too long!" and exit 0.
+reproduce-after:
+    #!/usr/bin/env bash
+    set -eo pipefail
+    source clone/{{builddir}}/env.sh
+    export ASAN_OPTIONS=detect_leaks=0
+    export GST_REGISTRY_UPDATE=no
+    clang -fsanitize=address,undefined -fno-sanitize=function -g -O0 \
+        $(pkg-config --cflags gstreamer-validate-1.0) \
+        -o /tmp/repro_numeric_after repro/repro_numeric.c \
+        $(pkg-config --libs gstreamer-validate-1.0)
+    clang -fsanitize=address,undefined -fno-sanitize=function -g -O0 \
+        $(pkg-config --cflags gstreamer-validate-1.0) \
+        -o /tmp/repro_identifier_after repro/repro_identifier.c \
+        $(pkg-config --libs gstreamer-validate-1.0)
+    ulimit -c 0
+    echo "--- numeric literal (expect: no crash, 'Token is too long!') ---"
+    /tmp/repro_numeric_after
+    echo "--- identifier (expect: no crash, 'Token is too long!') ---"
+    /tmp/repro_identifier_after
+
+clean:
+    rm -rf clone

@@ -1,0 +1,18 @@
+diff --git a/src/fs/abs.rs b/src/fs/abs.rs
+index 6642fee6..978b77a2 100644
+--- a/src/fs/abs.rs
++++ b/src/fs/abs.rs
+@@ -130,7 +130,12 @@ fn _readlink(path: &CStr, mut buffer: Vec<u8>) -> io::Result<CString> {
+         assert!(nread <= buffer.len());
+         if nread < buffer.len() {
+             buffer.resize(nread, 0_u8);
+-            return Ok(CString::new(buffer).unwrap());
++            // Not every filesystem driver that implements `readlink` is
++            // guaranteed to return a byte sequence free of embedded NULs (a
++            // FUSE daemon's `readlink` callback, or a corrupted/crafted
++            // on-disk image, can return arbitrary bytes), so handle that
++            // here rather than unwrapping and panicking.
++            return CString::new(buffer).map_err(|_cstr_err| io::Errno::ILSEQ);
+         }
+         // Use `Vec` reallocation strategy to grow capacity exponentially.
+         buffer.reserve(1);

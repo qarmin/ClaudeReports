@@ -1,0 +1,3 @@
+fn main() {
+    let _ = <zune_image::image::Image as ::core::ops::Add<zune_image::image::Image>>::add(<zune_image::codecs::webp::ZuneWebpDecoder<::std::io::Cursor<Vec<u8>>> as zune_image::traits::DecoderTrait>::decode(&mut <zune_image::codecs::webp::ZuneWebpDecoder<::std::io::Cursor<Vec<u8>>>>::new(std::io::Cursor::new(include_bytes!("data_0.bin").to_vec())).unwrap()).unwrap(), <zune_image::codecs::webp::ZuneWebpDecoder<::std::io::Cursor<Vec<u8>>> as zune_image::traits::DecoderTrait>::decode(&mut <zune_image::codecs::webp::ZuneWebpDecoder<::std::io::Cursor<Vec<u8>>>>::new(std::io::Cursor::new(include_bytes!("data_1.bin").to_vec())).unwrap()).unwrap());
+}

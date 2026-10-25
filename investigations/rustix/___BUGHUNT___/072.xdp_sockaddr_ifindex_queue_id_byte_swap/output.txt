@@ -1,0 +1,45 @@
+=== BEFORE patch.diff (base_commit 287214b889865d8e1406a0ee71cc409b6f6191c8) ===
+$ cargo run --release   (in repro/, against ../clone at base_commit)
+
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 1.46s
+     Running `target/release/repro`
+ifindex=         2 queue_id=         5  ->  decoded ifindex=  33554432 queue_id=  83886080  MISMATCH
+ifindex=         0 queue_id=         0  ->  decoded ifindex=         0 queue_id=         0  OK
+ifindex=         1 queue_id=         1  ->  decoded ifindex=  16777216 queue_id=  16777216  MISMATCH
+ifindex=4294967295 queue_id=4294967295  ->  decoded ifindex=4294967295 queue_id=4294967295  OK
+ifindex= 305419896 queue_id=2596069104  ->  decoded ifindex=2018915346 queue_id=4041129114  MISMATCH
+
+BUG CONFIRMED: SocketAddrXdp round-trip through rustix's own public encode (SocketAddrArg::as_any) and decode (TryFrom<SocketAddrAny>) functions is not lossless.
+
+Repeated 3/3 times (separate `cargo run --release` invocations) with identical output - fully
+deterministic (pure integer byte-swap arithmetic, no randomness/layout dependence).
+
+=== AFTER applying patch.diff to ../clone ===
+$ git apply ../patch.diff && cargo run --release
+
+   Compiling repro v0.1.0 (.../repro)
+    Finished `release` profile [optimized] target(s) in 1.39s
+     Running `target/release/repro`
+ifindex=         2 queue_id=         5  ->  decoded ifindex=         2 queue_id=         5  OK
+ifindex=         0 queue_id=         0  ->  decoded ifindex=         0 queue_id=         0  OK
+ifindex=         1 queue_id=         1  ->  decoded ifindex=         1 queue_id=         1  OK
+ifindex=4294967295 queue_id=4294967295  ->  decoded ifindex=4294967295 queue_id=4294967295  OK
+ifindex= 305419896 queue_id=2596069104  ->  decoded ifindex= 305419896 queue_id=2596069104  OK
+
+round-trip OK: no mismatch (bug not present / fixed).
+
+=== Supplementary: real socket(AF_XDP, SOCK_RAW, 0) probe in the sandbox used for investigation ===
+$ gcc -o /tmp/test_xdp_socket /tmp/test_xdp_socket.c && /tmp/test_xdp_socket
+socket() failed: Operation not permitted (errno=1)
+
+(Confirms AF_XDP socket creation itself requires CAP_NET_RAW, unavailable in this sandbox -
+one of the reasons a genuine bind()+getsockname()/recvmsg() kernel round trip could not be run
+here; the other, independent of privilege, is documented in repro/src/main.rs's header comment -
+AF_XDP's own kernel proto_ops disables getname and recvmsg never populates the address, verified
+by reading today's upstream net/xdp/xsk.c.)
+
+=== Project test suite, cargo test --verbose --features=all-apis --workspace --no-fail-fast ===
+Before fix: 413 passed, 1 failed (pre-existing: io::ioctl::test_int_setter - ENOENT on a device
+file not present in this sandbox, unrelated to this candidate).
+After fix:  413 passed, 1 failed (identical - same single pre-existing failure, same test).

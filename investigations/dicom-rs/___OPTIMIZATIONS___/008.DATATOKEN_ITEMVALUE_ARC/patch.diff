@@ -282,23 +282,21 @@ index 5c00bea8..cbc68bfb 100644
              DataToken::SequenceEnd,
              DataToken::ElementHeader(DataElementHeader::new(
 diff --git a/parser/src/dataset/mod.rs b/parser/src/dataset/mod.rs
-index 18469cae..96ce5e1b 100644
+index 18469cae..5fa76719 100644
 --- a/parser/src/dataset/mod.rs
 +++ b/parser/src/dataset/mod.rs
-@@ -55,7 +55,11 @@ pub enum DataToken {
+@@ -55,7 +55,9 @@ pub enum DataToken {
      /// This variant is used to represent
      /// the value of an encoded fragment.
      /// It should not be used to represent nested data sets.
 -    ItemValue(Vec<u8>),
 +    ///
-+    /// This is `Arc<[u8]>` (the same type as `dicom_core::value::InMemFragment`) rather than
-+    /// `Vec<u8>` so that producing this token from an already-`Arc`-backed fragment (as
-+    /// `InMemDicomObject`'s write path does) is a refcount bump instead of a full byte copy.
++    /// `Arc<[u8]>` (not `Vec<u8>`) so producing this from an already-`Arc`-backed fragment is a refcount bump, not a copy.
 +    ItemValue(std::sync::Arc<[u8]>),
      /// An owned sequence of unsigned 32 bit integers
      /// representing a pixel data offset table.
      ///
-@@ -292,7 +296,7 @@ where
+@@ -292,7 +294,7 @@ where
                  decoder
                      .read_to_vec(len, &mut data)
                      .context(ReadItemValueSnafu)?;
@@ -307,7 +305,7 @@ index 18469cae..96ce5e1b 100644
              }
          }
      }
-@@ -549,7 +553,7 @@ impl<I, P> Iterator for DataElementTokens<I, P>
+@@ -549,7 +551,7 @@ impl<I, P> Iterator for DataElementTokens<I, P>
  where
      I: IntoTokens,
      I: HasLength,
@@ -316,7 +314,7 @@ index 18469cae..96ce5e1b 100644
  {
      type Item = DataToken;
  
-@@ -704,7 +708,7 @@ impl<I, P> IntoTokens for DataElement<I, P>
+@@ -704,7 +706,7 @@ impl<I, P> IntoTokens for DataElement<I, P>
  where
      I: IntoTokens,
      I: HasLength,
@@ -325,7 +323,7 @@ index 18469cae..96ce5e1b 100644
  {
      type Iter = DataElementTokens<I, P>;
  
-@@ -895,7 +899,7 @@ pub struct ItemValue<P>(P);
+@@ -895,7 +897,7 @@ pub struct ItemValue<P>(P);
  
  impl<P> IntoTokens for ItemValue<P>
  where
@@ -334,7 +332,7 @@ index 18469cae..96ce5e1b 100644
  {
      type Iter = ItemValueTokens<P>;
  
-@@ -914,7 +918,9 @@ pub enum ItemValueTokens<P> {
+@@ -914,7 +916,9 @@ pub enum ItemValueTokens<P> {
      /// lengths can be trusted to be valid
      Start(Option<P>, bool),
      /// Will return a token of the value
@@ -345,7 +343,7 @@ index 18469cae..96ce5e1b 100644
      /// Will return an end of item token
      Done,
      /// Just ended, no more tokens
-@@ -930,7 +936,7 @@ impl<P> ItemValueTokens<P> {
+@@ -930,7 +934,7 @@ impl<P> ItemValueTokens<P> {
  
  impl<P> Iterator for ItemValueTokens<P>
  where
@@ -354,7 +352,7 @@ index 18469cae..96ce5e1b 100644
  {
      type Item = DataToken;
  
-@@ -950,14 +956,17 @@ where
+@@ -950,14 +954,17 @@ where
                      if end_item {
                          ItemValueTokens::Done
                      } else {
@@ -377,7 +375,7 @@ index 18469cae..96ce5e1b 100644
              ItemValueTokens::Done => (Some(DataToken::ItemEnd), ItemValueTokens::End),
              ItemValueTokens::End => return None,
          };
-@@ -1368,7 +1377,7 @@ mod tests {
+@@ -1368,7 +1375,7 @@ mod tests {
              VR::SQ, // wrong VR
              PixelFragmentSequence::new_fragments(vec![
                  // one fragment

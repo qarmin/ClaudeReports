@@ -1,0 +1,29 @@
+diff --git a/src/event/select.rs b/src/event/select.rs
+index 6bb93b53..17cb04e7 100644
+--- a/src/event/select.rs
++++ b/src/event/select.rs
+@@ -129,6 +129,10 @@ pub unsafe fn select(
+ const BITS: usize = size_of::<FdSetElement>() * 8;
+ 
+ /// Set `fd` in the set pointed to by `fds`.
++///
++/// On Windows and WASI, `fds` uses a fixed-capacity `FD_SET` under the hood
++/// (`FD_SETSIZE` entries); if it's already full and `fd` isn't already
++/// present, this has no effect.
+ #[doc(alias = "FD_SET")]
+ #[inline]
+ pub fn fd_set_insert(fds: &mut [FdSetElement], fd: RawFd) {
+@@ -145,9 +149,10 @@ pub fn fd_set_insert(fds: &mut [FdSetElement], fd: RawFd) {
+         let fd_array = &set.fd_array[..fd_count as usize];
+ 
+         if !fd_array.contains(&(fd as _)) {
+-            let fd_array = &mut set.fd_array[..fd_count as usize + 1];
+-            set.fd_count = fd_count + 1;
+-            fd_array[fd_count as usize] = fd as _;
++            if let Some(slot) = set.fd_array.get_mut(fd_count as usize) {
++                *slot = fd as _;
++                set.fd_count = fd_count + 1;
++            }
+         }
+     }
+ }

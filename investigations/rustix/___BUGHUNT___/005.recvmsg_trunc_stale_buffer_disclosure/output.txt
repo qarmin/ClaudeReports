@@ -1,0 +1,30 @@
+=== Captured output (identical across all 6 runs: 3x libc backend, 3x linux_raw backend) ===
+=== Call 1: normal recvmsg (no TRUNC) ===
+buffer before call 1: "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+recvmsg 1: bytes=16 flags=ReturnFlags(0x0)
+buffer after call 1: "FIRSTMESSAGE1234"
+
+=== Call 2: recvmsg with RecvFlags::TRUNC (same buffer, reused) ===
+buffer before call 2 (should still say FIRSTMESSAGE1234): "FIRSTMESSAGE1234"
+recvmsg 2: bytes=16 flags=ReturnFlags(0x0)
+buffer after call 2 (STALE DATA CHECK): "FIRSTMESSAGE1234"
+
+CONFIRMED: buffer still contains the FIRST message's bytes after a second recvmsg(TRUNC) call
+that reported new data - stale data leak reproduced.
+
+Additional experiment (buffer smaller than the second message, 8 bytes vs. 16-byte message):
+call2 (TRUNC, buf smaller than msg): bytes=8 flags=ReturnFlags(0x0), buffer still fully
+unchanged from call 1. This shows the reported byte count is capped to buffer capacity (not
+the "true size" the man page describes for datagrams) and ReturnFlags::TRUNC is never
+surfaced for TCP in any tested configuration - the caller has no signal in the return value
+distinguishing this from an ordinary successful read.
+
+=== After the documentation-only patch is applied ===
+Behavior is identical (doc-only change, no runtime effect) - same output as above, re-verified.
+
+=== cargo test --workspace --features "std,all-apis,use-libc" ===
+One pre-existing failure both before and after the patch: io::ioctl::test_int_setter fails with
+ENOENT because /dev/net/tun doesn't exist in this sandboxed container (confirmed identical
+failure on the unmodified tree via a temporary git stash). Excluding that unrelated test: all
+other tests pass, both before and after (unit tests across all crates, all doctests including
+the 3 doctests in the touched msg.rs file).

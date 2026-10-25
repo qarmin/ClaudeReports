@@ -1,0 +1,167 @@
+diff --git a/crates/zune-qoi/src/encoder.rs b/crates/zune-qoi/src/encoder.rs
+index 60c50c54..eadf494d 100644
+--- a/crates/zune-qoi/src/encoder.rs
++++ b/crates/zune-qoi/src/encoder.rs
+@@ -72,9 +72,24 @@ impl<'a> QoiEncoder<'a> {
+             + QOI_HEADER_SIZE
+             + QOI_PADDING
+     }
+-    fn encode_headers<T: ZByteWriterTrait>(
+-        &self, writer: &mut ZWriter<T>
+-    ) -> Result<(), QoiEncodeErrors> {
++    /// Encode into a pre-allocated buffer and error out if
++    /// the buffer provided is too small
++    ///
++    /// # Arguments.
++    /// - buf: The buffer to write encoded content to
++    ///
++    /// # Returns
++    /// - Ok(size): Actual bytes used for encoding
++    /// - Err: The error encountered during encoding
++    pub fn encode<T: ZByteWriterTrait>(&mut self, sink: T) -> Result<usize, QoiEncodeErrors> {
++        // Encode into a local, concretely-typed Vec<u8> first (plain `push`/`extend_from_slice`
++        // calls, no generic ZByteWriterTrait indirection per opcode byte), then flush it to the
++        // (possibly generic) sink in one call. Profiling showed the previous per-byte
++        // `stream.write_u8_err(...)` calls spent a large fraction of their time in a real
++        // `memmove` libc call for single-byte writes - the const-generic length information
++        // doesn't reliably survive across the ZWriter/ZByteWriterTrait boundary to let LLVM fold
++        // it into a plain store. Operating on a concrete local Vec avoids that indirection for
++        // the hot per-pixel loop; see zune-image issue #173.
+         let expected_len = self.options.width()
+             * self.options.height()
+             * self.options.colorspace().num_components();
+@@ -84,26 +99,13 @@ impl<'a> QoiEncoder<'a> {
+                 "Expected length doesn't match pixels length"
+             ));
+         }
+-
+-        // qoif
+-        writer.write_all(&QOI_MAGIC.to_be_bytes())?;
+-
+         let options = &self.options;
+         if (options.width() as u64) > u64::from(u32::MAX) {
+-            // error out
+             return Err(QoiEncodeErrors::TooLargeDimensions(options.width()));
+         }
+         if (options.height() as u64) > u64::from(u32::MAX) {
+             return Err(QoiEncodeErrors::TooLargeDimensions(options.height()));
+         }
+-        // it's safe to convert to u32 here. since we checked
+-        // the number can be safely encoded.
+-
+-        // width
+-        writer.write_u32_be_err(options.width() as u32)?;
+-        // height
+-        writer.write_u32_be_err(options.height() as u32)?;
+-        //channel
+         let channel = match self.options.colorspace() {
+             ColorSpace::RGB => 3,
+             ColorSpace::RGBA => 4,
+@@ -116,26 +118,15 @@ impl<'a> QoiEncoder<'a> {
+             }
+         };
+ 
+-        writer.write_u8_err(channel)?;
+-        // colorspace, gamma
+-        let xtic = 0;
+-        writer.write_u8_err(xtic)?;
+-
+-        Ok(())
+-    }
+-    /// Encode into a pre-allocated buffer and error out if
+-    /// the buffer provided is too small
+-    ///
+-    /// # Arguments.
+-    /// - buf: The buffer to write encoded content to
+-    ///
+-    /// # Returns
+-    /// - Ok(size): Actual bytes used for encoding
+-    /// - Err: The error encountered during encoding
+-    pub fn encode<T: ZByteWriterTrait>(&mut self, sink: T) -> Result<usize, QoiEncodeErrors> {
+-        let mut stream = ZWriter::new(sink);
++        let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(self.max_size());
+ 
+-        self.encode_headers(&mut stream)?;
++        // qoif
++        buf.extend_from_slice(&QOI_MAGIC.to_be_bytes());
++        buf.extend_from_slice(&(options.width() as u32).to_be_bytes());
++        buf.extend_from_slice(&(options.height() as u32).to_be_bytes());
++        buf.push(channel);
++        // colorspace, gamma
++        buf.push(0);
+ 
+         let mut index = [[0_u8; 4]; 64];
+         // starting pixel
+@@ -153,12 +144,12 @@ impl<'a> QoiEncoder<'a> {
+                 run += 1;
+ 
+                 if run == 62 {
+-                    stream.write_u8_err(QOI_OP_RUN | (run - 1))?;
++                    buf.push(QOI_OP_RUN | (run - 1));
+                     run = 0;
+                 }
+             } else {
+                 if run > 0 {
+-                    stream.write_u8_err(QOI_OP_RUN | (run - 1))?;
++                    buf.push(QOI_OP_RUN | (run - 1));
+                     run = 0;
+                 }
+ 
+@@ -169,7 +160,7 @@ impl<'a> QoiEncoder<'a> {
+                     % 64;
+ 
+                 if index[index_pos] == px {
+-                    stream.write_u8_err(QOI_OP_INDEX | (index_pos as u8))?;
++                    buf.push(QOI_OP_INDEX | (index_pos as u8));
+                 } else {
+                     index[index_pos] = px;
+ 
+@@ -185,7 +176,7 @@ impl<'a> QoiEncoder<'a> {
+                             && !(2..=253).contains(&vg)
+                             && !(2..=253).contains(&vb)
+                         {
+-                            stream.write_u8(
++                            buf.push(
+                                 QOI_OP_DIFF
+                                     | vr.wrapping_add(2) << 4
+                                     | vg.wrapping_add(2) << 2
+@@ -195,16 +186,15 @@ impl<'a> QoiEncoder<'a> {
+                             && !(32..=223).contains(&vg)
+                             && !(8..=247).contains(&vg_b)
+                         {
+-                            stream.write_u8_err(QOI_OP_LUMA | vg.wrapping_add(32))?;
+-                            stream
+-                                .write_u8_err(vg_r.wrapping_add(8) << 4 | vg_b.wrapping_add(8))?;
++                            buf.push(QOI_OP_LUMA | vg.wrapping_add(32));
++                            buf.push(vg_r.wrapping_add(8) << 4 | vg_b.wrapping_add(8));
+                         } else {
+-                            stream.write_u8_err(QOI_OP_RGB)?;
+-                            stream.write_const_bytes(&[px[0], px[1], px[2]])?;
++                            buf.push(QOI_OP_RGB);
++                            buf.extend_from_slice(&[px[0], px[1], px[2]]);
+                         }
+                     } else {
+-                        stream.write_u8_err(QOI_OP_RGBA)?;
+-                        stream.write_u32_be_err(u32::from_be_bytes(px))?;
++                        buf.push(QOI_OP_RGBA);
++                        buf.extend_from_slice(&px);
+                     }
+                 }
+             }
+@@ -212,11 +202,13 @@ impl<'a> QoiEncoder<'a> {
+             px_prev.copy_from_slice(&px);
+         }
+         if run > 0 {
+-            stream.write_u8_err(QOI_OP_RUN | (run - 1))?;
++            buf.push(QOI_OP_RUN | (run - 1));
+         }
+         // write trailing bytes
+-        stream.write_u64_be_err(0x01)?;
+-        // done
++        buf.extend_from_slice(&0x01_u64.to_be_bytes());
++
++        let mut stream = ZWriter::new(sink);
++        stream.write_all(&buf)?;
+         let len = stream.bytes_written();
+ 
+         Ok(len)

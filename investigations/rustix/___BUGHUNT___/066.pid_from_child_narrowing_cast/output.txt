@@ -1,0 +1,51 @@
+=== Approach 1: real end-to-end path, debug-assertions build, real child processes (worktree-local run against the checked-out source at 287214b8) ===
+$ cargo run --example pid_from_child_check --features process
+spawned 2000 real children via std::process::Command
+observed child.id() range: min=310738 max=312737
+i32::MAX = 2147483647
+distance from max observed id to i32::MAX boundary: 2147170910
+/proc/sys/kernel/pid_max = 4194304
+
+=== Same, repeated against a fresh clone via repro/ (just test), release build, 2000 more real children ===
+$ just test   (see justfile: clone -> cargo build --release -> run)
+spawned 2000 real child processes via std::process::Command
+observed real OS-assigned child.id() range: min=316687 max=318686
+distance from the highest observed real id to the i32 overflow boundary (i32::MAX): 2147164961
+/proc/sys/kernel/pid_max on this machine = 4194304
+did not reproduce - every real OS-assigned pid stayed far below the i32 overflow boundary
+
+=== Approach 2: cross-platform kernel/OS source ceilings for every target `src/pid.rs`'s module compiles on ===
+(module gated `#[cfg(not(any(windows, target_os = "wasi")))]` in src/lib.rs:368 - Windows and WASI never compile this code)
+- Linux:   include/linux/threads.h -> PID_MAX_LIMIT = 4 * 1024 * 1024 = 4194304 on 64-bit (sizeof(long) > 4);
+           this container's own /proc/sys/kernel/pid_max already reads 4194304 and is read-only (cannot be
+           raised further - this IS the kernel-enforced ceiling, not just today's configured value).
+- FreeBSD: sys/sys/proc.h -> #define PID_MAX 99999
+- macOS (xnu): bsd/sys/proc_internal.h -> #define PID_MAX 99999
+- OpenBSD: sys/sys/proc.h -> #define PID_MAX 99999
+- NetBSD:  sys/sys/proc.h -> #define PID_MAX 30000
+- illumos: usr/src/uts/common/os/pid.c's pid_allocate() cycles a bounded [minpid, maxpid) pool
+           (ASSERT(minpid <= mpid && mpid < maxpid); mpid wraps to minpid at maxpid), i.e. a bounded
+           allocator, not the raw 32-bit range - consistent in shape with every other platform checked,
+           though the exact numeric default/ceiling was not independently pinned down this session.
+All of the above are many orders of magnitude below the 2^31 (2147483648) boundary at which
+`child.id(): u32 as i32` would become non-positive.
+
+=== Approach 3 (root-cause mechanism only, NOT a reproduction - see RESULT.md "Fully reproducible"): ===
+A hand-fabricated u32 that mimics what a real OS pid allocator would have to (but structurally
+cannot) produce, fed through the exact same unsafe primitive `Pid::from_child` calls:
+
+$ cargo run --example pid_boundary_mechanism --features process          (debug build)
+u32 3000000000 as i32 = -1294967296 (negative: true)
+
+thread 'main' (313021) panicked at src/pid.rs:61:9:
+assertion failed: raw > 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+$ cargo run --release --example pid_boundary_mechanism --features process   (release build)
+u32 3000000000 as i32 = -1294967296 (negative: true)
+from_raw_unchecked(-1294967296) succeeded (would only happen in a release build or if debug_assert
+were absent): as_raw_pid() = -1294967296
+
+(same split reproduced via repro/'s own boundary_mechanism binary against the fresh clone:
+debug build panics at clone/src/pid.rs:61 "assertion failed: raw > 0" (exit 101); release build
+returns normally with as_raw_pid() = -1294967296.)

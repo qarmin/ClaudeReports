@@ -1,0 +1,55 @@
+diff --git a/tools/depmod.c b/tools/depmod.c
+index 0a137f1..7087f98 100644
+--- a/tools/depmod.c
++++ b/tools/depmod.c
+@@ -1336,11 +1336,31 @@ static bool should_exclude_dir(const struct cfg *cfg, const char *name)
+ 	return false;
+ }
+ 
+-static void depmod_modules_search_dir(struct depmod *depmod, DIR *d, struct strbuf *path)
++struct dir_chain {
++	dev_t dev;
++	ino_t ino;
++	const struct dir_chain *parent;
++};
++
++static void depmod_modules_search_dir(struct depmod *depmod, DIR *d, struct strbuf *path,
++				      const struct dir_chain *parent)
+ {
+ 	struct dirent *de;
+ 	int dfd = dirfd(d);
+ 	size_t baselen;
++	struct dir_chain self = { .parent = parent };
++	struct stat dir_st;
++
++	if (fstat(dfd, &dir_st) == 0) {
++		for (const struct dir_chain *c = parent; c != NULL; c = c->parent) {
++			if (c->dev == dir_st.st_dev && c->ino == dir_st.st_ino) {
++				ERR("directory loop at %s\n", strbuf_str(path));
++				return;
++			}
++		}
++		self.dev = dir_st.st_dev;
++		self.ino = dir_st.st_ino;
++	}
+ 
+ 	if (!strbuf_pushchar(path, '/')) {
+ 		ERR("No memory\n");
+@@ -1400,7 +1420,7 @@ static void depmod_modules_search_dir(struct depmod *depmod, DIR *d, struct strb
+ 				continue;
+ 			}
+ 
+-			depmod_modules_search_dir(depmod, subdir, path);
++			depmod_modules_search_dir(depmod, subdir, path, &self);
+ 			closedir(subdir);
+ 		} else {
+ 			int err = depmod_modules_search_file(depmod, baselen, namelen,
+@@ -1429,7 +1449,7 @@ static int depmod_modules_search_path(struct depmod *depmod, const char *path)
+ 		goto out;
+ 	}
+ 
+-	depmod_modules_search_dir(depmod, d, &s_path_buf);
++	depmod_modules_search_dir(depmod, d, &s_path_buf, NULL);
+ out:
+ 	closedir(d);
+ 	return err;

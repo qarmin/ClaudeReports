@@ -1,0 +1,64 @@
+diff --git a/crates/epaint/src/tessellator.rs b/crates/epaint/src/tessellator.rs
+index 22ba5c814..8558fe07a 100644
+--- a/crates/epaint/src/tessellator.rs
++++ b/crates/epaint/src/tessellator.rs
+@@ -1413,6 +1413,36 @@ fn mul_color(color: Color32, factor: f32) -> Color32 {
+ 
+ // ----------------------------------------------------------------------------
+ 
++/// Outline normals of a rounded rectangle whose four corners have the same radius, by number of points.
++///
++/// The normals only depend on the corner shape (not on the radius or position), so they are computed
++/// once with [`Path::add_line_loop`] from a canonical rectangle, instead of for every rectangle.
++/// `None` if there is no precomputed shape with this many points (e.g. corners were merged).
++fn rounded_rect_normals(num_points: usize) -> Option<&'static [Vec2]> {
++    static NORMALS: std::sync::OnceLock<[Vec<Vec2>; 5]> = std::sync::OnceLock::new();
++
++    let index = match num_points {
++        12 => 0,
++        20 => 1,
++        36 => 2,
++        68 => 3,
++        132 => 4,
++        _ => return None,
++    };
++    let normals = NORMALS.get_or_init(|| {
++        // One radius for each of the corner resolutions (see `path::add_circle_quadrant`):
++        [1.0_f32, 3.0, 10.0, 30.0, 60.0].map(|radius| {
++            let rect = Rect::from_min_size(Pos2::ZERO, Vec2::splat(4.0 * radius));
++            let mut points = Vec::new();
++            path::rounded_rectangle(&mut points, RoundedRect::new(rect, radius));
++            let mut path = Path::default();
++            path.add_line_loop(&points);
++            path.0.iter().map(|point| point.normal).collect()
++        })
++    });
++    Some(&normals[index])
++}
++
+ /// Converts [`Shape`]s into triangles ([`Mesh`]).
+ ///
+ /// For performance reasons it is smart to reuse the same [`Tessellator`].
+@@ -2184,7 +2214,21 @@ impl Tessellator {
+             }
+         }
+ 
+-        path.add_line_loop(&self.scratchpad_points);
++        let uniform_radius = {
++            let cr = RoundedRect::new(rect, corner_radius).corner_radius();
++            cr.nw == cr.ne && cr.nw == cr.sw && cr.nw == cr.se && 0.5 <= cr.nw
++        };
++        match rounded_rect_normals(self.scratchpad_points.len()) {
++            Some(normals) if angle == 0.0 && uniform_radius => {
++                path.0.extend(
++                    self.scratchpad_points
++                        .iter()
++                        .zip(normals)
++                        .map(|(&pos, &normal)| PathPoint { pos, normal }),
++                );
++            }
++            _ => path.add_line_loop(&self.scratchpad_points),
++        }
+ 
+         let path_stroke = PathStroke::from(stroke).with_kind(stroke_kind);
+ 

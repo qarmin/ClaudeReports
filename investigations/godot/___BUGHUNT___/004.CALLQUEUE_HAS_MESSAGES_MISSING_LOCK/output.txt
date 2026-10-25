@@ -1,0 +1,72 @@
+    #6 0x652d35618a26 in std::thread::_State_impl<std::thread::_Invoker<std::tuple<void (*)()> > >::_M_run() /usr/include/c++/15/bits/std_thread.h:255
+    #7 0x726019496ef8  (/usr/lib/x86_64-linux-gnu/libstdc++.so.6+0xf5ef8) (BuildId: 3a7a8c6bd922e6314edb7a710fdc0293265c2c42)
+    #8 0x7260196a4a80 in asan_thread_start ../../../../src/libsanitizer/asan/asan_interceptors.cpp:246
+    #9 0x7260190cfdf9 in start_thread nptl/pthread_create.c:454
+    #10 0x7260191633d3 in clone ../sysdeps/unix/sysv/linux/x86_64/clone.S:100
+
+0x6e801864feb0 is located 0 bytes inside of 8-byte region [0x6e801864feb0,0x6e801864feb8)
+freed by thread T4 here:
+    #0 0x72601976b6cf in realloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:81
+    #1 0x652d35619be5 in Memory::realloc_static(void*, unsigned long, bool) clone/core/os/memory.cpp:172
+
+previously allocated by thread T4 here:
+    #0 0x72601976c60f in malloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:67
+    #1 0x652d35619e32 in void* Memory::alloc_static<false>(unsigned long, bool) clone/core/os/memory.cpp:101
+
+Thread T21 created by T0 here:
+    #0 0x726019762f80 in pthread_create ../../../../src/libsanitizer/asan/asan_interceptors.cpp:257
+    #1 0x726019496ff0 in std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) (/usr/lib/x86_64-linux-gnu/libstdc++.so.6+0xf5ff0) (BuildId: 3a7a8c6bd922e6314edb7a710fdc0293265c2c42)
+    #2 0x652d35617ebe in std::thread::thread<void (&)(), , void>(void (&)()) /usr/include/c++/15/bits/std_thread.h:175
+    #3 0x652d35617ebe in main repro/repro.cpp:110
+
+Thread T4 created by T0 here:
+    #0 0x726019762f80 in pthread_create ../../../../src/libsanitizer/asan/asan_interceptors.cpp:257
+    #1 0x726019496ff0 in std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) (/usr/lib/x86_64-linux-gnu/libstdc++.so.6+0xf5ff0) (BuildId: 3a7a8c6bd922e6314edb7a710fdc0293265c2c42)
+    #2 0x652d35617b92 in std::thread::thread<void (&)(), , void>(void (&)()) /usr/include/c++/15/bits/std_thread.h:175
+    #3 0x652d35617b92 in main repro/repro.cpp:107
+
+SUMMARY: AddressSanitizer: heap-use-after-free repro/repro.cpp:66 in MiniCallQueue::has_messages() const
+Shadow bytes around the buggy address:
+  0x6e801864fc00: fa fa fd fa fa fa fd fa fa fa fd fa fa fa fd fa
+  0x6e801864fc80: fa fa fd fa fa fa fd fa fa fa fd fa fa fa fd fa
+  0x6e801864fd00: fa fa fd fa fa fa fd fa fa fa fd fa fa fa fd fa
+  0x6e801864fd80: fa fa fd fa fa fa fd fa fa fa fd fa fa fa fd fa
+  0x6e801864fe00: fa fa fd fa fa fa fd fa fa fa fd fa fa fa fd fa
+=>0x6e801864fe80: fa fa fd fd fa fa[fd]fa fa fa fd fa fa fa fd fa
+  0x6e801864ff00: fa fa fd fd fa fa fd fa fa fa fd fa fa fa fd fa
+  0x6e801864ff80: fa fa fd fa fa fa fd fa fa fa fd fa fa fa fd fa
+  0x6e8018650000: fa fa fd fa fa fa fd fa fa fa fd fa fa fa fd fa
+  0x6e8018650080: fa fa fd fa fa fa fd fa fa fa fd fa fa fa fd fa
+  0x6e8018650100: fa fa fd fa fa fa fd fa fa fa fd fa fa fa fd fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07 
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==76366==ABORTING
+cd clone && git apply "/home/rafal/Projekty/Obce/godot/___BUGHUNT___/004.CALLQUEUE_HAS_MESSAGES_MISSING_LOCK/patch.diff"
+g++ -std=c++17 -fsanitize=address -g -O1 -I./clone -I./clone/platform/linuxbsd -DASAN_ENABLED -DTHREADS_ENABLED -c clone/core/os/memory.cpp -o memory.o
+g++ -std=c++17 -fsanitize=address -g -O1 -I./clone -I./clone/platform/linuxbsd -DASAN_ENABLED -DTHREADS_ENABLED -c repro/err_stub.cpp -o err_stub.o
+g++ -std=c++17 -fsanitize=address -g -O1 -I./clone -I./clone/platform/linuxbsd -DASAN_ENABLED -DTHREADS_ENABLED -c repro/repro_fixed.cpp -o repro_fixed.o
+g++ -std=c++17 -fsanitize=address -g -O1 repro_fixed.o err_stub.o memory.o -o repro_after -lpthread
+ulimit -c 0 && ASAN_OPTIONS=detect_leaks=0 timeout 18 ./repro_after
+Verifying the fix for CallQueue::has_messages()/get_max_buffer_usage()
+12 writers growing pages/page_bytes, 12 readers calling the now-locked
+accessors concurrently.
+No crash within the time limit.
+
+[exited with code 0]

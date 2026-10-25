@@ -1,0 +1,32 @@
+diff --git a/subprojects/gstreamer/gst/gstbuffer.c b/subprojects/gstreamer/gst/gstbuffer.c
+index 398509bde7..60842fcf17 100644
+--- a/subprojects/gstreamer/gst/gstbuffer.c
++++ b/subprojects/gstreamer/gst/gstbuffer.c
+@@ -467,13 +467,26 @@ _memory_add (GstBuffer * buffer, gint idx, GstMemory * mem)
+   GST_CAT_LOG (GST_CAT_BUFFER, "buffer %p, idx %d, mem %p", buffer, idx, mem);
+ 
+   if (G_UNLIKELY (len >= GST_BUFFER_MEM_MAX)) {
++    GstMemory *merged;
++
+     /* too many buffer, span them. */
+     /* FIXME, there is room for improvement here: We could only try to merge
+      * 2 buffers to make some room. If we can't efficiently merge 2 buffers we
+      * could try to only merge the two smallest buffers to avoid memcpy, etc. */
+     GST_CAT_DEBUG (GST_CAT_PERFORMANCE, "memory array overflow in buffer %p",
+         buffer);
+-    _replace_memory (buffer, len, 0, len, _get_merged_memory (buffer, 0, len));
++    merged = _get_merged_memory (buffer, 0, len);
++    if (G_UNLIKELY (merged == NULL)) {
++      /* merge failed (e.g. allocation or map failure) - leave the existing
++       * memories untouched instead of corrupting the buffer's bookkeeping,
++       * and refuse to add the new memory since there is no room for it. */
++      GST_CAT_ERROR (GST_CAT_BUFFER,
++          "buffer %p: failed to merge memories to make room for new memory,"
++          " refusing to add it", buffer);
++      gst_memory_unref (mem);
++      return;
++    }
++    _replace_memory (buffer, len, 0, len, merged);
+     /* we now have 1 single spanned buffer */
+     len = 1;
+   }

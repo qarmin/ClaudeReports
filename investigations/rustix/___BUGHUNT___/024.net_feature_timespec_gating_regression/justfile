@@ -1,0 +1,41 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# Use the https:// remote, not git@github.com:... - this container has no SSH agent/known_hosts
+# set up, so an SSH clone URL fails here (and in any similarly configured sandbox).
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+# Full cycle: clone pristine, prove the bug exists (compile failure), apply the fix, prove the
+# crate now compiles AND the real socket-timeout round-trip behaves correctly.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# This is a compile-time regression, not a runtime crash/logic bug - the repro IS the build.
+# Expected result: `cargo build` fails with 6x error[E0433]: cannot find `timespec` in `crate`.
+reproduce-before:
+    cd repro && rm -f Cargo.lock; cargo build > /tmp/024-before.log 2>&1; \
+    status=$?; cat /tmp/024-before.log; \
+    if [ "$status" -eq 0 ]; then echo "UNEXPECTED: build succeeded, bug not reproduced"; exit 1; fi
+    grep -q "cannot find \`timespec\` in \`crate\`" /tmp/024-before.log
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Expected result: builds cleanly, and the real set_socket_timeout/socket_timeout round-trip
+# against a real AF_INET/SOCK_DGRAM socket succeeds.
+reproduce-after:
+    cd repro && rm -f Cargo.lock && cargo run
+
+clean:
+    rm -rf clone repro/target repro/Cargo.lock

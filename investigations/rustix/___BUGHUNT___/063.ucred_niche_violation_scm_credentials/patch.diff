@@ -1,0 +1,39 @@
+diff --git a/src/net/send_recv/msg.rs b/src/net/send_recv/msg.rs
+index 234e9933..b6f03321 100644
+--- a/src/net/send_recv/msg.rs
++++ b/src/net/send_recv/msg.rs
+@@ -569,8 +569,32 @@ impl<'buf> AncillaryDrain<'buf> {
+                 #[cfg(linux_kernel)]
+                 (c::SOL_SOCKET, c::SCM_CREDENTIALS) => {
+                     if payload_len >= size_of::<UCred>() {
+-                        let ucred = payload.as_ptr().cast::<UCred>().read_unaligned();
+-                        Some(RecvAncillaryMessage::ScmCredentials(ucred))
++                        // Read the raw fields through a plain, niche-free
++                        // `#[repr(C)]` struct first, rather than reading a
++                        // `UCred` directly: `UCred`'s `pid` field is a `Pid`,
++                        // which wraps a `NonZeroI32` and can never validly
++                        // hold 0, but the kernel documents (and this crate
++                        // has observed in practice) that it delivers
++                        // `pid == 0` in `SCM_CREDENTIALS` when the sender's
++                        // PID isn't representable in the receiver's PID
++                        // namespace. Constructing a `UCred`/`Pid` directly
++                        // from such a payload via `read_unaligned` would be
++                        // immediate UB (constructing an invalid value for a
++                        // niche-optimized type), not just a logic bug.
++                        #[repr(C)]
++                        struct RawUCred {
++                            pid: crate::pid::RawPid,
++                            uid: crate::ugid::RawUid,
++                            gid: crate::ugid::RawGid,
++                        }
++                        let raw = payload.as_ptr().cast::<RawUCred>().read_unaligned();
++                        crate::pid::Pid::from_raw(raw.pid).map(|pid| {
++                            RecvAncillaryMessage::ScmCredentials(UCred {
++                                pid,
++                                uid: crate::ugid::Uid::from_raw(raw.uid),
++                                gid: crate::ugid::Gid::from_raw(raw.gid),
++                            })
++                        })
+                     } else {
+                         None
+                     }

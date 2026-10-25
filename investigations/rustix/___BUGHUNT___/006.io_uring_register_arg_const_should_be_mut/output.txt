@@ -1,0 +1,26 @@
+=== BEFORE fix (pristine HEAD 287214b889865d8e1406a0ee71cc409b6f6191c8), 3/3 identical runs ===
+offset BEFORE syscall: 0xFFFFFFFF (4294967295)
+io_uring_register(RegisterRingFds) returned Ok(1)
+offset AFTER  syscall: 0x00000000 (0)
+RESULT: offset WAS mutated by the kernel through a pointer rustix's public API declares as
+`*const c_void` (immutable). This is the registered ring-fd slot index the kernel allocated: 0
+
+=== AFTER fix (patch.diff applied, arg is now legitimately *mut c_void), 3/3 identical runs ===
+offset BEFORE syscall: 0xFFFFFFFF (4294967295)
+io_uring_register(RegisterRingFds) returned Ok(1)
+offset AFTER  syscall: 0x00000000 (0)
+RESULT: offset WAS mutated by the kernel through a pointer rustix's public API declares as
+`*const c_void` (immutable). This is the registered ring-fd slot index the kernel allocated: 0
+
+(Mutation behavior is bit-for-bit identical to pre-fix, as expected - only the pointer's
+declared mutability/type changed, not runtime behavior.)
+
+=== cargo test --workspace --features "std,all-apis,use-libc" --no-fail-fast ===
+Before fix: 411 passed, 1 failed.
+After fix:  411 passed, 1 failed - identical.
+The one failure both times is io::ioctl::test_int_setter, which opens /dev/net/tun and fails
+with ENOENT - a sandbox-environment limitation (no TUN device present), unrelated to io_uring.
+The dedicated tests/io_uring/main.rs binary (register::test_io_uring_register_with,
+register::io_uring_buf_ring_can_be_registered) passed 2/2 both before and after.
+Both linux_raw (default) and libc (RUSTFLAGS="--cfg rustix_use_libc") backends confirmed to
+compile cleanly with the patch applied.

@@ -1,0 +1,85 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything needed is either in this folder or fetched by `just clone` into ./clone (gitignored),
+# except the shared empty-project harness at ___OPTIMIZATIONS___/harness/empty_project (untracked
+# in the main repo, shared with candidates 006/007/010/011/012/013/015/016/017 - see SKILL.md's
+# "Bench harnesses" section). This candidate's self-containment is relaxed to "given the whole
+# ___OPTIMIZATIONS___ folder kept together", not a fully isolated single subfolder.
+#
+# This is a from-scratch Godot build (SCons) - expect ~15-25 min per build on a modern multi-core
+# machine (~4 min on the 24-core container this was measured on), not a Rust/cargo build. scons
+# isn't preinstalled everywhere - `pip3 install scons --break-system-packages` if `command -v
+# scons` fails.
+#
+# This candidate is measured with **two** patches applied to the clone: candidate 035's
+# bench/memstat_instrumentation.diff (copied here as bench/memstat_instrumentation.diff), which
+# prints Godot's own allocator counters at shutdown, plus this candidate's own patch.diff. The
+# headline number is the tracked-peak delta from `get_mem_max_usage()`, which is byte-deterministic
+# (5 runs per arm, zero variance) - peak RSS is reported as secondary confirmation because it is
+# bimodal in this harness (see candidate 035).
+
+repo_url := "https://github.com/godotengine/godot.git"
+base_commit := "9552dfb6859a1aaba1e570b8e0ef5c599b830f19"
+harness_dir := "../harness/empty_project"
+
+test: clone apply-instrumentation build-baseline bench-baseline apply build-patched bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp -r "{{justfile_directory()}}/{{harness_dir}}" clone/_empty_project
+
+build-baseline:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v scons >/dev/null 2>&1 || pip3 install scons --break-system-packages
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+    cp bin/godot.linuxbsd.editor.x86_64 "{{justfile_directory()}}/bin_baseline"
+
+apply-instrumentation:
+    git -C clone apply "{{justfile_directory()}}/bench/memstat_instrumentation.diff"
+
+apply:
+    git -C clone apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+    cp bin/godot.linuxbsd.editor.x86_64 "{{justfile_directory()}}/bin_patched"
+
+# Peak RSS via /proc/<pid>/status's VmHWM, plus the MEMSTAT line the instrumentation prints.
+_bench BIN LABEL:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    export XDG_DATA_HOME="{{justfile_directory()}}/clone/_xdg_data"
+    export XDG_CONFIG_HOME="{{justfile_directory()}}/clone/_xdg_config"
+    mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME"
+    cd clone
+    echo "=== {{LABEL}} ==="
+    for i in 1 2 3 4 5; do
+      "{{BIN}}" --headless --editor --path _empty_project --quit-after 1 > /dev/null 2> /tmp/_bm_err.log &
+      PID=$!
+      PEAK=""
+      while kill -0 $PID 2>/dev/null; do
+        V=$(grep VmHWM /proc/$PID/status 2>/dev/null | awk '{print $2}' || true)
+        if [ -n "$V" ]; then PEAK="$V"; fi
+        sleep 0.02
+      done
+      wait $PID; RC=$?
+      echo "run $i peak_kB=$PEAK exit=$RC $(grep -h '^MEMSTAT' /tmp/_bm_err.log | tail -1)"
+    done
+
+bench-baseline:
+    @just _bench "{{justfile_directory()}}/bin_baseline" "baseline (instrumentation only)"
+
+bench-patched:
+    @just _bench "{{justfile_directory()}}/bin_patched" "patched (instrumentation + patch.diff)"
+
+clean:
+    rm -rf clone bin_baseline bin_patched

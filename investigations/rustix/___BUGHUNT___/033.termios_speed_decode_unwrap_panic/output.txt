@@ -1,0 +1,92 @@
+=== repro/ run (real, unmodified rustix speed::decode match-arm logic, resolved for
+    target_os = "illumos" and target_os = "haiku", fed the real B76800 / B31250 encodings
+    copied from the vendored libc-0.2.189 crate) ===
+
+$ cargo run
+   Compiling repro v0.1.0 (.../___BUGHUNT___/033.termios_speed_decode_unwrap_panic/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running `target/debug/repro`
+case 1: illumos/Solaris real B76800 (encoded = 17)
+
+thread 'main' (109589) panicked at src/main.rs:155:57:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  REPRODUCED - panicked: called `Option::unwrap()` on a `None` value
+case 2: Haiku real B31250 (encoded = 19, standard MIDI baud rate)
+
+thread 'main' (109589) panicked at src/main.rs:159:51:
+called `Option::unwrap()` on a `None` value
+  REPRODUCED - panicked: called `Option::unwrap()` on a `None` value
+
+(exit code 1 - both cases reproduced; repeated 3/3 runs during investigation, deterministic since
+this is a pure const-fn match over plain integers, no timing/environment dependence)
+
+=== Escalation: real `target_os = "illumos"` compiler check (x86_64-unknown-illumos, tier-2
+    rustup target, prebuilt std available in this sandbox) ===
+
+--- PRISTINE tree (base_commit 287214b889865d8e1406a0ee71cc409b6f6191c8), unpatched ---
+$ rustup target add x86_64-unknown-illumos
+$ cargo check --features "use-libc,all-apis,std" --target x86_64-unknown-illumos
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+    Checking rustix v1.1.5 (/tmp/rustix-worktree-033)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.56s
+(type-checks clean - confirms the vendored libc-0.2.189 crate really does define c::B76800 = 17
+for illumos, exactly as read from its source, and that the unpatched decode()/encode() really
+have no match arm for it, compiled for the real target_os - not just a manual source reading)
+
+--- Attempting a REAL illumos link (separate throwaway "hello world" bin crate, not rustix
+    itself - to check whether a genuine runnable illumos binary is possible here at all) ---
+$ cargo build --target x86_64-unknown-illumos   # in /tmp/illumos-linktest, `fn main() { println!("hi"); }`
+   Compiling illumos-linktest v0.1.0 (/tmp/illumos-linktest)
+error: linking with `cc` failed: exit status: 1
+  = note: "cc" "-m64" ... "-lsocket" "-lposix4" "-lpthread" "-lresolv" "-lnsl" "-lumem" ... "-lc" ...
+  = note: /usr/bin/x86_64-linux-gnu-ld.bfd: cannot find -lsocket: No such file or directory
+          /usr/bin/x86_64-linux-gnu-ld.bfd: cannot find -lposix4: No such file or directory
+          /usr/bin/x86_64-linux-gnu-ld.bfd: cannot find -lnsl: No such file or directory
+          /usr/bin/x86_64-linux-gnu-ld.bfd: cannot find -lumem: No such file or directory
+          collect2: error: ld returned 1 exit status
+error: could not compile `illumos-linktest` (bin "illumos-linktest") due to 1 previous error
+
+(confirms: no illumos sysroot/system libraries exist in this sandbox, so a real runnable illumos
+binary - and therefore a genuine tcgetattr()/cfgetispeed() call against a real illumos kernel -
+is not achievable here, even though type-checking the real target works)
+
+--- PATCHED tree (this candidate's patch.diff applied) ---
+$ cargo check --features "use-libc,all-apis,std" --target x86_64-unknown-illumos
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+    Checking rustix v1.1.5 (/tmp/rustix-worktree-033)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.57s
+(still type-checks clean after adding the new B76800/B153600/B307200 arms - confirms those three
+constants really exist in the illumos libc module at the names/values used)
+
+--- Haiku / GNU Hurd targets: no prebuilt std available in this sandbox ---
+$ rustup target add x86_64-unknown-haiku x86_64-unknown-hurd-gnu
+error: toolchain 'stable-x86_64-unknown-linux-gnu' has no prebuilt artifacts available for target 'x86_64-unknown-haiku'
+note: this may happen to a low-tier target as per https://doc.rust-lang.org/nightly/rustc/platform-support.html
+(same for x86_64-unknown-hurd-gnu - both are tier-3 targets with no prebuilt rust-std; `-Z
+build-std` would still need a full target sysroot/libc this sandbox doesn't have, same category
+as candidate 028's arm-vita/m68k/esp-idf "genuinely untestable here" targets)
+
+=== Project test suite, host x86_64-unknown-linux-gnu (new match arms are `#[cfg(...)]`'d out
+    entirely on this target, so this is a build-regression sanity check, not a stand-in for the
+    real illumos/Haiku/Hurd execution above) ===
+
+--- BEFORE (pristine tree) ---
+$ cargo test --workspace --features "std,all-apis,use-libc" --no-fail-fast
+...
+test ioctl::test_int_setter ... FAILED
+test result: FAILED. 16 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+...
+TOTAL: 411 passed; 1 failed
+(the 1 failure is the same pre-existing, environment-caused `ioctl::test_int_setter` failure
+documented in candidate 028's RESULT.md and projects/rustix.md's "Gotcha" section - NotFound
+opening /dev/net/tun, unrelated to termios/speed)
+
+--- AFTER (patch.diff applied) ---
+$ cargo test --workspace --features "std,all-apis,use-libc" --no-fail-fast
+...
+test ioctl::test_int_setter ... FAILED
+test result: FAILED. 16 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+...
+TOTAL: 411 passed; 1 failed
+(identical failure, identical counts, before and after - no regression, no new failures)

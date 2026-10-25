@@ -1,0 +1,80 @@
+diff --git a/src/backend/linux_raw/thread/cpu_set.rs b/src/backend/linux_raw/thread/cpu_set.rs
+index 8c39d57c..8e3a84cd 100644
+--- a/src/backend/linux_raw/thread/cpu_set.rs
++++ b/src/backend/linux_raw/thread/cpu_set.rs
+@@ -5,8 +5,16 @@
+ use super::types::RawCpuSet;
+ use core::mem::{size_of, size_of_val};
+ 
++/// The number of CPUs representable by a `RawCpuSet`, matching
++/// `backend::thread::types::CPU_SETSIZE`'s definition.
++const CPU_SETSIZE: usize = 8 * size_of::<RawCpuSet>();
++
+ #[inline]
+ pub(crate) fn CPU_SET(cpu: usize, cpuset: &mut RawCpuSet) {
++    assert!(
++        cpu < CPU_SETSIZE,
++        "cpu out of bounds: the cpu max is {CPU_SETSIZE} but the cpu is {cpu}"
++    );
+     let size_in_bits = 8 * size_of_val(&cpuset.bits[0]); // 32, 64 etc
+     let (idx, offset) = (cpu / size_in_bits, cpu % size_in_bits);
+     cpuset.bits[idx] |= 1 << offset
+@@ -19,6 +27,10 @@ pub(crate) fn CPU_ZERO(cpuset: &mut RawCpuSet) {
+ 
+ #[inline]
+ pub(crate) fn CPU_CLR(cpu: usize, cpuset: &mut RawCpuSet) {
++    assert!(
++        cpu < CPU_SETSIZE,
++        "cpu out of bounds: the cpu max is {CPU_SETSIZE} but the cpu is {cpu}"
++    );
+     let size_in_bits = 8 * size_of_val(&cpuset.bits[0]); // 32, 64 etc
+     let (idx, offset) = (cpu / size_in_bits, cpu % size_in_bits);
+     cpuset.bits[idx] &= !(1 << offset)
+@@ -26,6 +38,10 @@ pub(crate) fn CPU_CLR(cpu: usize, cpuset: &mut RawCpuSet) {
+ 
+ #[inline]
+ pub(crate) fn CPU_ISSET(cpu: usize, cpuset: &RawCpuSet) -> bool {
++    assert!(
++        cpu < CPU_SETSIZE,
++        "cpu out of bounds: the cpu max is {CPU_SETSIZE} but the cpu is {cpu}"
++    );
+     let size_in_bits = 8 * size_of_val(&cpuset.bits[0]);
+     let (idx, offset) = (cpu / size_in_bits, cpu % size_in_bits);
+     (cpuset.bits[idx] & (1 << offset)) != 0
+diff --git a/src/thread/sched.rs b/src/thread/sched.rs
+index 034b0261..03d5ba75 100644
+--- a/src/thread/sched.rs
++++ b/src/thread/sched.rs
+@@ -34,6 +34,10 @@ impl CpuSet {
+     /// Test to see if a CPU is in the `CpuSet`.
+     ///
+     /// `field` is the CPU id to test.
++    ///
++    /// # Panics
++    ///
++    /// Panics if `field` is greater than or equal to [`Self::MAX_CPU`].
+     #[inline]
+     pub fn is_set(&self, field: usize) -> bool {
+         backend::thread::cpu_set::CPU_ISSET(field, &self.cpu_set)
+@@ -42,6 +46,10 @@ impl CpuSet {
+     /// Add a CPU to `CpuSet`.
+     ///
+     /// `field` is the CPU id to add.
++    ///
++    /// # Panics
++    ///
++    /// Panics if `field` is greater than or equal to [`Self::MAX_CPU`].
+     #[inline]
+     pub fn set(&mut self, field: usize) {
+         backend::thread::cpu_set::CPU_SET(field, &mut self.cpu_set)
+@@ -50,6 +58,10 @@ impl CpuSet {
+     /// Remove a CPU from `CpuSet`.
+     ///
+     /// `field` is the CPU id to remove.
++    ///
++    /// # Panics
++    ///
++    /// Panics if `field` is greater than or equal to [`Self::MAX_CPU`].
+     #[inline]
+     pub fn unset(&mut self, field: usize) {
+         backend::thread::cpu_set::CPU_CLR(field, &mut self.cpu_set)

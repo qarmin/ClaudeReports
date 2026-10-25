@@ -1,0 +1,38 @@
+=== BEFORE (pristine checkout at base_commit 287214b889865d8e1406a0ee71cc409b6f6191c8) ===
+$ cd repro && cargo run --release
+    Finished `release` profile [optimized] target(s) in 0.00s
+     Running `target/release/repro`
+[minimal: 0 - (i64::MIN, 1ns)] Timespec { tv_sec: 0, tv_nsec: 0 }.checked_sub(Timespec { tv_sec: -9223372036854775808, tv_nsec: 1 }) = None (expected Some(Timespec { tv_sec: 9223372036854775807, tv_nsec: 999999999 })) -> MISMATCH (bug reproduced)
+[second input, same bug class (fuzz-found seed, minimized by hand)] Timespec { tv_sec: 10, tv_nsec: 100 }.checked_sub(Timespec { tv_sec: -9223372036854775798, tv_nsec: 200 }) = None (expected Some(Timespec { tv_sec: 9223372036854775807, tv_nsec: 999999900 })) -> MISMATCH (bug reproduced)
+[sanity: genuine overflow must remain None] Timespec { tv_sec: -9223372036854775808, tv_nsec: 0 }.checked_sub(Timespec { tv_sec: 0, tv_nsec: 1 }) = None (expected None) -> OK
+
+REPRODUCED - checked_sub returned a value that doesn't match the independently-computed correct result for at least one case above.
+$ echo exit=$?
+exit=1
+
+=== Reproduced 3/3 runs (deterministic, pure function, no flakiness) ===
+
+=== AFTER (patch.diff applied) ===
+$ cd repro && cargo run --release
+    Finished `release` profile [optimized] target(s) in 0.43s
+     Running `target/release/repro`
+[minimal: 0 - (i64::MIN, 1ns)] Timespec { tv_sec: 0, tv_nsec: 0 }.checked_sub(Timespec { tv_sec: -9223372036854775808, tv_nsec: 1 }) = Some(Timespec { tv_sec: 9223372036854775807, tv_nsec: 999999999 }) (expected Some(Timespec { tv_sec: 9223372036854775807, tv_nsec: 999999999 })) -> OK
+[second input, same bug class (fuzz-found seed, minimized by hand)] Timespec { tv_sec: 10, tv_nsec: 100 }.checked_sub(Timespec { tv_sec: -9223372036854775798, tv_nsec: 200 }) = Some(Timespec { tv_sec: 9223372036854775807, tv_nsec: 999999900 }) (expected Some(Timespec { tv_sec: 9223372036854775807, tv_nsec: 999999900 })) -> OK
+[sanity: genuine overflow must remain None] Timespec { tv_sec: -9223372036854775808, tv_nsec: 0 }.checked_sub(Timespec { tv_sec: 0, tv_nsec: 1 }) = None (expected None) -> OK
+
+did not reproduce - all cases matched the independently-computed result
+$ echo exit=$?
+exit=0
+
+=== Original libFuzzer crash (fuzz_timespec harness, before minimization) ===
+thread '<unnamed>' panicked at fuzz_targets/fuzz_timespec.rs:82:13:
+checked_sub returned None but reference fits: Timespec { tv_sec: 6402105296169785560, tv_nsec: 490606296 } - Timespec { tv_sec: -2821266740684990248, tv_nsec: 638089944 }, ref_sec=9223372036854775807
+(reproduced 3/3 re-runs of the same crash artifact against the pristine build)
+
+=== Test suite, same sandbox, before vs after patch (cargo test --workspace --features std,all-apis,use-libc --no-fail-fast) ===
+BEFORE: 411 passed; 1 failed; 5 ignored
+AFTER:  411 passed; 1 failed; 5 ignored
+(identical - the 1 pre-existing failure is `ioctl::test_int_setter`, NotFound opening
+/dev/net/tun, which does not exist in this sandbox; unrelated to timespec.rs and present
+both before and after the patch, see projects/rustix.md's "no /dev/net/tun" gotcha)
+Doc-tests for Timespec::checked_add / Timespec::checked_sub: both pass before and after.

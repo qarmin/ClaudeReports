@@ -1,0 +1,110 @@
+diff --git a/crates/epaint/src/shapes/bezier_shape.rs b/crates/epaint/src/shapes/bezier_shape.rs
+index a32d5f8d2..6c0010f94 100644
+--- a/crates/epaint/src/shapes/bezier_shape.rs
++++ b/crates/epaint/src/shapes/bezier_shape.rs
+@@ -488,6 +488,47 @@ impl QuadraticBezierShape {
+     /// This implements the algorithm described by Raph Levien at
+     /// <https://raphlinus.github.io/graphics/curves/2019/12/23/flatten-quadbez.html>
+     pub fn for_each_flattened_with_t<F>(&self, tolerance: f32, callback: &mut F)
++    where
++        F: FnMut(Pos2, f32),
++    {
++        // The flattening count is inaccurate for a hairpin (even a single chord for the whole curve),
++        // so flatten the two halves on each side of its apex separately.
++        if let Some(t_apex) = self.hairpin_apex_t() {
++            for (t0, t1) in [(0.0, t_apex), (t_apex, 1.0)] {
++                self.sub_curve(t0, t1)
++                    .for_each_flattened_without_apex(tolerance, &mut |p, t_sub| {
++                        callback(p, t0 + (t1 - t0) * t_sub);
++                    });
++            }
++        } else {
++            self.for_each_flattened_without_apex(tolerance, callback);
++        }
++    }
++
++    /// The `t` of the point where the curve turns the most,
++    /// if it turns by more than a right angle (a hairpin).
++    fn hairpin_apex_t(&self) -> Option<f32> {
++        let [from, ctrl, to] = self.points;
++        if 0.0 <= (ctrl - from).dot(to - ctrl) {
++            return None;
++        }
++        let dd = (from - ctrl) + (to - ctrl);
++        let t = -(ctrl - from).dot(dd) / dd.length_sq();
++        (1.0e-3 < t && t < 1.0 - 1.0e-3).then_some(t)
++    }
++
++    fn sub_curve(&self, t0: f32, t1: f32) -> Self {
++        let [from, ctrl, to] = self.points;
++        let start = self.sample(t0);
++        let end = self.sample(t1);
++        let tangent = (ctrl - from) * (1.0 - t0) + (to - ctrl) * t0;
++        Self {
++            points: [start, start + tangent * (t1 - t0), end],
++            ..self.clone()
++        }
++    }
++
++    fn for_each_flattened_without_apex<F>(&self, tolerance: f32, callback: &mut F)
+     where
+         F: FnMut(Pos2, f32),
+     {
+@@ -772,7 +813,7 @@ mod tests {
+             result.push(pos);
+         });
+ 
+-        assert_eq!(result.len(), 25);
++        assert_eq!(result.len(), 26);
+     }
+ 
+     #[test]
+@@ -799,7 +840,7 @@ mod tests {
+             result.push(pos);
+         });
+ 
+-        assert_eq!(result.len(), 25);
++        assert_eq!(result.len(), 26);
+ 
+         let mut result = vec![curve.points[0]]; // add the start point
+         curve.for_each_flattened_with_t(0.01, &mut |pos, _t| {
+@@ -1019,7 +1060,7 @@ mod tests {
+             result.push(pos);
+         });
+ 
+-        assert_eq!(result.len(), 71);
++        assert_eq!(result.len(), 72);
+ 
+         let curve = CubicBezierShape {
+             points: [
+@@ -1114,26 +1155,26 @@ mod tests {
+             result.push(pos);
+         });
+ 
+-        assert_eq!(result.len(), 11);
++        assert_eq!(result.len(), 12);
+ 
+         let mut result = vec![curve.points[0]]; // add the start point
+         curve.for_each_flattened_with_t(0.1, &mut |pos, _t| {
+             result.push(pos);
+         });
+ 
+-        assert_eq!(result.len(), 24);
++        assert_eq!(result.len(), 25);
+ 
+         let mut result = vec![curve.points[0]]; // add the start point
+         curve.for_each_flattened_with_t(0.01, &mut |pos, _t| {
+             result.push(pos);
+         });
+ 
+-        assert_eq!(result.len(), 72);
++        assert_eq!(result.len(), 73);
+         let mut result = vec![curve.points[0]]; // add the start point
+         curve.for_each_flattened_with_t(0.001, &mut |pos, _t| {
+             result.push(pos);
+         });
+ 
+-        assert_eq!(result.len(), 223);
++        assert_eq!(result.len(), 224);
+     }
+ }

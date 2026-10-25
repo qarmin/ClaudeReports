@@ -1,0 +1,61 @@
+=== BEFORE (unpatched subprojects/gst-editing-services/ges/ges-title-clip.c), fuller ges+base+good
+build, clang -fsanitize=address,undefined, ASAN_OPTIONS=detect_leaks=0 ===
+$ ./repro
+Created GESTitleClip 0x7bd3773ee280 (not added to any timeline)
+Calling ges_title_clip_get_text() on it...
+AddressSanitizer:DEADLYSIGNAL
+=================================================================
+==194369==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000 (pc 0x7e4379395e86 bp 0x7ffc8e31c290 sp 0x7ffc8e31c260 T0)
+==194369==The signal is caused by a READ memory access.
+==194369==Hint: address points to the zero page.
+    #0 0x7e4379395e86 in ges_title_clip_get_text .../subprojects/gst-editing-services/ges/ges-title-clip.c:541:70
+    #1 0x630939db7ccd in main .../repro/repro.c:28:27
+    #2 0x7e4378912600 in __libc_start_call_main csu/../sysdeps/nptl/libc_start_call_main.h:59:16
+    #3 0x7e4378912717 in __libc_start_main csu/../csu/libc-start.c:360:3
+    #4 0x630939cce434 in _start (.../repro+0x2d434)
+
+==194369==Register values:
+rax = 0x0000000000000000  rbx = 0x00007ffc8e31c2a0  rcx = 0x000000000002f741  rdx = 0x0000000000000000
+rdi = 0x00007a8377420590  rsi = 0x0000000000000000  rbp = 0x00007ffc8e31c290  rsp = 0x00007ffc8e31c260
+ r8 = 0x0000000000000000   r9 = 0x00007ac3773ee5a0  r10 = 0x00007b0377439ec0  r11 = 0x00007e4379395e0a
+r12 = 0x00007ffc8e31c478  r13 = 0x0000000000000001  r14 = 0x00007e43794a4000  r15 = 0x0000630939df2510
+AddressSanitizer can not provide additional info.
+SUMMARY: AddressSanitizer: SEGV .../subprojects/gst-editing-services/ges/ges-title-clip.c:541:70 in ges_title_clip_get_text
+==194369==ABORTING
+$ echo "exit code: $?"
+exit code: 1
+
+(Reproduced identically 3/3 consecutive runs before the fix, and 5/5 in an earlier, narrower
+ges-only build - same crash line every time, ges-title-clip.c:541:70, the
+`self->priv->track_titles->data` read inside ges_title_clip_get_text.)
+
+=== AFTER (patched subprojects/gst-editing-services/ges/ges-title-clip.c, same build, rebuilt) ===
+$ ./repro
+Created GESTitleClip 0x77e7247ee280 (not added to any timeline)
+Calling ges_title_clip_get_text() on it...
+get_text ->
+get_font_desc -> Serif 36
+get_halignment -> 1
+get_valignment -> 0
+get_text_color -> 4294967295
+get_background_color -> 4294967295
+get_xpos -> 0.500000
+get_ypos -> 0.500000
+All 8 getters returned without crashing.
+$ echo "exit code: $?"
+exit code: 0
+
+(get_text returns the documented empty-string default; get_font_desc returns the documented
+"Serif 36" default; get_text_color/get_background_color return 0xFFFFFFFF = G_MAXUINT32, the
+documented default per the "color"/"foreground-color" GParamSpec's own default value;
+get_xpos/get_ypos return 0.5/0.5, the documented default per GESTitleSource's own
+"xpos"/"ypos" properties. Reproduced clean 3/3 consecutive runs after the fix.)
+
+=== Project test suite: meson test --suite gst-editing-services (27 tests) ===
+Before patch: Ok: 13   Fail: 11   Skipped: 3
+After patch:  Ok: 13   Fail: 11   Skipped: 3
+Same 11 failing tests both times (ges_asset, nle_simple, nle_tempochange, nle_nleoperation,
+nle_complex, nle_nlecomposition, ges_uriclip, ges_timelineedition, ges_group, ges_clip,
+ges_project) - pre-existing, caused by this sandbox's narrow build (no gst-plugins-bad, no
+network-downloadable opus/vorbis codec subprojects those tests' fixture media need), unrelated to
+this patch. ges_titles (the dedicated GESTitleClip test) passes both before and after.

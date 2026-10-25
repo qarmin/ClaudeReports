@@ -1,0 +1,53 @@
+diff --git a/src/backend/libc/net/msghdr.rs b/src/backend/libc/net/msghdr.rs
+index f46ac7e2..9f65ac50 100644
+--- a/src/backend/libc/net/msghdr.rs
++++ b/src/backend/libc/net/msghdr.rs
+@@ -61,7 +61,7 @@ fn msg_iov_len(len: usize) -> c::c_int {
+     target_os = "nto",
+ ))]
+ #[inline]
+-fn msg_control_len(len: usize) -> c::socklen_t {
++pub(crate) fn msg_control_len(len: usize) -> c::socklen_t {
+     len.try_into().unwrap_or(c::socklen_t::MAX)
+ }
+ 
+@@ -83,7 +83,7 @@ fn msg_control_len(len: usize) -> c::socklen_t {
+     target_os = "wasi",
+ )))]
+ #[inline]
+-fn msg_control_len(len: usize) -> c::size_t {
++pub(crate) fn msg_control_len(len: usize) -> c::size_t {
+     len
+ }
+ 
+diff --git a/src/backend/linux_raw/net/msghdr.rs b/src/backend/linux_raw/net/msghdr.rs
+index 0343e18c..0584ff13 100644
+--- a/src/backend/linux_raw/net/msghdr.rs
++++ b/src/backend/linux_raw/net/msghdr.rs
+@@ -18,7 +18,7 @@ fn msg_iov_len(len: usize) -> c::size_t {
+     len as c::size_t
+ }
+ 
+-fn msg_control_len(len: usize) -> c::size_t {
++pub(crate) fn msg_control_len(len: usize) -> c::size_t {
+     // Same as above.
+     len as c::size_t
+ }
+diff --git a/src/net/send_recv/msg.rs b/src/net/send_recv/msg.rs
+index 234e9933..262634c7 100644
+--- a/src/net/send_recv/msg.rs
++++ b/src/net/send_recv/msg.rs
+@@ -937,7 +937,12 @@ mod messages {
+         pub(super) fn new(buf: &'buf mut [impl AllowedMsgBufType]) -> Self {
+             let mut msghdr = msghdr::zero_msghdr();
+             msghdr.msg_control = buf.as_mut_ptr().cast();
+-            msghdr.msg_controllen = buf.len().try_into().expect("buffer too large for msghdr");
++            // Use the same saturating conversion the backend already uses for
++            // outgoing `msghdr`s (`msghdr::msg_control_len`), instead of
++            // panicking when `msg_controllen`'s platform type (e.g. a 32-bit
++            // `socklen_t` on BSD/Solaris) is narrower than `usize` and the
++            // caller-supplied buffer is larger than it can represent.
++            msghdr.msg_controllen = msghdr::msg_control_len(buf.len());
+ 
+             // Get the first header.
+             let header = NonNull::new(unsafe { c::CMSG_FIRSTHDR(&msghdr) });

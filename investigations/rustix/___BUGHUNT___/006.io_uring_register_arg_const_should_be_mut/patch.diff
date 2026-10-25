@@ -1,0 +1,118 @@
+diff --git a/src/backend/libc/io_uring/syscalls.rs b/src/backend/libc/io_uring/syscalls.rs
+index 8bf1e987..41ce37eb 100644
+--- a/src/backend/libc/io_uring/syscalls.rs
++++ b/src/backend/libc/io_uring/syscalls.rs
+@@ -21,14 +21,14 @@ pub(crate) fn io_uring_setup(entries: u32, params: &mut io_uring_params) -> io:
+ pub(crate) unsafe fn io_uring_register(
+     fd: BorrowedFd<'_>,
+     opcode: IoringRegisterOp,
+-    arg: *const c::c_void,
++    arg: *mut c::c_void,
+     nr_args: u32,
+ ) -> io::Result<u32> {
+     syscall! {
+         fn io_uring_register(
+             fd: c::c_uint,
+             opcode: c::c_uint,
+-            arg: *const c::c_void,
++            arg: *mut c::c_void,
+             nr_args: c::c_uint
+         ) via SYS_io_uring_register -> c::c_int
+     }
+@@ -45,14 +45,14 @@ pub(crate) unsafe fn io_uring_register_with(
+     fd: BorrowedFd<'_>,
+     opcode: IoringRegisterOp,
+     flags: IoringRegisterFlags,
+-    arg: *const c::c_void,
++    arg: *mut c::c_void,
+     nr_args: u32,
+ ) -> io::Result<u32> {
+     syscall! {
+         fn io_uring_register(
+             fd: c::c_uint,
+             opcode: c::c_uint,
+-            arg: *const c::c_void,
++            arg: *mut c::c_void,
+             nr_args: c::c_uint
+         ) via SYS_io_uring_register -> c::c_int
+     }
+diff --git a/src/backend/linux_raw/io_uring/syscalls.rs b/src/backend/linux_raw/io_uring/syscalls.rs
+index 36edd4c0..607a6ed9 100644
+--- a/src/backend/linux_raw/io_uring/syscalls.rs
++++ b/src/backend/linux_raw/io_uring/syscalls.rs
+@@ -26,7 +26,7 @@ pub(crate) fn io_uring_setup(entries: u32, params: &mut io_uring_params) -> io:
+ pub(crate) unsafe fn io_uring_register(
+     fd: BorrowedFd<'_>,
+     opcode: IoringRegisterOp,
+-    arg: *const c_void,
++    arg: *mut c_void,
+     nr_args: u32,
+ ) -> io::Result<u32> {
+     // This is not `syscall_readonly` because when `opcode` is
+@@ -45,7 +45,7 @@ pub(crate) unsafe fn io_uring_register_with(
+     fd: BorrowedFd<'_>,
+     opcode: IoringRegisterOp,
+     flags: IoringRegisterFlags,
+-    arg: *const c_void,
++    arg: *mut c_void,
+     nr_args: u32,
+ ) -> io::Result<u32> {
+     // This is not `syscall_readonly` because when `opcode` is
+diff --git a/src/io_uring/mod.rs b/src/io_uring/mod.rs
+index 00fde8df..54515fdd 100644
+--- a/src/io_uring/mod.rs
++++ b/src/io_uring/mod.rs
+@@ -106,9 +106,6 @@ pub unsafe fn io_uring_setup(entries: u32, params: &mut io_uring_params) -> io:
+ /// responsible for ensuring that memory and resources are only accessed in
+ /// valid ways.
+ ///
+-/// If `opcode` is `IoringRegisterOp::RegisterRingFds`, `arg` must point to
+-/// mutable memory, despite being `*const`.
+-///
+ /// # References
+ ///  - [Linux]
+ ///
+@@ -117,7 +114,7 @@ pub unsafe fn io_uring_setup(entries: u32, params: &mut io_uring_params) -> io:
+ pub unsafe fn io_uring_register<Fd: AsFd>(
+     fd: Fd,
+     opcode: IoringRegisterOp,
+-    arg: *const c_void,
++    arg: *mut c_void,
+     nr_args: u32,
+ ) -> io::Result<u32> {
+     backend::io_uring::syscalls::io_uring_register(fd.as_fd(), opcode, arg, nr_args)
+@@ -132,9 +129,6 @@ pub unsafe fn io_uring_register<Fd: AsFd>(
+ /// responsible for ensuring that memory and resources are only accessed in
+ /// valid ways.
+ ///
+-/// If `opcode` is `IoringRegisterOp::RegisterRingFds`, `arg` must point to
+-/// mutable memory, despite being `*const`.
+-///
+ /// # References
+ ///  - [Linux]
+ ///
+@@ -144,7 +138,7 @@ pub unsafe fn io_uring_register_with<Fd: AsFd>(
+     fd: Fd,
+     opcode: IoringRegisterOp,
+     flags: IoringRegisterFlags,
+-    arg: *const c_void,
++    arg: *mut c_void,
+     nr_args: u32,
+ ) -> io::Result<u32> {
+     backend::io_uring::syscalls::io_uring_register_with(fd.as_fd(), opcode, flags, arg, nr_args)
+diff --git a/tests/io_uring/register.rs b/tests/io_uring/register.rs
+index 02d6287a..a0d94e30 100644
+--- a/tests/io_uring/register.rs
++++ b/tests/io_uring/register.rs
+@@ -27,10 +27,8 @@ where
+         IoringRegisterFlags::default()
+     };
+
+-    // Cast `arg` to `*const c_void` to match the current API. See
+-    // <https://github.com/bytecodealliance/rustix/issues/1545>.
+     unsafe {
+-        io_uring_register_with(fd, opcode, flags, arg as *const c_void, arg_nr)?;
++        io_uring_register_with(fd, opcode, flags, arg, arg_nr)?;
+     }
+
+     Ok(())

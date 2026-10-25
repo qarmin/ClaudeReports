@@ -1,0 +1,90 @@
+=== `just test` (fresh clone, repo_url @ base_commit) - real captured output ===
+
+rm -rf clone
+git clone https://github.com/bytecodealliance/rustix.git clone
+cd clone && git checkout 287214b889865d8e1406a0ee71cc409b6f6191c8
+HEAD is now at 287214b8 chore: Release rustix version 1.1.5
+
+--- reproduce-before (pristine, release build) ---
+ulimit -c 0 && cd repro && cargo run --release --quiet --bin fchown_bypass; test $? -eq 1 && echo "REPRODUCED (exit 1, as expected pre-fix)" || (echo "DID NOT REPRODUCE - unexpected, investigate" && exit 1)
+baseline OK: fchown to a real but foreign uid correctly returned EPERM: Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }
+Uid::from_raw(u32::MAX) did NOT panic - got Uid::as_raw() = 4294967295
+fchown(Some(Uid::from_raw(u32::MAX)), None) => Ok(())
+owner before = (1000, 1000), after = (1000, 1000)
+BUG: fchown silently returned Ok(()) and left the owner completely unchanged - the request to chown to uid 4294967295 was silently turned into a no-op, indistinguishable from `owner: None`, bypassing the real kernel permission check entirely (contrast with the baseline EPERM above)
+REPRODUCED (exit 1, as expected pre-fix)
+
+--- apply ---
+cd clone && git apply ".../patch.diff"
+
+--- reproduce-after (patched, release build) ---
+ulimit -c 0 && cd repro && cargo run --release --quiet --bin fchown_bypass; test $? -eq 0 && echo "FIXED (exit 0, as expected post-fix)" || (echo "STILL REPRODUCES - unexpected, investigate" && exit 1)
+baseline OK: fchown to a real but foreign uid correctly returned EPERM: Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }
+
+thread 'main' (428853) panicked at .../clone/src/ugid.rs:32:9:
+assertion `left != right` failed: Uid::from_raw: raw must not be -1
+  left: 4294967295
+ right: 4294967295
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FIXED: Uid::from_raw(u32::MAX) was rejected (panicked) before ever reaching fchown - the silent permission-check bypass can no longer happen
+FIXED (exit 0, as expected post-fix)
+
+
+=== Repeat-run determinism (3/3, release build, repro run directly against the investigation
+    worktree before the clone-based justfile existed) ===
+
+--- pristine, run 1/2/3 ---
+Uid::from_raw(u32::MAX) did NOT panic - got Uid::as_raw() = 4294967295
+fchown(Some(Uid::from_raw(u32::MAX)), None) => Ok(())
+owner before = (1000, 1000), after = (1000, 1000)
+BUG: ... (identical all 3 runs, exit=1 all 3 runs)
+
+--- patched, run 1/2/3 ---
+thread 'main' panicked at .../src/ugid.rs:32:9:
+assertion `left != right` failed: Uid::from_raw: raw must not be -1
+  left: 4294967295
+ right: 4294967295
+FIXED: Uid::from_raw(u32::MAX) was rejected (panicked) before ever reaching fchown - the silent
+permission-check bypass can no longer happen
+(identical all 3 runs, exit=0 all 3 runs)
+
+--- debug build, pristine, run 1/2/3 (for contrast - the OLD debug_assert_ne! already panics in
+    debug builds; the bug only manifests in release, see RESULT.md) ---
+thread 'main' panicked at .../src/ugid.rs:32:9:
+assertion `left != right` failed
+  left: 4294967295
+ right: 4294967295
+(identical all 3 runs)
+
+
+=== Same bug class, second input: `Gid::from_raw(u32::MAX)` via `fchown(fd, None, Some(gid))`
+    (CONFIRMATION.md section 7 - verified the fix isn't narrowly specific to Uid) ===
+
+--- pristine (debug_assert_ne!, release build) ---
+before gid=1000
+fchown(None, Some(Gid::from_raw(u32::MAX))) => Ok(()), after gid=1000
+
+--- patched (assert_ne!) ---
+thread 'main' panicked at .../src/ugid.rs:66:9:
+assertion `left != right` failed: Gid::from_raw: raw must not be -1
+  left: 4294967295
+ right: 4294967295
+FIXED: Gid::from_raw(u32::MAX) panicked
+
+
+=== Project test suite: `cargo test --workspace --features "std,all-apis,use-libc" --no-fail-fast`
+    (run directly against the investigation worktree, before and after applying patch.diff) ===
+
+BEFORE (pristine):
+  test result: FAILED. 16 passed; 1 failed; 0 ignored ...   <- tests/io (ioctl::test_int_setter)
+  (all other test binaries: ok)
+  Sum across all binaries: 411 passed, 1 failed, total.
+  Failing test: ioctl::test_int_setter - pre-existing, unrelated (no /dev/net/tun in this
+  sandbox; same failure already documented in ___BUGHUNT___/README.md and candidate 063's
+  RESULT.md).
+
+AFTER (patched):
+  test result: FAILED. 16 passed; 1 failed; 0 ignored ...   <- tests/io (ioctl::test_int_setter)
+  (all other test binaries: ok)
+  Sum across all binaries: 411 passed, 1 failed, total.
+  Same single failure, identical to BEFORE - no new failures introduced by the fix.

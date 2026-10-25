@@ -1,0 +1,58 @@
+=== BEFORE (pristine src/io/ioctl.rs, base_commit 287214b889865d8e1406a0ee71cc409b6f6191c8) ===
+$ cargo run --release   (in repro/, rustix path-dependency pointed at the unpatched source)
+
+apparent file size set via ftruncate : 3000000000
+ioctl_fionread() returned             : 18446744072414584320
+expected (size wrapped mod 2^32, u64) : 3000000000
+sign-extended-i32-to-u64 pattern would give: 18446744072414584320
+REPRODUCED - ioctl_fionread returned a value near u64::MAX (18446744072414584320) instead of the documented 32-bit wrapped value (3000000000); this is a sign-extension bug in `n as u64` over the raw (negative) C int
+
+(exit code 1)
+
+Re-run 4 more times for repeatability (5/5 total), release build, same machine, identical output
+each time:
+
+run 2: ioctl_fionread() returned             : 18446744072414584320
+run 3: ioctl_fionread() returned             : 18446744072414584320
+run 4: ioctl_fionread() returned             : 18446744072414584320
+run 5: ioctl_fionread() returned             : 18446744072414584320
+
+Boundary-value variants tried (same class, different SIZE), all reproduce identically before the
+fix and all pass after it:
+  SIZE = 2_147_483_648 (= i32::MAX + 1, the smallest value that wraps)
+    -> before: ioctl_fionread() returned 18446744071562067968 (buggy)
+    -> after:  ioctl_fionread() returned 2147483648 (correct)
+  SIZE = 4_294_967_294 (= u32::MAX - 1)
+    -> before: ioctl_fionread() returned 18446744073709551614 (buggy)
+    -> after:  ioctl_fionread() returned 4294967294 (correct)
+
+=== AFTER (patch.diff applied to base_commit) ===
+$ cargo run --release   (same repro/, rustix path-dependency pointed at the patched source)
+
+apparent file size set via ftruncate : 3000000000
+ioctl_fionread() returned             : 3000000000
+expected (size wrapped mod 2^32, u64) : 3000000000
+sign-extended-i32-to-u64 pattern would give: 18446744072414584320
+did not reproduce - ioctl_fionread returned the documented wrapped value
+
+(exit code 0)
+
+=== Independent OS-level confirmation (C program, bypassing rustix entirely) ===
+$ gcc -O2 -o t_fionread t_fionread.c && ./t_fionread
+ioctl ret=0 n=-1294967296 (as unsigned=3000000000)
+expected size=3000000000, n as u32 wrap=3000000000
+
+Confirms the kernel's real FIONREAD behavior on a 3,000,000,000-byte sparse regular file: it writes
+back a raw c_int of -1294967296, whose bit pattern reinterpreted as u32 correctly recovers
+3000000000 (the documented "wrapped value" rustix's own doc comment promises) - rustix's bug is
+purely in how it widens that already-wrapped c_int into a u64 (sign-extends instead of
+zero-extending through u32).
+
+=== just test (this candidate's own self-contained justfile, run from a fresh clone) ===
+Ran successfully end-to-end: clone -> reproduce-before (REPRODUCED, exit 1) -> apply -> 
+reproduce-after (did not reproduce, exit 0).
+
+=== Test suite (cargo test, default features, in the working worktree) ===
+Before fix: 22 passed, 0 failed, 1 ignored (the single test in tests/backends.rs, pre-existing
+`#[ignore] // TODO: re-enable until tempfile is updated`, unrelated to this candidate).
+After fix:  22 passed, 0 failed, 1 ignored (identical).

@@ -1,0 +1,82 @@
+=== Approach 1: debug-assertions build, existing exhaustive + boundary-value test ===
+$ cd ___BUGHUNT___/_worktrees/091
+$ cargo test --features "std,all-apis,use-libc" dec_int
+...
+     Running tests/path/main.rs (target/debug/deps/path-e7ccead072c6fa5e)
+running 1 test
+test dec_int::test_dec_int ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+
+(tests/path/dec_int.rs's test_dec_int exhaustively checks every i16/u16 value plus
+u8::MAX/i8::MIN/u16::MAX/i16::MIN/u32::MAX/i32::MIN/u64::MAX/i64::MIN/usize::MAX/isize::MIN
+against `format!("{i}")` - i.e. every digit-count boundary DecInt::new can ever hit for every
+Integer impl, run under a debug-assertions build where any arithmetic overflow or the
+`unreachable_unchecked()` guard misfiring would abort/produce wrong output.)
+
+=== Approach 2: standalone boundary-value repro crate against the public API ===
+$ cd /tmp/decint_repro && cargo run
+   Compiling rustix v1.1.5 (.../___BUGHUNT___/_worktrees/091)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.30s
+     Running `target/debug/decint_repro`
+OK: DecInt::new(0) = "0"
+OK: DecInt::new(1) = "1"
+OK: DecInt::new(-1) = "-1"
+OK: DecInt::new(9223372036854775807) = "9223372036854775807"
+OK: DecInt::new(-9223372036854775808) = "-9223372036854775808"
+OK: DecInt::new(18446744073709551615) = "18446744073709551615"
+OK: DecInt::new(0) = "0"
+OK: DecInt::new(0) = "0"
+OK: DecInt::new(-128) = "-128"
+OK: DecInt::new(127) = "127"
+OK: DecInt::new(255) = "255"
+OK: DecInt::new(0) = "0"
+OK: DecInt::new(-32768) = "-32768"
+OK: DecInt::new(32767) = "32767"
+OK: DecInt::new(65535) = "65535"
+OK: DecInt::new(0) = "0"
+OK: DecInt::new(-2147483648) = "-2147483648"
+OK: DecInt::new(2147483647) = "2147483647"
+OK: DecInt::new(4294967295) = "4294967295"
+OK: DecInt::new(0) = "0"
+OK: DecInt::new(-9223372036854775808) = "-9223372036854775808"
+OK: DecInt::new(9223372036854775807) = "9223372036854775807"
+OK: DecInt::new(18446744073709551615) = "18446744073709551615"
+All boundary checks passed - no panic, no overflow, no unreachable_unchecked hit.
+
+=== Approach 3: Miri, same exhaustive existing test ===
+$ RUSTFLAGS="--cfg rustix_no_linux_raw" cargo +nightly miri test --features "std,fs" --test path -- dec_int
+   Compiling rustix v1.1.5 (.../___BUGHUNT___/_worktrees/091)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.24s
+     Running tests/path/main.rs (target/miri/x86_64-unknown-linux-gnu/debug/build/rustix/14c4b3ddb11e2de4/out/path-14c4b3ddb11e2de4)
+
+running 1 test
+test dec_int::test_dec_int ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1020.62s
+[exited with code 0]
+
+(Miri interprets the same exhaustive/boundary test under its full UB checker - stacked borrows,
+out-of-bounds indexing, and incorrect use of MaybeUninit/transmute/unreachable_unchecked would all
+be caught here even if they didn't happen to panic/abort under a plain debug build. No UB
+reported.)
+
+=== Manual arithmetic check (BUF_LEN / len bound proof) ===
+U64_MAX_STR_LEN = "18446744073709551615".len() = 20 (verified: python3 -c "print(len('18446744073709551615'))" -> 20)
+I64_MAX_STR_LEN = "-9223372036854775808".len() = 20 (verified likewise)
+BUF_LEN = U64_MAX_STR_LEN + 1 = 21
+
+DecInt::new(i) loop trace:
+  len starts at 1.
+  Each loop iteration: len += 1, write one digit. Loop runs exactly `k` times, where `k` is the
+  number of decimal digits in the unsigned magnitude of `i` (k in [1, 20] for every Integer impl,
+  since all of them - i8/i16/i32/i64/u8/u16/u32/u64/isize/usize on 16/32/64-bit targets - fit in
+  a 64-bit magnitude, and u64::MAX has exactly 20 digits).
+  After the loop: len = 1 + k, so len in [2, 21].
+  If is_neg: len += 1, so len in [3, 22] -- but is_neg can only be true together with the signed
+  i64::MIN magnitude case, whose unsigned magnitude 9223372036854775808 has exactly k=19 digits,
+  giving len = 1+19+1 = 21, not 22. (Any smaller-width signed type's MIN has strictly fewer digits,
+  so len is correspondingly smaller.)
+  Maximum achievable len over every Integer impl is therefore exactly 21 == BUF_LEN - the
+  `len > BUF_LEN` guard (and its `unreachable_unchecked()`) is never actually exercised, and
+  `len as u8` is always in [1, 21], nowhere near the u8::MAX (255) truncation point, and never 0
+  (so `NonZeroU8::new(len as u8).unwrap()` never panics either).

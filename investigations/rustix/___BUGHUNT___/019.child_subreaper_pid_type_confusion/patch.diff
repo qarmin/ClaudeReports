@@ -1,0 +1,58 @@
+diff --git a/src/process/prctl.rs b/src/process/prctl.rs
+index 7c56305c..25d43d9f 100644
+--- a/src/process/prctl.rs
++++ b/src/process/prctl.rs
+@@ -16,7 +16,7 @@ use crate::fd::{AsRawFd as _, BorrowedFd, RawFd};
+ use crate::ffi::{c_int, c_uint, c_void, CStr};
+ use crate::io;
+ use crate::prctl::*;
+-use crate::process::{Pid, RawPid};
++use crate::process::Pid;
+ use crate::signal::Signal;
+ use crate::utils::{as_mut_ptr, as_ptr};
+ 
+@@ -840,16 +840,21 @@ const PR_GET_CHILD_SUBREAPER: c_int = 37;
+ 
+ /// Get the `child subreaper` setting of the calling process.
+ ///
++/// The kernel only tracks this as a boolean (`PR_GET_CHILD_SUBREAPER` writes
++/// back `0` or `1`, never a real pid - see `kernel/sys.c`'s
++/// `is_child_subreaper`) - there is no pid associated with this setting at
++/// all.
++///
+ /// # References
+ ///  - [`prctl(PR_GET_CHILD_SUBREAPER,…)`]
+ ///
+ /// [`prctl(PR_GET_CHILD_SUBREAPER,…)`]: https://man7.org/linux/man-pages/man2/prctl.2.html
+ #[inline]
+ #[doc(alias = "PR_GET_CHILD_SUBREAPER")]
+-pub fn child_subreaper() -> io::Result<Option<Pid>> {
++pub fn child_subreaper() -> io::Result<bool> {
+     unsafe {
+         let r = prctl_get_at_arg2_optional::<c_uint>(PR_GET_CHILD_SUBREAPER)?;
+-        Ok(Pid::from_raw(r as RawPid))
++        Ok(r != 0)
+     }
+ }
+ 
+@@ -857,15 +862,17 @@ const PR_SET_CHILD_SUBREAPER: c_int = 36;
+ 
+ /// Set the `child subreaper` attribute of the calling process.
+ ///
++/// The kernel only tracks this as a boolean (`is_child_subreaper = !!arg2`
++/// in `kernel/sys.c`) - there is no pid associated with this setting at all.
++///
+ /// # References
+ ///  - [`prctl(PR_SET_CHILD_SUBREAPER,…)`]
+ ///
+ /// [`prctl(PR_SET_CHILD_SUBREAPER,…)`]: https://man7.org/linux/man-pages/man2/prctl.2.html
+ #[inline]
+ #[doc(alias = "PR_SET_CHILD_SUBREAPER")]
+-pub fn set_child_subreaper(pid: Option<Pid>) -> io::Result<()> {
+-    let pid = pid.map_or(0_usize, |pid| pid.as_raw_nonzero().get() as usize);
+-    unsafe { prctl_2args(PR_SET_CHILD_SUBREAPER, pid as *mut _) }.map(|_r| ())
++pub fn set_child_subreaper(subreaper: bool) -> io::Result<()> {
++    unsafe { prctl_2args(PR_SET_CHILD_SUBREAPER, subreaper as usize as *mut _) }.map(|_r| ())
+ }
+ 
+ //

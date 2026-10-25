@@ -32,7 +32,7 @@ deterministically and dramatically on the first attempt; no sanitizer/miri/fuzzi
 
 **Confirmed**. Reproduces 3/3 runs, debug build, fully deterministic (identical numeric output
 every run - no dependency on ASLR/thread scheduling/hash order). Also independently confirmed by
-this project's own already-open issue #1289 (linked in `___BUGHUNT___/issues_raw/issues/1289.json`),
+this project's own already-open issue #1289 (linked in `___BUGHUNT___/__issues_raw/issues/1289.json`),
 whose own worked 8x-downscale example matches this candidate's finding exactly.
 
 **Fully reproducible**: **Yes**. The repro drives the real, public `vello_cpu` API end-to-end

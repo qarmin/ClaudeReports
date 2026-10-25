@@ -1,0 +1,47 @@
+diff --git a/crates/egui/src/context.rs b/crates/egui/src/context.rs
+index 9f6518cde..a96cb4990 100644
+--- a/crates/egui/src/context.rs
++++ b/crates/egui/src/context.rs
+@@ -1430,9 +1430,12 @@ impl Context {
+     /// The most important thing is that [`Rect::min`] is approximately correct,
+     /// because that's where the warning will be painted. If you don't know what size to pick, just pick [`Vec2::ZERO`].
+     pub fn check_for_id_clash(&self, id: Id, new_rect: Rect, what: &str) {
+-        let prev_rect = self.pass_state_mut(move |state| state.used_ids.insert(id, new_rect));
++        let (prev_rect, warn_on_id_clash) = self.write(|ctx| {
++            let prev_rect = ctx.viewport().this_pass.used_ids.insert(id, new_rect);
++            (prev_rect, ctx.memory.options.warn_on_id_clash)
++        });
+ 
+-        if !self.options(|opt| opt.warn_on_id_clash) {
++        if !warn_on_id_clash {
+             return;
+         }
+ 
+@@ -1725,9 +1728,6 @@ impl Context {
+             visible,
+         } = widget_rect;
+ 
+-        // previous pass + "highlight next pass" == "highlight this pass"
+-        let highlighted = self.prev_pass_state(|fs| fs.highlight_next_pass.contains(&id));
+-
+         let mut res = Response {
+             ctx: self.clone(),
+             layer_id,
+@@ -1742,11 +1742,16 @@ impl Context {
+ 
+         res.flags.set(Flags::ENABLED, enabled);
+         res.flags.set(Flags::VISIBLE, visible);
+-        res.flags.set(Flags::HIGHLIGHTED, highlighted);
+ 
+         self.write(|ctx| {
+             let viewport = ctx.viewports.entry(ctx.viewport_id()).or_default();
+ 
++            // previous pass + "highlight next pass" == "highlight this pass"
++            res.flags.set(
++                Flags::HIGHLIGHTED,
++                viewport.prev_pass.highlight_next_pass.contains(&id),
++            );
++
+             res.flags.set(
+                 Flags::CONTAINS_POINTER,
+                 viewport.interact_widgets.contains_pointer.contains(&id),

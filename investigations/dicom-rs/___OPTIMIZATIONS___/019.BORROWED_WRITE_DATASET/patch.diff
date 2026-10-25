@@ -1,5 +1,5 @@
 diff --git a/object/src/mem.rs b/object/src/mem.rs
-index f403b109..0b92bc08 100644
+index f403b109..f2244ebb 100644
 --- a/object/src/mem.rs
 +++ b/object/src/mem.rs
 @@ -78,7 +78,7 @@ use dicom_encoding::{TransferSyntax, encode::EncodeTo, text::SpecificCharacterSe
@@ -41,7 +41,7 @@ index f403b109..0b92bc08 100644
  
              Ok(())
          } else {
-@@ -2000,14 +2002,60 @@ where
+@@ -2000,14 +2002,48 @@ where
              let mut dset_writer =
                  DataSetWriter::with_ts_cs(to, ts, cs).context(CreatePrinterSnafu)?;
  
@@ -58,20 +58,8 @@ index f403b109..0b92bc08 100644
 +        }
 +    }
 +
-+    // ---- BEGIN comparison-only code, not part of candidate 019's real fix ----
-+    //
-+    // This is the OTHER approach discussed in issue #641: a `self`-consuming duplicate of
-+    // `write_dataset_with_ts_cs`, matching what the issue's own body originally proposed
-+    // (`write_dataset_with_ts_cs2`) - added here ONLY to measure, empirically, how it compares
-+    // to the borrowed approach above (which is what this candidate actually recommends, per the
-+    // maintainer's own stated preference in the issue thread - see RESULT.md). Whoever picks a
-+    // real fix from this candidate should delete this block; it exists purely so RESULT.md's
-+    // comparison numbers are backed by real code, not a guess.
-+    //
-+    // Uses the EXISTING owned `IntoTokens for InMemDicomObject<D>` impl (object/src/tokens.rs,
-+    // untouched by this patch) - consuming `self` all the way through already avoids cloning,
-+    // for the same reason the borrowed path does: `InMemDicomObject<D>: IntoIterator` yields
-+    // owned elements by moving them out of the underlying map, no `.cloned()` needed.
++    // ---- BEGIN comparison-only code, not part of candidate 019's real fix - delete before merging ----
++    // The other approach from issue #641: a self-consuming duplicate of write_dataset_with_ts_cs, added only to measure against the borrowed version above (see RESULT.md).
 +    pub fn write_dataset_with_ts_cs2<W>(
 +        self,
 +        to: W,
@@ -104,7 +92,7 @@ index f403b109..0b92bc08 100644
  
      /// Write this object's data set into the given printer,
      /// with the specified transfer syntax and character set,
-@@ -2031,9 +2079,8 @@ where
+@@ -2031,9 +2067,8 @@ where
              DataSetWriter::with_ts_cs_options(to, ts, cs, options).context(CreatePrinterSnafu)?;
          let required_options = IntoTokensOptions::new(self.charset_changed);
  
@@ -116,7 +104,7 @@ index f403b109..0b92bc08 100644
              .context(PrintDataSetSnafu)?;
  
          Ok(())
-@@ -2056,6 +2103,14 @@ where
+@@ -2056,6 +2091,14 @@ where
          self.write_dataset_with_ts_cs(to, ts, SpecificCharacterSet::default())
      }
  
@@ -131,7 +119,7 @@ index f403b109..0b92bc08 100644
      /// Write this object's data set into the given writer,
      /// with the specified transfer syntax,
      /// without preamble, magic code, nor file meta group.
-@@ -2421,6 +2476,7 @@ mod tests {
+@@ -2421,6 +2464,7 @@ mod tests {
          encode::{EncoderFor, implicit_le::ImplicitVRLittleEndianEncoder},
      };
      use dicom_parser::StatefulDecoder;
@@ -140,7 +128,7 @@ index f403b109..0b92bc08 100644
      fn assert_obj_eq<D>(obj1: &InMemDicomObject<D>, obj2: &InMemDicomObject<D>)
      where
 diff --git a/object/src/tokens.rs b/object/src/tokens.rs
-index e32a4436..0d5c9206 100644
+index e32a4436..c336ad4b 100644
 --- a/object/src/tokens.rs
 +++ b/object/src/tokens.rs
 @@ -1,8 +1,13 @@
@@ -159,29 +147,12 @@ index e32a4436..0d5c9206 100644
  
  /// A stream of tokens from a DICOM object.
  pub struct InMemObjectTokens<E> {
-@@ -116,3 +121,103 @@ where
+@@ -116,3 +121,84 @@ where
          InMemObjectTokens::new_with_options(self.into_iter().cloned(), options)
      }
  }
 +
-+/// Write this object's data set directly to a [`DataSetWriter`],
-+/// without cloning primitive values, pixel data fragments, or the offset table first.
-+///
-+/// This produces the same token stream that `IntoTokens for &InMemDicomObject` above would
-+/// (including the same [`IntoTokensOptions::force_invalidate_sq_length`] propagation rules,
-+/// and the same pre-existing quirk that encapsulated pixel data fragments and the offset
-+/// table never have their own item length invalidated regardless of `options` - confirmed by
-+/// reading `ItemValueTokens`/`OffsetTableItemTokens` in `dicom_parser`, not assumed), but
-+/// reaches straight into the writer's borrowed methods
-+/// ([`DataSetWriter::write_primitive_value_borrowed`],
-+/// [`DataSetWriter::write_item_value_borrowed`],
-+/// [`DataSetWriter::write_offset_table_borrowed`]) for the three payload-carrying token kinds,
-+/// instead of producing an owned [`DataToken`] (and thus cloning the value) for each one first.
-+///
-+/// This is the borrowing counterpart discussed in
-+/// <https://github.com/Enet4/dicom-rs/issues/641>: since the object is only ever borrowed
-+/// here, writing a large object (e.g. one with 1 GB of native pixel data) no longer needs a
-+/// second, transient clone of that data to reach the writer.
++/// Write this object's data set directly to a [`DataSetWriter`], without cloning primitive values, pixel data fragments, or the offset table first (borrowing counterpart of `IntoTokens for &InMemDicomObject`, see <https://github.com/Enet4/dicom-rs/issues/641>).
 +pub(crate) fn write_dataset_borrowed<W, E, D>(
 +    writer: &mut DataSetWriter<W, E>,
 +    obj: &InMemDicomObject<D>,
@@ -234,8 +205,7 @@ index e32a4436..0d5c9206 100644
 +        Value::PixelSequence(seq) => {
 +            writer.write(DataToken::PixelSequenceStart)?;
 +
-+            // offset table: always its own item, length never invalidated
-+            // (matches OffsetTableItemTokens, which ignores `options` entirely)
++            // offset table: always its own item, length never invalidated regardless of `options`
 +            let offset_table = seq.offset_table();
 +            writer.write(DataToken::ItemStart {
 +                len: Length(offset_table.len() as u32 * 4),
@@ -245,8 +215,7 @@ index e32a4436..0d5c9206 100644
 +            }
 +            writer.write(DataToken::ItemEnd)?;
 +
-+            // fragments: also never invalidated regardless of `options` (same reasoning as
-+            // the offset table above)
++            // fragments: also never invalidated regardless of `options` (same as the offset table above)
 +            for fragment in seq.fragments() {
 +                let bytes: &[u8] = fragment.as_slice();
 +                writer.write(DataToken::ItemStart {
@@ -264,7 +233,7 @@ index e32a4436..0d5c9206 100644
 +    Ok(())
 +}
 diff --git a/parser/src/dataset/write.rs b/parser/src/dataset/write.rs
-index 751e8a06..2c18588f 100644
+index 751e8a06..5369c929 100644
 --- a/parser/src/dataset/write.rs
 +++ b/parser/src/dataset/write.rs
 @@ -9,7 +9,7 @@
@@ -276,34 +245,21 @@ index 751e8a06..2c18588f 100644
  use dicom_encoding::TransferSyntax;
  use dicom_encoding::encode::EncodeTo;
  use dicom_encoding::text::SpecificCharacterSet;
-@@ -39,6 +39,12 @@ pub enum Error {
+@@ -39,6 +39,9 @@ pub enum Error {
          token: DataToken,
          backtrace: Backtrace,
      },
-+    /// A borrowed primitive value was given without an introducing element header.
-+    /// Sibling of `UnexpectedToken` for the borrowing write path
-+    /// ([`DataSetWriter::write_primitive_value_borrowed`]), which never holds
-+    /// an owned [`DataToken`] to report back.
++    /// A borrowed primitive value was given without an introducing element header (see `UnexpectedToken`).
 +    #[snafu(display("Unexpected primitive value without element header"))]
 +    UnexpectedPrimitiveValueBorrowed { backtrace: Backtrace },
      #[snafu(display("Could not write element header tagged {}", tag))]
      WriteHeader {
          tag: Tag,
-@@ -431,6 +437,53 @@ where
+@@ -431,6 +434,31 @@ where
          Ok(())
      }
  
-+    /// Write a primitive element value from a borrowed reference,
-+    /// without requiring ownership of the value.
-+    ///
-+    /// Must be called right after a [`DataToken::ElementHeader`] was fed via [`write`],
-+    /// exactly like the owned [`DataToken::PrimitiveValue`] path handled by [`write`] -
-+    /// this method exists purely to avoid cloning `value` beforehand, for callers
-+    /// that already hold a live borrow of it (see [`DataSetWriter::write_item_value_borrowed`]
-+    /// and [`DataSetWriter::write_offset_table_borrowed`] for the other two payload-carrying
-+    /// tokens with the same shape).
-+    ///
-+    /// [`write`]: DataSetWriter::write
++    /// Write a primitive element value from a borrowed reference, without requiring ownership. Must be called right after a [`DataToken::ElementHeader`] was fed via [`write`](DataSetWriter::write).
 +    pub fn write_primitive_value_borrowed(&mut self, value: &PrimitiveValue) -> Result<()> {
 +        let last_de = self
 +            .last_de
@@ -318,24 +274,12 @@ index 751e8a06..2c18588f 100644
 +        Ok(())
 +    }
 +
-+    /// Write pixel data fragment bytes from a borrowed reference,
-+    /// without requiring ownership of the data.
-+    ///
-+    /// Must be called right after a [`DataToken::ItemStart`] was fed via [`write`],
-+    /// exactly like the owned [`DataToken::ItemValue`] path.
-+    ///
-+    /// [`write`]: DataSetWriter::write
++    /// Write pixel data fragment bytes from a borrowed reference, without requiring ownership. Must be called right after a [`DataToken::ItemStart`] was fed via [`write`](DataSetWriter::write).
 +    pub fn write_item_value_borrowed(&mut self, data: &[u8]) -> Result<()> {
 +        self.printer.write_bytes(data).context(WriteValueSnafu)
 +    }
 +
-+    /// Write the encapsulated pixel data's basic offset table from a borrowed reference,
-+    /// without requiring ownership of the table.
-+    ///
-+    /// Must be called right after a [`DataToken::ItemStart`] was fed via [`write`],
-+    /// exactly like the owned [`DataToken::OffsetTable`] path.
-+    ///
-+    /// [`write`]: DataSetWriter::write
++    /// Write the encapsulated pixel data's basic offset table from a borrowed reference, without requiring ownership. Must be called right after a [`DataToken::ItemStart`] was fed via [`write`](DataSetWriter::write).
 +    pub fn write_offset_table_borrowed(&mut self, table: &[u32]) -> Result<()> {
 +        self.printer.encode_offset_table(table).context(WriteValueSnafu)
 +    }

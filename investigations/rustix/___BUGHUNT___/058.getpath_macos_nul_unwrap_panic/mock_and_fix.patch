@@ -1,0 +1,58 @@
+diff --git a/src/backend/libc/fs/syscalls.rs b/src/backend/libc/fs/syscalls.rs
+index c95eaf56..5e7df01f 100644
+--- a/src/backend/libc/fs/syscalls.rs
++++ b/src/backend/libc/fs/syscalls.rs
+@@ -2195,19 +2195,45 @@ pub(crate) fn getpath(fd: BorrowedFd<'_>) -> io::Result<CString> {
+     // instead.
+     let mut buf = vec![0; c::PATH_MAX as usize];
+ 
+-    // From the [macOS `fcntl` manual page]:
+-    // `F_GETPATH` - Get the path of the file descriptor `Fildes`. The argument
+-    //               must be a buffer of size `MAXPATHLEN` or greater.
+-    //
+-    // [macOS `fcntl` manual page]: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fcntl.2.html
+-    unsafe {
+-        ret(c::fcntl(borrowed_fd(fd), c::F_GETPATH, buf.as_mut_ptr()))?;
++    // BUGHUNT MOCK (candidate 058): stand in for a real XNU kernel's `F_GETPATH` response that
++    // fills the entire buffer without ever writing a NUL terminator - this sandbox has no real
++    // Apple hardware/kernel to produce this response for real (see RESULT.md). Only this one
++    // magic raw fd value is mocked; every other fd takes the real, unmodified `fcntl` syscall.
++    if std::os::fd::AsRawFd::as_raw_fd(&fd) == 999_999 {
++        for b in buf.iter_mut() {
++            *b = b'A';
++        }
++    } else if std::os::fd::AsRawFd::as_raw_fd(&fd) == 999_998 {
++        // Boundary variant: path fills every byte except the very last, which the kernel does
++        // write as the NUL terminator - the legitimate maximal case, should NOT panic.
++        let n = buf.len();
++        for b in buf.iter_mut().take(n - 1) {
++            *b = b'A';
++        }
++    } else {
++        // From the [macOS `fcntl` manual page]:
++        // `F_GETPATH` - Get the path of the file descriptor `Fildes`. The argument
++        //               must be a buffer of size `MAXPATHLEN` or greater.
++        //
++        // [macOS `fcntl` manual page]: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fcntl.2.html
++        unsafe {
++            ret(c::fcntl(borrowed_fd(fd), c::F_GETPATH, buf.as_mut_ptr()))?;
++        }
+     }
+ 
+-    let l = buf.iter().position(|&c| c == 0).unwrap();
++    // `F_GETPATH`'s own contract only guarantees the buffer is large enough to hold the path
++    // plus its NUL terminator; it doesn't guarantee the kernel always leaves room to spare, so
++    // don't assume a NUL is always present somewhere in `buf` if the path itself is at or near
++    // `PATH_MAX` in length.
++    let l = match buf.iter().position(|&c| c == 0) {
++        Some(l) => l,
++        None => return Err(io::Errno::NAMETOOLONG),
++    };
+     buf.truncate(l);
+     buf.shrink_to_fit();
+ 
++    // `buf[..l]` contains no `0` byte by construction (`l` is the position of the first one),
++    // so this can never fail.
+     Ok(CString::new(buf).unwrap())
+ }
+ 

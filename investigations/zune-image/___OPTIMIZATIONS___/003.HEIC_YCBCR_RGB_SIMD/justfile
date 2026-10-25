@@ -1,0 +1,59 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# patch.diff is ONLY the source fix (crates/zune-heic/src/hevc_decoder/{utils.rs,utils/avx2.rs,
+# raw_frame.rs}) - the standalone bench driver it's measured with (bench/bench_decode.rs, copied
+# to clone/crates/zune-heic/examples/bench_decode.rs) is harness, not fix, so it's copied in by
+# `clone:` below and present identically for both the baseline and patched builds, rather than
+# folded into patch.diff (the project has no existing example reaching HeifDecoder::decode()
+# with per-iteration timing).
+#
+# testdata/IMG_4862.HEIC is a copy of the repo's own crates/zune-heic/fuzz-samples/IMG_4862.HEIC
+# (already checked in there) - copied here too so this folder needs nothing outside itself.
+#
+# Measured result for this candidate: a small (-1.5%) but paired-confirmed single-core win,
+# not distinguishable from noise on the unpinned multi-core path for this test image - see
+# RESULT.md. `just test` reproduces the same direct-run comparison RESULT.md's own first table
+# shows; for the paired comparison that actually carries the conclusion, run `tools/paired.sh`
+# from the workspace root against bin_baseline/bin_patched after `just test` has built them.
+
+repo_url := "https://github.com/etemesi254/zune-image.git"
+base_commit := "533296caf9a6783691d42b2dfbc623029216cbaf"
+
+test: clone build-baseline apply build-patched bench
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    mkdir -p clone/crates/zune-heic/examples
+    cp "{{justfile_directory()}}/bench/bench_decode.rs" clone/crates/zune-heic/examples/bench_decode.rs
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Baseline build happens BEFORE `apply`, patched build happens AFTER - `test`'s recipe order
+# (clone build-baseline apply build-patched bench) guarantees this.
+build-baseline:
+    cd clone && cargo build --release -p zune-heic --example bench_decode 2>&1 | tail -5
+    mkdir -p ../bin
+    cp clone/target/release/examples/bench_decode ./bin_baseline
+
+build-patched:
+    cd clone && cargo build --release -p zune-heic --example bench_decode 2>&1 | tail -5
+    cp clone/target/release/examples/bench_decode ./bin_patched
+
+# expected_hash_hex pins the known-correct decode of testdata/IMG_4862.HEIC at base_commit -
+# both binaries must reproduce it bit-exact (this candidate is a bit-exact patch, see RESULT.md).
+bench_args := "testdata/IMG_4862.HEIC 20 c56cfb9cd2725d0b"
+
+bench:
+    @echo "=== baseline (before patch) ==="
+    ulimit -c 0 && ./bin_baseline {{bench_args}}
+    @echo "=== patched (after patch) ==="
+    ulimit -c 0 && ./bin_patched {{bench_args}}
+
+clean:
+    rm -rf clone bin_baseline bin_patched

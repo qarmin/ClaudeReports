@@ -1,0 +1,232 @@
+diff --git a/editor/docks/filesystem_dock.cpp b/editor/docks/filesystem_dock.cpp
+index a43fefccd6..a0286f7ffa 100644
+--- a/editor/docks/filesystem_dock.cpp
++++ b/editor/docks/filesystem_dock.cpp
+@@ -2719,7 +2719,7 @@ void FileSystemDock::_file_option(int p_option, const Vector<String> &p_selected
+ 		} break;
+ 
+ 		case FILE_MENU_NEW_RESOURCE: {
+-			new_resource_dialog->popup_create(true);
++			_ensure_new_resource_dialog()->popup_create(true);
+ 		} break;
+ 		case FILE_MENU_NEW_TEXTFILE: {
+ 			String fpath = current_path;
+@@ -2991,6 +2991,18 @@ void FileSystemDock::create_directory(const String &p_path, const String &p_base
+ 	}
+ }
+ 
++// `_resource_created()` dereferences new_resource_dialog directly: it only runs via that dialog's
++// own "create" signal, so it exists by then.
++CreateDialog *FileSystemDock::_ensure_new_resource_dialog() {
++	if (!new_resource_dialog) {
++		new_resource_dialog = memnew(CreateDialog);
++		add_child(new_resource_dialog);
++		new_resource_dialog->set_base_type("Resource");
++		new_resource_dialog->connect("create", callable_mp(this, &FileSystemDock::_resource_created));
++	}
++	return new_resource_dialog;
++}
++
+ ScriptCreateDialog *FileSystemDock::get_script_create_dialog() const {
+ 	return make_script_dialog;
+ }
+@@ -4770,11 +4782,6 @@ FileSystemDock::FileSystemDock() {
+ 	make_shader_dialog->connect("shader_created", callable_mp(this, &FileSystemDock::_script_or_shader_created));
+ 	make_shader_dialog->connect("shader_include_created", callable_mp(this, &FileSystemDock::_script_or_shader_created));
+ 
+-	new_resource_dialog = memnew(CreateDialog);
+-	add_child(new_resource_dialog);
+-	new_resource_dialog->set_base_type("Resource");
+-	new_resource_dialog->connect("create", callable_mp(this, &FileSystemDock::_resource_created));
+-
+ 	conversion_dialog = memnew(ConfirmationDialog);
+ 	conversion_dialog->set_flag(Window::FLAG_RESIZE_DISABLED, true);
+ 	add_child(conversion_dialog);
+diff --git a/editor/docks/filesystem_dock.h b/editor/docks/filesystem_dock.h
+index 5535675936..8e0aedef82 100644
+--- a/editor/docks/filesystem_dock.h
++++ b/editor/docks/filesystem_dock.h
+@@ -327,6 +327,7 @@ private:
+ 	void _folder_removed(const String &p_folder);
+ 
+ 	void _resource_created();
++	CreateDialog *_ensure_new_resource_dialog();
+ 	void _script_or_shader_created(const Ref<Resource> &p_resource);
+ 	void _make_scene_confirm();
+ 	void _rename_operation_confirm();
+diff --git a/editor/docks/inspector_dock.cpp b/editor/docks/inspector_dock.cpp
+index 80781d0c60..0040ee8d29 100644
+--- a/editor/docks/inspector_dock.cpp
++++ b/editor/docks/inspector_dock.cpp
+@@ -231,8 +231,20 @@ void InspectorDock::_menu_option_confirm(int p_option, bool p_confirmed) {
+ 	}
+ }
+ 
++// `_resource_created()` dereferences new_resource_dialog directly: it only runs via that dialog's
++// own "create" signal, so it exists by then.
++CreateDialog *InspectorDock::_ensure_new_resource_dialog() {
++	if (!new_resource_dialog) {
++		new_resource_dialog = memnew(CreateDialog);
++		EditorNode::get_singleton()->get_gui_base()->add_child(new_resource_dialog);
++		new_resource_dialog->set_base_type("Resource");
++		new_resource_dialog->connect("create", callable_mp(this, &InspectorDock::_resource_created));
++	}
++	return new_resource_dialog;
++}
++
+ void InspectorDock::_new_resource() {
+-	new_resource_dialog->popup_create(true);
++	_ensure_new_resource_dialog()->popup_create(true);
+ }
+ 
+ void InspectorDock::_load_resource(const String &p_type) {
+@@ -817,11 +829,6 @@ InspectorDock::InspectorDock(EditorData &p_editor_data) {
+ 	resource_extra_popup->set_item_disabled(-1, true);
+ 	resource_extra_popup->connect(SceneStringName(id_pressed), callable_mp(this, &InspectorDock::_menu_option));
+ 
+-	new_resource_dialog = memnew(CreateDialog);
+-	EditorNode::get_singleton()->get_gui_base()->add_child(new_resource_dialog);
+-	new_resource_dialog->set_base_type("Resource");
+-	new_resource_dialog->connect("create", callable_mp(this, &InspectorDock::_resource_created));
+-
+ 	HBoxContainer *property_tools_hb = memnew(HBoxContainer);
+ 	main_vb->add_child(property_tools_hb);
+ 
+diff --git a/editor/docks/inspector_dock.h b/editor/docks/inspector_dock.h
+index ce1ba8ba11..fe5ae412f6 100644
+--- a/editor/docks/inspector_dock.h
++++ b/editor/docks/inspector_dock.h
+@@ -84,6 +84,7 @@ class InspectorDock : public EditorDock {
+ 
+ 	EditorFileDialog *load_resource_dialog = nullptr;
+ 	CreateDialog *new_resource_dialog = nullptr;
++	CreateDialog *_ensure_new_resource_dialog();
+ 	Button *resource_save_button = nullptr;
+ 	MenuButton *resource_extra_button = nullptr;
+ 	LineEdit *search = nullptr;
+diff --git a/editor/docks/scene_tree_dock.cpp b/editor/docks/scene_tree_dock.cpp
+index 143ca73ac5..09085deb9f 100644
+--- a/editor/docks/scene_tree_dock.cpp
++++ b/editor/docks/scene_tree_dock.cpp
+@@ -695,13 +695,13 @@ void SceneTreeDock::_tool_selected(int p_tool, bool p_confirm_override) {
+ 
+ 				for (int i = 0; i < preferred_types.size(); i++) {
+ 					if (current_edited_scene_root->is_class(preferred_types[i])) {
+-						create_dialog->set_preferred_search_result_type(preferred_types[i]);
++						_ensure_create_dialog()->set_preferred_search_result_type(preferred_types[i]);
+ 						break;
+ 					}
+ 				}
+ 			}
+ 
+-			create_dialog->popup_create(true);
++			_ensure_create_dialog()->popup_create(true);
+ 		} break;
+ 		case TOOL_INSTANTIATE: {
+ 			if (!profile_allow_editing) {
+@@ -845,7 +845,7 @@ void SceneTreeDock::_tool_selected(int p_tool, bool p_confirm_override) {
+ 			}
+ 
+ 			if (selected) {
+-				create_dialog->popup_create(false, true, selected->get_class(), selected->get_name());
++				_ensure_create_dialog()->popup_create(false, true, selected->get_class(), selected->get_name());
+ 			}
+ 		} break;
+ 		case TOOL_EXTEND_SCRIPT: {
+@@ -2774,6 +2774,19 @@ void SceneTreeDock::_shader_created(Ref<Shader> p_shader) {
+ 	EditorNode::get_singleton()->edit_item(p_shader.ptr(), this);
+ }
+ 
++// `_do_create()` and the TOOL_CHANGE_TYPE branch dereference create_dialog directly: both only run
++// via its own "create" signal, so it exists by then.
++CreateDialog *SceneTreeDock::_ensure_create_dialog() {
++	if (!create_dialog) {
++		create_dialog = memnew(CreateDialog);
++		create_dialog->set_base_type("Node");
++		add_child(create_dialog);
++		create_dialog->connect("create", callable_mp(this, &SceneTreeDock::_create));
++		create_dialog->connect("favorites_updated", callable_mp(this, &SceneTreeDock::_update_create_root_dialog).bind(false));
++	}
++	return create_dialog;
++}
++
+ void SceneTreeDock::_script_creation_closed() {
+ 	script_create_dialog->disconnect("script_created", callable_mp(this, &SceneTreeDock::_script_created));
+ 	script_create_dialog->disconnect(SceneStringName(confirmed), callable_mp(this, &SceneTreeDock::_script_creation_closed));
+@@ -5250,12 +5263,6 @@ SceneTreeDock::SceneTreeDock(Node *p_scene_root, EditorSelection *p_editor_selec
+ 	inspect_hovered_node_delay->set_one_shot(true);
+ 	add_child(inspect_hovered_node_delay);
+ 
+-	create_dialog = memnew(CreateDialog);
+-	create_dialog->set_base_type("Node");
+-	add_child(create_dialog);
+-	create_dialog->connect("create", callable_mp(this, &SceneTreeDock::_create));
+-	create_dialog->connect("favorites_updated", callable_mp(this, &SceneTreeDock::_update_create_root_dialog).bind(false));
+-
+ 	rename_dialog = memnew(RenameDialog(scene_tree));
+ 	add_child(rename_dialog);
+ 
+diff --git a/editor/docks/scene_tree_dock.h b/editor/docks/scene_tree_dock.h
+index 26194021d8..2063e24950 100644
+--- a/editor/docks/scene_tree_dock.h
++++ b/editor/docks/scene_tree_dock.h
+@@ -220,6 +220,7 @@ class SceneTreeDock : public EditorDock {
+ 
+ 	void _node_selected();
+ 	void _node_renamed();
++	CreateDialog *_ensure_create_dialog();
+ 	void _script_created(Ref<Script> p_script);
+ 	void _shader_created(Ref<Shader> p_shader);
+ 	void _script_creation_closed();
+diff --git a/editor/scene/canvas_item_editor_plugin.cpp b/editor/scene/canvas_item_editor_plugin.cpp
+index e614d8ab9c..c74ae36b51 100644
+--- a/editor/scene/canvas_item_editor_plugin.cpp
++++ b/editor/scene/canvas_item_editor_plugin.cpp
+@@ -1038,10 +1038,22 @@ void CanvasItemEditor::_selection_menu_hide() {
+ 	selection_menu->reset_size();
+ }
+ 
++// `_create_node()` dereferences add_node_dialog directly: it only runs via that dialog's own
++// "create" signal, so it exists by then.
++CreateDialog *CanvasItemEditor::_ensure_add_node_dialog() {
++	if (!add_node_dialog) {
++		add_node_dialog = memnew(CreateDialog);
++		add_node_dialog->set_base_type("CanvasItem");
++		add_child(add_node_dialog);
++		add_node_dialog->connect("create", callable_mp(this, &CanvasItemEditor::_create_node));
++	}
++	return add_node_dialog;
++}
++
+ void CanvasItemEditor::_add_node_pressed(int p_result) {
+ 	switch (p_result) {
+ 		case ADD_NODE: {
+-			add_node_dialog->popup_create(true);
++			_ensure_add_node_dialog()->popup_create(true);
+ 		} break;
+ 		case ADD_INSTANCE: {
+ 			EditorNode::get_singleton()->get_quick_open_dialog()->popup_dialog(Vector<StringName>{ "PackedScene" }, callable_mp(this, &CanvasItemEditor::_instantiate_scene));
+@@ -6330,11 +6342,6 @@ CanvasItemEditor::CanvasItemEditor() {
+ 	add_child(add_node_menu);
+ 	add_node_menu->connect(SceneStringName(id_pressed), callable_mp(this, &CanvasItemEditor::_add_node_pressed));
+ 
+-	add_node_dialog = memnew(CreateDialog);
+-	add_node_dialog->set_base_type("CanvasItem");
+-	add_child(add_node_dialog);
+-	add_node_dialog->connect("create", callable_mp(this, &CanvasItemEditor::_create_node));
+-
+ 	resample_timer = memnew(Timer);
+ 	resample_timer->set_wait_time(resample_delay);
+ 	resample_timer->set_one_shot(true);
+diff --git a/editor/scene/canvas_item_editor_plugin.h b/editor/scene/canvas_item_editor_plugin.h
+index f2f3c4f7fd..3605be5971 100644
+--- a/editor/scene/canvas_item_editor_plugin.h
++++ b/editor/scene/canvas_item_editor_plugin.h
+@@ -382,6 +382,7 @@ private:
+ 	PopupMenu *selection_menu = nullptr;
+ 	PopupMenu *add_node_menu = nullptr;
+ 	CreateDialog *add_node_dialog = nullptr;
++	CreateDialog *_ensure_add_node_dialog();
+ 
+ 	Control *top_ruler = nullptr;
+ 	Control *left_ruler = nullptr;

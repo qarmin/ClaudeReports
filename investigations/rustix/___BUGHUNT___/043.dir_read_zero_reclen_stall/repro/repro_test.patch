@@ -1,0 +1,97 @@
+diff --git a/src/backend/linux_raw/fs/dir.rs b/src/backend/linux_raw/fs/dir.rs
+index ef02b470..7c05e8ee 100644
+--- a/src/backend/linux_raw/fs/dir.rs
++++ b/src/backend/linux_raw/fs/dir.rs
+@@ -386,4 +386,92 @@ mod tests {
+         assert!(matches!(dir.next(), Some(Err(_))));
+         assert!(dir.next().is_none());
+     }
++    /// Candidate 043 repro: a `d_reclen` of 0 in a `getdents64` record (as a
++    /// buggy/malicious filesystem backend, e.g. a broken FUSE driver, could
++    /// return) makes `Dir::read` loop forever re-parsing the same bytes,
++    /// since `self.pos += d_reclen as usize` never advances. This reaches
++    /// into `Dir`'s private fields the same way `dir_iterator_handles_io_errors`
++    /// above does, to corrupt one byte of a buffer that *was* populated by a
++    /// real `getdents64` syscall on a real directory fd, standing in for what
++    /// a misbehaving kernel-side backend would have returned instead - see
++    /// RESULT.md for why a real FUSE-backed end-to-end repro wasn't buildable
++    /// in this environment.
++    #[test]
++    fn dir_read_zero_reclen_stalls_forever() {
++        let tmp = tempfile::tempdir().unwrap();
++        crate::fs::openat(
++            crate::fs::CWD,
++            tmp.path().join("a"),
++            crate::fs::OFlags::WRONLY | crate::fs::OFlags::CREATE,
++            crate::fs::Mode::RWXU,
++        )
++        .unwrap();
++
++        let fd = crate::fs::openat(
++            crate::fs::CWD,
++            tmp.path(),
++            crate::fs::OFlags::RDONLY | crate::fs::OFlags::CLOEXEC,
++            crate::fs::Mode::empty(),
++        )
++        .unwrap();
++
++        let mut dir = Dir::read_from(&fd).unwrap();
++
++        // Force a real `getdents64` syscall to populate `dir.buf`, consuming
++        // one real entry (e.g. ".") in the process.
++        let _first = dir.next().unwrap().unwrap();
++
++        // Compute the same field offsets `Dir::read` itself computes.
++        let z = linux_dirent64 {
++            d_ino: 0_u64,
++            d_off: 0_i64,
++            d_type: 0_u8,
++            d_reclen: 0_u16,
++            d_name: Default::default(),
++        };
++        let base = as_ptr(&z) as usize;
++        let offsetof_d_reclen = (as_ptr(&z.d_reclen) as usize) - base;
++
++        // Sanity check: there must be at least one more real entry buffered
++        // (directories always have at least "." and ".." entries).
++        assert!(dir.buf.len() - dir.pos >= size_of::<linux_dirent64>());
++
++        // Corrupt just the `d_reclen` field of the *next* real entry to 0,
++        // the same single-field corruption a buggy backend's `getdents64`
++        // response could produce - everything else in the buffer is exactly
++        // what the real kernel returned.
++        let reclen_pos = dir.pos + offsetof_d_reclen;
++        dir.buf[reclen_pos] = 0;
++        dir.buf[reclen_pos + 1] = 0;
++
++        // Drive the real public `read`/`Iterator::next` entry point. With the
++        // bug present, `self.pos` never advances, so every call re-parses the
++        // exact same corrupted record and yields the exact same entry,
++        // indefinitely, with `any_errors` never set - detect that stall and
++        // fail the test (standard repro convention: panics when the bug is
++        // present). A fixed implementation is expected to stop the iteration
++        // (an `Err`, or `None`) well before `ITERATIONS` is reached instead of
++        // silently repeating forever - that counts as the test passing.
++        const ITERATIONS: usize = 50_000;
++        let mut pinned_pos = None;
++        for i in 0..ITERATIONS {
++            let pos_before = dir.pos;
++            match dir.next() {
++                None => return, // fixed: iterator terminated instead of stalling
++                Some(Err(_)) => return, // fixed: errors out instead of stalling
++                Some(Ok(_)) => {
++                    let pinned = *pinned_pos.get_or_insert(pos_before);
++                    if dir.pos != pinned {
++                        // `pos` moved on its own (e.g. a fix that skips the
++                        // corrupted record and continues) - not a stall.
++                        return;
++                    }
++                    assert!(!dir.any_errors, "iteration {i}: any_errors got set but iteration continued returning Ok");
++                }
++            }
++        }
++        panic!(
++            "REPRODUCED: Dir::read returned the same unchanged entry for {ITERATIONS} straight iterations (d_reclen=0 stall)"
++        );
++    }
+ }

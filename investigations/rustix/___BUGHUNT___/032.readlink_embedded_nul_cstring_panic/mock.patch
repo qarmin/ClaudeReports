@@ -1,0 +1,20 @@
+diff --git a/src/backend/linux_raw/fs/syscalls.rs b/src/backend/linux_raw/fs/syscalls.rs
+index 297782d8..7d55ccef 100644
+--- a/src/backend/linux_raw/fs/syscalls.rs
++++ b/src/backend/linux_raw/fs/syscalls.rs
+@@ -963,6 +963,15 @@ fn statfs_to_statvfs(statfs: StatFs) -> StatVfs {
+ #[cfg(feature = "alloc")]
+ #[inline]
+ pub(crate) fn readlink(path: &CStr, buf: &mut [u8]) -> io::Result<usize> {
++    // BUGHUNT MOCK (candidate 032): stand in for a real FUSE daemon's `readlink` callback or a
++    // corrupted on-disk fast-symlink, neither of which this sandbox can run for real (no
++    // /dev/fuse, no root, no loop devices, blocked unprivileged user namespaces). Only this one
++    // magic path is mocked; every other path takes the real, unmodified syscall below.
++    if path.to_bytes() == b"/__bughunt_fake_fuse_target__" {
++        let crafted: &[u8] = b"abc\0def";
++        buf[..crafted.len()].copy_from_slice(crafted);
++        return Ok(crafted.len());
++    }
+     let (buf_addr_mut, buf_len) = slice_mut(buf);
+     unsafe {
+         ret_usize(syscall!(

@@ -1,0 +1,79 @@
+rm -rf clone
+git clone https://github.com/bytecodealliance/rustix.git clone
+Cloning into 'clone'...
+cd clone && git checkout 287214b889865d8e1406a0ee71cc409b6f6191c8
+Note: switching to '287214b889865d8e1406a0ee71cc409b6f6191c8'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at 287214b8 chore: Release rustix version 1.1.5
+rustup target add x86_64-linux-android
+info: component rust-std for target x86_64-linux-android is up to date
+cd repro && (cargo check --target x86_64-linux-android && echo "UNEXPECTED: compiled cleanly before the patch" || echo "REPRODUCED: sendfile unreachable on Android, see E0425 above")
+    Updating crates.io index
+     Locking 7 packages to latest compatible versions
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+   Compiling libc v0.2.189
+   Compiling rustix v1.1.5 (/tmp/candidate_025_scratch/clone)
+    Checking linux-raw-sys v0.12.1
+    Checking bitflags v2.13.2
+    Checking errno v0.3.14
+    Checking sendfile_android_repro v0.1.0 (/tmp/candidate_025_scratch/repro)
+error[E0425]: cannot find function `sendfile` in module `rustix::fs`
+   --> src/main.rs:25:20
+    |
+ 25 |     Ok(rustix::fs::sendfile(out_fd, in_fd, None, 4096)?)
+    |                    ^^^^^^^^ not found in `rustix::fs`
+    |
+note: found an item that was configured out
+   --> /tmp/candidate_025_scratch/clone/src/fs/mod.rs:55:5
+    |
+ 54 | #[cfg(target_os = "linux")]
+    |       ------------------- the item is gated behind the `linux` feature
+ 55 | mod sendfile;
+    |     ^^^^^^^^
+note: found an item that was configured out
+   --> /tmp/candidate_025_scratch/clone/src/fs/mod.rs:121:19
+    |
+120 | #[cfg(target_os = "linux")]
+    |       ------------------- the item is gated behind the `linux` feature
+121 | pub use sendfile::sendfile;
+    |                   ^^^^^^^^
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `sendfile_android_repro` (bin "sendfile_android_repro") due to 1 previous error
+REPRODUCED: sendfile unreachable on Android, see E0425 above
+cd clone && git apply "/tmp/candidate_025_scratch/patch.diff"
+cd repro && cargo check --target x86_64-linux-android
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+    Checking rustix v1.1.5 (/tmp/candidate_025_scratch/clone)
+    Checking sendfile_android_repro v0.1.0 (/tmp/candidate_025_scratch/repro)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.42s
+FIXED: sendfile now resolves and type-checks for Android
+# Sanity: the native host build (unaffected by this bug either way) still works too.
+cd repro && cargo run --release
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+warning: rustix@1.1.5: ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it
+   Compiling libc v0.2.189
+   Compiling rustix v1.1.5 (/tmp/candidate_025_scratch/clone)
+   Compiling linux-raw-sys v0.12.1
+   Compiling bitflags v2.13.2
+   Compiling errno v0.3.14
+   Compiling sendfile_android_repro v0.1.0 (/tmp/candidate_025_scratch/repro)
+    Finished `release` profile [optimized] target(s) in 1.47s
+     Running `target/release/sendfile_android_repro`
+REPRO: rustix::fs::sendfile resolved and type-checked for this target

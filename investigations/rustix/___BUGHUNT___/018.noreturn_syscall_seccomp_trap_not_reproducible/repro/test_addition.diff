@@ -1,0 +1,75 @@
+diff --git a/src/runtime_448b8ad740e2a26f.rs b/src/runtime_448b8ad740e2a26f.rs
+index 698f44f2..1f55f89b 100644
+--- a/src/runtime_448b8ad740e2a26f.rs
++++ b/src/runtime_448b8ad740e2a26f.rs
+@@ -796,6 +796,70 @@ pub const KERNEL_SIGRTMAX: i32 = {
+ mod tests {
+     use super::*;
+ 
++    // BUGHUNT candidate 018 scratch test, temporary - reverted after use.
++    // Real repro for GitHub issue #1433 ("UB if noreturn syscall actually
++    // returns"): install a real seccomp-bpf filter that makes the
++    // `SYS_exit_group` *syscall instruction itself* return (SECCOMP_RET_ERRNO)
++    // instead of actually terminating the process, then call the crate's
++    // real (private, same-crate-testable) `exit_group`. If the noreturn
++    // asm wrapper lacks a trap instruction after `syscall`, execution falls
++    // through into whatever comes next - real UB. If the trap is present (as
++    // code reading found on every arch), the process must die via a signal
++    // instead of ever reaching the `unreachable!()` below.
++    #[test]
++    #[cfg(target_arch = "x86_64")]
++    fn bughunt_018_noreturn_seccomp_repro() {
++        #[repr(C)]
++        struct SockFilter {
++            code: u16,
++            jt: u8,
++            jf: u8,
++            k: u32,
++        }
++        #[repr(C)]
++        struct SockFprog {
++            len: u16,
++            filter: *const SockFilter,
++        }
++        const BPF_LD: u16 = 0x00;
++        const BPF_W: u16 = 0x00;
++        const BPF_ABS: u16 = 0x20;
++        const BPF_JMP: u16 = 0x05;
++        const BPF_JEQ: u16 = 0x10;
++        const BPF_K: u16 = 0x00;
++        const BPF_RET: u16 = 0x06;
++        const SECCOMP_RET_ALLOW: u32 = 0x7fff0000;
++        const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
++        const SYS_EXIT_GROUP: u32 = 231;
++
++        unsafe {
++            let r = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
++            assert_eq!(r, 0, "PR_SET_NO_NEW_PRIVS failed");
++
++            let prog = [
++                SockFilter { code: BPF_LD | BPF_W | BPF_ABS, jt: 0, jf: 0, k: 0 },
++                SockFilter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 0, jf: 1, k: SYS_EXIT_GROUP },
++                SockFilter { code: BPF_RET | BPF_K, jt: 0, jf: 0, k: SECCOMP_RET_ERRNO },
++                SockFilter { code: BPF_RET | BPF_K, jt: 0, jf: 0, k: SECCOMP_RET_ALLOW },
++            ];
++            let fprog = SockFprog { len: prog.len() as u16, filter: prog.as_ptr() };
++            let r = libc::prctl(
++                libc::PR_SET_SECCOMP,
++                libc::SECCOMP_MODE_FILTER,
++                &fprog as *const SockFprog,
++                0,
++                0,
++            );
++            assert_eq!(r, 0, "PR_SET_SECCOMP failed");
++        }
++
++        exit_group(0);
++
++        unreachable!(
++            "BUG (issue #1433): exit_group() returned to safe Rust code after a seccomp filter intercepted the syscall"
++        );
++    }
++
+     #[test]
+     fn test_assumptions() {
+         assert!(libc::SIGSYS < KERNEL_SIGRTMIN);

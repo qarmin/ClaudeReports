@@ -1,0 +1,123 @@
+diff --git a/src/fs/raw_dir.rs b/src/fs/raw_dir.rs
+index 4b14be38..6b23c173 100644
+--- a/src/fs/raw_dir.rs
++++ b/src/fs/raw_dir.rs
+@@ -7,6 +7,8 @@ use crate::fs::FileType;
+ use crate::io;
+ use core::fmt;
+ use core::mem::{align_of, MaybeUninit};
++#[cfg(test)]
++use core::mem::size_of;
+ 
+ #[cfg(not(linux_raw_dep))]
+ use libc::dirent64 as linux_dirent64;
+@@ -252,3 +254,109 @@ impl<'buf, Fd: AsFd> RawDir<'buf, Fd> {
+ /// println!("{item1:?}");
+ /// ```
+ fn _doctest() {}
++
++#[cfg(test)]
++#[cfg(linux_raw_dep)]
++mod tests {
++    use super::*;
++    use crate::fs::{openat, Mode, OFlags, CWD};
++    use crate::utils::as_ptr;
++
++    /// Candidate 076 repro: a `d_reclen` of 0 in a `getdents64` record (as a
++    /// buggy/malicious filesystem backend, e.g. a broken FUSE driver, could
++    /// return) leaves `self.offset` unchanged (`self.offset +=
++    /// usize::from(dirent.d_reclen)`), so `is_buffer_empty()`
++    /// (`self.offset >= self.initialized`) never becomes true again and
++    /// `RawDir::next` re-parses the exact same bytes forever. This reaches
++    /// into `RawDir`'s private fields to corrupt one field of a buffer that
++    /// *was* populated by a real `getdents64` syscall on a real directory
++    /// fd, standing in for what a misbehaving kernel-side backend would have
++    /// returned instead - see RESULT.md for why a real FUSE-backed
++    /// end-to-end repro wasn't buildable in this environment (same
++    /// conclusion as the sibling candidates 043/044 for this exact file/
++    /// bug class).
++    #[test]
++    fn raw_dir_next_zero_reclen_stalls_forever() {
++        let tmp = tempfile::tempdir().unwrap();
++        // A real directory always has at least "." and ".." entries, but
++        // add a real file too so there's more than one real entry past the
++        // very first one `getdents_uninit` returns.
++        openat(
++            CWD,
++            tmp.path().join("a"),
++            OFlags::WRONLY | OFlags::CREATE,
++            Mode::RWXU,
++        )
++        .unwrap();
++
++        let fd = openat(
++            CWD,
++            tmp.path(),
++            OFlags::RDONLY | OFlags::CLOEXEC,
++            Mode::empty(),
++        )
++        .unwrap();
++
++        let mut storage = vec![MaybeUninit::uninit(); 8192];
++        let mut dir = RawDir::new(&fd, storage.as_mut_slice());
++
++        // Force a real `getdents64` syscall to populate `dir.buf`,
++        // consuming one real entry (e.g. ".") in the process.
++        let _first = dir.next().unwrap().unwrap();
++
++        // Sanity check: there must be at least one more real entry buffered
++        // after the one just consumed (a real directory has at least 3
++        // entries here: ".", "..", "a").
++        assert!(dir.initialized - dir.offset >= size_of::<linux_dirent64>());
++
++        // Compute the same field offset `RawDir::next` itself computes via
++        // the `dirent_ptr.cast::<linux_dirent64>()` read.
++        let z = linux_dirent64 {
++            d_ino: 0,
++            d_off: 0,
++            d_reclen: 0,
++            d_type: 0,
++            d_name: Default::default(),
++        };
++        let base = as_ptr(&z) as usize;
++        let offsetof_d_reclen = (as_ptr(&z.d_reclen) as usize) - base;
++
++        // Corrupt just the `d_reclen` field of the *next* real entry to 0,
++        // the same single-field corruption a buggy backend's `getdents64`
++        // response could produce - everything else in the buffer is
++        // exactly what the real kernel returned.
++        let reclen_pos = dir.offset + offsetof_d_reclen;
++        dir.buf[reclen_pos].write(0);
++        dir.buf[reclen_pos + 1].write(0);
++
++        // Drive the real public `next` entry point. With the bug present,
++        // `self.offset` never advances, so every call re-parses the exact
++        // same corrupted record and yields the exact same entry,
++        // indefinitely. Detect that stall and fail the test (standard
++        // repro convention: panics when the bug is present). A fixed
++        // implementation is expected to stop the iteration (an `Err`) well
++        // before `ITERATIONS` is reached instead of silently repeating
++        // forever - that counts as the test passing.
++        const ITERATIONS: usize = 50_000;
++        let mut pinned_offset = None;
++        for _ in 0..ITERATIONS {
++            let offset_before = dir.offset;
++            match dir.next() {
++                None => return,          // fixed: iterator terminated instead of stalling
++                Some(Err(_)) => return,  // fixed: errors out instead of stalling
++                Some(Ok(_)) => {
++                    let pinned = *pinned_offset.get_or_insert(offset_before);
++                    if dir.offset != pinned {
++                        // `offset` moved on its own (e.g. a fix that skips
++                        // the corrupted record and continues) - not a
++                        // stall.
++                        return;
++                    }
++                }
++            }
++        }
++        panic!(
++            "REPRODUCED: RawDir::next returned the same unchanged entry for {ITERATIONS} straight iterations (d_reclen=0 stall)"
++        );
++    }
++}

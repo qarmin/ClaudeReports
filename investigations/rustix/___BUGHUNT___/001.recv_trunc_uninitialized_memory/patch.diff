@@ -1,0 +1,48 @@
+diff --git a/src/net/send_recv/mod.rs b/src/net/send_recv/mod.rs
+index a7056cb3..770bacb1 100644
+--- a/src/net/send_recv/mod.rs
++++ b/src/net/send_recv/mod.rs
+@@ -67,11 +67,17 @@ pub fn recv<Fd: AsFd, Buf: Buffer<u8>>(
+     let (ptr, len) = buf.parts_mut();
+     // SAFETY: `recv` behaves.
+     let recv_len = unsafe { backend::net::syscalls::recv(fd.as_fd(), (ptr, len), flags)? };
+-    // If the `TRUNC` flag is set, the returned `length` may be longer than the
+-    // buffer length.
+-    let min_len = min(len, recv_len);
++    // If the `TRUNC` flag is set, the kernel reports the full length of the
++    // (discarded) message in `recv_len`, but it may not have written that
++    // many bytes - or any bytes at all - into our buffer, so we can't assume
++    // `min(len, recv_len)` bytes were actually initialized in that case.
++    let init_len = if flags.contains(RecvFlags::TRUNC) {
++        0
++    } else {
++        min(len, recv_len)
++    };
+     // SAFETY: `recv` behaves.
+-    unsafe { Ok((buf.assume_init(min_len), recv_len)) }
++    unsafe { Ok((buf.assume_init(init_len), recv_len)) }
+ }
+
+ /// `send(fd, buf, flags)`—Writes data to a socket.
+@@ -146,11 +152,17 @@ pub fn recvfrom<Fd: AsFd, Buf: Buffer<u8>>(
+     // SAFETY: `recvfrom` behaves.
+     let (recv_len, addr) =
+         unsafe { backend::net::syscalls::recvfrom(fd.as_fd(), (ptr, len), flags)? };
+-    // If the `TRUNC` flag is set, the returned `length` may be longer than the
+-    // buffer length.
+-    let min_len = min(len, recv_len);
++    // If the `TRUNC` flag is set, the kernel reports the full length of the
++    // (discarded) message in `recv_len`, but it may not have written that
++    // many bytes - or any bytes at all - into our buffer, so we can't assume
++    // `min(len, recv_len)` bytes were actually initialized in that case.
++    let init_len = if flags.contains(RecvFlags::TRUNC) {
++        0
++    } else {
++        min(len, recv_len)
++    };
+     // SAFETY: `recvfrom` behaves.
+-    unsafe { Ok((buf.assume_init(min_len), recv_len, addr)) }
++    unsafe { Ok((buf.assume_init(init_len), recv_len, addr)) }
+ }
+
+ /// `sendto(fd, buf, flags, addr)`—Writes data to a socket to a specific IP

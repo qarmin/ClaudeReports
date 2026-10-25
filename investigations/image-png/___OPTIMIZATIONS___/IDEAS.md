@@ -26,7 +26,7 @@ Last GitHub issue/PR checked for inspiration: **#716** (repo: image-rs/image-png
 This workspace was created on 2026-09-02 by a discovery-only session. No candidate has been tried
 yet and `SUMMARY.md` is empty, but `README.md` and `harness/encoder_bench/` now exist (`tools/` and
 the root `justfile` still do not - the first real session should copy those in). Base commit
-`05ccdb9c`. The `issues_raw/` cache here is a copy of the one the `bug-hunt` workspace synced the
+`05ccdb9c`. The `__issues_raw/` cache here is a copy of the one the `bug-hunt` workspace synced the
 same day (same repo, same watermark), not a second sync.
 
 **Harnesses - reuse, do not rebuild.** See `README.md` for the full table. In short: the project's

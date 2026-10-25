@@ -1,0 +1,71 @@
+diff --git a/subprojects/gst-devtools/validate/gst/validate/gst-validate-utils.c b/subprojects/gst-devtools/validate/gst/validate/gst-validate-utils.c
+index 66674019cb..0b106b0181 100644
+--- a/subprojects/gst-devtools/validate/gst/validate/gst-validate-utils.c
++++ b/subprojects/gst-devtools/validate/gst/validate/gst-validate-utils.c
+@@ -97,6 +97,19 @@ _next (MathParser * parser)
+   return '\0';
+ }
+ 
++/* Appends @c (already consumed via _next()) to @token at *@pos, bailing out
++ * via longjmp if @token (a fixed PARSER_MAX_TOKEN_SIZE stack buffer) would
++ * overflow - callers only ever grow tokens one gchar at a time via _next(),
++ * so this is the single choke point that needs the bounds check. */
++static void
++_token_push (MathParser * parser, gchar * token, gint * pos, gchar c)
++{
++  if (*pos >= PARSER_MAX_TOKEN_SIZE - 1)
++    _error (parser, "Token is too long!");
++
++  token[(*pos)++] = c;
++}
++
+ static gdouble
+ _read_double (MathParser * parser)
+ {
+@@ -106,30 +119,30 @@ _read_double (MathParser * parser)
+ 
+   c = _peek (parser);
+   if (c == '+' || c == '-')
+-    token[pos++] = _next (parser);
++    _token_push (parser, token, &pos, _next (parser));
+ 
+   while (isdigit (_peek (parser)))
+-    token[pos++] = _next (parser);
++    _token_push (parser, token, &pos, _next (parser));
+ 
+   c = _peek (parser);
+   if (c == '.')
+-    token[pos++] = _next (parser);
++    _token_push (parser, token, &pos, _next (parser));
+ 
+   while (isdigit (_peek (parser)))
+-    token[pos++] = _next (parser);
++    _token_push (parser, token, &pos, _next (parser));
+ 
+   c = _peek (parser);
+   if (c == 'e' || c == 'E') {
+-    token[pos++] = _next (parser);
++    _token_push (parser, token, &pos, _next (parser));
+ 
+     c = _peek (parser);
+     if (c == '+' || c == '-') {
+-      token[pos++] = _next (parser);
++      _token_push (parser, token, &pos, _next (parser));
+     }
+   }
+ 
+   while (isdigit (_peek (parser)))
+-    token[pos++] = _next (parser);
++    _token_push (parser, token, &pos, _next (parser));
+ 
+   token[pos] = '\0';
+ 
+@@ -366,7 +379,7 @@ _read_builtin (MathParser * parser)
+   c = _peek (parser);
+   if (isalpha (c) || c == '_' || c == '$') {
+     while (isalpha (c) || isdigit (c) || c == '_' || c == '$') {
+-      token[pos++] = _next (parser);
++      _token_push (parser, token, &pos, _next (parser));
+       c = _peek (parser);
+     }
+     token[pos] = '\0';

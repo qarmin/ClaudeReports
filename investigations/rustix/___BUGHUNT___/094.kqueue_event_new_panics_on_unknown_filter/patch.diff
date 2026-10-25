@@ -1,0 +1,98 @@
+diff --git a/examples/kq.rs b/examples/kq.rs
+index 7f1b8dd5..3efcddf3 100644
+--- a/examples/kq.rs
++++ b/examples/kq.rs
+@@ -28,7 +28,7 @@ fn main() -> std::io::Result<()> {
+             },
+             EventFlags::ADD,
+             null_mut(),
+-        ),
++        )?,
+         #[cfg(feature = "fs")]
+         Event::new(
+             EventFilter::Vnode {
+@@ -37,7 +37,7 @@ fn main() -> std::io::Result<()> {
+             },
+             EventFlags::ADD | EventFlags::CLEAR,
+             null_mut(),
+-        ),
++        )?,
+         Event::new(
+             EventFilter::Timer {
+                 ident: 0,
+@@ -45,7 +45,7 @@ fn main() -> std::io::Result<()> {
+             },
+             EventFlags::ADD,
+             null_mut(),
+-        ),
++        )?,
+         Event::new(
+             EventFilter::Timer {
+                 ident: 1,
+@@ -53,7 +53,7 @@ fn main() -> std::io::Result<()> {
+             },
+             EventFlags::ADD | EventFlags::ONESHOT,
+             null_mut(),
+-        ),
++        )?,
+     ];
+ 
+     eprintln!("Listening for various events");
+diff --git a/src/event/kqueue.rs b/src/event/kqueue.rs
+index 897d9398..7d48a920 100644
+--- a/src/event/kqueue.rs
++++ b/src/event/kqueue.rs
+@@ -23,8 +23,19 @@ pub struct Event {
+ 
+ impl Event {
+     /// Create a new `Event`.
++    ///
++    /// # Errors
++    ///
++    /// Returns [`io::Errno::INVAL`] if `filter` is [`EventFilter::Unknown`].
++    /// `Unknown` can only be produced by decoding an [`Event`] returned by
++    /// [`kevent`]/[`kevent_timespec`] (via [`Event::filter`]) for a filter
++    /// type this crate doesn't have typed support for - it is never
++    /// something a caller can construct on purpose, but code that decodes an
++    /// `Event` and feeds its filter back into `new` (e.g. a generic
++    /// re-registration pipeline) can genuinely hit this at runtime, so it is
++    /// reported as an error rather than panicking.
+     #[allow(clippy::needless_update)]
+-    pub fn new(filter: EventFilter, flags: EventFlags, udata: *mut c::c_void) -> Event {
++    pub fn new(filter: EventFilter, flags: EventFlags, udata: *mut c::c_void) -> io::Result<Event> {
+         let (ident, data, filter, fflags) = match filter {
+             EventFilter::Read(fd) => (fd as uintptr_t, 0, c::EVFILT_READ, 0),
+             EventFilter::Write(fd) => (fd as _, 0, c::EVFILT_WRITE, 0),
+@@ -65,10 +76,10 @@ impl Event {
+                 flags,
+                 user_flags,
+             } => (ident as _, 0, c::EVFILT_USER, flags.bits() | user_flags.0),
+-            EventFilter::Unknown => panic!("unknown filter"),
++            EventFilter::Unknown => return Err(io::Errno::INVAL),
+         };
+ 
+-        Event {
++        Ok(Event {
+             inner: kevent_t {
+                 ident,
+                 filter: filter as _,
+@@ -84,7 +95,7 @@ impl Event {
+                 },
+                 ..unsafe { zeroed() }
+             },
+-        }
++        })
+     }
+ 
+     /// Get the event flags for this event.
+@@ -225,9 +236,7 @@ pub enum EventFilter {
+ 
+     /// This filter is unknown.
+     ///
+-    /// # Panics
+-    ///
+-    /// Passing this into `Event::new()` will result in a panic.
++    /// Passing this into [`Event::new`] returns [`io::Errno::INVAL`].
+     Unknown,
+ }
+ 

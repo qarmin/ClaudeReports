@@ -1,27 +1,17 @@
 diff --git a/parser/src/stateful/decode.rs b/parser/src/stateful/decode.rs
-index 39e8e856..f7b4c3d6 100644
+index 39e8e856..6ff87ffc 100644
 --- a/parser/src/stateful/decode.rs
 +++ b/parser/src/stateful/decode.rs
-@@ -451,6 +451,27 @@ where
+@@ -451,6 +451,17 @@ where
          Ok(PrimitiveValue::Tags(parts?))
      }
  
-+    /// Resizes `self.buffer` to exactly `len` bytes without zero-initializing any newly-added
-+    /// capacity, for a caller about to immediately fully overwrite it via `read_exact` -
-+    /// `Vec::resize_with(len, Default::default)` pays a real, measured memset cost for content
-+    /// that gets fully discarded a few instructions later (the same anti-pattern as
-+    /// `read_value_ob`'s `smallvec![0u8; len]`, but here `self.buffer` is a persistent scratch
-+    /// buffer reused across many calls, so this also benefits from not re-zeroing capacity that
-+    /// was already reserved by a previous, larger call).
++    /// Resizes `self.buffer` to `len` bytes without zero-initializing it, for a caller about to fully overwrite it via `read_exact`.
 +    #[inline]
 +    fn resize_buffer_uninit(&mut self, len: usize) {
 +        self.buffer.clear();
 +        self.buffer.reserve(len);
-+        // SAFETY: capacity is now >= len (just reserved above); every byte in [0, len) is either
-+        // fully written by the caller's subsequent `read_exact` before being read, or never read
-+        // at all if `read_exact` errors and the error is propagated (u8 has no Drop glue and
-+        // every bit pattern is valid, so an unwritten tail is never unsound to hold, only unsound
-+        // to treat as meaningful data - which no caller of this method does).
++        // SAFETY: capacity is now >= len; bytes are either fully written by read_exact or never read (u8 has no Drop glue, every bit pattern valid).
 +        unsafe {
 +            self.buffer.set_len(len);
 +        }
@@ -30,7 +20,7 @@ index 39e8e856..f7b4c3d6 100644
      fn read_value_ob(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
          // Note: this function always expects a defined length OB value
          // (pixel sequence detection needs to be done by the caller)
-@@ -468,7 +489,7 @@ where
+@@ -468,7 +479,7 @@ where
      fn read_value_strs(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
          let len = self.require_known_length(header)?;
          // sequence of strings
@@ -39,7 +29,7 @@ index 39e8e856..f7b4c3d6 100644
          self.from
              .read_exact(&mut self.buffer)
              .context(ReadValueDataSnafu {
-@@ -511,7 +532,7 @@ where
+@@ -511,7 +522,7 @@ where
          let len = self.require_known_length(header)?;
  
          // a single string
@@ -48,7 +38,7 @@ index 39e8e856..f7b4c3d6 100644
          self.from
              .read_exact(&mut self.buffer)
              .context(ReadValueDataSnafu {
-@@ -561,7 +582,7 @@ where
+@@ -561,7 +572,7 @@ where
          let len = self.require_known_length(header)?;
          // sequence of dates
  
@@ -57,7 +47,7 @@ index 39e8e856..f7b4c3d6 100644
          self.from
              .read_exact(&mut self.buffer)
              .context(ReadValueDataSnafu {
-@@ -600,7 +621,7 @@ where
+@@ -600,7 +611,7 @@ where
          let len = self.require_known_length(header)?;
          // sequence of doubles in text form
  
@@ -66,7 +56,7 @@ index 39e8e856..f7b4c3d6 100644
          self.from
              .read_exact(&mut self.buffer)
              .context(ReadValueDataSnafu {
-@@ -632,7 +653,7 @@ where
+@@ -632,7 +643,7 @@ where
          let len = self.require_known_length(header)?;
          // sequence of datetimes
  
@@ -75,7 +65,7 @@ index 39e8e856..f7b4c3d6 100644
          self.from
              .read_exact(&mut self.buffer)
              .context(ReadValueDataSnafu {
-@@ -669,7 +690,7 @@ where
+@@ -669,7 +680,7 @@ where
      fn read_value_is(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
          let len = self.require_known_length(header)?;
          // sequence of signed integers in text form
@@ -84,7 +74,7 @@ index 39e8e856..f7b4c3d6 100644
          self.from
              .read_exact(&mut self.buffer)
              .context(ReadValueDataSnafu {
-@@ -701,7 +722,7 @@ where
+@@ -701,7 +712,7 @@ where
          let len = self.require_known_length(header)?;
          // sequence of time instances
  

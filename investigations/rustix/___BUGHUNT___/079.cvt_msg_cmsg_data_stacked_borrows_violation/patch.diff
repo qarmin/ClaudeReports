@@ -1,0 +1,116 @@
+diff --git a/src/net/send_recv/msg.rs b/src/net/send_recv/msg.rs
+index 234e9933..db5b9e58 100644
+--- a/src/net/send_recv/msg.rs
++++ b/src/net/send_recv/msg.rs
+@@ -15,6 +15,7 @@ use core::marker::PhantomData;
+ use core::mem::{align_of, size_of, size_of_val, take, MaybeUninit};
+ #[cfg(linux_kernel)]
+ use core::ptr::addr_of;
++use core::ptr::NonNull;
+ use core::{ptr, slice};
+ 
+ use super::{RecvFlags, ReturnFlags, SendFlags, SocketAddrAny};
+@@ -345,15 +346,18 @@ impl<'buf, 'slice, 'fd> SendAncillaryBuffer<'buf, 'slice, 'fd> {
+ 
+         // Get the last header in the buffer.
+         let last_header = leap!(messages::Messages::new(buffer).last());
++        let last_header = last_header.as_ptr();
+ 
+         // Set the header fields.
+-        last_header.cmsg_len = unsafe { c::CMSG_LEN(source_len) } as _;
+-        last_header.cmsg_level = cmsg_level;
+-        last_header.cmsg_type = cmsg_type;
++        unsafe {
++            (*last_header).cmsg_len = c::CMSG_LEN(source_len) as _;
++            (*last_header).cmsg_level = cmsg_level;
++            (*last_header).cmsg_type = cmsg_type;
++        }
+ 
+         // Get the pointer to the payload and copy the data.
+         unsafe {
+-            let payload = c::CMSG_DATA(last_header);
++            let payload = c::CMSG_DATA(last_header.cast_const());
+             ptr::copy_nonoverlapping(source.as_ptr(), payload, source_len as usize);
+         }
+ 
+@@ -535,11 +539,11 @@ impl<'buf> AncillaryDrain<'buf> {
+ 
+     fn advance(
+         read_and_length: &mut Option<(&'buf mut usize, &'buf mut usize)>,
+-        msg: &c::cmsghdr,
++        msg: NonNull<c::cmsghdr>,
+     ) -> Option<RecvAncillaryMessage<'buf>> {
+         // Advance the `read` pointer.
+         if let Some((read, length)) = read_and_length {
+-            let msg_len = msg.cmsg_len as usize;
++            let msg_len = unsafe { (*msg.as_ptr()).cmsg_len as usize };
+             **read += msg_len;
+             **length -= msg_len;
+         }
+@@ -548,17 +552,37 @@ impl<'buf> AncillaryDrain<'buf> {
+     }
+ 
+     /// A closure that converts a message into a [`RecvAncillaryMessage`].
+-    fn cvt_msg(msg: &c::cmsghdr) -> Option<RecvAncillaryMessage<'buf>> {
++    ///
++    /// Takes `msg` as a raw `NonNull<c::cmsghdr>`, not a `&`/`&mut
++    /// c::cmsghdr` reference: `CMSG_DATA(msg)` computes a pointer to the
++    /// message's *payload*, which starts right after the fixed-size
++    /// `cmsghdr` header and can extend arbitrarily far beyond it. Under
++    /// Stacked Borrows, a reference's retag only grants access for the
++    /// byte range covered by its own pointee type (`size_of::<c::cmsghdr>()`
++    /// bytes) - deriving a reference to the header first (even a `&mut`
++    /// one) and then using `.offset()`/pointer arithmetic through it to
++    /// reach bytes past that footprint is itself already a violation,
++    /// regardless of whether the header reference was shared or unique.
++    /// Reproduces deterministically under Miri on every received ancillary
++    /// message, valid or not (see
++    /// ___BUGHUNT___/079.cvt_msg_cmsg_data_stacked_borrows_violation/).
++    /// Working with a raw pointer end-to-end (as the `Messages` iterator
++    /// now yields) avoids ever creating that too-narrow reference, so the
++    /// payload pointer keeps the full-allocation provenance of the
++    /// original buffer instead.
++    fn cvt_msg(msg: NonNull<c::cmsghdr>) -> Option<RecvAncillaryMessage<'buf>> {
+         unsafe {
++            let msg = msg.as_ptr();
++
+             // Get a pointer to the payload.
+-            let payload = c::CMSG_DATA(msg);
+-            let payload_len = msg.cmsg_len as usize - c::CMSG_LEN(0) as usize;
++            let payload = c::CMSG_DATA(msg.cast_const());
++            let payload_len = (*msg).cmsg_len as usize - c::CMSG_LEN(0) as usize;
+ 
+             // Get a mutable slice of the payload.
+             let payload: &'buf mut [u8] = slice::from_raw_parts_mut(payload, payload_len);
+ 
+             // Determine what type it is.
+-            let (level, msg_type) = (msg.cmsg_level, msg.cmsg_type);
++            let (level, msg_type) = ((*msg).cmsg_level, (*msg).cmsg_type);
+             match (level as _, msg_type as _) {
+                 (c::SOL_SOCKET, c::SCM_RIGHTS) => {
+                     // Create an iterator that reads out the file descriptors.
+@@ -951,7 +975,13 @@ mod messages {
+     }
+ 
+     impl<'a> Iterator for Messages<'a> {
+-        type Item = &'a mut c::cmsghdr;
++        // A raw pointer, not `&'a mut c::cmsghdr` - see `cvt_msg`'s own doc
++        // comment in the outer module for why a reference to just the
++        // `cmsghdr` header is the wrong type to hand out here at all: its
++        // Stacked Borrows footprint would only cover the header's own
++        // `size_of`, not the variable-length payload that
++        // `CMSG_DATA`/`cvt_msg` reaches via pointer arithmetic past it.
++        type Item = NonNull<c::cmsghdr>;
+ 
+         #[inline]
+         fn next(&mut self) -> Option<Self::Item> {
+@@ -966,8 +996,7 @@ mod messages {
+                 self.header = None;
+             }
+ 
+-            // SAFETY: The lifetime of `header` is tied to this.
+-            Some(unsafe { &mut *header.as_ptr() })
++            Some(header)
+         }
+ 
+         fn size_hint(&self) -> (usize, Option<usize>) {

@@ -1,0 +1,92 @@
+diff --git a/editor/scene/gui/theme_editor_plugin.cpp b/editor/scene/gui/theme_editor_plugin.cpp
+index 4edca89abd..9cffb2c59f 100644
+--- a/editor/scene/gui/theme_editor_plugin.cpp
++++ b/editor/scene/gui/theme_editor_plugin.cpp
+@@ -3807,7 +3807,25 @@ void ThemeEditor::_preview_scene_dialog_cbk(const String &p_path) {
+ 	preview_tab->connect("scene_reloaded", callable_mp(this, &ThemeEditor::_update_preview_tab).bind(preview_tab));
+ }
+ 
++// The default preview is a sizable widget gallery, but the dock is created at editor startup and
++// usually never opened, so it is only built once the dock is actually shown or otherwise used.
++void ThemeEditor::_ensure_default_preview() {
++	if (default_preview_tab) {
++		return;
++	}
++
++	default_preview_tab = memnew(DefaultThemeEditorPreview);
++	default_preview_tab->set_preview_theme(theme);
++	preview_tabs_content->add_child(default_preview_tab);
++	// Preview tabs are matched with their contents by index, and the default preview is always tab 0.
++	preview_tabs_content->move_child(default_preview_tab, 0);
++	default_preview_tab->connect("control_picked", callable_mp(this, &ThemeEditor::_preview_control_picked));
++	default_preview_tab->set_visible(preview_tabs->get_current_tab() == 0);
++}
++
+ void ThemeEditor::_add_preview_tab(ThemeEditorPreview *p_preview_tab, const String &p_preview_name, const Ref<Texture2D> &p_icon) {
++	_ensure_default_preview();
++
+ 	p_preview_tab->set_preview_theme(theme);
+ 
+ 	preview_tabs->add_tab(p_preview_name, p_icon);
+@@ -3820,6 +3838,8 @@ void ThemeEditor::_add_preview_tab(ThemeEditorPreview *p_preview_tab, const Stri
+ }
+ 
+ void ThemeEditor::_change_preview_tab(int p_tab) {
++	_ensure_default_preview();
++
+ 	ERR_FAIL_INDEX_MSG(p_tab, preview_tabs_content->get_child_count(), "Attempting to open a preview tab that doesn't exist.");
+ 
+ 	for (int i = 0; i < preview_tabs_content->get_child_count(); i++) {
+@@ -3897,6 +3917,8 @@ bool ThemeEditor::can_drop_data_fw(const Point2 &p_point, const Variant &p_data,
+ }
+ 
+ void ThemeEditor::drop_data_fw(const Point2 &p_point, const Variant &p_data, Control *p_from) {
++	_ensure_default_preview();
++
+ 	Dictionary d = p_data;
+ 	Vector<String> files = d["files"];
+ 	const String &path = files[0];
+@@ -3972,6 +3994,12 @@ void ThemeEditor::_notification(int p_what) {
+ 			theme_name->set_custom_minimum_size(Size2(label_min_width, 0));
+ 		} break;
+ 
++		case NOTIFICATION_VISIBILITY_CHANGED: {
++			if (is_visible_in_tree()) {
++				_ensure_default_preview();
++			}
++		} break;
++
+ 		case NOTIFICATION_LAYOUT_DIRECTION_CHANGED:
+ 		case NOTIFICATION_TRANSLATION_CHANGED: {
+ 			_preview_tabs_resized();
+@@ -4099,9 +4127,7 @@ ThemeEditor::ThemeEditor() {
+ 	add_preview_button_ph->set_custom_minimum_size(add_preview_button->get_minimum_size());
+ 	preview_tabbar_hb->add_child(add_preview_button_ph);
+ 
+-	DefaultThemeEditorPreview *default_preview_tab = memnew(DefaultThemeEditorPreview);
+-	preview_tabs_content->add_child(default_preview_tab);
+-	default_preview_tab->connect("control_picked", callable_mp(this, &ThemeEditor::_preview_control_picked));
++	// Contents are created lazily, see _ensure_default_preview().
+ 	preview_tabs->add_tab(TTRC("Default Preview"));
+ 
+ 	preview_scene_dialog = memnew(EditorFileDialog);
+diff --git a/editor/scene/gui/theme_editor_plugin.h b/editor/scene/gui/theme_editor_plugin.h
+index 450cc93949..19df5553eb 100644
+--- a/editor/scene/gui/theme_editor_plugin.h
++++ b/editor/scene/gui/theme_editor_plugin.h
+@@ -448,6 +448,7 @@ class ThemeEditor : public EditorDock {
+ 
+ 	TabBar *preview_tabs = nullptr;
+ 	PanelContainer *preview_tabs_content = nullptr;
++	DefaultThemeEditorPreview *default_preview_tab = nullptr;
+ 	Control *add_preview_button_ph = nullptr;
+ 	Button *add_preview_button = nullptr;
+ 	EditorFileDialog *preview_scene_dialog = nullptr;
+@@ -469,6 +470,7 @@ class ThemeEditor : public EditorDock {
+ 
+ 	void _add_preview_button_cbk();
+ 	void _preview_scene_dialog_cbk(const String &p_path);
++	void _ensure_default_preview();
+ 	void _add_preview_tab(ThemeEditorPreview *p_preview_tab, const String &p_preview_name, const Ref<Texture2D> &p_icon);
+ 	void _change_preview_tab(int p_tab);
+ 	void _remove_preview_tab(int p_tab);

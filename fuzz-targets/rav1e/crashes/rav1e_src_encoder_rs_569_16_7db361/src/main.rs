@@ -1,0 +1,7 @@
+use rav1e::bench::encoder::SegmentationState;
+use rav1e::bench::rdo::DistortionScale;
+
+fn main() {
+    let mut segmentation_state = SegmentationState { enabled: false, update_data: false, update_map: false, preskip: false, last_active_segid: 0u8, features: [[false, false, false, false, false, false, false, false], [false, false, false, false, false, false, false, false], [false, false, false, false, false, false, false, false], [false, false, false, false, false, false, false, false], [false, false, false, false, false, false, false, false], [false, false, false, false, false, false, false, false], [false, false, false, false, false, false, false, false], [false, false, false, false, false, false, false, false]], data: [[0i16, 0i16, 0i16, 0i16, 0i16, 0i16, 0i16, 0i16], [0i16, 0i16, 0i16, 0i16, 0i16, 0i16, 0i16, 0i16], [0i16, 0i16, 0i16, 0i16, 0i16, 0i16, 0i16, 0i16], [0i16, 0i16, 0i16, 0i16, 0i16, 0i16, 0i16, 0i16], [0i16, 0i16, 0i16, 0i16, 0i16, 0i16, 0i16, 0i16], [0i16, 0i16, 0i16, 0i16, 0i16, 0i16, 0i16, 0i16], [0i16, 0i16, 0i16, 0i16, 0i16, 0i16, 0i16, 0i16], [0i16, 0i16, 0i16, 0i16, 0i16, 0i16, 0i16, 0i16]], threshold: [rav1e::bench::rdo::distortion_scale_for(0.0f64, 0.0f64), rav1e::bench::rdo::distortion_scale_for(0.0f64, 1.0f64), DistortionScale::from(0.0f64), DistortionScale::default(), DistortionScale(0u32), rav1e::bench::rdo::distortion_scale_for(0.0f64, 1.0f64), DistortionScale::from(0.0f64)], min_segment: 0u8, max_segment: 10u8 };
+    segmentation_state.update_threshold(1u8, 0usize);
+}

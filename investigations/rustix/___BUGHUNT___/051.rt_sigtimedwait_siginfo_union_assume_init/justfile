@@ -1,0 +1,31 @@
+# Self-contained reproduction attempt for this candidate.
+#
+# Status: Not reproducible - no patch.diff exists, so there is no apply/reproduce-after step.
+# Both binaries here demonstrate that, on this environment's kernel, the real
+# `rt_sigtimedwait` syscall fully overwrites all 128 bytes of the `siginfo_t`
+# buffer (zero leftover "poison" bytes observed across 15 runs), so
+# `MaybeUninit::<Siginfo>::assume_init()` in
+# `src/backend/linux_raw/runtime/syscalls.rs` does not read genuinely
+# uninitialized memory on this kernel.
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Approach 1: real rustix public API end-to-end (rustix::runtime_448b8ad740e2a26f::kernel_sigtimedwait).
+# Approach 2: deterministic explicit-poison heap buffer + the real raw rt_sigtimedwait syscall.
+reproduce:
+    cd repro && cargo build --release
+    echo "=== Approach 1: real rustix public API, 3 runs ==="
+    for i in 1 2 3; do ./repro/target/release/repro; done
+    echo "=== Approach 2: explicit-poison heap buffer + raw syscall, 3 runs ==="
+    for i in 1 2 3; do ./repro/target/release/raw_syscall_poison; done
+
+clean:
+    rm -rf clone repro/target

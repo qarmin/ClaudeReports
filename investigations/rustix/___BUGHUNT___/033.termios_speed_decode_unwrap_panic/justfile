@@ -1,0 +1,45 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in. That
+# means this whole folder can be copied anywhere (including posted standalone, e.g. attached to a
+# GitHub issue) and `just test` still works, with no dependency on the main project checkout this
+# candidate was originally found in.
+#
+# NOTE on this specific candidate: `repro/` does NOT depend on `clone/` at build time (it's a
+# standalone verbatim copy of rustix's real `speed::decode` match arms, resolved by hand for
+# target_os = "illumos"/"haiku" - see repro/src/main.rs's header comment and RESULT.md's "Fully
+# reproducible: No" section for why a real illumos/Haiku/Hurd/AIX execution isn't possible in a
+# plain x86_64 Linux sandbox). `clone` below is kept only so `patch.diff` can be verified to apply
+# and type-check cleanly against the real crate on its real base_commit - not to re-run repro/
+# against it.
+
+repo_url := "git@github.com:bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+# Run the standalone repro - demonstrates the bug via rustix's real, unmodified decode() match
+# logic fed the real illumos/Haiku encoded speed constants (see repro/src/main.rs).
+reproduce-before:
+    ulimit -c 0 && cd repro && cargo run
+
+# Verify patch.diff applies cleanly and type-checks against the real illumos target (requires
+# `rustup target add x86_64-unknown-illumos` once; prebuilt std, no sysroot/linker needed for
+# `cargo check`).
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+    cd clone && cargo check --features "use-libc,all-apis,std" --target x86_64-unknown-illumos
+
+# repro/ doesn't change behavior based on clone/ (see note above) - re-running it here just
+# reconfirms the same deterministic panic; the "after" proof is `apply`'s own `cargo check`.
+reproduce-after:
+    ulimit -c 0 && cd repro && cargo run
+
+clean:
+    rm -rf clone

@@ -1,0 +1,64 @@
+[gd_scene load_steps=2 format=3]
+
+[sub_resource type="GDScript" id="GDScript_1"]
+script/source = "extends Node
+
+
+var running := true
+var tree: Tree
+var root: TreeItem
+var middle_child: TreeItem
+
+
+func _ready() -> void:
+	tree = Tree.new()
+	add_child(tree)
+	root = tree.create_item()
+
+	# Seed a handful of stable children; reader threads will call get_next()/
+	# get_prev() on the one in the middle, which is never itself removed -
+	# this specifically targets the cross-object gap (middle_child's own
+	# next/prev fields are written by root's create_child()/remove_child(),
+	# a DIFFERENT object's lock under the old per-instance-mutex design).
+	for i in range(5):
+		var c := root.create_child()
+		if i == 2:
+			middle_child = c
+
+	var threads: Array[Thread] = []
+	for i in range(6):
+		var t := Thread.new()
+		t.start(_writer_thread)
+		threads.append(t)
+	for i in range(6):
+		var t := Thread.new()
+		t.start(_reader_thread)
+		threads.append(t)
+
+	await get_tree().create_timer(8.0).timeout
+	running = false
+
+	for t in threads:
+		t.wait_to_finish()
+
+	print(\"survived\")
+	get_tree().quit()
+
+
+func _writer_thread() -> void:
+	while running:
+		var c := root.create_child(0)
+		root.remove_child(c)
+
+
+func _reader_thread() -> void:
+	while running:
+		var _n: TreeItem = middle_child.get_next()
+		var _p: TreeItem = middle_child.get_prev()
+		var _c: int = root.get_child_count()
+		var _f: TreeItem = root.get_first_child()
+		var _l: TreeItem = root.get_last_child()
+"
+
+[node name="Main" type="Node"]
+script = SubResource("GDScript_1")

@@ -1,0 +1,65 @@
+diff --git a/crates/zune-inflate/src/streaming_decoder.rs b/crates/zune-inflate/src/streaming_decoder.rs
+index aff212ae..b361ffed 100644
+--- a/crates/zune-inflate/src/streaming_decoder.rs
++++ b/crates/zune-inflate/src/streaming_decoder.rs
+@@ -70,6 +70,13 @@ pub struct StreamingDecoder {
+     max_bytes: usize,
+     // Keep track of bytes shifted out of the buffer to track absolute total
+     window_slid_bytes: usize,
++    // Set right after returning NeedsMoreOutput: the caller's documented contract for that
++    // status is "retry with the SAME chunk, don't advance input", so `stream.position` (an
++    // index into that chunk) must be preserved across the next call instead of being reset.
++    // Every other status implies the caller will present a brand-new chunk slice (or is
++    // terminal), so `stream.position` must reset to 0 for it, since it always starts back
++    // at index 0 of that new slice.
++    awaiting_output_retry: bool,
+ }
+ impl StreamingDecoder {
+     #[must_use]
+@@ -435,8 +442,24 @@ impl StreamingDecoder {
+     pub fn decode_chunk(
+         &mut self, chunk: &[u8], is_final_chunk: bool, out_block: &mut [u8],
+     ) -> DecodeStatus {
+-        // Update the bit reader with the new slice
+-        self.stream.update_chunk(is_final_chunk);
++        // `stream.update_chunk` resets `stream.position` (an index into `chunk`), which is
++        // correct for a fresh chunk but must be skipped on a NeedsMoreOutput retry, where the
++        // caller is contractually required to re-present the SAME chunk slice - see
++        // `awaiting_output_retry`'s doc comment on the struct field.
++        if !self.awaiting_output_retry {
++            self.stream.update_chunk(is_final_chunk);
++        }
++
++        let status = self.decode_chunk_inner(chunk, is_final_chunk, out_block);
++
++        self.awaiting_output_retry = matches!(status, DecodeStatus::NeedsMoreOutput { .. });
++
++        status
++    }
++
++    fn decode_chunk_inner(
++        &mut self, chunk: &[u8], is_final_chunk: bool, out_block: &mut [u8],
++    ) -> DecodeStatus {
+         self.is_final_chunk = is_final_chunk;
+ 
+         loop {
+diff --git a/crates/zune-inflate/src/streaming_decoder/streaming_bitstream.rs b/crates/zune-inflate/src/streaming_decoder/streaming_bitstream.rs
+index f8072940..a4bf8b8f 100644
+--- a/crates/zune-inflate/src/streaming_decoder/streaming_bitstream.rs
++++ b/crates/zune-inflate/src/streaming_decoder/streaming_bitstream.rs
+@@ -29,8 +29,15 @@ impl StreamingBitStreamReader {
+         Self::default()
+     }
+ 
++    /// Announce a new chunk slice to the reader.
++    ///
++    /// Must be called once for every genuinely new chunk (`position` indexes into that
++    /// chunk and is reset to 0 here) - but must NOT be called again when the caller is
++    /// re-presenting the SAME chunk slice (e.g. retrying after `NeedsMoreOutput`), or the
++    /// in-progress position within that chunk would be lost.
+     pub fn update_chunk(&mut self, is_final: bool) {
+         self.is_final = is_final;
++        self.position = 0;
+         // Wipe out any "Ghost Bytes" trapped in the buffer
+         self.buffer &= (1_u64 << self.bits_left) - 1;
+     }

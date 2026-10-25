@@ -1,0 +1,39 @@
+# Self-contained reproduction attempt for this candidate.
+#
+# Status: Not reproducible - no patch.diff exists, so there is no apply/reproduce-after step.
+# `io_sweep` exercises rustix's real public API for the NetBSD-gated code Miri CAN actually
+# execute on this target (plain, non-ABI-versioned libc symbols); `unsupported_sweep` documents
+# (does not "pass") the NetBSD-gated sites Miri cannot execute at all on this target, because
+# NetBSD's own libc exposes them only under ABI-versioned symbol names (`__fstat50`, `kqueue` has
+# no shim, `uname` has no shim) that Miri's `shims/unix/netbsd/foreign_items.rs` doesn't implement.
+# Requires: rustup with the `nightly` toolchain's `miri` component and the
+# `x86_64-unknown-netbsd` target's `rust-std`/`rust-src` already available (`rustup target add
+# x86_64-unknown-netbsd`, `rustup component add miri --toolchain nightly`).
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+test: clone check-layout io-sweep unsupported-sweep
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+
+check-layout:
+    echo "=== cargo check --tests --target x86_64-unknown-netbsd (static_assertions layout checks) ==="
+    cd clone && cargo check --target x86_64-unknown-netbsd --tests --lib \
+        --features "std,fs,net,event,time,process,thread,mount,pipe,termios,shm,system,use-libc"
+
+io-sweep:
+    echo "=== Real end-to-end Miri cross-interpretation: paths Miri CAN execute on netbsd ==="
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-unknown-netbsd --bin io_sweep
+
+unsupported-sweep:
+    echo "=== Miri cross-interpretation attempts of the 3 most-promising suspects - each fails with Miri's own 'unsupported operation', not a rustix bug ==="
+    -cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-unknown-netbsd --bin unsupported_sweep -- fstat
+    -cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-unknown-netbsd --bin unsupported_sweep -- kqueue
+    -cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-unknown-netbsd --bin unsupported_sweep -- uname
+
+clean:
+    rm -rf clone repro/target

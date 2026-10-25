@@ -1,0 +1,107 @@
+/*
+ * CDDL HEADER START
+ *
+ * The contents of this file are subject to the terms of the
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
+ *
+ * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
+ * or http://www.opensolaris.org/os/licensing.
+ * See the License for the specific language governing permissions
+ * and limitations under the License.
+ *
+ * When distributing Covered Code, include this CDDL HEADER in each
+ * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
+ * If applicable, add the following below this CDDL HEADER, with the
+ * fields enclosed by brackets "[]" replaced with your own identifying
+ * information: Portions Copyright [yyyy] [name of copyright owner]
+ *
+ * CDDL HEADER END
+ */
+	glist = &portq->portq_get_list;	/* use temporary event queue */
+	tnent = portq->portq_nent;	/* get current number of events */
+	portq->portq_nent = 0;		/* no events in the port event queue */
+	portq->portq_flags |= PORTQ_WAIT_EVENTS; /* detect incoming events */
+	mutex_exit(&portq->portq_mutex);    /* event queue can be reused now */
+
+	if (model == DATAMODEL_NATIVE) {
+		eventsz = sizeof (port_event_t);
+
+		if (nmax == 0) {
+			kevp = NULL;
+		} else {
+			kevp = kmem_alloc(eventsz * nmax, KM_NOSLEEP);
+			if (kevp == NULL) {
+				if (nmax > pp->port_max_list)
+					nmax = pp->port_max_list;
+				kevp = kmem_alloc(eventsz * nmax, KM_SLEEP);
+			}
+		}
+
+		results = kevp;
+		lev = NULL;	/* start with first event in the queue */
+		for (nevents = 0; nevents < nmax; ) {
+			pev = port_get_kevent(glist, lev);
+			if (pev == NULL)	/* no more events available */
+				break;
+			if (pev->portkev_flags & PORT_KEV_FREE) {
+				/* Just discard event */
+				list_remove(glist, pev);
+				pev->portkev_flags &= ~(PORT_CLEANUP_DONE);
+				if (PORT_FREE_EVENT(pev))
+					port_free_event_local(pev, 0);
+				tnent--;
+				continue;
+			}
+
+			/* move event data to copyout list */
+			if (port_copy_event(&kevp[nevents], pev, glist)) {
+				/*
+				 * Event can not be delivered to the
+				 * current process.
+	} else {
+		mutex_exit(&portq->portq_mutex);
+	}
+
+	/* now copyout list of user event structures to user space */
+	if (nevents) {
+		if (copyout(results, uevp, nevents * eventsz))
+			error = EFAULT;
+	}
+	kmem_free(results, eventsz * nmax);
+
+ *    event source to update events, to free local resources associated with
+ *    the event or to deny the delivery of the event.
+ */
+static int
+port_copy_event(port_event_t *puevp, port_kevent_t *pkevp, list_t *list)
+{
+	int	free_event = 0;
+	int	flags;
+	int	error;
+
+	puevp->portev_source = pkevp->portkev_source;
+	puevp->portev_object = pkevp->portkev_object;
+	puevp->portev_user = pkevp->portkev_user;
+	puevp->portev_events = pkevp->portkev_events;
+
+	/* remove event from the queue */
+	list_remove(list, pkevp);
+
+
+----
+Full file fetched 2026-10-01 from:
+https://raw.githubusercontent.com/illumos/illumos-gate/master/usr/src/uts/common/fs/portfs/port.c
+(illumos-gate, master branch at fetch time)
+
+Key facts cited in RESULT.md:
+- line ~1392: `kevp = kmem_alloc(eventsz * nmax, KM_NOSLEEP);` (and the KM_SLEEP retry a few lines
+  below) - allocates the per-call buffer of `port_event_t` structs with the plain (non-zeroing)
+  kernel allocator.
+- lines 1592-1601 (`port_copy_event()`): writes only `puevp->portev_source`, `portev_object`,
+  `portev_user`, `portev_events` into each slot - `portev_pad` is never assigned anywhere in this
+  file.
+- line ~1541: `copyout(results, uevp, nevents * eventsz)` copies that same buffer (including the
+  untouched `portev_pad` bytes) directly to the calling userland process.
+- `port_get()` is a thin wrapper around `port_getn()` with `max = 1` (see the ioctl dispatch
+  around line 616), so this applies to both `port_get()` and `port_getn()`.

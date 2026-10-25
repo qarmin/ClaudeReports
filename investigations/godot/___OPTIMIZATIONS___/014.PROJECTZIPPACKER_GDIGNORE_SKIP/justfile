@@ -1,0 +1,74 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything needed is either in this folder or fetched by `just clone` into ./clone (gitignored).
+# `bench/generate_repro_project.py` builds the synthetic repro project (a `.gdignore`-marked
+# directory with 15,000 files, reused from candidate 009's own generator) fresh each time.
+# `ProjectZIPPacker::pack_project_zip()` is not GDScript-exposed, so the bench harness is a
+# temporary compiled TEST_CASE (`bench/scratch_bench_test.cpp`) copied into `tests/core/io/` in
+# the clone for BOTH the baseline and patched builds (it is bench harness, not part of the fix
+# itself, and is not included in patch.diff).
+#
+# This is a from-scratch Godot build (SCons) - expect ~15-25 min per build on a modern multi-core
+# machine, not a Rust/cargo build. scons isn't preinstalled everywhere - `pip3 install scons
+# --break-system-packages` if `command -v scons` fails.
+
+repo_url := "https://github.com/godotengine/godot.git"
+base_commit := "9552dfb6859a1aaba1e570b8e0ef5c599b830f19"
+
+test: clone gen-repro build-baseline bench-baseline apply build-patched bench-patched
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    cp "{{justfile_directory()}}/bench/scratch_bench_test.cpp" clone/tests/core/io/test_project_zip_packer_scratch.cpp
+
+gen-repro:
+    rm -rf repro_project
+    python3 "{{justfile_directory()}}/bench/generate_repro_project.py" repro_project
+
+build-baseline:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v scons >/dev/null 2>&1 || pip3 install scons --break-system-packages
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+    cp bin/godot.linuxbsd.editor.x86_64 "{{justfile_directory()}}/bin_baseline"
+
+apply:
+    git -C clone apply "{{justfile_directory()}}/patch.diff"
+
+build-patched:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="$HOME/.local/bin:$PATH"
+    cd clone
+    scons -j"$(nproc)" platform=linuxbsd target=editor tests=yes
+    cp bin/godot.linuxbsd.editor.x86_64 "{{justfile_directory()}}/bin_patched"
+
+# The scratch TEST_CASE hardcodes "/tmp/repro_014" as the project path it calls
+# ProjectSettings::setup() against - point gen-repro's output there, or edit the scratch test's
+# own path constant if reusing a different location.
+bench-baseline:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -rf /tmp/repro_014
+    cp -r "{{justfile_directory()}}/repro_project" /tmp/repro_014
+    echo "=== baseline (before patch) ==="
+    for i in 1 2 3; do
+      "{{justfile_directory()}}/bin_baseline" --headless --test --test-case="*pack_project_zip*" 2>&1 | grep "total_us\|zip_entries"
+    done
+
+bench-patched:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -rf /tmp/repro_014
+    cp -r "{{justfile_directory()}}/repro_project" /tmp/repro_014
+    echo "=== patched (after patch) ==="
+    for i in 1 2 3; do
+      "{{justfile_directory()}}/bin_patched" --headless --test --test-case="*pack_project_zip*" 2>&1 | grep "total_us\|zip_entries"
+    done
+
+clean:
+    rm -rf clone bin_baseline bin_patched repro_project /tmp/repro_014

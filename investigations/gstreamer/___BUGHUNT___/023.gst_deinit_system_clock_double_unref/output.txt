@@ -1,0 +1,101 @@
+=== Approach 1: code trace (gstsystemclock.c) - not a runnable command, see RESULT.md ===
+
+=== Approach 2: existing regression tests, ASAN+UBSAN, main tree's build-asan-fuzz (read-only,
+    same commit 65b9547519, built before this session) ===
+
+$ source build-asan-fuzz/env.sh
+$ export ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 GST_STATE_IGNORE_ELEMENTS=""
+$ ulimit -c 0
+$ ./build-asan-fuzz/subprojects/gstreamer/tests/check/gst_gstdeinit; echo "exit=$?"
+exit=0
+
+$ ./build-asan-fuzz/subprojects/gstreamer/tests/check/gst_gst
+Running suite(s): Gst
+100%: Checks: 6, Failures: 0, Errors: 0
+Check suite gst ran in 0.043s (tests failed: 0)
+exit=0
+
+(This suite includes test_init, test_deinit, test_deinit_sysclock, test_new_pipeline,
+test_new_fakesrc, test_version - test_deinit_sysclock specifically calls
+gst_system_clock_obtain()+gst_object_unref() before letting the test-exit handler call
+gst_deinit(), i.e. it already exercises "someone besides gst_deinit() has independently
+obtained/released the system clock" before the double-unref runs.)
+
+=== Approach 3: standalone minimal repro, built + run entirely inside the isolated worktree
+    (/tmp/bughunt-023-worktree, its own core-only meson build at build-023, clang ASAN+UBSAN) ===
+
+repro.c:
+    #include <gst/gst.h>
+    #include <stdio.h>
+
+    int main(int argc, char **argv) {
+      gst_init(&argc, &argv);
+      printf("init done\n");
+      gst_deinit();
+      printf("deinit done\n");
+      return 0;
+    }
+
+$ export PATH="$HOME/.local/bin:$PATH"
+$ cd /tmp/bughunt-023-worktree
+$ CC=clang CXX=clang++ meson setup build-023 --buildtype=debugoptimized \
+    -Db_sanitize=address,undefined -Db_lundef=false \
+    -Dc_args=-fno-sanitize=function -Dcpp_args=-fno-sanitize=function \
+    -Dbase=disabled -Dgood=disabled -Dugly=disabled -Dbad=disabled -Dlibav=disabled \
+    -Ddevtools=disabled -Drtsp_server=disabled -Ddoc=disabled -Dexamples=disabled \
+    -Dintrospection=disabled -Dgst-examples=disabled -Drs=disabled -Dtests=enabled
+[... configures OK, only "gstreamer" subproject enabled ...]
+
+$ ninja -C build-023 subprojects/gstreamer/tests/check/gst_gstdeinit \
+    subprojects/gstreamer/tests/check/gst_gst
+[... builds OK ...]
+
+$ ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 meson test -C build-023 -v gst_gstdeinit gst_gstsystemclock
+1/2 gstreamer:gst_gstdeinit      OK               0.01s
+2/2 gstreamer:gst_gstsystemclock OK               3.18s
+stdout (gst_gstsystemclock): Running suite(s): GstSystemClock
+100%: Checks: 8, Failures: 0, Errors: 0
+Check suite gst_systemclock ran in 3.139s (tests failed: 0)
+Ok: 2   Fail: 0
+(stderr GST_PLUGIN_LOADING_WARNING about gst-plugin-scanner not being built is expected/harmless -
+this build has no plugins enabled at all, it only exercises core gst.c/gstsystemclock.c)
+
+$ python3 gst-env.py --builddir=build-023 --only-environment > build-023/env.sh
+$ source build-023/env.sh
+$ export ASAN_OPTIONS=detect_leaks=0:abort_on_error=1
+$ ulimit -c 0
+$ clang -fsanitize=address,undefined -g -O0 $(pkg-config --cflags gstreamer-1.0) \
+    repro.c -o repro_worktree $(pkg-config --libs gstreamer-1.0)
+$ for i in $(seq 1 10); do ./repro_worktree; echo "run $i exit=$?"; done
+init done
+deinit done
+run 1 exit=0
+init done
+deinit done
+run 2 exit=0
+init done
+deinit done
+run 3 exit=0
+init done
+deinit done
+run 4 exit=0
+init done
+deinit done
+run 5 exit=0
+init done
+deinit done
+run 6 exit=0
+init done
+deinit done
+run 7 exit=0
+init done
+deinit done
+run 8 exit=0
+init done
+deinit done
+run 9 exit=0
+init done
+deinit done
+run 10 exit=0
+
+No ASAN/UBSAN report in any of the 10 runs. All exited 0.

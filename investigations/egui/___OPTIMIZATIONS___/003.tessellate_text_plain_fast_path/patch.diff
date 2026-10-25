@@ -1,0 +1,42 @@
+diff --git a/crates/epaint/src/tessellator.rs b/crates/epaint/src/tessellator.rs
+index 22ba5c814..4e730cee4 100644
+--- a/crates/epaint/src/tessellator.rs
++++ b/crates/epaint/src/tessellator.rs
+@@ -2318,7 +2318,28 @@ impl Tessellator {
+                     .map(|index| index + index_offset),
+             );
+ 
+-            out.vertices.extend(
++            let is_plain = override_text_color.is_none()
++                && !row_has_color_glyphs
++                && *opacity_factor >= 1.0
++                && *angle == 0.0;
++            if is_plain {
++                // Common case, split out so the per-vertex loop has no loop-invariant branches.
++                out.vertices.extend(row.visuals.mesh.vertices.iter().map(|vertex| {
++                    let Vertex { pos, uv, color } = *vertex;
++                    let color = if color == Color32::PLACEHOLDER {
++                        *fallback_color
++                    } else {
++                        color
++                    };
++                    debug_assert!(color != Color32::PLACEHOLDER, "A placeholder color made it to the tessellator. You forgot to set a fallback color.");
++                    Vertex {
++                        pos: final_row_pos + pos.to_vec2(),
++                        uv: (uv.to_vec2() * uv_normalizer).to_pos2(),
++                        color,
++                    }
++                }));
++            } else {
++                out.vertices.extend(
+                 row.visuals
+                     .mesh
+                     .vertices
+@@ -2360,6 +2381,7 @@ impl Tessellator {
+                         }
+                     }),
+             );
++            }
+ 
+             if *underline != Stroke::NONE {
+                 self.tessellate_line_segment(

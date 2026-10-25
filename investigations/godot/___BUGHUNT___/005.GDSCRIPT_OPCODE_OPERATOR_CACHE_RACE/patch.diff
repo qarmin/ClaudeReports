@@ -1,0 +1,40 @@
+diff --git a/modules/gdscript/gdscript_vm.cpp b/modules/gdscript/gdscript_vm.cpp
+index 0699d9c07c..48d16c9660 100644
+--- a/modules/gdscript/gdscript_vm.cpp
++++ b/modules/gdscript/gdscript_vm.cpp
+@@ -36,6 +36,8 @@
+ #include "core/os/os.h"
+ #include "core/profiling/profiling.h"
+ 
++#include <atomic>
++
+ #ifdef DEBUG_ENABLED
+ 
+ static bool _profile_count_as_native(const Object *p_base_obj, const StringName &p_methodname) {
+@@ -767,7 +769,9 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
+ 				GET_VARIANT_PTR(b, 1);
+ 				GET_VARIANT_PTR(dst, 2);
+ 				// Compute signatures (types of operands) so it can be optimized when matching.
+-				uint32_t op_signature = _code_ptr[ip + 5];
++				// Acquire-load: pairs with the release-store below, so observing a non-zero
++				// signature here also guarantees the ret_type/op_func writes it publishes are visible.
++				uint32_t op_signature = reinterpret_cast<std::atomic<uint32_t> *>(&_code_ptr[ip + 5])->load(std::memory_order_acquire);
+ 				uint32_t actual_signature = (a->get_type() << 8) | (b->get_type());
+ 
+ #ifdef DEBUG_ENABLED
+@@ -799,11 +803,13 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
+ 						op_func(a, b, dst);
+ 
+ 						// Check again in case another thread already set it.
+-						if (_code_ptr[ip + 5] == 0) {
+-							_code_ptr[ip + 5] = actual_signature;
++						if (reinterpret_cast<std::atomic<uint32_t> *>(&_code_ptr[ip + 5])->load(std::memory_order_relaxed) == 0) {
+ 							_code_ptr[ip + 6] = static_cast<int>(ret_type);
+ 							Variant::ValidatedOperatorEvaluator *tmp = reinterpret_cast<Variant::ValidatedOperatorEvaluator *>(&_code_ptr[ip + 7]);
+ 							*tmp = op_func;
++							// Release-store, published last: pairs with the acquire-load above, so
++							// no thread can observe this new signature before ret_type/op_func are visible.
++							reinterpret_cast<std::atomic<uint32_t> *>(&_code_ptr[ip + 5])->store(actual_signature, std::memory_order_release);
+ 						}
+ 					}
+ 					initializer_mutex.unlock();

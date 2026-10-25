@@ -1,0 +1,324 @@
+diff --git a/editor/docks/filesystem_dock.cpp b/editor/docks/filesystem_dock.cpp
+index a43fefccd6..f7ebcdc97f 100644
+--- a/editor/docks/filesystem_dock.cpp
++++ b/editor/docks/filesystem_dock.cpp
+@@ -2689,8 +2689,9 @@ void FileSystemDock::_file_option(int p_option, const Vector<String> &p_selected
+ 			if (!fpath.ends_with("/")) {
+ 				fpath = fpath.get_base_dir();
+ 			}
+-			make_script_dialog->config("Node", fpath.path_join("new_script.gd"), false, false);
+-			make_script_dialog->popup_centered();
++			ScriptCreateDialog *dialog = get_script_create_dialog();
++			dialog->config("Node", fpath.path_join("new_script.gd"), false, false);
++			dialog->popup_centered();
+ 		} break;
+ 
+ 		case FILE_MENU_COPY_PATH: {
+@@ -2827,20 +2828,24 @@ void FileSystemDock::_resource_created() {
+ 
+ 	const String type_name = new_resource_dialog->get_selected_type();
+ 	if (type_name == "Shader") {
+-		make_shader_dialog->config(fpath.path_join("new_shader"), false, false, type_name);
+-		make_shader_dialog->popup_centered();
++		ShaderCreateDialog *dialog = _ensure_shader_create_dialog();
++		dialog->config(fpath.path_join("new_shader"), false, false, type_name);
++		dialog->popup_centered();
+ 		return;
+ 	} else if (type_name == "ShaderInclude") {
+-		make_shader_dialog->config(fpath.path_join("new_shader_include"), false, false, type_name);
+-		make_shader_dialog->popup_centered();
++		ShaderCreateDialog *dialog = _ensure_shader_create_dialog();
++		dialog->config(fpath.path_join("new_shader_include"), false, false, type_name);
++		dialog->popup_centered();
+ 		return;
+ 	} else if (type_name == "VisualShader") {
+-		make_shader_dialog->config(fpath.path_join("new_shader"), false, false, type_name);
+-		make_shader_dialog->popup_centered();
++		ShaderCreateDialog *dialog = _ensure_shader_create_dialog();
++		dialog->config(fpath.path_join("new_shader"), false, false, type_name);
++		dialog->popup_centered();
+ 		return;
+ 	} else if (ClassDB::is_parent_class(type_name, "Script")) {
+-		make_script_dialog->config("Node", fpath.path_join("new_script"), false, false);
+-		make_script_dialog->popup_centered();
++		ScriptCreateDialog *dialog = get_script_create_dialog();
++		dialog->config("Node", fpath.path_join("new_script"), false, false);
++		dialog->popup_centered();
+ 		return;
+ 	}
+ 
+@@ -2991,10 +2996,26 @@ void FileSystemDock::create_directory(const String &p_path, const String &p_base
+ 	}
+ }
+ 
+-ScriptCreateDialog *FileSystemDock::get_script_create_dialog() const {
++ScriptCreateDialog *FileSystemDock::get_script_create_dialog() {
++	if (!make_script_dialog) {
++		make_script_dialog = memnew(ScriptCreateDialog);
++		make_script_dialog->set_title(TTRC("Create Script"));
++		add_child(make_script_dialog);
++		make_script_dialog->connect("script_created", callable_mp(this, &FileSystemDock::_script_or_shader_created));
++	}
+ 	return make_script_dialog;
+ }
+ 
++ShaderCreateDialog *FileSystemDock::_ensure_shader_create_dialog() {
++	if (!make_shader_dialog) {
++		make_shader_dialog = memnew(ShaderCreateDialog);
++		add_child(make_shader_dialog);
++		make_shader_dialog->connect("shader_created", callable_mp(this, &FileSystemDock::_script_or_shader_created));
++		make_shader_dialog->connect("shader_include_created", callable_mp(this, &FileSystemDock::_script_or_shader_created));
++	}
++	return make_shader_dialog;
++}
++
+ void FileSystemDock::set_file_list_display_mode(FileListDisplayMode p_mode) {
+ 	if (p_mode == file_list_display_mode) {
+ 		return;
+@@ -4760,16 +4781,6 @@ FileSystemDock::FileSystemDock() {
+ 	add_child(make_scene_dialog);
+ 	make_scene_dialog->connect(SceneStringName(confirmed), callable_mp(this, &FileSystemDock::_make_scene_confirm));
+ 
+-	make_script_dialog = memnew(ScriptCreateDialog);
+-	make_script_dialog->set_title(TTRC("Create Script"));
+-	add_child(make_script_dialog);
+-	make_script_dialog->connect("script_created", callable_mp(this, &FileSystemDock::_script_or_shader_created));
+-
+-	make_shader_dialog = memnew(ShaderCreateDialog);
+-	add_child(make_shader_dialog);
+-	make_shader_dialog->connect("shader_created", callable_mp(this, &FileSystemDock::_script_or_shader_created));
+-	make_shader_dialog->connect("shader_include_created", callable_mp(this, &FileSystemDock::_script_or_shader_created));
+-
+ 	new_resource_dialog = memnew(CreateDialog);
+ 	add_child(new_resource_dialog);
+ 	new_resource_dialog->set_base_type("Resource");
+diff --git a/editor/docks/filesystem_dock.h b/editor/docks/filesystem_dock.h
+index 5535675936..5df2a5b1f0 100644
+--- a/editor/docks/filesystem_dock.h
++++ b/editor/docks/filesystem_dock.h
+@@ -327,6 +327,7 @@ private:
+ 	void _folder_removed(const String &p_folder);
+ 
+ 	void _resource_created();
++	ShaderCreateDialog *_ensure_shader_create_dialog();
+ 	void _script_or_shader_created(const Ref<Resource> &p_resource);
+ 	void _make_scene_confirm();
+ 	void _rename_operation_confirm();
+@@ -438,7 +439,7 @@ public:
+ 	void focus_on_filter();
+ 	void create_directory(const String &p_path, const String &p_base_dir);
+ 
+-	ScriptCreateDialog *get_script_create_dialog() const;
++	ScriptCreateDialog *get_script_create_dialog();
+ 
+ 	void fix_dependencies(const String &p_for_file);
+ 	void update_all();
+diff --git a/editor/docks/scene_tree_dock.cpp b/editor/docks/scene_tree_dock.cpp
+index 143ca73ac5..7119e2494c 100644
+--- a/editor/docks/scene_tree_dock.cpp
++++ b/editor/docks/scene_tree_dock.cpp
+@@ -2774,6 +2774,27 @@ void SceneTreeDock::_shader_created(Ref<Shader> p_shader) {
+ 	EditorNode::get_singleton()->edit_item(p_shader.ptr(), this);
+ }
+ 
++// Also the backing accessor for the GDScript-exposed EditorPlugin.get_script_create_dialog(),
++// so it must construct rather than ever return null.
++ScriptCreateDialog *SceneTreeDock::get_script_create_dialog() {
++	if (!script_create_dialog) {
++		script_create_dialog = memnew(ScriptCreateDialog);
++		script_create_dialog->set_inheritance_base_type("Node");
++		add_child(script_create_dialog);
++	}
++	return script_create_dialog;
++}
++
++ShaderCreateDialog *SceneTreeDock::_ensure_shader_create_dialog() {
++	if (!shader_create_dialog) {
++		shader_create_dialog = memnew(ShaderCreateDialog);
++		add_child(shader_create_dialog);
++	}
++	return shader_create_dialog;
++}
++
++// Both *_creation_closed() handlers only ever run via their own dialog's signals, so the lazily
++// created dialog is guaranteed to exist here.
+ void SceneTreeDock::_script_creation_closed() {
+ 	script_create_dialog->disconnect("script_created", callable_mp(this, &SceneTreeDock::_script_created));
+ 	script_create_dialog->disconnect(SceneStringName(confirmed), callable_mp(this, &SceneTreeDock::_script_creation_closed));
+@@ -4431,12 +4452,13 @@ void SceneTreeDock::attach_script_to_selected(bool p_extend) {
+ 		return;
+ 	}
+ 
+-	script_create_dialog->connect("script_created", callable_mp(this, &SceneTreeDock::_script_created));
+-	script_create_dialog->connect(SceneStringName(confirmed), callable_mp(this, &SceneTreeDock::_script_creation_closed));
+-	script_create_dialog->connect("canceled", callable_mp(this, &SceneTreeDock::_script_creation_closed));
+-	script_create_dialog->set_inheritance_base_type("Node");
+-	script_create_dialog->config(inherits, path);
+-	script_create_dialog->popup_centered();
++	ScriptCreateDialog *dialog = get_script_create_dialog();
++	dialog->connect("script_created", callable_mp(this, &SceneTreeDock::_script_created));
++	dialog->connect(SceneStringName(confirmed), callable_mp(this, &SceneTreeDock::_script_creation_closed));
++	dialog->connect("canceled", callable_mp(this, &SceneTreeDock::_script_creation_closed));
++	dialog->set_inheritance_base_type("Node");
++	dialog->config(inherits, path);
++	dialog->popup_centered();
+ }
+ 
+ void SceneTreeDock::open_script_dialog(Node *p_for_node, bool p_extend) {
+@@ -4476,11 +4498,12 @@ void SceneTreeDock::attach_shader_to_selected(int p_preferred_mode) {
+ 		}
+ 	}
+ 
+-	shader_create_dialog->connect("shader_created", callable_mp(this, &SceneTreeDock::_shader_created));
+-	shader_create_dialog->connect(SceneStringName(confirmed), callable_mp(this, &SceneTreeDock::_shader_creation_closed));
+-	shader_create_dialog->connect("canceled", callable_mp(this, &SceneTreeDock::_shader_creation_closed));
+-	shader_create_dialog->config(path, true, true, "", p_preferred_mode);
+-	shader_create_dialog->popup_centered();
++	ShaderCreateDialog *dialog = _ensure_shader_create_dialog();
++	dialog->connect("shader_created", callable_mp(this, &SceneTreeDock::_shader_created));
++	dialog->connect(SceneStringName(confirmed), callable_mp(this, &SceneTreeDock::_shader_creation_closed));
++	dialog->connect("canceled", callable_mp(this, &SceneTreeDock::_shader_creation_closed));
++	dialog->config(path, true, true, "", p_preferred_mode);
++	dialog->popup_centered();
+ }
+ 
+ void SceneTreeDock::open_shader_dialog(const Ref<ShaderMaterial> &p_for_material, int p_preferred_mode) {
+@@ -5259,13 +5282,6 @@ SceneTreeDock::SceneTreeDock(Node *p_scene_root, EditorSelection *p_editor_selec
+ 	rename_dialog = memnew(RenameDialog(scene_tree));
+ 	add_child(rename_dialog);
+ 
+-	script_create_dialog = memnew(ScriptCreateDialog);
+-	script_create_dialog->set_inheritance_base_type("Node");
+-	add_child(script_create_dialog);
+-
+-	shader_create_dialog = memnew(ShaderCreateDialog);
+-	add_child(shader_create_dialog);
+-
+ 	reparent_dialog = memnew(ReparentDialog);
+ 	add_child(reparent_dialog);
+ 	reparent_dialog->connect("reparent_requested", callable_mp(this, &SceneTreeDock::_node_reparent));
+diff --git a/editor/docks/scene_tree_dock.h b/editor/docks/scene_tree_dock.h
+index 26194021d8..4acc8ea801 100644
+--- a/editor/docks/scene_tree_dock.h
++++ b/editor/docks/scene_tree_dock.h
+@@ -220,6 +220,7 @@ class SceneTreeDock : public EditorDock {
+ 
+ 	void _node_selected();
+ 	void _node_renamed();
++	ShaderCreateDialog *_ensure_shader_create_dialog();
+ 	void _script_created(Ref<Script> p_script);
+ 	void _shader_created(Ref<Shader> p_shader);
+ 	void _script_creation_closed();
+@@ -371,9 +372,7 @@ public:
+ 	void paste_node_as_replacement();
+ 	List<Node *> get_node_clipboard() const;
+ 
+-	ScriptCreateDialog *get_script_create_dialog() {
+-		return script_create_dialog;
+-	}
++	ScriptCreateDialog *get_script_create_dialog();
+ 
+ 	SceneTreeDock(Node *p_scene_root, EditorSelection *p_editor_selection, EditorData &p_editor_data);
+ 	~SceneTreeDock();
+diff --git a/editor/script/script_editor_plugin.cpp b/editor/script/script_editor_plugin.cpp
+index 2c53a1e58d..bf3cb5f538 100644
+--- a/editor/script/script_editor_plugin.cpp
++++ b/editor/script/script_editor_plugin.cpp
+@@ -1795,8 +1795,9 @@ void ScriptEditor::_menu_option(int p_option) {
+ 	EditorHelp *eh = Object::cast_to<EditorHelp>(current_editor);
+ 	switch (p_option) {
+ 		case FILE_MENU_NEW_SCRIPT: {
+-			script_create_dialog->config("Node", "new_script", false, false);
+-			script_create_dialog->popup_centered();
++			ScriptCreateDialog *dialog = _ensure_script_create_dialog();
++			dialog->config("Node", "new_script", false, false);
++			dialog->popup_centered();
+ 		} break;
+ 		case FILE_MENU_NEW_TEXTFILE: {
+ 			file_dialog->set_file_mode(EditorFileDialog::FILE_MODE_SAVE_FILE);
+@@ -1812,13 +1813,15 @@ void ScriptEditor::_menu_option(int p_option) {
+ 		} break;
+ 		case FILE_MENU_NEW_SHADER: {
+ 			String base_path = FileSystemDock::get_singleton()->get_current_path().get_base_dir();
+-			shader_create_dialog->config(base_path.path_join("new_shader"), false, false, "Shader");
+-			shader_create_dialog->popup_centered();
++			ShaderCreateDialog *dialog = _ensure_shader_create_dialog();
++			dialog->config(base_path.path_join("new_shader"), false, false, "Shader");
++			dialog->popup_centered();
+ 		} break;
+ 		case FILE_MENU_NEW_INCLUDE: {
+ 			String base_path = FileSystemDock::get_singleton()->get_current_path().get_base_dir();
+-			shader_create_dialog->config(base_path.path_join("new_shader"), false, false, "ShaderInclude");
+-			shader_create_dialog->popup_centered();
++			ShaderCreateDialog *dialog = _ensure_shader_create_dialog();
++			dialog->config(base_path.path_join("new_shader"), false, false, "ShaderInclude");
++			dialog->popup_centered();
+ 		} break;
+ 		case FILE_MENU_OPEN: {
+ 			file_dialog->set_file_mode(EditorFileDialog::FILE_MODE_OPEN_FILE);
+@@ -2955,9 +2958,29 @@ void ScriptEditor::_auto_format_text(ScriptEditorBase *p_seb) {
+ 	}
+ }
+ 
++ScriptCreateDialog *ScriptEditor::_ensure_script_create_dialog() {
++	if (!script_create_dialog) {
++		script_create_dialog = memnew(ScriptCreateDialog);
++		script_create_dialog->set_title(TTRC("Create Script"));
++		add_child(script_create_dialog);
++		script_create_dialog->connect("script_created", callable_mp(this, &ScriptEditor::_resource_created));
++	}
++	return script_create_dialog;
++}
++
++ShaderCreateDialog *ScriptEditor::_ensure_shader_create_dialog() {
++	if (!shader_create_dialog) {
++		shader_create_dialog = memnew(ShaderCreateDialog);
++		shader_create_dialog->connect("shader_created", callable_mp(this, &ScriptEditor::_resource_created));
++		shader_create_dialog->connect("shader_include_created", callable_mp(this, &ScriptEditor::_resource_created));
++		add_child(shader_create_dialog);
++	}
++	return shader_create_dialog;
++}
++
+ void ScriptEditor::open_script_create_dialog(const String &p_base_name, const String &p_base_path) {
+ 	_menu_option(FILE_MENU_NEW_SCRIPT);
+-	script_create_dialog->config(p_base_name, p_base_path);
++	_ensure_script_create_dialog()->config(p_base_name, p_base_path);
+ }
+ 
+ void ScriptEditor::open_text_file_create_dialog(const String &p_base_path, const String &p_base_name) {
+@@ -4365,21 +4388,11 @@ ScriptEditor::ScriptEditor(const String &p_config_section, const String &p_cache
+ 	erase_tab_confirm->connect("custom_action", callable_mp(this, &ScriptEditor::_close_discard_current_tab));
+ 	add_child(erase_tab_confirm);
+ 
+-	script_create_dialog = memnew(ScriptCreateDialog);
+-	script_create_dialog->set_title(TTRC("Create Script"));
+-	add_child(script_create_dialog);
+-	script_create_dialog->connect("script_created", callable_mp(this, &ScriptEditor::_resource_created));
+-
+ 	file_dialog_option = -1;
+ 	file_dialog = memnew(EditorFileDialog);
+ 	add_child(file_dialog);
+ 	file_dialog->connect("file_selected", callable_mp(this, &ScriptEditor::_file_dialog_action));
+ 
+-	shader_create_dialog = memnew(ShaderCreateDialog);
+-	shader_create_dialog->connect("shader_created", callable_mp(this, &ScriptEditor::_resource_created));
+-	shader_create_dialog->connect("shader_include_created", callable_mp(this, &ScriptEditor::_resource_created));
+-	add_child(shader_create_dialog);
+-
+ 	error_dialog = memnew(AcceptDialog);
+ 	add_child(error_dialog);
+ 
+diff --git a/editor/script/script_editor_plugin.h b/editor/script/script_editor_plugin.h
+index bf73b06b7e..f329e236d7 100644
+--- a/editor/script/script_editor_plugin.h
++++ b/editor/script/script_editor_plugin.h
+@@ -364,6 +364,8 @@ class ScriptEditor : public EditorDock {
+ 	void _clear_execution(Ref<RefCounted> p_script) { _change_execution(p_script); }
+ 	String _get_debug_tooltip(const String &p_text, Node *p_se);
+ 	void _resource_created(Ref<Resource> p_res);
++	ScriptCreateDialog *_ensure_script_create_dialog();
++	ShaderCreateDialog *_ensure_shader_create_dialog();
+ 	void _set_breakpoint(Ref<RefCounted> p_script, int p_line, bool p_enabled);
+ 	void _clear_breakpoints();
+ 	Array _get_cached_breakpoints_for_script(const String &p_path) const;

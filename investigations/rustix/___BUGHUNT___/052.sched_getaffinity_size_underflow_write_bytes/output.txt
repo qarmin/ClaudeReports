@@ -1,0 +1,196 @@
+=== Real execution: instrumented sched_getaffinity (temporary eprintln, reverted afterward) ===
+
+Command:
+  cd <worktree>
+  cargo build --example getaffinity_probe --features="std,thread,process"
+  cargo run --example getaffinity_probe --features="std,thread,process"
+
+Host: Linux claude-sandbox 7.0.0-34-generic #34-Ubuntu SMP PREEMPT_DYNAMIC Wed Sep 2 14:29:37 UTC 2026 x86_64 GNU/Linux
+(24 logical CPUs active)
+
+Actual captured stdout/stderr:
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/examples/getaffinity_probe`
+BUGHUNT_PROBE: kernel-reported size=8 requested(size_of::<RawCpuSet>())=128
+current thread affinity count = 24
+BUGHUNT_PROBE: kernel-reported size=8 requested(size_of::<RawCpuSet>())=128
+pid 1 affinity count = 24
+BUGHUNT_PROBE: kernel-reported size=8 requested(size_of::<RawCpuSet>())=128
+after restricting to cpu0, count = 1
+
+In every one of the 3 real calls (current thread, pid 1/init, and again after narrowing affinity
+to a single CPU via a real sched_setaffinity), the kernel-reported size (8 bytes - one 64-bit
+word, enough to hold the 24 real active CPUs' bitmask) stayed far below the requested/allocated
+128 bytes (size_of::<RawCpuSet>()). No underflow occurred; `size <= size_of::<RawCpuSet>()` held
+in every real call, as the kernel contract below guarantees it must.
+
+The probe's source (examples/getaffinity_probe.rs, removed after the run - not part of the final
+worktree state):
+
+    fn main() {
+        let cur = rustix::thread::sched_getaffinity(None).unwrap();
+        println!("current thread affinity count = {}", cur.count());
+
+        if let Ok(pid1) = rustix::process::Pid::from_raw(1).ok_or(()) {
+            match rustix::thread::sched_getaffinity(Some(pid1)) {
+                Ok(set) => println!("pid 1 affinity count = {}", set.count()),
+                Err(e) => println!("pid 1 affinity query failed: {e:?}"),
+            }
+        }
+
+        let mut small = rustix::thread::CpuSet::new();
+        small.set(0);
+        rustix::thread::sched_setaffinity(None, &small).unwrap();
+        let after = rustix::thread::sched_getaffinity(None).unwrap();
+        println!("after restricting to cpu0, count = {}", after.count());
+    }
+
+The temporary instrumentation added to syscalls.rs for this run (reverted via `git checkout --`
+immediately after, confirmed via `git status`/`git diff --stat` showing no changes):
+
+    eprintln!(
+        "BUGHUNT_PROBE: kernel-reported size={} requested(size_of::<RawCpuSet>())={}",
+        size,
+        core::mem::size_of::<RawCpuSet>()
+    );
+
+=== Kernel source review: sys_sched_getaffinity's own return-value contract, every major version ===
+
+Current torvalds/linux master (fetched live from GitHub), kernel/sched/syscalls.c:
+
+    SYSCALL_DEFINE3(sched_getaffinity, pid_t, pid, unsigned int, len,
+    		unsigned long __user *, user_mask_ptr)
+    {
+    	int ret;
+    	cpumask_var_t mask;
+
+    	if ((len * BITS_PER_BYTE) < nr_cpu_ids)
+    		return -EINVAL;
+    	if (len & (sizeof(unsigned long)-1))
+    		return -EINVAL;
+
+    	if (!zalloc_cpumask_var(&mask, GFP_KERNEL))
+    		return -ENOMEM;
+
+    	ret = sched_getaffinity(pid, mask);
+    	if (ret == 0) {
+    		unsigned int retlen = min(len, cpumask_size());
+
+    		if (copy_to_user(user_mask_ptr, cpumask_bits(mask), retlen))
+    			ret = -EFAULT;
+    		else
+    			ret = retlen;
+    	}
+    	free_cpumask_var(mask);
+
+    	return ret;
+    }
+
+Same `unsigned int retlen = min(len, cpumask_size());` / `ret = retlen;` shape, byte-for-byte
+confirmed present (line numbers vary only due to unrelated surrounding code) in:
+
+  - v6.6  (kernel/sched/core.c:8516)
+  - v5.4  (kernel/sched/core.c:5561)
+  - v4.19 (kernel/sched/core.c:4910)
+  - v4.4  (kernel/sched/core.c:4574, `size_t retlen = min_t(size_t, len, cpumask_size());`)
+  - v3.10 (kernel/sched/core.c:4302, same `min_t` shape)
+  - v3.0  (kernel/sched/core.c:5514, same `min_t` shape)
+
+v2.6.32 (kernel/sched.c:6622-6644) predates the `min()`/`min_t()` clamp, but independently
+enforces the same upper bound a different way - by rejecting the call outright before any value
+is ever returned:
+
+    SYSCALL_DEFINE3(sched_getaffinity, pid_t, pid, unsigned int, len,
+    		unsigned long __user *, user_mask_ptr)
+    {
+    	int ret;
+    	cpumask_var_t mask;
+
+    	if (len < cpumask_size())
+    		return -EINVAL;
+
+    	if (!alloc_cpumask_var(&mask, GFP_KERNEL))
+    		return -ENOMEM;
+
+    	ret = sched_getaffinity(pid, mask);
+    	if (ret == 0) {
+    		if (copy_to_user(user_mask_ptr, mask, cpumask_size()))
+    			ret = -EFAULT;
+    		else
+    			ret = cpumask_size();
+    	}
+    	free_cpumask_var(mask);
+
+    	return ret;
+    }
+
+`if (len < cpumask_size()) return -EINVAL;` guarantees `len >= cpumask_size()` on every path that
+reaches `ret = cpumask_size();`, so the returned value is `<= len` here too - via a stricter
+upfront rejection instead of a `min()` clamp on the way out.
+
+=== Commit history for rustix's own write_bytes zero-fill logic ===
+
+$ git log --all -S"write_bytes(0, core::mem::size_of::<RawCpuSet>" --oneline
+39adac2c Move `sched_*` and `membarrier_*` into `rustix::thread`. (#1265)
+2b0fab4a Split time/process/io/thread/rand syscalls into separate files.
+23cc1187 fix sched_getaffinity (#109)
+
+$ git show 23cc1187 -- src/
+commit 23cc11877923aaad8f7ff7325b778a94ce2f9513
+Author: nivkner <nivkner@zoho.com>
+Date:   Tue Nov 9 18:21:11 2021 +0200
+
+    fix sched_getaffinity (#109)
+
+    * accept the value returned by sched_getaffinity
+
+    * zero rest of cpuset
+
+ src/imp/linux_raw/syscalls.rs | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/src/imp/linux_raw/syscalls.rs b/src/imp/linux_raw/syscalls.rs
+index 73e402f8..5eecd090 100644
+--- a/src/imp/linux_raw/syscalls.rs
++++ b/src/imp/linux_raw/syscalls.rs
+@@ -491,12 +491,19 @@ pub(crate) fn getrandom(buf: &mut [u8], flags: GetRandomFlags) -> io::Result<usi
+ #[inline]
+ pub(crate) fn sched_getaffinity(pid: Pid, cpuset: &mut RawCpuSet) -> io::Result<()> {
+     unsafe {
+-        ret(syscall3(
++        // the raw linux syscall returns the size (in bytes) of the cpumask_t data type,
++        // that is used internally by the kernel to represent the CPU set bit mask
++        let size = ret_usize(syscall3(
+             nr(__NR_sched_getaffinity),
+             c_uint(pid.as_raw()),
+             size_of::<RawCpuSet, _>(),
+             by_mut(&mut cpuset.bits),
+-        ))
++        ))?;
++        let bytes = (cpuset as *mut RawCpuSet).cast::<u8>();
++        let rest = bytes.wrapping_add(size);
++        // zero every byte in the cpuset, not set by the kernel
++        rest.write_bytes(0, core::mem::size_of::<RawCpuSet>() - size);
++        Ok(())
+     }
+ }
+
+This is where the exact pattern this candidate examines was introduced - the current code at
+src/backend/linux_raw/thread/syscalls.rs:478-495 is functionally unchanged from this 2021-11-09
+commit (only moved/renamed across later file-reorganization commits 2b0fab4a and 39adac2c).
+
+=== Project test suite baseline (this worktree, pristine tree, no changes) ===
+
+$ cargo test --workspace --features "std,all-apis,use-libc" --no-fail-fast
+...
+test ioctl::test_int_setter ... FAILED
+...
+test result: FAILED. 16 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+...
+error: 1 target failed:
+    `--test io`
+
+Aggregate across all test binaries: 411 passed, 1 failed (ioctl::test_int_setter - needs
+/dev/net/tun, not present in this sandbox container; pre-existing/unrelated, already documented in
+projects/rustix.md and previously reproduced on the untouched tree by candidate 027).

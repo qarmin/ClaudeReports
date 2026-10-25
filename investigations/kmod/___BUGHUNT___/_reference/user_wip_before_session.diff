@@ -1,0 +1,152 @@
+diff --git a/.gitignore b/.gitignore
+index 65d02ae..8cb0635 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -11,3 +11,4 @@
+ .*.swp
+ cscope.out
+ tags
++/tmp/
+diff --git a/libkmod/libkmod-index.c b/libkmod/libkmod-index.c
+index 3dd13df..304309c 100644
+--- a/libkmod/libkmod-index.c
++++ b/libkmod/libkmod-index.c
+@@ -54,6 +54,9 @@
+  */
+ #define INDEX_CHILDMAX 128u
+ 
++/* Each recursion level pushes at least one char, so this also caps depth on cyclic indexes. */
++#define INDEX_MAX_KEY_LEN 8192u
++
+ /* Disk format:
+  *
+  *  uint32_t magic = INDEX_MAGIC;
+@@ -281,7 +284,8 @@ static struct index_node_f *index_read(struct index_file *idx, uint32_t offset)
+ 		int first = read_char(fp);
+ 		int last = read_char(fp);
+ 
+-		if (first == EOF || last == EOF || first > last)
++		if (first == EOF || last == EOF || first > last ||
++		    last >= (int)INDEX_CHILDMAX)
+ 			goto err;
+ 
+ 		child_count = last - first + 1;
+@@ -402,6 +406,11 @@ static void index_dump_node(struct index_node_f *node, struct strbuf *buf,
+ 	struct index_value *v;
+ 	size_t pushed;
+ 
++	if (strbuf_used(buf) > INDEX_MAX_KEY_LEN) {
++		index_close(node);
++		return;
++	}
++
+ 	pushed = strbuf_pushchars(buf, node->prefix);
+ 
+ 	for (v = node->values; v != NULL; v = v->next) {
+@@ -518,6 +527,11 @@ static void index_searchwild__all(struct index_node_f *node, int j, struct strbu
+ {
+ 	size_t pushed;
+ 
++	if (strbuf_used(buf) > INDEX_MAX_KEY_LEN) {
++		index_close(node);
++		return;
++	}
++
+ 	pushed = strbuf_pushchars(buf, &node->prefix[j]);
+ 
+ 	for (uint8_t ch = node->first; ch <= node->last; ch++) {
+@@ -688,6 +702,18 @@ static inline void read_value_mm(const void **p, struct index_mm_value *v)
+ 	v->value = read_chars_mm(p, &v->len);
+ }
+ 
++static inline size_t mm_left(const struct index_mm *idx, const void *p)
++{
++	return (size_t)((const char *)idx->mm + idx->size - (const char *)p);
++}
++
++static const void *mm_skip_str(const struct index_mm *idx, const void *p)
++{
++	const char *nul = memchr(p, '\0', mm_left(idx, p));
++
++	return nul != NULL ? nul + 1 : NULL;
++}
++
+ /* reads node into given node struct and returns its address on success or NULL on error. */
+ static struct index_mm_node *index_mm_read_node(const struct index_mm *idx,
+ 						uint32_t offset,
+@@ -701,8 +727,10 @@ static struct index_mm_node *index_mm_read_node(const struct index_mm *idx,
+ 	p = (const char *)idx->mm + (offset & INDEX_NODE_MASK);
+ 
+ 	if (offset & INDEX_NODE_PREFIX) {
+-		size_t len;
+-		node->prefix = read_chars_mm(&p, &len);
++		node->prefix = p;
++		p = mm_skip_str(idx, p);
++		if (p == NULL)
++			return NULL;
+ 	} else {
+ 		node->prefix = "";
+ 	}
+@@ -710,6 +738,9 @@ static struct index_mm_node *index_mm_read_node(const struct index_mm *idx,
+ 	if (offset & INDEX_NODE_CHILDS) {
+ 		size_t child_count;
+ 
++		if (mm_left(idx, p) < 2)
++			return NULL;
++
+ 		node->first = read_char_mm(&p);
+ 		node->last = read_char_mm(&p);
+ 
+@@ -720,6 +751,9 @@ static struct index_mm_node *index_mm_read_node(const struct index_mm *idx,
+ 		node->children = p;
+ 
+ 		child_count = node->last - node->first + 1;
++		if (mm_left(idx, p) < sizeof(uint32_t) * child_count)
++			return NULL;
++
+ 		p = (const char *)p + sizeof(uint32_t) * child_count;
+ 	} else {
+ 		node->first = INDEX_CHILDMAX;
+@@ -728,8 +762,22 @@ static struct index_mm_node *index_mm_read_node(const struct index_mm *idx,
+ 	}
+ 
+ 	if (offset & INDEX_NODE_VALUES) {
++		size_t i;
++
++		if (mm_left(idx, p) < sizeof(uint32_t))
++			return NULL;
++
+ 		node->value_count = read_u32_mm(&p);
+ 		node->values = p;
++
++		/* consumers read values unchecked, so validate them all here */
++		for (i = 0; i < node->value_count; i++) {
++			if (mm_left(idx, p) < sizeof(uint32_t))
++				return NULL;
++			p = mm_skip_str(idx, (const char *)p + sizeof(uint32_t));
++			if (p == NULL)
++				return NULL;
++		}
+ 	} else {
+ 		node->value_count = 0;
+ 		node->values = NULL;
+@@ -859,6 +907,9 @@ static void index_mm_dump_node(struct index_mm_node *node, struct strbuf *buf,
+ 	const void *p;
+ 	size_t i, pushed;
+ 
++	if (strbuf_used(buf) > INDEX_MAX_KEY_LEN)
++		return;
++
+ 	pushed = strbuf_pushchars(buf, node->prefix);
+ 
+ 	for (i = 0, p = node->values; i < node->value_count; i++) {
+@@ -980,6 +1031,9 @@ static void index_mm_searchwild_all(struct index_mm_node *node, int j, struct st
+ {
+ 	size_t pushed;
+ 
++	if (strbuf_used(buf) > INDEX_MAX_KEY_LEN)
++		return;
++
+ 	pushed = strbuf_pushchars(buf, &node->prefix[j]);
+ 
+ 	for (uint8_t ch = node->first; ch <= node->last; ch++) {

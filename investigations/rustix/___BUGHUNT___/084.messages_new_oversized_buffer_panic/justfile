@@ -1,0 +1,51 @@
+# Self-contained reproduction for this candidate.
+#
+# Everything this needs is either already in this folder, or fetched by `just clone` into
+# ./clone (gitignored) - nothing in this justfile reaches outside the folder it lives in.
+#
+# No mock is needed here, unlike several sibling candidates (e.g. 058): the bug fires purely from
+# the *length* of a real, caller-allocated buffer, before any kernel syscall or ancillary-message
+# content is ever touched. The real target platform needed to observe the panic is one where the
+# real C `msghdr.msg_controllen` field is narrower than `usize` (a 32-bit `socklen_t`, e.g.
+# BSD/macOS/Solaris) - this sandboxed environment has no macOS SDK/cross-linker to produce or run
+# a real linked Darwin binary, so this uses Miri's cross-interpretation
+# (`cargo miri run --target x86_64-apple-darwin`), which interprets MIR directly against the
+# real, unmodified source and needs no native execution or FFI shim for this code path (no actual
+# syscall happens before the panic point).
+
+repo_url := "https://github.com/bytecodealliance/rustix.git"
+base_commit := "287214b889865d8e1406a0ee71cc409b6f6191c8"
+
+# Full cycle: clone pristine, prove the bug exists, apply the fix, prove it's gone.
+test: clone reproduce-before apply reproduce-after
+
+clone:
+    rm -rf clone
+    git clone {{repo_url}} clone
+    cd clone && git checkout {{base_commit}}
+    rustup target add x86_64-apple-darwin
+    rustup run nightly cargo miri setup --target x86_64-apple-darwin
+
+# Build+run the standalone repro against the pristine clone, cross-interpreted under Miri for
+# the apple target - should panic on `boundary_panic` (and `far_over`), not on `small`/
+# `boundary_ok`.
+# (prefixed with `-`: the `boundary_panic` run is EXPECTED to panic - that's the bug reproducing -
+# `just` must not treat that as a reason to abort the `test` chain)
+reproduce-before:
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-apple-darwin -- small
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-apple-darwin -- boundary_ok
+    -cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-apple-darwin -- boundary_panic
+
+apply:
+    cd clone && git apply "{{justfile_directory()}}/patch.diff"
+
+# Same repro again, now against the patched clone - `boundary_panic` (and `far_over`) should no
+# longer panic either.
+reproduce-after:
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-apple-darwin -- small
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-apple-darwin -- boundary_ok
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-apple-darwin -- boundary_panic
+    cd repro && MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri run --target x86_64-apple-darwin -- far_over
+
+clean:
+    rm -rf clone repro/target
